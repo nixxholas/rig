@@ -32,6 +32,7 @@ export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 export type ProviderErrorCode = "incomplete_response" | "invalid_image_request";
 /** `resetAt` is a Unix timestamp in milliseconds when present. */
 export type ProviderError =
+    | { type: "authentication" }
     | { type: "out_of_tokens"; resetAt?: number }
     | { type: "rate_limit"; resetAt?: number }
     | { type: "server_overloaded" }

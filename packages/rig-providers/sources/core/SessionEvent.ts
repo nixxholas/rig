@@ -6,6 +6,7 @@ export type SessionErrorKind = "internal_error" | "context_overflow" | "billing_
 
 /** Provider failure details that remain meaningful above a native session transport. */
 export type SessionProviderError =
+    | { type: "authentication" }
     | { type: "out_of_tokens"; resetAt?: number }
     | { type: "rate_limit"; resetAt?: number }
     | { type: "server_overloaded" }

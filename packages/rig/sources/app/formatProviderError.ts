@@ -1,6 +1,8 @@
 import type { ProviderError } from "@slopus/rig-execution";
+import { describeProviderSignIn } from "./describeProviderSignIn.js";
 import { formatResetDuration } from "./formatResetDuration.js";
 import { humanizeProviderId } from "./humanizeProviderId.js";
+import { looksLikeAuthenticationFailure } from "./looksLikeAuthenticationFailure.js";
 
 export function formatProviderError(
     error: ProviderError | undefined,
@@ -13,6 +15,14 @@ export function formatProviderError(
             ? undefined
             : formatResetDuration(resetAt - (options.now ?? Date.now()));
 
+    // A provider may fail to classify the rejection, so the raw text is checked too.
+    if (
+        error?.type === "authentication" ||
+        looksLikeAuthenticationFailure(options.fallbackMessage)
+    ) {
+        const signIn = describeProviderSignIn(options.providerId);
+        return `${provider} credentials have expired.${signIn === undefined ? " Sign in again." : ` Run ${signIn} to sign in again.`}`;
+    }
     if (error?.type === "out_of_tokens") {
         return `${provider} is out of tokens.${reset === undefined ? "" : ` Resets in ${reset}.`}`;
     }

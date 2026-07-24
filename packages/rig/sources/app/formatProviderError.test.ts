@@ -42,6 +42,39 @@ describe("formatProviderError", () => {
         ).toBe("Codex encountered an internal server error. Try again. Request ID: request-123.");
     });
 
+    it("explains expired credentials instead of showing the upstream diagnostic string", () => {
+        expect(
+            formatProviderError(
+                { type: "authentication" },
+                { fallbackMessage: "raw 401", providerId: "grok" },
+            ),
+        ).toBe("Grok Build credentials have expired. Run grok to sign in again.");
+    });
+
+    it("recognizes an unclassified credential rejection from its raw text", () => {
+        const raw =
+            'Error 401 "Invalid or expired credentials (auth_kind=bearer, x_xai_token_auth=xai-grok-cli, upstream=PermissionDenied, reason=no auth context)"';
+
+        expect(
+            formatProviderError(
+                { type: "unclassified" },
+                { fallbackMessage: raw, providerId: "grok" },
+            ),
+        ).toBe("Grok Build credentials have expired. Run grok to sign in again.");
+        expect(formatProviderError(undefined, { fallbackMessage: raw, providerId: "grok" })).toBe(
+            "Grok Build credentials have expired. Run grok to sign in again.",
+        );
+    });
+
+    it("falls back to a generic sign-in hint for an unknown provider", () => {
+        expect(
+            formatProviderError(
+                { type: "authentication" },
+                { fallbackMessage: "raw 401", providerId: "acme" },
+            ),
+        ).toBe("Acme credentials have expired. Sign in again.");
+    });
+
     it("preserves the provider message for unclassified errors", () => {
         expect(
             formatProviderError(

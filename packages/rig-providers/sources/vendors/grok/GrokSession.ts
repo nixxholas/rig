@@ -4,6 +4,7 @@ import type { SessionCompaction, SessionCompactionOptions } from "@/core/Session
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import { isSessionErrorDone } from "@/core/SessionEvent.js";
+import { isGrokAuthError } from "@/vendors/grok/impl/isGrokAuthError.js";
 import type { SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
@@ -61,6 +62,7 @@ export class GrokSession extends BaseSession {
 
     private activeModel: string | undefined;
     private client: GrokOpenAIClient | undefined;
+    private clientToken: string | undefined;
     private context: SessionContext;
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
@@ -389,6 +391,7 @@ export class GrokSession extends BaseSession {
         retryAfterContent?: boolean;
     }): AsyncGenerator<SessionEvent, GrokRunResult | undefined> {
         const { abort } = options;
+        await this.refreshCredentialIfExpiring();
         let client = await this.resolveClient();
         let requestContext = options.context;
         let attempt = 0;
@@ -456,9 +459,14 @@ export class GrokSession extends BaseSession {
 
                 const message = error instanceof Error ? error.message : String(error);
                 const status = grokErrorStatus(error);
+                const authError = isGrokAuthError({
+                    message,
+                    ...(status === undefined ? {} : { status }),
+                });
                 if (
-                    status === 401 &&
+                    authError &&
                     !refreshedCredential &&
+                    !responseContentBegun &&
                     this.credential instanceof GrokSessionCredential
                 ) {
                     refreshedCredential = true;
@@ -500,26 +508,38 @@ export class GrokSession extends BaseSession {
                     state: "error",
                     kind: classifyGrokError(message),
                     message,
+                    ...(authError ? { providerError: { type: "authentication" as const } } : {}),
                 };
                 return;
             }
         }
     }
 
+    /** Renews an expiring session token so the request is not sent with a dead credential. */
+    private async refreshCredentialIfExpiring(): Promise<void> {
+        if (this.credential instanceof GrokSessionCredential) {
+            await this.credential.ensureFresh();
+        }
+    }
+
     private async resolveClient(): Promise<GrokOpenAIClient> {
-        if (this.client !== undefined) {
+        const token = this.credential.credential.token;
+        if (this.client !== undefined && this.clientToken === token) {
             return this.client;
         }
+        if (this.client !== undefined) {
+            // A rotated token invalidates the client that captured the previous one.
+            await this.client.close();
+        }
 
-        this.client = createGrokOpenAIClient({
-            baseUrl: this.endpoint,
-            token: this.credential.credential.token,
-        });
+        this.clientToken = token;
+        this.client = createGrokOpenAIClient({ baseUrl: this.endpoint, token });
         return this.client;
     }
 
     private async rebuildClient(forceHttp1: boolean): Promise<GrokOpenAIClient> {
         await this.client?.close();
+        this.clientToken = this.credential.credential.token;
         this.client = createGrokOpenAIClient({
             baseUrl: this.endpoint,
             token: this.credential.credential.token,
