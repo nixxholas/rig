@@ -12,4 +12,12 @@ describe("renderTurnCompletionSeparator", () => {
         expect(stripAnsi(renderTurnCompletionSeparator(60_000, 12))).toBe("────────────");
         expect(stripAnsi(renderTurnCompletionSeparator(3_723_000, 24))).toHaveLength(24);
     });
+
+    it("shows the turn usage summary even for short turns", () => {
+        const rendered = stripAnsi(
+            renderTurnCompletionSeparator(12_000, 60, "3.1k generated · 50% cache hit"),
+        );
+        expect(rendered).toContain("Worked for 12s · 3.1k generated · 50% cache hit");
+        expect(rendered).toHaveLength(60);
+    });
 });

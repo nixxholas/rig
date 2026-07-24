@@ -84,6 +84,7 @@ import { formatSessionTokenStatus } from "./formatSessionTokenStatus.js";
 import { formatSessionUsageSummary } from "./formatSessionUsageSummary.js";
 import { formatSubagentToolCall } from "./formatSubagentToolCall.js";
 import { formatToolResultForDisplay } from "./formatToolResultForDisplay.js";
+import { formatTurnUsageSummary } from "./formatTurnUsageSummary.js";
 import { humanizeReasoningLevel } from "./humanizeReasoningLevel.js";
 import { humanizePermissionMode } from "./humanizePermissionMode.js";
 import { humanizeProviderId } from "./humanizeProviderId.js";
@@ -3809,6 +3810,9 @@ export class CodingAssistantApp implements Component, Focusable {
         if (entry.turnElapsedMs !== undefined) {
             completeEntry.turnElapsedMs = entry.turnElapsedMs;
         }
+        if (entry.turnUsage !== undefined) {
+            completeEntry.turnUsage = entry.turnUsage;
+        }
 
         this.#entries.push(completeEntry);
         this.#requestRender();
@@ -3940,10 +3944,17 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     #appendEntryCompletion(lines: string[], entry: AppTranscriptEntry, width: number): void {
+        const usageSummary =
+            this.#showUsage && entry.turnUsage !== undefined
+                ? formatTurnUsageSummary(entry.turnUsage)
+                : undefined;
         if (this.#compactCompletedTurns && entry.completedTurn !== undefined) {
-            lines.push("", renderCompletedTurnStats(entry.completedTurn.stats, width));
+            lines.push(
+                "",
+                renderCompletedTurnStats(entry.completedTurn.stats, width, usageSummary),
+            );
         } else if (entry.turnElapsedMs !== undefined) {
-            lines.push("", renderTurnCompletionSeparator(entry.turnElapsedMs, width));
+            lines.push("", renderTurnCompletionSeparator(entry.turnElapsedMs, width, usageSummary));
         }
     }
 
@@ -4191,12 +4202,16 @@ export class CodingAssistantApp implements Component, Focusable {
         );
     }
 
-    #usageFooter(): string {
-        const usage = this.#subagents.reduce(
+    #sessionUsage(): Usage {
+        return this.#subagents.reduce(
             (total, subagent) =>
                 subagent.usage === undefined ? total : addUsage(total, subagent.usage),
             this.#usage,
         );
+    }
+
+    #usageFooter(): string {
+        const usage = this.#sessionUsage();
         const sessionTokens = this.#subagents.reduce(
             (total, subagent) =>
                 total + (subagent.sessionTokenCount?.totalTokens ?? subagent.totalTokens ?? 0),
@@ -5475,6 +5490,8 @@ export class CodingAssistantApp implements Component, Focusable {
                 completedTurn.entry.turnElapsedMs = elapsedMs;
             }
         }
+        // Snapshot session usage now so the history row never changes after later turns.
+        (completedTurn?.entry ?? latest).turnUsage = structuredClone(this.#sessionUsage());
         this.#activeTurnEntryStart = undefined;
         this.#requestRender();
     }

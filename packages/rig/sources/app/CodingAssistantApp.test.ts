@@ -5288,6 +5288,114 @@ describe("CodingAssistantApp", () => {
         expect(stripAnsi(app.render(100).join("\n"))).toContain("Session tokens: 0");
     });
 
+    it("summarizes generated tokens and cache hits on each completed turn when usage is shown", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        let turn = 0;
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                turn += 1;
+                return streamMessage({
+                    role: "assistant",
+                    content: [{ type: "text", text: `Turn ${turn} done.` }],
+                    api: "test",
+                    provider: "codex",
+                    model: model.id,
+                    usage: {
+                        input: 1_200,
+                        output: 300,
+                        cacheRead: 100,
+                        cacheWrite: 0,
+                        totalTokens: 1_600,
+                        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                    },
+                    stopReason: "stop",
+                    timestamp: turn,
+                });
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: harness.context,
+            printToConsole: false,
+        });
+        const app = new CodingAssistantApp({
+            agent,
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            showUsage: true,
+            tui: fakeTui(),
+        });
+
+        submit(app, "First turn.");
+        await app.waitForIdle();
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("300 generated · 8% cache hit");
+
+        submit(app, "Second turn.");
+        await app.waitForIdle();
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        // The first turn keeps the totals it was completed with; only the newest row grows.
+        expect(rendered).toContain("300 generated · 8% cache hit");
+        expect(rendered).toContain("600 generated · 8% cache hit");
+    });
+
+    it("hides the completed turn usage summary while token status is off", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamMessage({
+                    role: "assistant",
+                    content: [{ type: "text", text: "Quiet turn." }],
+                    api: "test",
+                    provider: "codex",
+                    model: model.id,
+                    usage: {
+                        input: 1_200,
+                        output: 300,
+                        cacheRead: 100,
+                        cacheWrite: 0,
+                        totalTokens: 1_600,
+                        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+                    },
+                    stopReason: "stop",
+                    timestamp: 1,
+                });
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: harness.context,
+            printToConsole: false,
+        });
+        const app = new CodingAssistantApp({
+            agent,
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            tui: fakeTui(),
+        });
+
+        submit(app, "Quiet turn.");
+        await app.waitForIdle();
+        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("generated");
+    });
+
     it("shows live compaction tokens and elapsed time until the paired finish event", () => {
         const model = defineModel({
             id: "openai/gpt-test",

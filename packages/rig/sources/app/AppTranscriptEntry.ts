@@ -1,3 +1,5 @@
+import type { Usage } from "@slopus/rig-execution";
+
 import type {
     BackgroundTerminalInteractionPresentation,
     ExecCommandPresentation,
@@ -35,4 +37,5 @@ export interface AppTranscriptEntry {
     detail?: string;
     title?: string;
     turnElapsedMs?: number;
+    turnUsage?: Usage;
 }
