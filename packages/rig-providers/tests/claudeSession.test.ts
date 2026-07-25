@@ -394,10 +394,21 @@ describe("ClaudeSession", () => {
             }),
         );
 
-        expect(capturedEntries).toHaveLength(3);
+        expect(capturedEntries).toHaveLength(4);
         expect(capturedEntries).toMatchObject([
             { type: "user", message: { role: "user", content: "Run both tools." } },
-            { type: "assistant" },
+            {
+                type: "assistant",
+                message: {
+                    content: [{ type: "tool_use", id: "parallel-read", name: "Read" }],
+                },
+            },
+            {
+                type: "assistant",
+                message: {
+                    content: [{ type: "tool_use", id: "parallel-glob", name: "Glob" }],
+                },
+            },
             {
                 type: "user",
                 isMeta: true,
@@ -410,6 +421,16 @@ describe("ClaudeSession", () => {
                 },
             },
         ]);
+        const assistantEntries = (
+            capturedEntries as Array<{
+                message?: { id?: string };
+                parentUuid?: string | null;
+                type: string;
+                uuid?: string;
+            }>
+        ).filter((entry) => entry.type === "assistant");
+        expect(assistantEntries[0]?.message?.id).toBe(assistantEntries[1]?.message?.id);
+        expect(assistantEntries[1]?.parentUuid).toBe(assistantEntries[0]?.uuid);
         expect(textFromSessionEvents(events)).toBe("RECOVERED_PARALLEL_BATCH");
     });
 

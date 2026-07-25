@@ -67,6 +67,28 @@ prompt into a differently shaped request is a bug.
 A provider may be stripped back to the barebones, but it must always be reconstructable into
 something that matches the native implementation.
 
+### Caller-owned history is immutable
+
+The complete history supplied by the caller is authoritative. Providers are a thin network layer:
+they must never rewrite, filter, normalize, truncate, or otherwise mutate that history. The same
+messages and content blocks that enter the provider must remain available unchanged to the caller.
+Session-owned connection and cache state may optimize how the history is transmitted, but it must
+not become a second, modified conversation history.
+
+When a vendor protocol cannot accept part of the caller's history, perform the smallest necessary
+projection while serializing that one request. For example, reasoning blocks may be omitted from
+the wire request when replaying them would be invalid. That projection is ephemeral: do not remove
+the blocks from `SessionContext`, mutate the caller's objects, or return a rewritten history.
+
+Claude should normally be given the complete history, including reasoning. Claude Code SDK owns
+its request compatibility and can remove unsupported reasoning itself when technically necessary,
+so the provider should not preemptively strip it.
+
+Compaction follows the same ownership boundary. A provider may return a new replacement context
+for the caller to adopt explicitly, but it must not modify the input context in place or silently
+install a different durable history. Until the caller adopts the returned context, the original
+history remains authoritative.
+
 ### Headers and identification
 
 Specifying every header precisely is not realistic, and trying to enumerate them would go stale

@@ -180,6 +180,8 @@ function withoutClaudeCredentials(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 function thinkingOptions(
     effort: SessionReasoningEffort | undefined,
 ): Partial<Pick<ClaudeSdkOptions, "effort" | "thinking">> {
+    // Left to the SDK, which already thinks adaptively; the capture shows the native client sends
+    // no thinking configuration of its own when the caller states no preference.
     if (effort === undefined) return {};
     if (effort === "off") return { thinking: { type: "disabled" } };
     const sdkEffort =

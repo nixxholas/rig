@@ -132,8 +132,17 @@ history, `impl/createClaudeSessionReplay.ts` supplies an in-memory `SessionStore
 Claude transcript to disk.
 
 User messages and tool results may contain ordered text and base64 image blocks. Replay
-maps them to Claude-native `text` and `image` content blocks. Assistant history remains
-text plus tool-use blocks because Rig currently has no assistant-image output modality.
+maps them to Claude-native `text` and `image` content blocks. Assistant history includes
+every faithfully representable signed thinking block, followed by text and tool-use blocks.
+Each assistant content block is stored as a separate transcript entry with one shared API
+message ID and an unbroken parent chain, matching Claude Code's native transcript shape.
+This preserves thinking and parallel tool-use siblings when the SDK reconstructs a request.
+
+The caller-owned Rig history remains authoritative and is never rewritten by replay. The
+in-memory `SessionStore` ignores transcript entries appended by the SDK; it only observes a
+native compaction summary as the explicit result of `compact()`. Claude's SDK may project
+completed-turn thinking out of the outgoing API request when required by the active model or
+trajectory. That request-time projection does not change Rig's supplied session context.
 
 A run-level model overrides the active model and is retained for later turns and
 compaction. Replay serializes historical assistant entries with the currently selected

@@ -13,12 +13,14 @@ import type {
     SessionImageContent,
     SessionInputContent,
     SessionMessage,
+    SessionReasoning,
     SessionTextContent,
     SessionToolResultMessage,
     SessionUserMessage,
 } from "@/core/SessionContext.js";
 
 export interface ClaudeSessionReplay {
+    compactionSummary(): string | undefined;
     entries(): readonly SessionStoreEntry[];
     message: SDKUserMessage;
     options: Pick<ClaudeSdkOptions, "persistSession" | "resume" | "sessionStore">;
@@ -35,15 +37,26 @@ export function createClaudeSessionReplay(options: {
     const history = options.context.messages.slice(0, splitIndex);
     const promptMessages = options.context.messages.slice(splitIndex);
     const entries = toSessionStoreEntries(history, options);
+    let compactionSummary: string | undefined;
     const sessionStore: SessionStore = {
         append: (key, appendedEntries) => {
-            if (key.sessionId === options.sessionId) entries.push(...appendedEntries);
+            // Rig owns the conversation. Ignore Claude's transcript mirror instead of making a
+            // second history authoritative. Native compaction is the one exception in what we
+            // observe: its replacement summary is a result, not resumable session state.
+            if (key.sessionId === options.sessionId) {
+                compactionSummary =
+                    findCompactionSummary(appendedEntries) ?? compactionSummary;
+            }
             return Promise.resolve();
         },
-        load: (key) => Promise.resolve(key.sessionId === options.sessionId ? entries : null),
+        load: (key) =>
+            Promise.resolve(
+                key.sessionId === options.sessionId && key.subpath === undefined ? entries : null,
+            ),
     };
     const message = toPromptMessage(promptMessages);
     return {
+        compactionSummary: () => compactionSummary,
         entries: () => entries,
         message,
         options: { persistSession: true, resume: options.sessionId, sessionStore },
@@ -121,16 +134,32 @@ function toSessionStoreEntries(
             uuid,
             version: "rig-providers",
         };
-        parentUuid = uuid;
         if (message.role === "assistant") {
-            for (const call of message.toolCalls ?? []) {
-                assistantUuidByToolCallId.set(call.callId, uuid);
+            const sdkMessage = toSdkAssistantMessage(message, options.model, uuid);
+            // This must match Claude Code's transcript shape exactly. Streaming persists one
+            // assistant entry per content block, each with its own transcript UUID but with the
+            // same API message.id. Resume first reconstructs the parentUuid chain, then
+            // normalizeMessagesForAPI merges adjacent assistant entries by that shared message.id.
+            // Combining the blocks into one synthetic entry, changing the id between siblings, or
+            // failing to link every sibling can make resume discard an orphaned thinking block or
+            // lose one branch of a parallel tool-use turn.
+            for (const [blockIndex, block] of sdkMessage.content.entries()) {
+                const blockUuid =
+                    blockIndex === 0
+                        ? uuid
+                        : stableContentBlockUuid(options.sessionId, index, blockIndex);
+                entries.push({
+                    ...base,
+                    parentUuid: blockIndex === 0 ? base.parentUuid : parentUuid,
+                    uuid: blockUuid,
+                    message: { ...sdkMessage, content: [block] },
+                    type: "assistant",
+                });
+                parentUuid = blockUuid;
+                if (block.type === "tool_use") {
+                    assistantUuidByToolCallId.set(block.id, blockUuid);
+                }
             }
-            entries.push({
-                ...base,
-                message: toSdkAssistantMessage(message, options.model, uuid),
-                type: "assistant",
-            });
             continue;
         }
         if (message.role === "tool") {
@@ -147,6 +176,7 @@ function toSessionStoreEntries(
                 ...(sourceToolAssistantUUID === undefined ? {} : { sourceToolAssistantUUID }),
                 type: "user",
             });
+            parentUuid = uuid;
             continue;
         }
         entries.push({
@@ -160,6 +190,7 @@ function toSessionStoreEntries(
             },
             type: "user",
         });
+        parentUuid = uuid;
     }
     return entries;
 }
@@ -177,6 +208,9 @@ function toSdkAssistantMessage(message: SessionAssistantMessage, model: string, 
         id: `msg_rig_${uuid.replaceAll("-", "")}`,
         container: null,
         content: [
+            // Give the SDK every reasoning block that can be represented faithfully. It owns any
+            // further request-time projection needed for the active model and trajectory.
+            ...(message.reasoning ?? []).flatMap(toThinkingBlock),
             ...(message.content.length === 0
                 ? []
                 : [{ type: "text" as const, text: message.content }]),
@@ -203,6 +237,23 @@ function toSdkAssistantMessage(message: SessionAssistantMessage, model: string, 
             cache_creation: null,
         },
     };
+}
+
+function toThinkingBlock(reasoning: SessionReasoning): (
+    | { type: "thinking"; thinking: string; signature: string }
+    | { type: "redacted_thinking"; data: string }
+)[] {
+    if (reasoning.signature === undefined) return [];
+    if (reasoning.redacted === true) {
+        return [{ type: "redacted_thinking" as const, data: reasoning.signature }];
+    }
+    return [
+        {
+            type: "thinking" as const,
+            thinking: reasoning.text,
+            signature: reasoning.signature,
+        },
+    ];
 }
 
 function toToolResultBlock(message: SessionToolResultMessage) {
@@ -245,16 +296,32 @@ function parseArguments(argumentsJson: string): Record<string, unknown> {
 }
 
 function stableMessageUuid(sessionId: string, message: SessionMessage, index: number): string {
-    const digest = createHash("sha256")
-        .update(sessionId)
-        .update(String(index))
-        .update(message.role)
-        .digest();
+    return stableUuid(sessionId, `${index}:${message.role}`);
+}
+
+function stableContentBlockUuid(sessionId: string, messageIndex: number, blockIndex: number): string {
+    return stableUuid(sessionId, `${messageIndex}:assistant:${blockIndex}`);
+}
+
+function stableUuid(sessionId: string, identity: string): string {
+    const digest = createHash("sha256").update(sessionId).update(identity).digest();
     const bytes = Buffer.from(digest.subarray(0, 16));
     bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50;
     bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
     const hex = bytes.toString("hex");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function findCompactionSummary(entries: readonly SessionStoreEntry[]): string | undefined {
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+        const entry = entries[index];
+        if (entry?.isCompactSummary !== true) continue;
+        const message = entry.message as { content?: unknown } | undefined;
+        if (typeof message?.content === "string" && message.content.trim().length > 0) {
+            return message.content;
+        }
+    }
+    return undefined;
 }
 
 async function* singleMessagePrompt(message: SDKUserMessage): AsyncIterable<SDKUserMessage> {

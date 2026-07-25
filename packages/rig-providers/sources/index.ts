@@ -31,6 +31,7 @@ export type {
     SessionImageContent,
     SessionInputContent,
     SessionMessage,
+    SessionReasoning,
     SessionSystemMessage,
     SessionTextContent,
     SessionToolCall,

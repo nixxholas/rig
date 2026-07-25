@@ -12,6 +12,7 @@ import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/Sessio
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type {
     SessionContext,
+    SessionReasoning,
     SessionToolCall,
     SessionToolResultMessage,
 } from "@/core/SessionContext.js";
@@ -193,6 +194,8 @@ export class ClaudeSession extends BaseSession {
             ]),
         };
         let assistantText = "";
+        let reasoningText = "";
+        let reasoning: SessionReasoning[] = [];
         for await (const event of this.streamQuery({
             context: this.context,
             model,
@@ -200,6 +203,18 @@ export class ClaudeSession extends BaseSession {
             ...(request.abort === undefined ? {} : { abort: request.abort }),
         })) {
             if (event.type === "text_delta") assistantText += event.delta;
+            if (event.type === "reasoning_delta") reasoningText += event.delta;
+            // The signature closes the thinking block it was issued for, so the pair is banked
+            // together and the buffer reopens for whatever the model reasons about next.
+            if (event.type === "encrypted_reasoning") {
+                reasoning = [...reasoning, { text: reasoningText, signature: event.content }];
+                reasoningText = "";
+            }
+            if (event.type === "block_reset") {
+                assistantText = "";
+                reasoningText = "";
+                reasoning = [];
+            }
             if (event.type === "done" && event.state !== "error") {
                 this.context = {
                     instructions: this.context.instructions,
@@ -208,6 +223,7 @@ export class ClaudeSession extends BaseSession {
                         {
                             role: "assistant",
                             content: assistantText,
+                            ...(reasoning.length === 0 ? {} : { reasoning }),
                             ...(this.lastQueryToolCalls.length === 0
                                 ? {}
                                 : { toolCalls: this.lastQueryToolCalls }),
@@ -474,7 +490,7 @@ export class ClaudeSession extends BaseSession {
                 throw new Error(nativeCompactionError);
             }
             if (options.compaction && nativeCompactionCompleted) {
-                const summary = findNativeCompactionSummary(this.activeReplay?.entries() ?? []);
+                const summary = this.activeReplay?.compactionSummary();
                 if (summary === undefined) {
                     throw new Error(
                         "Claude SDK compacted the session without persisting a summary.",
@@ -588,20 +604,6 @@ function trailingToolResults(
         results.unshift(message);
     }
     return results;
-}
-
-function findNativeCompactionSummary(
-    entries: readonly { [key: string]: unknown }[],
-): string | undefined {
-    for (let index = entries.length - 1; index >= 0; index -= 1) {
-        const entry = entries[index];
-        if (entry?.isCompactSummary !== true) continue;
-        const message = entry.message as { content?: unknown } | undefined;
-        if (typeof message?.content === "string" && message.content.trim().length > 0) {
-            return message.content;
-        }
-    }
-    return undefined;
 }
 
 function toUsage(usage: {

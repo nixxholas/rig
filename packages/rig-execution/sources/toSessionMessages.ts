@@ -74,6 +74,13 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
                 ...(content.vendor === undefined ? {} : { vendor: content.vendor }),
             }));
         const encryptedReasoning = thinking.at(-1)?.encrypted;
+        // A signature only verifies the exact text it was issued for, so the blocks travel whole
+        // and in order. Vendors that treat reasoning as one opaque blob still read the field above.
+        const reasoning = thinking.map((content) => ({
+            text: content.thinking,
+            ...(content.encrypted === undefined ? {} : { signature: content.encrypted }),
+            ...(content.redacted === undefined ? {} : { redacted: content.redacted }),
+        }));
         return {
             role: "assistant",
             content: message.content
@@ -81,6 +88,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
                 .map((content) => content.text)
                 .join(""),
             ...(encryptedReasoning === undefined ? {} : { encryptedReasoning }),
+            ...(reasoning.length === 0 ? {} : { reasoning }),
             ...(toolCalls.length === 0 ? {} : { toolCalls }),
             ...(message.responseItems === undefined
                 ? {}

@@ -34,11 +34,28 @@ export interface SessionSystemMessage {
     readonly content: string | readonly string[];
 }
 
+/**
+ * One reasoning block retained exactly as the caller supplied it.
+ *
+ * Anthropic signs the text of its thinking blocks, so a signature replayed beside different text
+ * is rejected. Unsigned reasoning still remains part of caller-owned history even when a vendor
+ * must omit it while serializing a request. Vendors that hand back reasoning as one opaque payload
+ * use `encryptedReasoning` instead.
+ */
+export interface SessionReasoning {
+    readonly text: string;
+    readonly signature?: string;
+    /** Reasoning the vendor withheld, where the signature is the whole payload. */
+    readonly redacted?: boolean;
+}
+
 export interface SessionAssistantMessage {
     readonly role: "assistant";
     readonly content: string;
     /** Opaque encrypted reasoning JSON from a prior Responses-compatible response. */
     readonly encryptedReasoning?: string;
+    /** Ordered reasoning blocks retained as caller-owned history. */
+    readonly reasoning?: readonly SessionReasoning[];
     /** Completed client tool calls emitted alongside this assistant message. */
     readonly toolCalls?: readonly SessionToolCall[];
     /**
