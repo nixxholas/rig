@@ -1,8 +1,22 @@
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
 import type { DatabaseSync } from "node:sqlite";
 
-const CURRENT_SCHEMA_VERSION = 6;
+import { createId } from "@paralleldrive/cuid2";
+
+import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
+import {
+    folderProjectName,
+    projectNameKey,
+    projectStorageKey,
+} from "./projectIdentity.js";
+import { initializePersistentGlobalEventQueueSchema } from "./PersistentGlobalEventQueue.js";
+
+const CURRENT_SCHEMA_VERSION = 7;
 
 const sessionColumnMigrations = [
+    ["project_id", "TEXT"],
+    ["workspace_id", "TEXT"],
     ["title", "TEXT"],
     ["docker_json", "TEXT"],
     ["secret_ids_json", "TEXT NOT NULL DEFAULT '[]'"],
@@ -64,16 +78,123 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             | { user_version?: bigint | number }
             | undefined;
         const schemaVersion = Number(versionRow?.user_version ?? 0);
+        const legacyProjectSecrets =
+            schemaVersion > 0 &&
+            schemaVersion < 7 &&
+            database
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'project_secret_attachments'",
+                )
+                .get() !== undefined
+                ? database
+                      .prepare("SELECT cwd, secret_id FROM project_secret_attachments")
+                      .all()
+                      .map((row) => ({
+                          cwd: readString(row, "cwd"),
+                          secretId: readString(row, "secret_id"),
+                      }))
+                : [];
+        const legacyGlobalEventTable =
+            schemaVersion > 0 &&
+            schemaVersion < 7 &&
+            database
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'durable_global_events'",
+                )
+                .get() !== undefined &&
+            database
+                .prepare("PRAGMA table_info(durable_global_events)")
+                .all()
+                .some((column) => column.name === "cursor");
+        const legacyGlobalEventState =
+            legacyGlobalEventTable &&
+            database
+                .prepare(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'durable_global_event_queue_state'",
+                )
+                .get() !== undefined
+                ? database
+                      .prepare(
+                          "SELECT last_cursor, trimmed_through FROM durable_global_event_queue_state WHERE id = 1",
+                      )
+                      .get()
+                : undefined;
         if (schemaVersion > CURRENT_SCHEMA_VERSION) {
             throw new Error(
                 `The session database uses schema version ${String(schemaVersion)}, but this Rig version supports up to ${String(CURRENT_SCHEMA_VERSION)}.`,
             );
         }
+        if (schemaVersion > 0 && schemaVersion < 7) {
+            if (legacyGlobalEventTable) {
+                database.exec(
+                    "ALTER TABLE durable_global_events RENAME TO legacy_durable_global_events_v5",
+                );
+            }
+            database.exec(`
+                DROP TABLE IF EXISTS durable_global_events;
+                DROP TABLE IF EXISTS durable_global_event_queue_state;
+                DROP TABLE IF EXISTS durable_global_event_streams;
+                DROP TABLE IF EXISTS project_secret_attachments;
+            `);
+        }
 
         database.exec(`
+            CREATE TABLE IF NOT EXISTS project_avatar_assets (
+                hash TEXT PRIMARY KEY,
+                media_type TEXT NOT NULL,
+                byte_length INTEGER NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                created_at_ms INTEGER NOT NULL,
+                dereferenced_at_ms INTEGER
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                path TEXT NOT NULL UNIQUE,
+                storage_key TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                name_key TEXT NOT NULL UNIQUE,
+                name_source TEXT NOT NULL,
+                avatar_hash TEXT REFERENCES project_avatar_assets(hash),
+                avatar_source TEXT,
+                initialization_status TEXT NOT NULL,
+                initialization_error TEXT,
+                initialization_attempt INTEGER NOT NULL DEFAULT 0,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS project_workspaces (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL REFERENCES projects(id),
+                path TEXT NOT NULL UNIQUE,
+                storage_key TEXT NOT NULL COLLATE NOCASE,
+                name TEXT NOT NULL,
+                name_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                status TEXT NOT NULL,
+                base_ref TEXT,
+                branch TEXT,
+                git_common_dir TEXT NOT NULL,
+                error TEXT,
+                client_request_id TEXT,
+                version INTEGER NOT NULL DEFAULT 1,
+                created_at_ms INTEGER NOT NULL,
+                updated_at_ms INTEGER NOT NULL,
+                archived_at_ms INTEGER,
+                UNIQUE (project_id, storage_key),
+                UNIQUE (project_id, name_key),
+                UNIQUE (project_id, client_request_id)
+            );
+
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 agent_id TEXT NOT NULL,
+                project_id TEXT REFERENCES projects(id),
+                workspace_id TEXT REFERENCES project_workspaces(id),
                 session_kind TEXT NOT NULL DEFAULT 'primary',
                 parent_session_id TEXT,
                 root_session_id TEXT,
@@ -215,9 +336,9 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             );
 
             CREATE TABLE IF NOT EXISTS project_secret_attachments (
-                cwd TEXT NOT NULL,
-                secret_id TEXT NOT NULL,
-                PRIMARY KEY (cwd, secret_id)
+                project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+                secret_id TEXT NOT NULL REFERENCES secret_registrations(id) ON DELETE CASCADE,
+                PRIMARY KEY (project_id, secret_id)
             );
 
             CREATE TABLE IF NOT EXISTS happy_sessions (
@@ -242,6 +363,63 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             );
         `);
 
+        if (legacyGlobalEventTable) {
+            const streamId = createId();
+            const legacyEventRange = database
+                .prepare(
+                    `
+                    SELECT MIN(cursor) AS first_cursor, MAX(cursor) AS last_cursor
+                    FROM legacy_durable_global_events_v5
+                    `,
+                )
+                .get();
+            const firstLegacyCursor = readOptionalNumber(legacyEventRange, "first_cursor");
+            const lastLegacyCursor = readOptionalNumber(legacyEventRange, "last_cursor") ?? 0;
+            const lastPosition =
+                legacyGlobalEventState === undefined
+                    ? lastLegacyCursor
+                    : Math.max(
+                          lastLegacyCursor,
+                          readNumber(legacyGlobalEventState, "last_cursor"),
+                      );
+            const trimmedThrough =
+                legacyGlobalEventState === undefined
+                    ? Math.max(0, (firstLegacyCursor ?? 1) - 1)
+                    : readNumber(legacyGlobalEventState, "trimmed_through");
+            initializePersistentGlobalEventQueueSchema(database);
+            database
+                .prepare(
+                    `
+                    INSERT INTO durable_global_event_streams (
+                        stream_id, last_position, trimmed_through, created_at_ms
+                    ) VALUES (?, ?, ?, ?)
+                    `,
+                )
+                .run(streamId, lastPosition, trimmedThrough, Date.now());
+            database
+                .prepare(
+                    `
+                    INSERT INTO durable_global_events (
+                        position, stream_id, event_id, aggregate_kind, aggregate_id,
+                        type, created_at_ms, data_json
+                    )
+                    SELECT
+                        cursor, ?, event_id, 'session', session_id, type, created_at_ms,
+                        json_object(
+                            'createdAt', created_at_ms,
+                            'data', json(data_json),
+                            'id', event_id,
+                            'sessionId', session_id,
+                            'type', type
+                        )
+                    FROM legacy_durable_global_events_v5
+                    ORDER BY cursor
+                    `,
+                )
+                .run(streamId);
+            database.exec("DROP TABLE legacy_durable_global_events_v5");
+        }
+
         const sessionColumns = new Set(
             database
                 .prepare("PRAGMA table_info(sessions)")
@@ -251,6 +429,33 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         for (const [name, definition] of sessionColumnMigrations) {
             if (sessionColumns.has(name)) continue;
             database.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${definition}`);
+        }
+
+        const historicalSessions = database
+            .prepare(
+                "SELECT DISTINCT cwd FROM sessions WHERE project_id IS NULL ORDER BY created_at_ms ASC",
+            )
+            .all();
+        const canonicalHome = normalizeProjectCwd(homedir());
+        for (const row of historicalSessions) {
+            const originalCwd = readString(row, "cwd");
+            const path = normalizeProjectCwd(originalCwd);
+            const projectId = ensureProject(database, path, canonicalHome);
+            database
+                .prepare("UPDATE sessions SET project_id = ? WHERE project_id IS NULL AND cwd = ?")
+                .run(projectId, originalCwd);
+        }
+        for (const attachment of legacyProjectSecrets) {
+            const projectId = ensureProject(
+                database,
+                normalizeProjectCwd(attachment.cwd),
+                canonicalHome,
+            );
+            database
+                .prepare(
+                    "INSERT OR IGNORE INTO project_secret_attachments (project_id, secret_id) VALUES (?, ?)",
+                )
+                .run(projectId, attachment.secretId);
         }
 
         const queuedRunColumns = new Set(
@@ -281,6 +486,14 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 ON session_messages(session_id, message_id);
             CREATE INDEX IF NOT EXISTS sessions_parent_created
                 ON sessions(parent_session_id, created_at_ms);
+            CREATE INDEX IF NOT EXISTS sessions_project_activity
+                ON sessions(project_id, last_message_at_ms DESC, updated_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS sessions_workspace_activity
+                ON sessions(workspace_id, last_message_at_ms DESC, updated_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS projects_updated
+                ON projects(updated_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS project_workspaces_project_updated
+                ON project_workspaces(project_id, updated_at_ms DESC);
             CREATE INDEX IF NOT EXISTS external_tool_calls_session_created
                 ON external_tool_calls(session_id, created_at_ms);
             CREATE INDEX IF NOT EXISTS durable_user_inputs_session_created
@@ -298,4 +511,101 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         }
         throw error;
     }
+}
+
+function ensureProject(
+    database: DatabaseSync,
+    path: string,
+    canonicalHome: string,
+): string {
+    const existing = database.prepare("SELECT id FROM projects WHERE path = ?").get(path);
+    if (existing !== undefined) return readString(existing, "id");
+
+    const kind = path === canonicalHome ? "home" : "regular";
+    const baseName = kind === "home" ? "Home" : folderProjectName(path);
+    const name = reserveName(database, baseName);
+    const storageKey = reserveStorageKey(
+        database,
+        kind === "home" ? "home" : projectStorageKey(baseName),
+    );
+    const now = Date.now();
+    const available = kind === "home" || existsSync(path);
+    const id = createId();
+    database
+        .prepare(
+            `
+            INSERT INTO projects (
+                id, path, storage_key, kind, name, name_key, name_source,
+                initialization_status, initialization_error,
+                initialization_attempt, version, created_at_ms, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, 'folder', ?, ?, 0, 1, ?, ?)
+            `,
+        )
+        .run(
+            id,
+            path,
+            storageKey,
+            kind,
+            name,
+            projectNameKey(name),
+            available && kind === "regular"
+                ? "initializing"
+                : available
+                  ? "ready"
+                  : "failed",
+            available ? null : "Project directory is unavailable.",
+            now,
+            now,
+        );
+    return id;
+}
+
+function reserveName(database: DatabaseSync, base: string): string {
+    for (let suffix = 1; ; suffix += 1) {
+        const candidate = suffix === 1 ? base : `${base} (${String(suffix)})`;
+        if (
+            database.prepare("SELECT 1 FROM projects WHERE name_key = ?").get(
+                projectNameKey(candidate),
+            ) === undefined
+        ) {
+            return candidate;
+        }
+    }
+}
+
+function reserveStorageKey(database: DatabaseSync, base: string): string {
+    for (let suffix = 1; ; suffix += 1) {
+        const candidate = suffix === 1 ? base : `${base}-${String(suffix)}`;
+        if (
+            database
+                .prepare("SELECT 1 FROM projects WHERE storage_key = ? COLLATE NOCASE")
+                .get(candidate) === undefined
+        ) {
+            return candidate;
+        }
+    }
+}
+
+function readString(row: Record<string, unknown>, key: string): string {
+    const value = row[key];
+    if (typeof value !== "string") throw new Error(`Expected text SQLite column '${key}'.`);
+    return value;
+}
+
+function readNumber(row: Record<string, unknown>, key: string): number {
+    const value = row[key];
+    if (typeof value === "number") return value;
+    if (typeof value === "bigint") return Number(value);
+    throw new Error(`Expected numeric SQLite column '${key}'.`);
+}
+
+function readOptionalNumber(
+    row: Record<string, unknown> | undefined,
+    key: string,
+): number | undefined {
+    if (row === undefined) return undefined;
+    const value = row[key];
+    if (typeof value === "number") return value;
+    if (typeof value === "bigint") return Number(value);
+    return undefined;
 }

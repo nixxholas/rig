@@ -7,8 +7,12 @@ import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateProjectWorkspaceRequest,
     CreateSessionRequest,
     ModelCatalog,
+    Project,
+    ProjectWorkspace,
+    GlobalEvent,
     RegisterSecretRequest,
     SecretSummary,
     SessionEvent,
@@ -45,11 +49,18 @@ import type { TaskDrain } from "./TrackedTaskDrain.js";
 import { isTransientInferenceSessionEvent } from "./isTransientInferenceSessionEvent.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
 import type { ExternalToolCall, ExternalToolDefinition } from "../external-tools/index.js";
 import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
+import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
+import {
+    ProjectRepository,
+    type ProjectAvatarAsset,
+    type ProjectGitRunner,
+} from "./ProjectRepository.js";
+import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
+import { errorToMessage } from "../errorToMessage.js";
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -60,8 +71,11 @@ export interface PersistentSessionStoreOptions {
     now?: () => number;
     onSessionAccess?: (session: InMemorySession) => void;
     onSessionEvent?: (event: SessionEvent, session: InMemorySession | undefined) => void;
+    projectGit?: ProjectGitRunner;
     taskDrain?: TaskDrain;
     secrets?: readonly SecretRegistration[];
+    homeDirectory?: string;
+    stateDirectory?: string;
 }
 
 export class PersistentSessionStore implements SessionStore, InMemorySessionPersistence {
@@ -75,7 +89,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #onSessionEvent:
         | ((event: SessionEvent, session: InMemorySession | undefined) => void)
         | undefined;
-    #persistentGlobalEventQueue: PersistentGlobalEventQueue | undefined;
+    #globalEventQueue: GlobalEventQueue;
+    #projects: ProjectRepository;
     #secrets: SecretRegistry;
     #sessions = new Map<string, WeakRef<InMemorySession>>();
     #sessionFinalizer = new FinalizationRegistry<{
@@ -85,6 +100,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#sessions.get(id) === reference) this.#sessions.delete(id);
     });
     #taskDrain: TaskDrain | undefined;
+    #transactionCommitCallbacks: (() => void)[] | undefined;
 
     constructor(options: PersistentSessionStoreOptions) {
         this.#secrets = new SecretRegistry();
@@ -106,9 +122,25 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         initializeSessionDatabase(this.#database);
         this.#loadSecretRegistrations();
         for (const secret of options.secrets ?? []) this.registerSecret(secret);
-        if (options.durableGlobalEventQueue === true) {
-            this.#persistentGlobalEventQueue = new PersistentGlobalEventQueue(this.#database);
-        }
+        this.#globalEventQueue =
+            options.durableGlobalEventQueue === true
+                ? new PersistentGlobalEventQueue(this.#database)
+                : new InMemoryGlobalEventQueue();
+        this.#projects = new ProjectRepository({
+            database: this.#database,
+            ...(options.projectGit === undefined ? {} : { git: options.projectGit }),
+            ...(options.homeDirectory === undefined
+                ? {}
+                : { homeDirectory: options.homeDirectory }),
+            onEvent: (event) => this.#publishGlobalEvent(event),
+            ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
+            transaction: (body) => this.#transaction(body),
+            ...(options.stateDirectory !== undefined
+                ? { stateDirectory: options.stateDirectory }
+                : options.databasePath === ":memory:"
+                  ? {}
+                  : { stateDirectory: dirname(options.databasePath) }),
+        });
         this.#agentManager = new AgentSessionManager({
             repository: {
                 createSubagent: (request, metadata, contextMessages) =>
@@ -120,6 +152,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         this.#repairInterruptedTitleGenerations();
         this.repairInterruptedSessions("crash");
+        const recover = () => this.#recoverProjectWorkspaces();
+        const recovery = this.#taskDrain?.run(recover) ?? recover();
+        void recovery.catch(() => undefined);
     }
 
     changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined {
@@ -141,14 +176,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (session === undefined) return undefined;
         this.#secrets.reference(secretId);
         if (scope === "project") {
-            const cwd = normalizeProjectCwd(session.snapshot().cwd);
+            const projectId = session.snapshot().projectId;
             this.#database
                 .prepare(
-                    "INSERT OR IGNORE INTO project_secret_attachments (cwd, secret_id) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO project_secret_attachments (project_id, secret_id) VALUES (?, ?)",
                 )
-                .run(cwd, secretId);
+                .run(projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
-                if (normalizeProjectCwd(candidate.snapshot().cwd) === cwd) {
+                if (candidate.snapshot().projectId === projectId) {
                     candidate.attachSecret(secretId, { scope });
                 }
             }
@@ -189,6 +224,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     close(): void {
+        this.#projects.close();
+        this.#globalEventQueue.deactivate();
         this.#database.close();
     }
 
@@ -211,12 +248,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
-            const cwd = normalizeProjectCwd(session.snapshot().cwd);
+            const projectId = session.snapshot().projectId;
             this.#database
-                .prepare("DELETE FROM project_secret_attachments WHERE cwd = ? AND secret_id = ?")
-                .run(cwd, secretId);
+                .prepare(
+                    "DELETE FROM project_secret_attachments WHERE project_id = ? AND secret_id = ?",
+                )
+                .run(projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
-                if (normalizeProjectCwd(candidate.snapshot().cwd) === cwd) {
+                if (candidate.snapshot().projectId === projectId) {
                     candidate.detachSecret(secretId, { scope });
                 }
             }
@@ -231,30 +270,47 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const source = this.get(sessionId);
         if (source === undefined) return undefined;
         const state = source.createForkState();
-        const session = new InMemorySession({
-            agentManager: this.#agentManager,
-            createEventId: createEventIdFactory(),
-            ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
-            emitCreatedEvent: false,
-            modelCatalog: this.#modelCatalog,
-            ...(this.#mcpToolProvider !== undefined
-                ? { mcpToolProvider: this.#mcpToolProvider }
-                : {}),
-            onAppendEvent: (event) => this.#appendEvent(event),
-            persistence: this,
-            request: source.requestForSubagent(),
-            projectSecretIds: this.#projectSecrets(source.snapshot().cwd),
-            secretRegistry: this.#secrets,
-            restore: state,
-            ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
-        });
-        this.#cacheSession(session);
+        const sourceSnapshot = source.snapshot();
+        if (sourceSnapshot.workspaceId !== undefined) {
+            const workspace = this.#projects.getWorkspace(
+                sourceSnapshot.projectId,
+                sourceSnapshot.workspaceId,
+            );
+            if (workspace?.status !== "ready") {
+                throw new Error("A session in an unavailable workspace cannot be forked.");
+            }
+        }
+        let session!: InMemorySession;
         this.#transaction(() => {
+            session = new InMemorySession({
+                agentManager: this.#agentManager,
+                createEventId: createEventIdFactory(),
+                ...(this.#createRuntime === undefined
+                    ? {}
+                    : { createRuntime: this.#createRuntime }),
+                emitCreatedEvent: false,
+                modelCatalog: this.#modelCatalog,
+                ...(this.#mcpToolProvider !== undefined
+                    ? { mcpToolProvider: this.#mcpToolProvider }
+                    : {}),
+                onAppendEvent: (event) => this.#appendEvent(event),
+                persistence: this,
+                request: source.requestForSubagent(),
+                projectId: sourceSnapshot.projectId,
+                projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
+                secretRegistry: this.#secrets,
+                restore: state,
+                ...(sourceSnapshot.workspaceId === undefined
+                    ? {}
+                    : { workspaceId: sourceSnapshot.workspaceId }),
+                ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
+            });
             for (const message of state.messages) {
                 this.upsertMessage(session.id, message);
             }
+            session.emitCreatedEvent();
         });
-        session.emitCreatedEvent();
+        this.#cacheSession(session);
         return session;
     }
 
@@ -265,27 +321,73 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         id?: string,
     ): InMemorySession {
         this.#assertAcceptingMutations();
-        const session = new InMemorySession({
-            agentManager: this.#agentManager,
-            createEventId: createEventIdFactory(),
-            ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
-            emitCreatedEvent: false,
-            modelCatalog: this.#modelCatalog,
-            ...(this.#mcpToolProvider !== undefined
-                ? { mcpToolProvider: this.#mcpToolProvider }
-                : {}),
-            ...(metadata !== undefined ? { metadata } : {}),
-            ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
-            ...(id === undefined ? {} : { id }),
-            onAppendEvent: (event) => this.#appendEvent(event),
-            persistence: this,
-            projectSecretIds: this.#projectSecrets(request.cwd),
-            request,
-            ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
-            secretRegistry: this.#secrets,
+        let session!: InMemorySession;
+        this.#transaction(() => {
+            const inherited =
+                metadata?.parentSessionId === undefined
+                    ? undefined
+                    : this.get(metadata.parentSessionId)?.snapshot();
+            if (metadata?.parentSessionId !== undefined && inherited === undefined) {
+                throw new Error("The parent session was not found.");
+            }
+            if (inherited?.status === "archived") {
+                throw new Error("An archived session cannot create a subagent.");
+            }
+            const inheritedWorkspace =
+                inherited?.workspaceId === undefined
+                    ? undefined
+                    : this.#projects.getWorkspace(inherited.projectId, inherited.workspaceId);
+            if (
+                inherited?.workspaceId !== undefined &&
+                inheritedWorkspace?.status !== "ready"
+            ) {
+                throw new Error("The parent session workspace is not ready.");
+            }
+            const ownership = (() => {
+                if (inherited === undefined) {
+                    return this.#projects.resolve(request.cwd, request.workspaceId);
+                }
+                const project = this.#projects.getProject(inherited.projectId);
+                if (project === undefined) {
+                    throw new Error("The parent session project was not found.");
+                }
+                return {
+                    project,
+                    ...(inheritedWorkspace === undefined
+                        ? {}
+                        : { workspace: inheritedWorkspace }),
+                };
+            })();
+            session = new InMemorySession({
+                agentManager: this.#agentManager,
+                createEventId: createEventIdFactory(),
+                ...(this.#createRuntime === undefined
+                    ? {}
+                    : { createRuntime: this.#createRuntime }),
+                emitCreatedEvent: false,
+                modelCatalog: this.#modelCatalog,
+                ...(this.#mcpToolProvider !== undefined
+                    ? { mcpToolProvider: this.#mcpToolProvider }
+                    : {}),
+                ...(metadata !== undefined ? { metadata } : {}),
+                ...(contextMessages !== undefined
+                    ? { initialContextMessages: contextMessages }
+                    : {}),
+                ...(id === undefined ? {} : { id }),
+                onAppendEvent: (event) => this.#appendEvent(event),
+                persistence: this,
+                projectId: ownership.project.id,
+                projectSecretIds: this.#projectSecrets(ownership.project.id),
+                request,
+                ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
+                secretRegistry: this.#secrets,
+                ...(ownership.workspace === undefined
+                    ? {}
+                    : { workspaceId: ownership.workspace.id }),
+            });
+            session.emitCreatedEvent();
         });
         this.#cacheSession(session);
-        session.emitCreatedEvent();
         return session;
     }
 
@@ -312,18 +414,17 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return session;
     }
 
-    get globalEventQueue(): GlobalEventQueue | undefined {
-        return this.#persistentGlobalEventQueue;
+    get globalEventQueue(): GlobalEventQueue {
+        return this.#globalEventQueue;
     }
 
-    setDurableGlobalEventQueue(enabled: boolean): GlobalEventQueue | undefined {
-        if (enabled) {
-            this.#persistentGlobalEventQueue ??= new PersistentGlobalEventQueue(this.#database);
-        } else {
-            this.#persistentGlobalEventQueue?.deactivate();
-            this.#persistentGlobalEventQueue = undefined;
-        }
-        return this.#persistentGlobalEventQueue;
+    setDurableGlobalEventQueue(enabled: boolean): GlobalEventQueue {
+        if (this.#globalEventQueue.durable === enabled) return this.#globalEventQueue;
+        this.#globalEventQueue.deactivate();
+        this.#globalEventQueue = enabled
+            ? new PersistentGlobalEventQueue(this.#database, { resetStream: true })
+            : new InMemoryGlobalEventQueue();
+        return this.#globalEventQueue;
     }
 
     insertQueuedRun(sessionId: string, run: PersistedQueuedRun): void {
@@ -387,6 +488,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 `
                 SELECT
                     id,
+                    project_id,
+                    workspace_id,
                     archive_on_idle,
                     archived,
                     track_unread,
@@ -435,9 +538,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             const dockerJson = readOptionalString(row, "docker_json");
             const unreadReason = readOptionalString(row, "unread_reason");
             const unreadSince = readOptionalNumber(row, "unread_since_ms");
+            const workspaceId = readOptionalString(row, "workspace_id");
             return {
                 id: readString(row, "id"),
                 archived: readNumber(row, "archived") !== 0,
+                projectId: readString(row, "project_id"),
+                ...(workspaceId === undefined ? {} : { workspaceId }),
                 archiveOnIdle: readNumber(row, "archive_on_idle") !== 0,
                 trackUnread: readNumber(row, "track_unread") !== 0,
                 ...(unreadReason !== undefined && unreadSince !== undefined
@@ -569,6 +675,107 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     listSecrets(): readonly SecretSummary[] {
         return this.#secrets.references();
+    }
+
+    getProject(projectId: string): Project | undefined {
+        return this.#projects.getProject(projectId);
+    }
+
+    listProjects(): readonly Project[] {
+        return this.#projects.listProjects();
+    }
+
+    getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
+        return this.#projects.getWorkspace(projectId, workspaceId);
+    }
+
+    listWorkspaces(projectId?: string): readonly ProjectWorkspace[] {
+        return this.#projects.listWorkspaces(projectId);
+    }
+
+    renameProject(projectId: string, name: string): Project | undefined {
+        return this.#projects.renameProject(projectId, name);
+    }
+
+    refreshProject(projectId: string): Project | undefined {
+        return this.#projects.refreshProject(projectId);
+    }
+
+    renameWorkspace(
+        projectId: string,
+        workspaceId: string,
+        name: string,
+        expectedVersion?: number,
+    ): ProjectWorkspace | undefined {
+        return this.#projects.renameWorkspace(projectId, workspaceId, name, expectedVersion);
+    }
+
+    createWorkspace(
+        projectId: string,
+        request: CreateProjectWorkspaceRequest,
+    ): Promise<ProjectWorkspace | undefined> {
+        return this.#projects.createWorkspace(projectId, request);
+    }
+
+    archiveWorkspace(
+        projectId: string,
+        workspaceId: string,
+        expectedVersion?: number,
+    ): Promise<ProjectWorkspace | undefined> {
+        const archive = () =>
+            this.#archiveWorkspace(projectId, workspaceId, expectedVersion);
+        return this.#taskDrain?.run(archive) ?? archive();
+    }
+
+    async #archiveWorkspace(
+        projectId: string,
+        workspaceId: string,
+        expectedVersion?: number,
+    ): Promise<ProjectWorkspace | undefined> {
+        let workspace: ProjectWorkspace | undefined;
+        let cleanup: Promise<void>[] = [];
+        this.#transaction(() => {
+            workspace = this.#projects.beginWorkspaceArchive(
+                projectId,
+                workspaceId,
+                expectedVersion,
+            );
+            if (workspace === undefined || workspace.status === "archived") return;
+            cleanup = this.#database
+                .prepare("SELECT id FROM sessions WHERE workspace_id = ?")
+                .all(workspaceId)
+                .map((row) => this.get(readString(row, "id"))?.archiveForWorkspace(workspaceId))
+                .filter((task): task is Promise<void> => task !== undefined);
+        });
+        if (workspace === undefined || workspace.status === "archived") return workspace;
+        const results = await Promise.allSettled(cleanup);
+        const failure = results.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failure !== undefined) {
+            return this.#projects.failWorkspaceArchive(
+                projectId,
+                workspaceId,
+                errorToMessage(failure.reason),
+            );
+        }
+        return this.#projects.removeArchivedWorkspace(projectId, workspaceId);
+    }
+
+    setProjectAvatar(
+        projectId: string,
+        bytes: Buffer,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        return this.#projects.setAvatar(projectId, "user", bytes, expectedVersion);
+    }
+
+    clearProjectAvatar(projectId: string): Project | undefined {
+        return this.#projects.clearAvatar(projectId);
+    }
+
+    getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined> {
+        return this.#projects.avatarAsset(hash);
     }
 
     registerSecret(request: RegisterSecretRequest): SecretSummary {
@@ -785,12 +992,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     saveSession(state: PersistedSessionState): void {
+        const projectId = state.projectId ?? this.#projects.resolve(state.cwd).project.id;
         this.#database
             .prepare(
                 `
                 INSERT INTO sessions (
                     id,
                     agent_id,
+                    project_id,
+                    workspace_id,
                     session_kind,
                     parent_session_id,
                     root_session_id,
@@ -843,9 +1053,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     created_at_ms,
                     updated_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
+                    project_id = excluded.project_id,
+                    workspace_id = excluded.workspace_id,
                     session_kind = excluded.session_kind,
                     parent_session_id = excluded.parent_session_id,
                     root_session_id = excluded.root_session_id,
@@ -901,6 +1113,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             .run(
                 state.id,
                 state.agentId,
+                projectId,
+                state.workspaceId ?? null,
                 state.agent.type,
                 state.agent.parentSessionId ?? null,
                 state.agent.rootSessionId,
@@ -1048,15 +1262,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         externalCall: ExternalToolCall,
         permissionCall: DurableUserInputCall,
     ): void {
-        this.#database.exec("BEGIN IMMEDIATE");
-        try {
+        this.#transaction(() => {
             this.upsertExternalToolCall(externalCall);
             this.upsertDurableUserInput(permissionCall);
-            this.#database.exec("COMMIT");
-        } catch (error) {
-            this.#database.exec("ROLLBACK");
-            throw error;
-        }
+        });
     }
 
     upsertDurableUserInput(call: DurableUserInputCall): void {
@@ -1167,7 +1376,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.#notifySessionEvent(event);
             return;
         }
-        const globalEntry = this.#transaction(() => {
+        let globalEntry: ReturnType<GlobalEventQueue["append"]>;
+        this.#transaction(() => {
             this.#database
                 .prepare(
                     `
@@ -1188,7 +1398,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     event.createdAt,
                     JSON.stringify(event.data),
                 );
-            const queued = this.#persistentGlobalEventQueue?.persist(event);
+            if (this.#globalEventQueue.durable) {
+                globalEntry = this.#globalEventQueue.append(event);
+            }
             this.#database
                 .prepare(
                     `
@@ -1198,10 +1410,37 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     `,
                 )
                 .run(event.id, this.#now(), event.sessionId);
-            return queued;
         });
-        if (globalEntry !== undefined) this.#persistentGlobalEventQueue?.publish(globalEntry);
-        this.#notifySessionEvent(event);
+        if (this.#globalEventQueue.durable && globalEntry !== undefined) {
+            const queue = this.#globalEventQueue;
+            this.#afterTransactionCommit(() => queue.publish(globalEntry!));
+        } else if (
+            !this.#globalEventQueue.durable &&
+            shouldPublishGlobalEvent(event)
+        ) {
+            const queue = this.#globalEventQueue;
+            this.#afterTransactionCommit(() => {
+                const entry = queue.append(event);
+                if (entry !== undefined) queue.publish(entry);
+            });
+        }
+        this.#afterTransactionCommit(() => this.#notifySessionEvent(event));
+    }
+
+    #publishGlobalEvent(event: GlobalEvent): void {
+        if (!shouldPublishGlobalEvent(event)) return;
+        const queue = this.#globalEventQueue;
+        if (!queue.durable) {
+            this.#afterTransactionCommit(() => {
+                const entry = queue.append(event);
+                if (entry !== undefined) queue.publish(entry);
+            });
+            return;
+        }
+        const entry = queue.append(event);
+        if (entry !== undefined) {
+            this.#afterTransactionCommit(() => queue.publish(entry));
+        }
     }
 
     #notifySessionAccess(session: InMemorySession): void {
@@ -1441,6 +1680,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const goalJson = readOptionalString(row, "goal_json");
         const lastEventId = readOptionalString(row, "last_event_id");
         const id = readString(row, "id");
+        const projectId = readString(row, "project_id");
+        const workspaceId = readOptionalString(row, "workspace_id");
         const agent: SessionAgentMetadata = {
             depth: readNumber(row, "depth"),
             rootSessionId: readOptionalString(row, "root_session_id") ?? id,
@@ -1495,6 +1736,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             models: JSON.parse(readString(row, "models_json")) as Model[],
             providerId: readString(row, "provider_id"),
             permissionMode,
+            projectId,
+            ...(workspaceId === undefined ? {} : { workspaceId }),
             secretIds: secretIdsJson === undefined ? [] : (JSON.parse(secretIdsJson) as string[]),
             queuedRuns: this.#loadQueuedRuns(sessionId),
             status: readString(row, "status") as PersistedSessionState["status"],
@@ -1551,10 +1794,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : {}),
             onAppendEvent: (event) => this.#appendEvent(event),
             persistence: this,
-            projectSecretIds: this.#projectSecrets(restore.cwd),
+            projectSecretIds: this.#projectSecrets(projectId),
+            projectId,
             request,
             secretRegistry: this.#secrets,
             restore,
+            ...(workspaceId === undefined ? {} : { workspaceId }),
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });
     }
@@ -1581,13 +1826,21 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return sessions;
     }
 
-    #projectSecrets(cwd: string): readonly string[] {
+    #projectSecrets(projectId: string): readonly string[] {
         return this.#database
             .prepare(
-                "SELECT secret_id FROM project_secret_attachments WHERE cwd = ? ORDER BY secret_id",
+                "SELECT secret_id FROM project_secret_attachments WHERE project_id = ? ORDER BY secret_id",
             )
-            .all(normalizeProjectCwd(cwd))
+            .all(projectId)
             .map((row) => readString(row, "secret_id"));
+    }
+
+    async #recoverProjectWorkspaces(): Promise<void> {
+        await this.#projects.reconcileInitializingWorkspaces();
+        for (const workspace of this.#projects.listWorkspaces()) {
+            if (workspace.status !== "archiving") continue;
+            await this.#archiveWorkspace(workspace.projectId, workspace.id);
+        }
     }
 
     #repairInterruptedTitleGenerations(): void {
@@ -1606,15 +1859,41 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #transaction<T>(body: () => T): T {
+        if (this.#database.isTransaction) return body();
+        this.#transactionCommitCallbacks = [];
         this.#database.exec("BEGIN IMMEDIATE");
         try {
             const value = body();
             this.#database.exec("COMMIT");
+            const callbacks = this.#transactionCommitCallbacks;
+            this.#transactionCommitCallbacks = undefined;
+            for (const callback of callbacks) {
+                try {
+                    callback();
+                } catch {
+                    // The durable transaction already committed; observers are best effort.
+                }
+            }
             return value;
         } catch (error) {
-            this.#database.exec("ROLLBACK");
+            this.#transactionCommitCallbacks = undefined;
+            if (this.#database.isTransaction) {
+                try {
+                    this.#database.exec("ROLLBACK");
+                } catch {
+                    // Preserve the transaction's original failure.
+                }
+            }
             throw error;
         }
+    }
+
+    #afterTransactionCommit(callback: () => void): void {
+        if (this.#database.isTransaction) {
+            this.#transactionCommitCallbacks?.push(callback);
+            return;
+        }
+        callback();
     }
 }
 

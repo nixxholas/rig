@@ -1,9 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { promisify } from "node:util";
 
 import { describe, expect, it, vi } from "vitest";
+import sharp from "sharp";
 
 import { ProtocolHttpClient } from "../client/ProtocolHttpClient.js";
 import { createEventIdFactory, type SessionEvent, type SessionSummary } from "../protocol/index.js";
@@ -19,7 +22,154 @@ import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 
+const execFile = promisify(execFileCallback);
+
 describe("createProtocolHttpServer", () => {
+    it("requires an entity version for workspace mutations", async () => {
+        const projectDirectory = await mkdtemp(join(tmpdir(), "rig-workspace-version-"));
+        await execFile("git", ["-C", projectDirectory, "init"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.email", "rig@example.test"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.name", "Rig Test"]);
+        await writeFile(join(projectDirectory, "README.md"), "fixture\n");
+        await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
+        await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
+        const { client, close, socketPath } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: projectDirectory });
+            const response = await client.createProjectWorkspace(created.session.projectId, {
+                baseRef: "HEAD",
+                clientRequestId: "workspace-version-test",
+                name: "Versioned workspace",
+            });
+            const workspacePath = `/projects/${encodeURIComponent(
+                created.session.projectId,
+            )}/workspaces/${encodeURIComponent(response.workspace.id)}`;
+
+            await expect(
+                requestRawJson(socketPath, workspacePath, {
+                    body: '{"name":"Missing version"}',
+                    method: "PATCH",
+                }),
+            ).resolves.toMatchObject({ statusCode: 400 });
+            await expect(
+                requestRawJson(socketPath, `${workspacePath}/archive`, {
+                    body: "{}",
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 400 });
+
+            let workspace = response.workspace;
+            await vi.waitFor(
+                async () => {
+                    const candidate = (
+                        await client.listProjectWorkspaces(created.session.projectId)
+                    ).workspaces.find((item) => item.id === response.workspace.id);
+                    if (candidate === undefined) throw new Error("Expected the workspace.");
+                    workspace = candidate;
+                    expect(workspace.status).toBe("ready");
+                },
+                { interval: 20, timeout: 5_000 },
+            );
+            const attached = await client.createSession({
+                cwd: workspace.path,
+                workspaceId: workspace.id,
+            });
+            await client.archiveProjectWorkspace(
+                created.session.projectId,
+                workspace.id,
+                workspace.version,
+            );
+
+            await expect(client.unarchiveSession(attached.session.id)).rejects.toThrow(
+                "cannot be restored",
+            );
+            await expect(client.listSessions()).resolves.toMatchObject({
+                sessions: expect.not.arrayContaining([
+                    expect.objectContaining({ id: attached.session.id }),
+                ]),
+            });
+            await expect(client.listSessions({ archived: true })).resolves.toMatchObject({
+                sessions: expect.arrayContaining([
+                    expect.objectContaining({
+                        archived: true,
+                        id: attached.session.id,
+                        status: "archived",
+                    }),
+                ]),
+            });
+        } finally {
+            await close();
+            await rm(projectDirectory, { force: true, recursive: true });
+        }
+    });
+
+    it("lists, renames, snapshots, and updates project avatars", async () => {
+        const store = new InMemorySessionStore();
+        const { client, close } = await startServer({ store });
+        try {
+            const first = await client.createSession({ cwd: "/tmp/rig-project-api/one/project" });
+            const second = await client.createSession({ cwd: "/tmp/rig-project-api/two/project" });
+            const firstProject = await client.renameProject(first.session.projectId, {
+                name: "Shared",
+            });
+            const secondProject = await client.renameProject(second.session.projectId, {
+                name: "Shared",
+            });
+            expect(firstProject.project.name).toBe("Shared");
+            expect(secondProject.project.name).toBe("Shared (2)");
+
+            await expect(client.globalState()).resolves.toMatchObject({
+                cursor: expect.any(String),
+                hasMoreSessions: false,
+                projects: expect.arrayContaining([
+                    expect.objectContaining({ id: first.session.projectId }),
+                    expect.objectContaining({ id: second.session.projectId }),
+                ]),
+                sessions: expect.arrayContaining([
+                    expect.objectContaining({
+                        id: first.session.id,
+                        projectId: first.session.projectId,
+                    }),
+                ]),
+            });
+
+            const png = await sharp({
+                create: {
+                    background: { alpha: 1, b: 40, g: 80, r: 120 },
+                    channels: 4,
+                    height: 32,
+                    width: 32,
+                },
+            })
+                .png()
+                .toBuffer();
+            const withAvatar = await client.uploadProjectAvatar(
+                first.session.projectId,
+                png,
+                "image/png",
+                firstProject.project.version,
+            );
+            expect(withAvatar.project.avatar).toMatchObject({
+                hash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+                mediaType: "image/webp",
+                source: "user",
+            });
+            await expect(
+                client.uploadProjectAvatar(
+                    first.session.projectId,
+                    png,
+                    "image/png",
+                    firstProject.project.version,
+                ),
+            ).rejects.toThrow("changed");
+            expect(
+                (await client.clearProjectAvatar(first.session.projectId)).project.avatar,
+            ).toBeUndefined();
+        } finally {
+            await close();
+        }
+    });
+
     it("broadcasts one fully configured message to every primary session", async () => {
         const store = new InMemorySessionStore();
         const first = store.create({ cwd: "/tmp/broadcast-first" });
@@ -670,15 +820,13 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
-    it("does not expose global events when the durable queue is disabled", async () => {
+    it("exposes the in-memory global event queue when durable retention is disabled", async () => {
         const { client, close } = await startServer();
         try {
             await expect(client.getDaemonConfig()).resolves.toEqual({
                 config: { settings: { durableGlobalEventQueue: false } },
             });
-            await expect(client.getGlobalEvents()).rejects.toThrow(
-                "The durable global event queue is disabled.",
-            );
+            await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
             await expect(client.health()).resolves.toMatchObject({
                 durableGlobalEventQueue: false,
             });
@@ -731,29 +879,37 @@ describe("createProtocolHttpServer", () => {
             const observed = new Promise<void>((resolve) => {
                 resolveObserved = resolve;
             });
+            const controller = new AbortController();
             const watching = client.watchGlobalEvents({
                 onEvent: () => resolveObserved?.(),
+                signal: controller.signal,
             });
-            const stoppedWatching = expect(watching).rejects.toThrow("SSE failed with HTTP 404");
             const created = await client.createSession({ cwd: "/tmp/rig-socket-config" });
             await observed;
             const queued = await client.getGlobalEvents();
-            expect(queued.events).toEqual([
-                expect.objectContaining({
-                    event: expect.objectContaining({
-                        sessionId: created.session.id,
-                        type: "session_created",
+            expect(queued.events).toEqual(
+                expect.arrayContaining([
+                    expect.objectContaining({
+                        event: expect.objectContaining({
+                            projectId: created.session.projectId,
+                            type: "project_created",
+                        }),
                     }),
-                }),
-            ]);
+                    expect.objectContaining({
+                        event: expect.objectContaining({
+                            sessionId: created.session.id,
+                            type: "session_created",
+                        }),
+                    }),
+                ]),
+            );
 
+            controller.abort();
+            await watching;
             await client.updateDaemonConfig({
                 settings: { durableGlobalEventQueue: false },
             });
-            await stoppedWatching;
-            await expect(client.getGlobalEvents()).rejects.toThrow(
-                "The durable global event queue is disabled.",
-            );
+            await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
             await expect(client.getDaemonConfig()).resolves.toEqual({
                 config: { settings: { durableGlobalEventQueue: false } },
             });
@@ -761,7 +917,7 @@ describe("createProtocolHttpServer", () => {
             await client.updateDaemonConfig({
                 settings: { durableGlobalEventQueue: true },
             });
-            await expect(client.getGlobalEvents()).resolves.toEqual(queued);
+            await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
         } finally {
             await close();
             store.close();
@@ -783,13 +939,16 @@ describe("createProtocolHttpServer", () => {
             const first = await client.createSession({ cwd: "/tmp/rig-global-events-a" });
             const second = await client.createSession({ cwd: "/tmp/rig-global-events-b" });
             const queued = await client.getGlobalEvents();
-
-            expect(queued.events.map((entry) => entry.event.sessionId)).toEqual([
+            const sessionEntries = queued.events.filter(
+                (entry): entry is typeof entry & { event: SessionEvent } =>
+                    "sessionId" in entry.event,
+            );
+            expect(sessionEntries.map((entry) => entry.event.sessionId)).toEqual([
                 first.session.id,
                 second.session.id,
             ]);
-            const firstCursor = queued.events[0]?.cursor;
-            const secondCursor = queued.events[1]?.cursor;
+            const firstCursor = sessionEntries[0]?.cursor;
+            const secondCursor = sessionEntries[1]?.cursor;
             if (firstCursor === undefined || secondCursor === undefined) {
                 throw new Error("Expected global event cursors.");
             }
@@ -799,6 +958,7 @@ describe("createProtocolHttpServer", () => {
                 void client.watchGlobalEvents({
                     after: secondCursor,
                     onEvent: (entry) => {
+                        if (!("sessionId" in entry.event)) return;
                         controller.abort();
                         resolve(entry.event);
                     },
@@ -812,14 +972,16 @@ describe("createProtocolHttpServer", () => {
             });
 
             await expect(client.trimGlobalEvents(firstCursor)).resolves.toEqual({
-                trimmed: 1,
+                trimmed: 3,
                 through: firstCursor,
             });
-            await expect(client.getGlobalEvents(0)).rejects.toThrow(
+            await expect(client.getGlobalEvents("missing.0")).rejects.toThrow(
                 "The global event cursor is not available.",
             );
             const remaining = await client.getGlobalEvents(firstCursor);
-            expect(remaining.events[0]?.event.sessionId).toBe(second.session.id);
+            expect(
+                remaining.events.find((entry) => "sessionId" in entry.event)?.event,
+            ).toMatchObject({ sessionId: second.session.id });
             await expect(client.getEvents(first.session.id)).resolves.toMatchObject({
                 events: expect.arrayContaining([
                     expect.objectContaining({ type: "session_created" }),

@@ -56,6 +56,35 @@ describe("ProtocolHttpClient", () => {
         }
     });
 
+    it("sends the expected workspace version with rename and archive mutations", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const socketPath = join(directory, "server.sock");
+        const versions: Array<string | undefined> = [];
+        const server = createServer((request, response) => {
+            versions.push(request.headers["if-match"]);
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end('{"workspace":{}}');
+        });
+
+        try {
+            await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+            const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
+
+            await client.renameProjectWorkspace(
+                "project-1",
+                "workspace-1",
+                { name: "Renamed" },
+                3,
+            );
+            await client.archiveProjectWorkspace("project-1", "workspace-1", 4);
+
+            expect(versions).toEqual(['"3"', '"4"']);
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it("surfaces a rejected session cursor without retrying forever", async () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
         const socketPath = join(directory, "server.sock");
@@ -315,8 +344,8 @@ describe("ProtocolHttpClient", () => {
             const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
             const controller = new AbortController();
             const firstGate = deferred<void>();
-            const applied: number[] = [];
-            const attempted: number[] = [];
+            const applied: string[] = [];
+            const attempted: string[] = [];
             let failFirstOnce = true;
 
             const watching = client.watchGlobalEvents({
@@ -363,7 +392,7 @@ describe("ProtocolHttpClient", () => {
             const controller = new AbortController();
             const applicationStarted = deferred<void>();
             const releaseApplication = deferred<void>();
-            const applied: number[] = [];
+            const applied: string[] = [];
             let watchingCompleted = false;
 
             const watching = client.watchGlobalEvents({
@@ -423,7 +452,7 @@ function writeSseEvent(response: { write(data: string): void }, event: SessionEv
 
 function globalEvent(cursor: number): GlobalEventQueueEntry {
     return {
-        cursor,
+        cursor: `stream.${String(cursor)}`,
         event: sessionResetEvent(`018bcfe5-6800-700${cursor}-8000-00000000000${cursor}`),
     };
 }

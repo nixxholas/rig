@@ -24,6 +24,7 @@ function subagentSession(): ProtocolSession {
         archived: false,
         cwd: "/tmp/rig-resume-test",
         id: "subagent-1",
+        projectId: "project-1",
         modelId: "openai/gpt-5.5",
         modelLocked: true,
         models: [],

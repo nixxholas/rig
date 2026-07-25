@@ -37,7 +37,8 @@ export type SessionStatus =
     | "completed"
     | "aborted"
     | "suspended"
-    | "error";
+    | "error"
+    | "archived";
 
 export type SessionSummaryStatus = SessionStatus;
 
@@ -150,6 +151,8 @@ export interface ProtocolSession {
     id: string;
     agentId: string;
     archived: boolean;
+    projectId: string;
+    workspaceId?: string;
     archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
@@ -216,6 +219,8 @@ export interface SubagentSummary {
 export interface SessionSummary {
     id: string;
     archived: boolean;
+    projectId: string;
+    workspaceId?: string;
     archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
@@ -255,6 +260,7 @@ export interface CreateSessionRequest {
     workflowsEnabled?: boolean;
     docker?: DockerExecutionConfig;
     local?: boolean;
+    workspaceId?: string;
 }
 
 export interface UpdateSessionRequest {
@@ -411,26 +417,8 @@ export interface StartInspectorResponse {
     inspectorUrl: string;
 }
 
-export interface GlobalEventQueueEntry {
-    cursor: number;
-    event: SessionEvent;
-}
-
-export interface ListGlobalEventsResponse {
-    events: readonly GlobalEventQueueEntry[];
-}
-
 export interface ListExternalToolCallsResponse {
     calls: readonly ExternalToolCall[];
-}
-
-export interface TrimGlobalEventsRequest {
-    through: number;
-}
-
-export interface TrimGlobalEventsResponse {
-    trimmed: number;
-    through: number;
 }
 
 export interface SubmitMessageRequest {
@@ -558,6 +546,7 @@ export type SessionEvent =
     | SessionCreatedEvent
     | SessionUpdatedEvent
     | SessionArchiveChangedEvent
+    | SessionWorkspaceArchivedEvent
     | MessageSubmittedEvent
     | SteeringAppliedEvent
     | RunStartedEvent
@@ -603,6 +592,11 @@ export type SessionUpdatedEvent = BaseSessionEvent<"session_updated", { session:
 export type SessionArchiveChangedEvent = BaseSessionEvent<
     "session_archived",
     { archived: boolean }
+>;
+
+export type SessionWorkspaceArchivedEvent = BaseSessionEvent<
+    "session_workspace_archived",
+    { reason: "workspace_archived"; workspaceId: string }
 >;
 
 export type MessageSubmittedEvent = BaseSessionEvent<

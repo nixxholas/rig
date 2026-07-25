@@ -158,6 +158,7 @@ export interface HappySessionMetadata {
     path: string;
     model: { id: string; providerId: string };
     permissionMode: string;
+    project: { id: string; kind: "home" | "regular"; name: string };
     provider: HappyProviderDescriptor;
     providers: readonly HappyProviderDescriptor[];
     reasoning: { current: string | null; levels: readonly string[] };
@@ -174,6 +175,7 @@ export interface HappySessionMetadata {
     summary: { text: string; updatedAt: number };
     thoughtLevels: readonly { code: string; value: string }[];
     tools: readonly string[];
+    workspace?: { id: string; kind: "git_worktree"; name: string };
 }
 
 export interface HappyProviderDescriptor {

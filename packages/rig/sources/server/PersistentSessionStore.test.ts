@@ -869,12 +869,13 @@ describe("PersistentSessionStore", () => {
         }
     });
 
-    it("keeps the global event queue disabled unless explicitly enabled", async () => {
+    it("uses in-memory global events unless durable retention is explicitly enabled", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
             const store = new PersistentSessionStore({ databasePath });
             store.create({ cwd: "/tmp/rig-persistent-session-test" });
-            expect(store.globalEventQueue).toBeUndefined();
+            expect(store.globalEventQueue.durable).toBe(false);
+            expect(store.globalEventQueue.list()).toHaveLength(3);
             store.close();
 
             const enabledStore = new PersistentSessionStore({
@@ -896,11 +897,13 @@ describe("PersistentSessionStore", () => {
                 durableGlobalEventQueue: true,
             });
             try {
-                expect(restoredStore.globalEventQueue?.list()).toEqual([
-                    expect.objectContaining({
-                        event: expect.objectContaining({ sessionId: queuedSession.id }),
-                    }),
-                ]);
+                expect(restoredStore.globalEventQueue.list()).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            event: expect.objectContaining({ sessionId: queuedSession.id }),
+                        }),
+                    ]),
+                );
             } finally {
                 restoredStore.close();
             }
@@ -919,27 +922,30 @@ describe("PersistentSessionStore", () => {
             const firstSession = store.create({ cwd: "/tmp/rig-persistent-session-test-a" });
             const secondSession = store.create({ cwd: "/tmp/rig-persistent-session-test-b" });
             const initial = store.globalEventQueue?.list() ?? [];
-
-            expect(initial.map((entry) => entry.event.sessionId)).toEqual([
+            const sessionEntries = initial.filter(
+                (entry): entry is typeof entry & { event: SessionEvent } =>
+                    "sessionId" in entry.event,
+            );
+            expect(sessionEntries.map((entry) => entry.event.sessionId)).toEqual([
                 firstSession.id,
                 secondSession.id,
             ]);
-            const firstCursor = initial[0]?.cursor;
-            const secondCursor = initial[1]?.cursor;
+            const firstCursor = sessionEntries[0]?.cursor;
+            const secondCursor = sessionEntries[1]?.cursor;
             expect(firstCursor).toBeDefined();
             expect(secondCursor).toBeDefined();
             if (firstCursor === undefined || secondCursor === undefined) {
                 throw new Error("Expected two global event cursors.");
             }
             expect(store.globalEventQueue?.trim(firstCursor)).toEqual({
-                trimmed: 1,
+                trimmed: 3,
                 through: firstCursor,
             });
             expect(store.globalEventQueue?.trim(firstCursor)).toEqual({
                 trimmed: 0,
                 through: firstCursor,
             });
-            expect(store.globalEventQueue?.list({ after: 0 })).toBeUndefined();
+            expect(store.globalEventQueue?.list({ after: "missing.0" })).toBeUndefined();
             expect(firstSession.events.since(undefined)).toHaveLength(1);
             store.close();
 
@@ -948,26 +954,86 @@ describe("PersistentSessionStore", () => {
                 durableGlobalEventQueue: true,
             });
             try {
-                expect(restoredStore.globalEventQueue?.list()).toEqual([
-                    expect.objectContaining({
-                        cursor: secondCursor,
-                        event: expect.objectContaining({ sessionId: secondSession.id }),
-                    }),
-                ]);
+                expect(restoredStore.globalEventQueue.list()).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            cursor: secondCursor,
+                            event: expect.objectContaining({ sessionId: secondSession.id }),
+                        }),
+                    ]),
+                );
                 const thirdSession = restoredStore.create({
                     cwd: "/tmp/rig-persistent-session-test-c",
                 });
                 const appended = restoredStore.globalEventQueue?.list({ after: secondCursor });
-                expect(appended).toEqual([
-                    expect.objectContaining({
-                        event: expect.objectContaining({ sessionId: thirdSession.id }),
-                    }),
-                ]);
-                expect(appended?.[0]?.cursor).toBeGreaterThan(secondCursor);
+                expect(appended).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            event: expect.objectContaining({ sessionId: thirdSession.id }),
+                        }),
+                    ]),
+                );
+                expect(appended?.[0]?.cursor).not.toBe(secondCursor);
             } finally {
                 restoredStore.close();
             }
         } finally {
+            await cleanup();
+        }
+    });
+
+    it("rolls back a new project and session when its durable global event cannot commit", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const store = new PersistentSessionStore({
+            databasePath,
+            durableGlobalEventQueue: true,
+        });
+        const breaker = new DatabaseSync(databasePath);
+        try {
+            breaker.exec(`
+                CREATE TRIGGER reject_project_global_event
+                BEFORE INSERT ON durable_global_events
+                WHEN NEW.aggregate_kind = 'project'
+                BEGIN
+                    SELECT RAISE(ABORT, 'rejected project event');
+                END;
+            `);
+
+            expect(() =>
+                store.create({ cwd: "/tmp/rig-atomic-project-session" }),
+            ).toThrow("rejected project event");
+            expect(store.listProjects()).toEqual([]);
+            expect(store.list()).toEqual([]);
+            expect(store.globalEventQueue.list()).toEqual([]);
+        } finally {
+            breaker.close();
+            store.close();
+            await cleanup();
+        }
+    });
+
+    it("does not publish in-memory global events from a rolled-back transaction", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const store = new PersistentSessionStore({ databasePath });
+        const breaker = new DatabaseSync(databasePath);
+        try {
+            breaker.exec(`
+                CREATE TRIGGER reject_session_insert
+                BEFORE INSERT ON sessions
+                BEGIN
+                    SELECT RAISE(ABORT, 'rejected session insert');
+                END;
+            `);
+
+            expect(() =>
+                store.create({ cwd: "/tmp/rig-atomic-in-memory-project-session" }),
+            ).toThrow("rejected session insert");
+            expect(store.listProjects()).toEqual([]);
+            expect(store.list()).toEqual([]);
+            expect(store.globalEventQueue.list()).toEqual([]);
+        } finally {
+            breaker.close();
+            store.close();
             await cleanup();
         }
     });

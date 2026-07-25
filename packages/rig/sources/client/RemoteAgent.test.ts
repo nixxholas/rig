@@ -809,6 +809,7 @@ function protocolSession(model: ReturnType<typeof defineModel>): ProtocolSession
         archived: false,
         cwd: "/workspace",
         id: "session-1",
+        projectId: "project-1",
         modelId: model.id,
         modelLocked: false,
         models: [model],

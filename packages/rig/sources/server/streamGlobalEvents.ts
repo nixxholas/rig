@@ -16,7 +16,7 @@ export function streamGlobalEvents(
     const selectedValue = cursorValue ?? afterValue;
     const after = parseGlobalEventCursor(selectedValue ?? null);
     if (selectedValue !== undefined && selectedValue !== null && after === undefined) {
-        sendJson(response, 400, { error: "The event cursor must be a whole number." });
+        sendJson(response, 400, { error: "The event cursor is invalid." });
         return;
     }
 
@@ -41,7 +41,7 @@ export function streamGlobalEvents(
     for (;;) {
         for (const entry of catchup) writeGlobalSseEvent(response, entry);
         if (catchup.length < catchupLimit) break;
-        const nextCursor: number | undefined = catchup.at(-1)?.cursor;
+        const nextCursor: string | undefined = catchup.at(-1)?.cursor;
         if (nextCursor === undefined) break;
         catchup = queue.list({ after: nextCursor, limit: catchupLimit }) ?? [];
     }

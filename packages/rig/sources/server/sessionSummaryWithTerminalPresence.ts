@@ -9,6 +9,9 @@ export function sessionSummaryWithTerminalPresence(
         summary.unread !== undefined && terminals.hasFocusedTerminal(summary.id)
             ? withoutUnread(summary)
             : summary;
+    if (summary.status === "archived") {
+        return { ...presentedSummary, archived: true };
+    }
     if (
         terminals.hasConnectedTerminal(summary.id) ||
         summary.status === "queued" ||

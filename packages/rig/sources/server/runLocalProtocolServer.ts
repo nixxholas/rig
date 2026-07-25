@@ -273,6 +273,19 @@ export async function runLocalProtocolServer(
                         ),
                     databasePath: paths.databasePath,
                     getSubagents: (sessionId) => store?.listSubagents(sessionId) ?? [],
+                    getProjectContext: (session) => {
+                        const snapshot = session.snapshot();
+                        const project = store?.getProject(snapshot.projectId);
+                        if (project === undefined) return undefined;
+                        const workspace =
+                            snapshot.workspaceId === undefined
+                                ? undefined
+                                : store?.getWorkspace(project.id, snapshot.workspaceId);
+                        return {
+                            project,
+                            ...(workspace === undefined ? {} : { workspace }),
+                        };
+                    },
                     modelCatalog,
                 });
                 service.start();
@@ -338,6 +351,24 @@ export async function runLocalProtocolServer(
                                           databasePath: paths.databasePath,
                                           getSubagents: (sessionId) =>
                                               store?.listSubagents(sessionId) ?? [],
+                                          getProjectContext: (session) => {
+                                              const snapshot = session.snapshot();
+                                              const project = store?.getProject(snapshot.projectId);
+                                              if (project === undefined) return undefined;
+                                              const workspace =
+                                                  snapshot.workspaceId === undefined
+                                                      ? undefined
+                                                      : store?.getWorkspace(
+                                                            project.id,
+                                                            snapshot.workspaceId,
+                                                        );
+                                              return {
+                                                  project,
+                                                  ...(workspace === undefined
+                                                      ? {}
+                                                      : { workspace }),
+                                              };
+                                          },
                                           modelCatalog,
                                       });
                                   } catch (error) {

@@ -1,7 +1,12 @@
 import { io, type Socket } from "socket.io-client";
 
 import type { ImageBlock } from "../agent/types.js";
-import type { ModelCatalog, SubagentSummary } from "../protocol/index.js";
+import type {
+    ModelCatalog,
+    Project,
+    ProjectWorkspace,
+    SubagentSummary,
+} from "../protocol/index.js";
 import type { InMemorySession } from "../server/InMemorySession.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
@@ -38,6 +43,7 @@ export interface HappySessionClientOptions {
     fetch?: Fetch;
     getSubagents?: (sessionId: string) => readonly SubagentSummary[];
     modelCatalog?: ModelCatalog;
+    projectContext?: () => { project: Project; workspace?: ProjectWorkspace } | undefined;
     repository: HappySyncRepository;
     session: InMemorySession;
     socketFactory?: (url: string, options: Parameters<typeof io>[1]) => HappySocket;
@@ -48,6 +54,9 @@ export class HappySessionClient {
     readonly #fetch: Fetch;
     readonly #getSubagents: NonNullable<HappySessionClientOptions["getSubagents"]>;
     readonly #modelCatalog: ModelCatalog | undefined;
+    readonly #projectContext:
+        | (() => { project: Project; workspace?: ProjectWorkspace } | undefined)
+        | undefined;
     readonly #repository: HappySyncRepository;
     readonly #session: InMemorySession;
     readonly #socketFactory: NonNullable<HappySessionClientOptions["socketFactory"]>;
@@ -70,6 +79,7 @@ export class HappySessionClient {
         this.#fetch = options.fetch ?? fetch;
         this.#getSubagents = options.getSubagents ?? (() => []);
         this.#modelCatalog = options.modelCatalog;
+        this.#projectContext = options.projectContext;
         this.#repository = options.repository;
         this.#session = options.session;
         this.#socketFactory =
@@ -504,6 +514,7 @@ export class HappySessionClient {
 
     #metadata(): HappySessionMetadata {
         const snapshot = this.#session.snapshot();
+        const context = this.#projectContext?.();
         const title = snapshot.title ?? "Rig session";
         if (title !== this.#summaryTitle) {
             this.#summaryTitle = title;
@@ -513,6 +524,24 @@ export class HappySessionClient {
             configuration: this.#configuration,
             ...(this.#modelCatalog === undefined ? {} : { modelCatalog: this.#modelCatalog }),
             session: snapshot,
+            ...(context === undefined
+                ? {}
+                : {
+                      project: {
+                          id: context.project.id,
+                          kind: context.project.kind,
+                          name: context.project.name,
+                      },
+                      ...(context.workspace === undefined
+                          ? {}
+                          : {
+                                workspace: {
+                                    id: context.workspace.id,
+                                    kind: context.workspace.kind,
+                                    name: context.workspace.name,
+                                },
+                            }),
+                  }),
             subagents: this.#getSubagents(this.#session.id),
             summaryUpdatedAt: this.#summaryUpdatedAt,
         });

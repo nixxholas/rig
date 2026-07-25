@@ -24,11 +24,16 @@ import type {
     ListExternalToolCallsResponse,
     ListSecretsResponse,
     HealthResponse,
+    GlobalStateResponse,
     GoalSessionResponse,
     ListModelsResponse,
+    ListProjectsResponse,
+    ListProjectWorkspacesResponse,
     ListSessionsResponse,
     ListSubagentsResponse,
     ModelCatalog,
+    ProjectResponse,
+    ProjectWorkspaceResponse,
     RewindSessionRequest,
     RewindSessionResponse,
     RecordSessionActivityResponse,
@@ -130,7 +135,7 @@ export function createProtocolHttpServer(
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
-        globalEventQueue: options.globalEventQueue,
+        globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
         onDurableGlobalEventQueueChange: options.onDurableGlobalEventQueueChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
@@ -193,7 +198,7 @@ export function createProtocolHttpServer(
 }
 
 interface ProtocolServerRuntimeConfig {
-    globalEventQueue: GlobalEventQueue | undefined;
+    globalEventQueue: GlobalEventQueue;
     onDurableGlobalEventQueueChange:
         | ((
               enabled: boolean,
@@ -235,7 +240,7 @@ async function handleRequest(
         sendJson<HealthResponse>(
             response,
             200,
-            healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue !== undefined),
+            healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue.durable),
         );
         return;
     }
@@ -270,6 +275,244 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "models") {
         sendJson<ListModelsResponse>(response, 200, { catalog: modelCatalog });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "state") {
+        const sessions = store.list({ limit: 501 });
+        sendJson<GlobalStateResponse>(response, 200, {
+            cursor: runtimeConfig.globalEventQueue.cursor(),
+            hasMoreSessions: sessions.length > 500,
+            projects: store.listProjects(),
+            sessions: sessions
+                .slice(0, 500)
+                .map((summary) =>
+                    sessionSummaryWithTerminalPresence(summary, sessionTerminals),
+                ),
+            workspaces: store.listWorkspaces(),
+        });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "projects") {
+        sendJson<ListProjectsResponse>(response, 200, { projects: store.listProjects() });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "project-asset") {
+        const asset = await store.getProjectAvatar(route.assetHash);
+        if (asset === undefined) {
+            sendJson(response, 404, { error: "Project avatar not found" });
+            return;
+        }
+        response.writeHead(200, {
+            "cache-control": "public, max-age=31536000, immutable",
+            "content-length": String(asset.bytes.byteLength),
+            "content-type": asset.mediaType,
+            etag: `"${asset.hash}"`,
+        });
+        response.end(asset.bytes);
+        return;
+    }
+
+    if (route.name === "project") {
+        const project = store.getProject(route.projectId);
+        if (project === undefined) {
+            sendJson(response, 404, { error: "Project not found" });
+            return;
+        }
+        if (request.method === "GET") {
+            sendJson<ProjectResponse>(response, 200, { project });
+            return;
+        }
+        if (request.method === "PATCH") {
+            const body = await readJson<unknown>(request);
+            if (!hasOnlyObjectKeys(body, ["name"]) || typeof body.name !== "string") {
+                sendJson(response, 400, { error: "Project name must be text." });
+                return;
+            }
+            try {
+                sendJson<ProjectResponse>(response, 200, {
+                    project: store.renameProject(project.id, body.name)!,
+                });
+            } catch (error) {
+                sendJson(response, 400, { error: errorToMessage(error) });
+            }
+            return;
+        }
+    }
+
+    if (route.name === "project-refresh" && request.method === "POST") {
+        try {
+            const project = store.refreshProject(route.projectId);
+            if (project === undefined) {
+                sendJson(response, 404, { error: "Project not found" });
+                return;
+            }
+            sendJson<ProjectResponse>(response, 202, { project });
+        } catch (error) {
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
+        return;
+    }
+
+    if (route.name === "project-avatar") {
+        if (request.method === "PUT") {
+            const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim();
+            if (
+                contentType === undefined ||
+                !["image/png", "image/jpeg", "image/webp", "image/gif", "image/tiff"].includes(
+                    contentType,
+                )
+            ) {
+                sendJson(response, 415, { error: "This project avatar format is not supported." });
+                return;
+            }
+            const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+            if (expectedVersion === undefined) {
+                sendJson(response, 400, {
+                    error: "The project avatar update requires a valid project version.",
+                });
+                return;
+            }
+            try {
+                const bytes = await readBuffer(request, 8 * 1024 * 1024);
+                const project = await store.setProjectAvatar(
+                    route.projectId,
+                    bytes,
+                    expectedVersion,
+                );
+                if (project === undefined) {
+                    sendJson(response, 404, { error: "Project not found" });
+                    return;
+                }
+                sendJson<ProjectResponse>(response, 200, { project });
+            } catch (error) {
+                const message = errorToMessage(error);
+                sendJson(
+                    response,
+                    error instanceof RequestBodyTooLargeError
+                        ? 413
+                        : message.includes("changed before")
+                          ? 409
+                          : 400,
+                    { error: message },
+                );
+            }
+            return;
+        }
+        if (request.method === "DELETE") {
+            const project = store.clearProjectAvatar(route.projectId);
+            if (project === undefined) {
+                sendJson(response, 404, { error: "Project not found" });
+                return;
+            }
+            sendJson<ProjectResponse>(response, 200, { project });
+            return;
+        }
+    }
+
+    if (route.name === "project-workspaces") {
+        if (store.getProject(route.projectId) === undefined) {
+            sendJson(response, 404, { error: "Project not found" });
+            return;
+        }
+        if (request.method === "GET") {
+            sendJson<ListProjectWorkspacesResponse>(response, 200, {
+                workspaces: store.listWorkspaces(route.projectId),
+            });
+            return;
+        }
+        if (request.method === "POST") {
+            const body = await readJson<unknown>(request);
+            if (
+                !hasOnlyObjectKeys(body, ["baseRef", "clientRequestId", "name"]) ||
+                typeof body.name !== "string" ||
+                typeof body.baseRef !== "string" ||
+                typeof body.clientRequestId !== "string"
+            ) {
+                sendJson(response, 400, { error: "Workspace settings are invalid." });
+                return;
+            }
+            try {
+                const workspace = await store.createWorkspace(route.projectId, {
+                    baseRef: body.baseRef,
+                    clientRequestId: body.clientRequestId,
+                    name: body.name,
+                });
+                if (workspace === undefined) {
+                    sendJson(response, 404, { error: "Project not found" });
+                    return;
+                }
+                sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
+            } catch (error) {
+                const message = errorToMessage(error);
+                sendJson(response, message.includes("already used") ? 409 : 400, {
+                    error: message,
+                });
+            }
+            return;
+        }
+    }
+
+    if (route.name === "project-workspace") {
+        const workspace = store.getWorkspace(route.projectId, route.workspaceId);
+        if (workspace === undefined) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+        }
+        if (request.method === "PATCH") {
+            const body = await readJson<unknown>(request);
+            if (!hasOnlyObjectKeys(body, ["name"]) || typeof body.name !== "string") {
+                sendJson(response, 400, { error: "Workspace name must be text." });
+                return;
+            }
+            try {
+                const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+                if (expectedVersion === undefined) {
+                    sendJson(response, 400, { error: "The workspace version is invalid." });
+                    return;
+                }
+                const renamed = store.renameWorkspace(
+                    route.projectId,
+                    route.workspaceId,
+                    body.name,
+                    expectedVersion,
+                );
+                if (renamed === undefined) {
+                    sendJson(response, 404, { error: "Workspace not found" });
+                    return;
+                }
+                sendJson<ProjectWorkspaceResponse>(response, 200, {
+                    workspace: renamed,
+                });
+            } catch (error) {
+                sendJson(response, 409, { error: errorToMessage(error) });
+            }
+            return;
+        }
+    }
+
+    if (route.name === "project-workspace-archive" && request.method === "POST") {
+        try {
+            const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+            if (expectedVersion === undefined) {
+                sendJson(response, 400, { error: "The workspace version is invalid." });
+                return;
+            }
+            const workspace = await store.archiveWorkspace(
+                route.projectId,
+                route.workspaceId,
+                expectedVersion,
+            );
+            if (workspace === undefined) {
+                sendJson(response, 404, { error: "Workspace not found" });
+                return;
+            }
+            sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
+        } catch (error) {
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
         return;
     }
 
@@ -330,7 +573,7 @@ async function handleRequest(
         sendJson<GetDaemonConfigResponse>(response, 200, {
             config: {
                 settings: {
-                    durableGlobalEventQueue: runtimeConfig.globalEventQueue !== undefined,
+                    durableGlobalEventQueue: runtimeConfig.globalEventQueue.durable,
                 },
             },
         });
@@ -353,7 +596,7 @@ async function handleRequest(
             return;
         }
         const queue = await runtimeConfig.onDurableGlobalEventQueueChange(enabled);
-        if ((queue !== undefined) !== enabled) {
+        if (queue === undefined || queue.durable !== enabled) {
             throw new Error("The daemon could not apply the durable global event queue setting.");
         }
         runtimeConfig.globalEventQueue = queue;
@@ -365,10 +608,6 @@ async function handleRequest(
 
     if (isGlobalEventRoute(route.name)) {
         const globalEventQueue = runtimeConfig.globalEventQueue;
-        if (globalEventQueue === undefined) {
-            sendJson(response, 404, { error: "The durable global event queue is disabled." });
-            return;
-        }
 
         if (request.method === "GET" && route.name === "global-events") {
             const after = parseGlobalEventCursor(url.searchParams.get("after"));
@@ -400,8 +639,8 @@ async function handleRequest(
 
         if (request.method === "POST" && route.name === "global-events-trim") {
             const body = await readJson<TrimGlobalEventsRequest>(request);
-            if (!Number.isSafeInteger(body.through) || body.through < 0) {
-                sendJson(response, 400, { error: "The trim cursor must be a whole number." });
+            if (parseGlobalEventCursor(body.through) === undefined) {
+                sendJson(response, 400, { error: "The trim cursor is invalid." });
                 return;
             }
             const result = globalEventQueue.trim(body.through);
@@ -672,6 +911,12 @@ async function handleRequest(
         if (session.isSubagent()) {
             sendJson(response, 409, {
                 error: "Subagent histories are read-only and cannot be archived.",
+            });
+            return;
+        }
+        if (route.name === "unarchive" && session.snapshot().status === "archived") {
+            sendJson(response, 409, {
+                error: "A session archived with its workspace cannot be restored.",
             });
             return;
         }
@@ -1213,10 +1458,24 @@ function matchRoute(pathname: string):
               | "happy-reload"
               | "messages"
               | "models"
+              | "projects"
               | "secret-registrations"
               | "sessions"
+              | "state"
               | "shutdown";
           sessionId?: undefined;
+      }
+    | { assetHash: string; name: "project-asset"; sessionId?: undefined }
+    | {
+          name: "project" | "project-avatar" | "project-refresh" | "project-workspaces";
+          projectId: string;
+          sessionId?: undefined;
+      }
+    | {
+          name: "project-workspace" | "project-workspace-archive";
+          projectId: string;
+          sessionId?: undefined;
+          workspaceId: string;
       }
     | { name: "secret-registration"; secretId: string; sessionId?: undefined }
     | {
@@ -1276,11 +1535,49 @@ function matchRoute(pathname: string):
     if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };
     if (pathname === "/messages") return { name: "messages" };
+    if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
+    if (pathname === "/state") return { name: "state" };
     if (pathname === "/shutdown") return { name: "shutdown" };
 
     const globalParts = pathname.split("/").filter(Boolean);
+    if (
+        globalParts.length === 2 &&
+        globalParts[0] === "project-assets" &&
+        globalParts[1] !== undefined
+    ) {
+        return {
+            assetHash: decodeURIComponent(globalParts[1]),
+            name: "project-asset",
+        };
+    }
+    if (globalParts[0] === "projects" && globalParts[1] !== undefined) {
+        const projectId = decodeURIComponent(globalParts[1]);
+        if (globalParts.length === 2) return { name: "project", projectId };
+        if (globalParts.length === 3 && globalParts[2] === "avatar") {
+            return { name: "project-avatar", projectId };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "refresh") {
+            return { name: "project-refresh", projectId };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "workspaces") {
+            return { name: "project-workspaces", projectId };
+        }
+        if (
+            globalParts.length >= 4 &&
+            globalParts[2] === "workspaces" &&
+            globalParts[3] !== undefined
+        ) {
+            const workspaceId = decodeURIComponent(globalParts[3]);
+            if (globalParts.length === 4) {
+                return { name: "project-workspace", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "archive") {
+                return { name: "project-workspace-archive", projectId, workspaceId };
+            }
+        }
+    }
     if (globalParts.length === 2 && globalParts[0] === "secrets") {
         return {
             name: "secret-registration",
@@ -1427,11 +1724,44 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "sessions") return request.method === "POST";
+    if (
+        [
+            "project",
+            "project-avatar",
+            "project-refresh",
+            "project-workspace",
+            "project-workspace-archive",
+            "project-workspaces",
+        ].includes(route.name)
+    ) {
+        return request.method !== "GET";
+    }
     if (route.sessionId === undefined) return false;
     return isSessionMutation(route.name, request.method);
 }
 
 async function readJson<T>(request: IncomingMessage, maximumBytes?: number): Promise<T> {
+    const body = (await readBuffer(request, maximumBytes)).toString("utf8");
+    try {
+        return (body.length === 0 ? {} : JSON.parse(body)) as T;
+    } catch {
+        throw new InvalidJsonBodyError();
+    }
+}
+
+function hasOnlyObjectKeys(
+    value: unknown,
+    expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    const keys = Object.keys(value);
+    return (
+        keys.length === expectedKeys.length &&
+        keys.every((key) => expectedKeys.includes(key))
+    );
+}
+
+async function readBuffer(request: IncomingMessage, maximumBytes?: number): Promise<Buffer> {
     const chunks: Buffer[] = [];
     let receivedBytes = 0;
     for await (const chunk of request) {
@@ -1443,12 +1773,16 @@ async function readJson<T>(request: IncomingMessage, maximumBytes?: number): Pro
         chunks.push(buffer);
     }
 
-    const body = Buffer.concat(chunks).toString("utf8");
-    try {
-        return (body.length === 0 ? {} : JSON.parse(body)) as T;
-    } catch {
-        throw new InvalidJsonBodyError();
-    }
+    return Buffer.concat(chunks);
+}
+
+function parseEntityVersion(value: string | readonly string[] | undefined): number | undefined {
+    const selected = Array.isArray(value) ? value.at(-1) : value;
+    if (selected === undefined) return undefined;
+    const match = /^"?(\d+)"?$/u.exec(selected.trim());
+    if (match === null) return undefined;
+    const version = Number(match[1]);
+    return Number.isSafeInteger(version) && version > 0 ? version : undefined;
 }
 
 class InvalidJsonBodyError extends Error {}

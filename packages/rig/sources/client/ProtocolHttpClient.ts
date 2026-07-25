@@ -19,6 +19,7 @@ import type {
     ChangeServiceTierRequest,
     ChangeSessionGoalStatusRequest,
     CompactSessionResponse,
+    CreateProjectWorkspaceRequest,
     CreateSessionRequest,
     CreateSessionResponse,
     DisconnectSessionTerminalResponse,
@@ -28,16 +29,23 @@ import type {
     GetDaemonConfigResponse,
     GetSessionUsageResponse,
     GlobalEventQueueEntry,
+    GlobalStateResponse,
     HealthResponse,
     GoalSessionResponse,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
     ListModelsResponse,
+    ListProjectsResponse,
+    ListProjectWorkspacesResponse,
     ListSecretsResponse,
     ListSessionsOptions,
     ListSessionsResponse,
     ListSubagentsResponse,
     ProtocolSession,
+    ProjectResponse,
+    ProjectWorkspaceResponse,
+    RenameProjectRequest,
+    RenameProjectWorkspaceRequest,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
     ResolveExternalToolCallRequest,
@@ -99,7 +107,7 @@ export interface WatchSessionEventsOptions {
 }
 
 export interface WatchGlobalEventsOptions {
-    after?: number;
+    after?: string;
     signal?: AbortSignal;
     onEvent: (entry: GlobalEventQueueEntry) => void | Promise<void>;
 }
@@ -469,6 +477,105 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", `/sessions${suffix}`);
     }
 
+    globalState(): Promise<GlobalStateResponse> {
+        return this.#requestJson("GET", "/state");
+    }
+
+    listProjects(): Promise<ListProjectsResponse> {
+        return this.#requestJson("GET", "/projects");
+    }
+
+    getProject(projectId: string): Promise<ProjectResponse> {
+        return this.#requestJson("GET", `/projects/${encodeURIComponent(projectId)}`);
+    }
+
+    renameProject(
+        projectId: string,
+        request: RenameProjectRequest,
+    ): Promise<ProjectResponse> {
+        return this.#requestJson(
+            "PATCH",
+            `/projects/${encodeURIComponent(projectId)}`,
+            request,
+        );
+    }
+
+    refreshProject(projectId: string): Promise<ProjectResponse> {
+        return this.#requestJson(
+            "POST",
+            `/projects/${encodeURIComponent(projectId)}/refresh`,
+        );
+    }
+
+    uploadProjectAvatar(
+        projectId: string,
+        bytes: Uint8Array,
+        mediaType: "image/gif" | "image/jpeg" | "image/png" | "image/tiff" | "image/webp",
+        expectedVersion: number,
+    ): Promise<ProjectResponse> {
+        return this.#requestBytesJson(
+            "PUT",
+            `/projects/${encodeURIComponent(projectId)}/avatar`,
+            bytes,
+            {
+                "content-type": mediaType,
+                "if-match": `"${String(expectedVersion)}"`,
+            },
+        );
+    }
+
+    clearProjectAvatar(projectId: string): Promise<ProjectResponse> {
+        return this.#requestJson(
+            "DELETE",
+            `/projects/${encodeURIComponent(projectId)}/avatar`,
+        );
+    }
+
+    listProjectWorkspaces(projectId: string): Promise<ListProjectWorkspacesResponse> {
+        return this.#requestJson(
+            "GET",
+            `/projects/${encodeURIComponent(projectId)}/workspaces`,
+        );
+    }
+
+    createProjectWorkspace(
+        projectId: string,
+        request: CreateProjectWorkspaceRequest,
+    ): Promise<ProjectWorkspaceResponse> {
+        return this.#requestJson(
+            "POST",
+            `/projects/${encodeURIComponent(projectId)}/workspaces`,
+            request,
+        );
+    }
+
+    renameProjectWorkspace(
+        projectId: string,
+        workspaceId: string,
+        request: RenameProjectWorkspaceRequest,
+        expectedVersion: number,
+    ): Promise<ProjectWorkspaceResponse> {
+        return this.#requestJson(
+            "PATCH",
+            `/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}`,
+            request,
+            { "if-match": `"${String(expectedVersion)}"` },
+        );
+    }
+
+    archiveProjectWorkspace(
+        projectId: string,
+        workspaceId: string,
+        expectedVersion: number,
+    ): Promise<ProjectWorkspaceResponse> {
+        return this.#requestJson(
+            "POST",
+            `/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/archive`,
+            {},
+            { "if-match": `"${String(expectedVersion)}"` },
+        );
+    }
+
     listSubagents(sessionId: string): Promise<ListSubagentsResponse> {
         return this.#requestJson("GET", `/sessions/${encodeURIComponent(sessionId)}/subagents`);
     }
@@ -533,7 +640,7 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/config");
     }
 
-    getGlobalEvents(after?: number, limit = 100): Promise<ListGlobalEventsResponse> {
+    getGlobalEvents(after?: string, limit = 100): Promise<ListGlobalEventsResponse> {
         const parameters = new URLSearchParams({ limit: String(limit) });
         if (after !== undefined) parameters.set("after", String(after));
         return this.#requestJson("GET", `/events?${parameters.toString()}`);
@@ -621,7 +728,7 @@ export class ProtocolHttpClient {
         );
     }
 
-    trimGlobalEvents(through: number): Promise<TrimGlobalEventsResponse> {
+    trimGlobalEvents(through: string): Promise<TrimGlobalEventsResponse> {
         return this.#requestJson("POST", "/events/trim", { through });
     }
 
@@ -681,11 +788,17 @@ export class ProtocolHttpClient {
         }
     }
 
-    async #requestJson<T>(method: string, path: string, body?: unknown): Promise<T> {
+    async #requestJson<T>(
+        method: string,
+        path: string,
+        body?: unknown,
+        extraHeaders: Readonly<Record<string, string>> = {},
+    ): Promise<T> {
         const payload = body === undefined ? undefined : JSON.stringify(body);
         const headers: Record<string, string | number> = {
             accept: "application/json",
             authorization: `Bearer ${this.token}`,
+            ...extraHeaders,
         };
         if (payload !== undefined) {
             headers["content-length"] = Buffer.byteLength(payload);
@@ -727,6 +840,52 @@ export class ProtocolHttpClient {
                 request.write(payload);
             }
             request.end();
+        });
+    }
+
+    async #requestBytesJson<T>(
+        method: string,
+        path: string,
+        bytes: Uint8Array,
+        extraHeaders: Readonly<Record<string, string>>,
+    ): Promise<T> {
+        const payload = Buffer.from(bytes);
+        return await new Promise<T>((resolve, reject) => {
+            const request = httpRequest(
+                {
+                    headers: {
+                        accept: "application/json",
+                        authorization: `Bearer ${this.token}`,
+                        "content-length": payload.byteLength,
+                        ...extraHeaders,
+                    },
+                    method,
+                    path,
+                    socketPath: this.socketPath,
+                },
+                (response) => {
+                    const chunks: Buffer[] = [];
+                    response.on("data", (chunk: Buffer | string) => {
+                        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+                    });
+                    response.on("end", () => {
+                        const text = Buffer.concat(chunks).toString("utf8");
+                        const statusCode = response.statusCode ?? 500;
+                        if (statusCode >= 400) {
+                            reject(
+                                new ProtocolHttpError(
+                                    statusCode,
+                                    text.length > 0 ? text : `HTTP ${String(statusCode)}`,
+                                ),
+                            );
+                            return;
+                        }
+                        resolve((text.length === 0 ? {} : JSON.parse(text)) as T);
+                    });
+                },
+            );
+            request.on("error", reject);
+            request.end(payload);
         });
     }
 
@@ -813,10 +972,10 @@ export class ProtocolHttpClient {
     }
 
     #watchGlobalEventsOnce(
-        after: number | undefined,
+        after: string | undefined,
         options: WatchGlobalEventsOptions,
-    ): Promise<number | undefined> {
-        return new Promise<number | undefined>((resolve, reject) => {
+    ): Promise<string | undefined> {
+        return new Promise<string | undefined>((resolve, reject) => {
             let application = Promise.resolve();
             let cursor = after;
             let terminalScheduled = false;
@@ -829,7 +988,9 @@ export class ProtocolHttpClient {
                 );
             };
             const requestPath =
-                after === undefined ? "/events/stream" : `/events/stream?after=${after}`;
+                after === undefined
+                    ? "/events/stream"
+                    : `/events/stream?after=${encodeURIComponent(after)}`;
             const request = httpRequest(
                 {
                     headers: {

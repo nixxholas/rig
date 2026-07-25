@@ -23,6 +23,9 @@ export interface HappySyncServiceOptions {
     databasePath: string;
     fetch?: typeof fetch;
     getSubagents?: (sessionId: string) => readonly SubagentSummary[];
+    getProjectContext?: (
+        session: InMemorySession,
+    ) => ReturnType<NonNullable<HappySessionClientOptions["projectContext"]>>;
     modelCatalog?: ModelCatalog;
     socketFactory?: HappySessionClientOptions["socketFactory"];
 }
@@ -37,6 +40,7 @@ export class HappySyncService {
     readonly #createSession: HappySyncServiceOptions["createSession"];
     readonly #fetch: typeof fetch | undefined;
     readonly #getSubagents: NonNullable<HappySyncServiceOptions["getSubagents"]>;
+    readonly #getProjectContext: HappySyncServiceOptions["getProjectContext"];
     readonly #modelCatalog: ModelCatalog | undefined;
     readonly #machineClient: HappyMachineClient | undefined;
     readonly #repository: HappySyncRepository;
@@ -48,6 +52,7 @@ export class HappySyncService {
         this.#createSession = options.createSession;
         this.#fetch = options.fetch;
         this.#getSubagents = options.getSubagents ?? (() => []);
+        this.#getProjectContext = options.getProjectContext;
         this.#modelCatalog = options.modelCatalog;
         this.#repository = new HappySyncRepository(options.databasePath);
         this.#socketFactory = options.socketFactory;
@@ -106,6 +111,9 @@ export class HappySyncService {
                     configuration: this.#configuration,
                     ...(this.#fetch === undefined ? {} : { fetch: this.#fetch }),
                     getSubagents: this.#getSubagents,
+                    ...(this.#getProjectContext === undefined
+                        ? {}
+                        : { projectContext: () => this.#getProjectContext?.(session) }),
                     ...(this.#modelCatalog === undefined
                         ? {}
                         : { modelCatalog: this.#modelCatalog }),

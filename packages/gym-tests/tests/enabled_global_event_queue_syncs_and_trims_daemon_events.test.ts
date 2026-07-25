@@ -53,26 +53,45 @@ describe("enabled global event queue syncs and trims daemon events", () => {
 
         const result = JSON.parse(await gym.readFile("global-event-sync-result.json")) as {
             queuedTypes: string[];
-            remainingCursors: number[];
+            projectCount: number;
+            remainingCursors: string[];
+            sessionProjectId: string;
+            sharedProjectIds: string[];
             sessionHistoryTypes: string[];
-            trim: { through: number; trimmed: number };
+            trim: { through: string; trimmed: number };
+            home: { avatarBuiltin?: string; initializationStatus: string; kind: string };
         };
+        expect(result.queuedTypes.slice(0, 2)).toEqual([
+            "project_created",
+            "session_created",
+        ]);
         expect(result.queuedTypes).toContain("session_created");
         expect(result.queuedTypes).toContain("agent_message");
         expect(result.queuedTypes).not.toContain("agent_event");
+        expect(result.projectCount).toBe(3);
+        expect(result.sessionProjectId).toMatch(/^[a-z0-9]+$/u);
+        expect(new Set(result.sharedProjectIds).size).toBe(1);
+        expect(result.home).toMatchObject({
+            avatarBuiltin: "home",
+            initializationStatus: "ready",
+            kind: "home",
+        });
         expect(result.trim.trimmed).toBe(1);
-        expect(result.remainingCursors.every((cursor) => cursor > result.trim.through)).toBe(true);
+        expect(result.remainingCursors).not.toContain(result.trim.through);
         expect(result.sessionHistoryTypes).toContain("session_created");
         const enabled = JSON.parse(await gym.readFile("global-event-enable-result.json")) as {
             after: boolean;
             before: boolean;
+            beforeQueuedTypes: string[];
         };
-        expect(enabled).toEqual({ after: true, before: false });
+        expect(enabled).toMatchObject({ after: true, before: false });
+        expect(enabled.beforeQueuedTypes).toContain("project_created");
+        expect(enabled.beforeQueuedTypes).toContain("session_created");
     }, 120_000);
 });
 
 const inspectGlobalEventsScript = String.raw`
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { request } from "node:http";
 
 const directory = "/tmp/rig-" + process.getuid();
@@ -117,15 +136,20 @@ function requestJson(method, path, body) {
 
 if (process.argv[2] === "enable") {
     const before = await requestJson("GET", "/config");
+    const beforeQueued = await requestJson("GET", "/events?limit=100");
     const updated = await requestJson("PATCH", "/config", {
         settings: { durableGlobalEventQueue: true },
     });
-    await requestJson("POST", "/sessions", { cwd: "/workspace" });
+    await requestJson("POST", "/sessions", { cwd: "/home/rig" });
+    await mkdir("/workspace/second-project");
+    await requestJson("POST", "/sessions", { cwd: "/workspace/second-project" });
+    await requestJson("POST", "/sessions", { cwd: "/workspace/second-project" });
     await writeFile(
         "global-event-enable-result.json",
         JSON.stringify({
             before: before.config.settings.durableGlobalEventQueue,
             after: updated.config.settings.durableGlobalEventQueue,
+            beforeQueuedTypes: beforeQueued.events.map((entry) => entry.event.type),
         }),
     );
 } else {
@@ -134,15 +158,29 @@ if (process.argv[2] === "enable") {
     const first = queued.events[0];
     const trim = await requestJson("POST", "/events/trim", { through: first.cursor });
     const remaining = await requestJson("GET", "/events?after=" + first.cursor + "&limit=100");
-    const sessionId = first.event.sessionId;
+    const state = await requestJson("GET", "/state");
+    const created = queued.events.find((entry) => entry.event.type === "session_created");
+    const sessionId = created?.event.sessionId;
+    if (typeof sessionId !== "string") throw new Error("The session creation event is missing.");
     const history = await requestJson("GET", "/sessions/" + encodeURIComponent(sessionId) + "/events");
+    const session = state.sessions.find((candidate) => candidate.id === sessionId);
+    if (session === undefined) throw new Error("The session snapshot is missing.");
+    const sharedSessions = state.sessions.filter(
+        (candidate) => candidate.cwd === "/workspace/second-project",
+    );
+    const home = state.projects.find((candidate) => candidate.kind === "home");
+    if (home === undefined) throw new Error("The Home project is missing.");
 
     await writeFile(
         "global-event-sync-result.json",
         JSON.stringify({
             queuedTypes: queued.events.map((entry) => entry.event.type),
+            projectCount: state.projects.length,
             remainingCursors: remaining.events.map((entry) => entry.cursor),
+            sessionProjectId: session.projectId,
+            sharedProjectIds: sharedSessions.map((candidate) => candidate.projectId),
             sessionHistoryTypes: history.events.map((event) => event.type),
+            home,
             trim,
         }),
     );

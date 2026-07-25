@@ -218,6 +218,8 @@ export interface PersistedSessionState {
     models: readonly Model[];
     providerId: string;
     permissionMode: PermissionMode;
+    projectId?: string;
+    workspaceId?: string;
     secretIds?: readonly string[];
     queuedRuns: readonly PersistedQueuedRun[];
     recap?: string;
@@ -284,9 +286,11 @@ export interface InMemorySessionOptions {
     persistence?: InMemorySessionPersistence;
     request: CreateSessionRequest;
     projectSecretIds?: readonly string[];
+    projectId?: string;
     secretRegistry?: SecretRegistry;
     restore?: PersistedSessionState;
     taskDrain?: TaskDrain;
+    workspaceId?: string;
 }
 
 interface ActiveRun {
@@ -353,6 +357,7 @@ export class InMemorySession {
     readonly id: string;
 
     #appendSystemPrompt: string | undefined;
+    #archived = false;
     #activePartial: PartialMessageState | undefined;
     #activeRun: ActiveRun | undefined;
     #abortInFlight:
@@ -366,7 +371,6 @@ export class InMemorySession {
     #agentManager: AgentSessionManager | undefined;
     #agentMetadata: SessionAgentMetadata;
     #agentId: string;
-    #archived: boolean;
     #createEventId: () => EventId;
     #createRuntime: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
     #compactionController: AbortController | undefined;
@@ -418,6 +422,7 @@ export class InMemorySession {
     #pendingUserInputs = new Map<string, PendingUserInput>();
     #persistence: InMemorySessionPersistence | undefined;
     #providerId: string;
+    #projectId: string;
     #permissionMode: PermissionMode;
     #queue: PersistedQueuedRun[] = [];
     #recap: string | undefined;
@@ -430,6 +435,7 @@ export class InMemorySession {
     #unread: SessionUnreadState | undefined;
     #suspendedRunIds = new Set<string>();
     #systemPrompt: string | undefined;
+    #workspaceId: string | undefined;
     #suspendOnAbort = false;
     #shutdownCleanup: Promise<void> | undefined;
     #shellCommandCompletions = new Map<number, Promise<void>>();
@@ -446,6 +452,7 @@ export class InMemorySession {
     #tools: readonly string[] = [];
     #workflowRuns = new Map<string, InternalWorkflowRun>();
     #workflowsEnabled: boolean;
+    #workspaceArchived = false;
 
     constructor(options: InMemorySessionOptions) {
         this.#agentManager = options.agentManager;
@@ -514,6 +521,8 @@ export class InMemorySession {
                 options.request.permissionMode ??
                 DEFAULT_PERMISSION_MODE,
         );
+        this.#projectId = options.restore?.projectId ?? options.projectId ?? createId();
+        this.#workspaceId = options.restore?.workspaceId ?? options.workspaceId;
         this.#appendSystemPrompt =
             options.restore?.appendSystemPrompt ?? options.request.appendSystemPrompt;
         this.#systemPrompt = options.restore?.systemPrompt;
@@ -550,6 +559,7 @@ export class InMemorySession {
                 : [...options.restore.contextMessages];
         this.#models = this.#modelsForProvider(this.#providerId);
         this.#status = options.restore?.status ?? "idle";
+        this.#workspaceArchived = this.#status === "archived";
         this.#unread =
             options.restore?.unread === undefined ? undefined : { ...options.restore.unread };
         this.#activeSince = options.restore?.activeSince;
@@ -1174,6 +1184,7 @@ export class InMemorySession {
     }
 
     createForkState(): PersistedSessionState {
+        this.#assertAcceptingWork();
         if (this.isSubagent()) {
             throw new Error("Subagent histories cannot be forked.");
         }
@@ -1262,6 +1273,9 @@ export class InMemorySession {
     }
 
     setArchived(archived: boolean): ProtocolSession {
+        if (!archived && this.#workspaceArchived) {
+            throw new Error("A session archived with its workspace cannot be restored.");
+        }
         if (this.#archived === archived) return this.snapshot();
         this.#archived = archived;
         this.#append("session_archived", { archived });
@@ -1819,7 +1833,7 @@ export class InMemorySession {
             if (workflow.state.status === "running") this.stopWorkflow(workflow.state.runId);
         }
         const activeRun = this.#activeRun;
-        if (activeRun !== undefined && this.hasDurableToolRun()) {
+        if (activeRun !== undefined && this.hasDurableToolRun() && !this.#workspaceArchived) {
             this.#restoredActiveRunId = activeRun.runId;
             this.#activeRun = undefined;
             this.#status = "running";
@@ -1832,6 +1846,40 @@ export class InMemorySession {
             this.#runtime?.agent.close() ?? Promise.resolve(),
         ]).then(() => undefined);
         return this.#shutdownCleanup;
+    }
+
+    archiveForWorkspace(workspaceId: string): Promise<void> {
+        if (this.#workspaceArchived) return this.#shutdownCleanup ?? Promise.resolve();
+        const activeRun = this.#activeRun;
+        const runIds = new Set([
+            ...(activeRun === undefined ? [] : [activeRun.runId]),
+            ...(this.#restoredActiveRunId === undefined ? [] : [this.#restoredActiveRunId]),
+            ...this.#queue.map((run) => run.runId),
+        ]);
+        for (const runId of runIds) {
+            this.#cancelExternalToolCalls(runId);
+            this.#cancelDurableUserInputs(runId);
+        }
+        for (const run of this.#queue) this.#persistence?.deleteQueuedRun(this.id, run.runId);
+        this.#queue = [];
+        this.#finishElapsedInterval();
+        this.#activeRun = undefined;
+        this.#restoredActiveRunId = undefined;
+        this.#activePartial = undefined;
+        this.#pendingSteeringMessages.clear();
+        this.#pendingSteeringContinuations.clear();
+        this.#suspendedRunIds.clear();
+        this.#suspendOnAbort = false;
+        this.#pauseActiveGoal();
+        activeRun?.controller.abort();
+        this.#status = "archived";
+        this.#archived = true;
+        this.#append("session_workspace_archived", {
+            reason: "workspace_archived",
+            workspaceId,
+        });
+        this.#workspaceArchived = true;
+        return this.beginShutdown();
     }
 
     createRemoteTerminal(request: CreateRemoteTerminalRequest): Promise<RemoteTerminal> {
@@ -2141,6 +2189,8 @@ export class InMemorySession {
             id: this.id,
             agentId: this.#agentId,
             archived: this.#archived,
+            projectId: this.#projectId,
+            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -2203,6 +2253,8 @@ export class InMemorySession {
         return {
             id: this.id,
             archived: this.#archived,
+            projectId: this.#projectId,
+            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -2270,6 +2322,8 @@ export class InMemorySession {
             models: this.#models,
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
+            projectId: this.#projectId,
+            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             secretIds: this.#secrets.sessionIds(),
             queuedRuns: [...this.#queue],
             ...(this.#recap !== undefined ? { recap: this.#recap } : {}),
@@ -2741,6 +2795,7 @@ export class InMemorySession {
     }
 
     resumeDurableToolRun(): void {
+        if (this.#workspaceArchived) return;
         if (this.#resumingDurableToolRun) {
             this.#resumeDurableToolRunAgain = true;
             return;
@@ -2756,7 +2811,7 @@ export class InMemorySession {
     }
 
     async #resumeDurableToolRun(): Promise<void> {
-        if (this.#closing || this.#activeRun !== undefined) return;
+        if (this.#workspaceArchived || this.#closing || this.#activeRun !== undefined) return;
         const runId = this.#restoredActiveRunId;
         if (runId === undefined || !this.hasDurableToolRun()) return;
         this.#reconcileExternalToolConsumption(runId);
@@ -3132,7 +3187,7 @@ export class InMemorySession {
             this.#appendRunFinished(runId, result);
         } catch (error) {
             if (this.#activeRun?.runId !== runId) return;
-            this.#status = "error";
+            if (!this.#workspaceArchived) this.#status = "error";
             this.#finishElapsedInterval();
             this.#activeRun = undefined;
             this.#append("run_error", {
@@ -3294,6 +3349,7 @@ export class InMemorySession {
             sessionId: this.id,
             type,
         } as Extract<SessionEvent, { type: TType }>;
+        if (this.#workspaceArchived) return event;
         if (!this.isSubagent() && this.#request.trackUnread === true) {
             this.#unread = sessionUnreadStateAfterEvent(this.#unread, event);
         }
@@ -3456,13 +3512,15 @@ export class InMemorySession {
             stopReason !== "error" &&
             responseText === undefined;
         const subagentFailed = providerFailed || tokenExhausted;
-        this.#status = subagentFailed
-            ? "error"
-            : stopReason === "aborted"
-              ? this.#suspendOnAbort
-                  ? "suspended"
-                  : "aborted"
-              : "completed";
+        if (!this.#workspaceArchived) {
+            this.#status = subagentFailed
+                ? "error"
+                : stopReason === "aborted"
+                  ? this.#suspendOnAbort
+                      ? "suspended"
+                      : "aborted"
+                  : "completed";
+        }
         this.#finishElapsedInterval();
         this.#suspendOnAbort = false;
         this.#activePartial = undefined;
@@ -3802,6 +3860,7 @@ export class InMemorySession {
     }
 
     #saveSession(): void {
+        if (this.#workspaceArchived) this.#status = "archived";
         this.#persistence?.saveSession(this.state());
     }
 
@@ -4115,8 +4174,10 @@ export class InMemorySession {
             if (this.#activeRun?.runId !== queued.runId) {
                 return;
             }
-            this.#status =
-                controller.signal.aborted && this.#suspendOnAbort ? "suspended" : "error";
+            if (!this.#workspaceArchived) {
+                this.#status =
+                    controller.signal.aborted && this.#suspendOnAbort ? "suspended" : "error";
+            }
             this.#finishElapsedInterval();
             this.#suspendOnAbort = false;
             this.#activePartial = undefined;
@@ -4200,6 +4261,9 @@ export class InMemorySession {
     }
 
     #assertAcceptingWork(): void {
+        if (this.#workspaceArchived) {
+            throw new Error("This session was archived with its workspace.");
+        }
         if (this.#closing || this.#taskDrain?.closing === true) {
             throw new Error("The local daemon is shutting down.");
         }

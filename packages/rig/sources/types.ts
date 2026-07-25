@@ -23,10 +23,10 @@ export type {
     SubmitMessageRequest,
     SubmitMessageResponse,
     SubagentSummary,
-    TrimGlobalEventsRequest,
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
 } from "./protocol/SessionProtocol.js";
+export type { TrimGlobalEventsRequest } from "./protocol/ProjectProtocol.js";
 export type { DurableSkillDefinition } from "./external-skills/types.js";
 export type {
     ExternalToolCall,

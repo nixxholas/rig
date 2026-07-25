@@ -1,8 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
 
+import { createId } from "@paralleldrive/cuid2";
+
 import type {
+    GlobalEvent,
     GlobalEventQueueEntry,
-    SessionEvent,
+    ProjectEvent,
     TrimGlobalEventsResponse,
 } from "../protocol/index.js";
 import type {
@@ -12,52 +15,100 @@ import type {
 } from "./GlobalEventQueue.js";
 import { shouldPersistGlobalEventType } from "./shouldPersistGlobalEventType.js";
 
+export function initializePersistentGlobalEventQueueSchema(database: DatabaseSync): void {
+    database.exec(`
+        CREATE TABLE IF NOT EXISTS durable_global_events (
+            position INTEGER NOT NULL,
+            stream_id TEXT NOT NULL,
+            event_id TEXT NOT NULL UNIQUE,
+            aggregate_kind TEXT NOT NULL,
+            aggregate_id TEXT NOT NULL,
+            type TEXT NOT NULL,
+            created_at_ms INTEGER NOT NULL,
+            data_json TEXT NOT NULL,
+            PRIMARY KEY (stream_id, position)
+        );
+
+        CREATE TABLE IF NOT EXISTS durable_global_event_streams (
+            stream_id TEXT PRIMARY KEY,
+            last_position INTEGER NOT NULL,
+            trimmed_through INTEGER NOT NULL,
+            created_at_ms INTEGER NOT NULL
+        );
+    `);
+}
+
 export class PersistentGlobalEventQueue implements GlobalEventQueue {
+    readonly durable = true;
     readonly #database: DatabaseSync;
     readonly #closeListeners = new Set<() => void>();
     readonly #listeners = new Set<GlobalEventQueueListener>();
+    readonly #streamId: string;
 
-    constructor(database: DatabaseSync) {
+    constructor(database: DatabaseSync, options: { resetStream?: boolean } = {}) {
         this.#database = database;
         this.#initialize();
+        if (options.resetStream === true) {
+            this.#database.exec(`
+                DELETE FROM durable_global_events;
+                DELETE FROM durable_global_event_streams;
+            `);
+        }
+        const latest = this.#database
+            .prepare(
+                "SELECT stream_id FROM durable_global_event_streams ORDER BY created_at_ms DESC LIMIT 1",
+            )
+            .get();
+        this.#streamId = latest === undefined
+            ? this.#createStream()
+            : readString(latest, "stream_id");
     }
 
-    persist(event: SessionEvent): GlobalEventQueueEntry | undefined {
-        if (!shouldPersistGlobalEventType(event.type)) return undefined;
-
-        const result = this.#database
+    append(event: GlobalEvent): GlobalEventQueueEntry | undefined {
+        if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
+        const state = this.#state();
+        const position = state.lastPosition + 1;
+        let aggregate: { id: string; kind: "project" | "session" | "workspace" };
+        if ("workspaceId" in event && typeof event.workspaceId === "string") {
+            aggregate = { id: event.workspaceId, kind: "workspace" };
+        } else if ("sessionId" in event && typeof event.sessionId === "string") {
+            aggregate = { id: event.sessionId, kind: "session" };
+        } else {
+            aggregate = { id: (event as ProjectEvent).projectId, kind: "project" };
+        }
+        this.#database
             .prepare(
                 `
                 INSERT INTO durable_global_events (
-                    event_id,
-                    session_id,
-                    type,
-                    created_at_ms,
-                    data_json
-                )
-                VALUES (?, ?, ?, ?, ?)
+                    position, stream_id, event_id, aggregate_kind, aggregate_id,
+                    type, created_at_ms, data_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 `,
             )
             .run(
+                position,
+                this.#streamId,
                 event.id,
-                event.sessionId,
+                aggregate.kind,
+                aggregate.id,
                 event.type,
                 event.createdAt,
-                JSON.stringify(event.data),
+                JSON.stringify(event),
             );
-        const cursor = Number(result.lastInsertRowid);
         this.#database
-            .prepare("UPDATE durable_global_event_queue_state SET last_cursor = ? WHERE id = 1")
-            .run(cursor);
+            .prepare(
+                "UPDATE durable_global_event_streams SET last_position = ? WHERE stream_id = ?",
+            )
+            .run(position, this.#streamId);
+        return { cursor: this.#cursor(position), event };
+    }
 
-        const entry = { cursor, event };
-        return entry;
+    cursor(): string {
+        return this.#cursor(this.#state().lastPosition);
     }
 
     publish(entry: GlobalEventQueueEntry): void {
-        for (const listener of this.#listeners) {
-            listener(entry);
-        }
+        for (const listener of this.#listeners) listener(entry);
     }
 
     deactivate(): void {
@@ -68,25 +119,38 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
 
     list(options: ListGlobalEventQueueOptions = {}): readonly GlobalEventQueueEntry[] | undefined {
         const state = this.#state();
-        const after = options.after;
-        if (after !== undefined && (after < state.trimmedThrough || after > state.lastCursor)) {
+        const after =
+            options.after === undefined
+                ? state.trimmedThrough
+                : this.#position(options.after);
+        if (
+            after === undefined ||
+            after < state.trimmedThrough ||
+            after > state.lastPosition
+        ) {
             return undefined;
         }
-
         const limitClause = options.limit === undefined ? "" : "LIMIT ?";
-        const values = [after ?? 0, ...(options.limit === undefined ? [] : [options.limit])];
+        const values = [
+            this.#streamId,
+            after,
+            ...(options.limit === undefined ? [] : [options.limit]),
+        ];
         return this.#database
             .prepare(
                 `
-                SELECT cursor, event_id, session_id, type, created_at_ms, data_json
+                SELECT position, data_json
                 FROM durable_global_events
-                WHERE cursor > ?
-                ORDER BY cursor ASC
+                WHERE stream_id = ? AND position > ?
+                ORDER BY position ASC
                 ${limitClause}
                 `,
             )
             .all(...values)
-            .map((row) => this.#entry(row));
+            .map((row) => ({
+                cursor: this.#cursor(readNumber(row, "position")),
+                event: JSON.parse(readString(row, "data_json")) as GlobalEvent,
+            }));
     }
 
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void {
@@ -98,25 +162,23 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         };
     }
 
-    trim(through: number): TrimGlobalEventsResponse | undefined {
+    trim(through: string): TrimGlobalEventsResponse | undefined {
+        const position = this.#position(through);
         const state = this.#state();
-        if (through > state.lastCursor) {
-            return undefined;
-        }
-        if (through <= state.trimmedThrough) {
-            return { trimmed: 0, through };
-        }
-
+        if (position === undefined || position > state.lastPosition) return undefined;
+        if (position <= state.trimmedThrough) return { trimmed: 0, through };
         this.#database.exec("BEGIN IMMEDIATE");
         try {
             const result = this.#database
-                .prepare("DELETE FROM durable_global_events WHERE cursor <= ?")
-                .run(through);
+                .prepare(
+                    "DELETE FROM durable_global_events WHERE stream_id = ? AND position <= ?",
+                )
+                .run(this.#streamId, position);
             this.#database
                 .prepare(
-                    "UPDATE durable_global_event_queue_state SET trimmed_through = ? WHERE id = 1",
+                    "UPDATE durable_global_event_streams SET trimmed_through = ? WHERE stream_id = ?",
                 )
-                .run(through);
+                .run(position, this.#streamId);
             this.#database.exec("COMMIT");
             return { trimmed: Number(result.changes), through };
         } catch (error) {
@@ -125,61 +187,52 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         }
     }
 
-    #entry(row: Record<string, unknown>): GlobalEventQueueEntry {
-        return {
-            cursor: readNumber(row, "cursor"),
-            event: {
-                createdAt: readNumber(row, "created_at_ms"),
-                data: JSON.parse(readString(row, "data_json")) as SessionEvent["data"],
-                id: readString(row, "event_id"),
-                sessionId: readString(row, "session_id"),
-                type: readString(row, "type") as SessionEvent["type"],
-            } as SessionEvent,
-        };
-    }
-
     #initialize(): void {
-        this.#database.exec(`
-            CREATE TABLE IF NOT EXISTS durable_global_events (
-                cursor INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT NOT NULL UNIQUE,
-                session_id TEXT NOT NULL,
-                type TEXT NOT NULL,
-                created_at_ms INTEGER NOT NULL,
-                data_json TEXT NOT NULL
-            );
-
-            CREATE TABLE IF NOT EXISTS durable_global_event_queue_state (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                last_cursor INTEGER NOT NULL DEFAULT 0,
-                trimmed_through INTEGER NOT NULL DEFAULT 0
-            );
-
-            INSERT OR IGNORE INTO durable_global_event_queue_state (
-                id,
-                last_cursor,
-                trimmed_through
-            ) VALUES (1, 0, 0);
-        `);
+        initializePersistentGlobalEventQueueSchema(this.#database);
     }
 
-    #state(): { lastCursor: number; trimmedThrough: number } {
+    #createStream(): string {
+        const streamId = createId();
+        this.#database
+            .prepare(
+                `
+                INSERT INTO durable_global_event_streams (
+                    stream_id, last_position, trimmed_through, created_at_ms
+                ) VALUES (?, 0, 0, ?)
+                `,
+            )
+            .run(streamId, Date.now());
+        return streamId;
+    }
+
+    #state(): { lastPosition: number; trimmedThrough: number } {
         const row = this.#database
             .prepare(
                 `
-                SELECT last_cursor, trimmed_through
-                FROM durable_global_event_queue_state
-                WHERE id = 1
+                SELECT last_position, trimmed_through
+                FROM durable_global_event_streams
+                WHERE stream_id = ?
                 `,
             )
-            .get();
-        if (row === undefined) {
-            throw new Error("The durable global event queue is not initialized.");
-        }
+            .get(this.#streamId);
+        if (row === undefined) throw new Error("The durable global event queue is not initialized.");
         return {
-            lastCursor: readNumber(row, "last_cursor"),
+            lastPosition: readNumber(row, "last_position"),
             trimmedThrough: readNumber(row, "trimmed_through"),
         };
+    }
+
+    #cursor(position: number): string {
+        return `${this.#streamId}.${position.toString(36)}`;
+    }
+
+    #position(cursor: string): number | undefined {
+        const [streamId, encoded, extra] = cursor.split(".");
+        if (streamId !== this.#streamId || encoded === undefined || extra !== undefined) {
+            return undefined;
+        }
+        const position = Number.parseInt(encoded, 36);
+        return Number.isSafeInteger(position) && position >= 0 ? position : undefined;
     }
 }
 

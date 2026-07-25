@@ -1,11 +1,15 @@
 import { createEventIdFactory } from "../protocol/index.js";
+import { DatabaseSync } from "node:sqlite";
 import type { Message } from "../agent/types.js";
 import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
+    CreateProjectWorkspaceRequest,
     CreateSessionRequest,
     ModelCatalog,
+    Project,
+    ProjectWorkspace,
     RegisterSecretRequest,
     SecretSummary,
     SessionAgentMetadata,
@@ -19,14 +23,24 @@ import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
+import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
+import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
+import {
+    ProjectRepository,
+    type ProjectAvatarAsset,
+} from "./ProjectRepository.js";
+import type { GlobalEventQueue } from "./GlobalEventQueue.js";
+import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
+import { errorToMessage } from "../errorToMessage.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
     secrets?: readonly SecretRegistration[];
+    homeDirectory?: string;
+    stateDirectory?: string;
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -35,10 +49,26 @@ export class InMemorySessionStore implements SessionStore {
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #projectSecretIds = new Map<string, Set<string>>();
+    #database = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
+    readonly #projects: ProjectRepository;
+    readonly globalEventQueue = new InMemoryGlobalEventQueue();
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
+    #transactionCommitCallbacks: (() => void)[] | undefined;
 
     constructor(options: InMemorySessionStoreOptions = {}) {
+        initializeSessionDatabase(this.#database);
+        this.#projects = new ProjectRepository({
+            database: this.#database,
+            ...(options.homeDirectory === undefined
+                ? {}
+                : { homeDirectory: options.homeDirectory }),
+            onEvent: (event) => this.#publishGlobalEvent(event),
+            ...(options.stateDirectory === undefined
+                ? {}
+                : { stateDirectory: options.stateDirectory }),
+            transaction: (body) => this.#transaction(body),
+        });
         this.#secrets = new SecretRegistry(options.secrets);
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
         this.#createRuntime = options.createRuntime;
@@ -77,12 +107,12 @@ export class InMemorySessionStore implements SessionStore {
         if (session === undefined) return undefined;
         this.#secrets.reference(secretId);
         if (scope === "project") {
-            const cwd = normalizeProjectCwd(session.snapshot().cwd);
-            const ids = this.#projectSecretIds.get(cwd) ?? new Set<string>();
+            const projectId = session.snapshot().projectId;
+            const ids = this.#projectSecretIds.get(projectId) ?? new Set<string>();
             ids.add(secretId);
-            this.#projectSecretIds.set(cwd, ids);
+            this.#projectSecretIds.set(projectId, ids);
             for (const candidate of this.#sessions.values()) {
-                if (normalizeProjectCwd(candidate.snapshot().cwd) === cwd) {
+                if (candidate.snapshot().projectId === projectId) {
                     candidate.attachSecret(secretId, { scope });
                 }
             }
@@ -114,10 +144,10 @@ export class InMemorySessionStore implements SessionStore {
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
         if (scope === "project") {
-            const cwd = normalizeProjectCwd(session.snapshot().cwd);
-            this.#projectSecretIds.get(cwd)?.delete(secretId);
+            const projectId = session.snapshot().projectId;
+            this.#projectSecretIds.get(projectId)?.delete(secretId);
             for (const candidate of this.#sessions.values()) {
-                if (normalizeProjectCwd(candidate.snapshot().cwd) === cwd) {
+                if (candidate.snapshot().projectId === projectId) {
                     candidate.detachSecret(secretId, { scope });
                 }
             }
@@ -131,6 +161,16 @@ export class InMemorySessionStore implements SessionStore {
         const source = this.get(sessionId);
         if (source === undefined) return undefined;
         const state = source.createForkState();
+        const sourceSnapshot = source.snapshot();
+        if (sourceSnapshot.workspaceId !== undefined) {
+            const workspace = this.#projects.getWorkspace(
+                sourceSnapshot.projectId,
+                sourceSnapshot.workspaceId,
+            );
+            if (workspace?.status !== "ready") {
+                throw new Error("A session in an unavailable workspace cannot be forked.");
+            }
+        }
         const session = new InMemorySession({
             agentManager: this.#agentManager,
             createEventId: createEventIdFactory(),
@@ -140,9 +180,14 @@ export class InMemorySessionStore implements SessionStore {
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),
             request: source.requestForSubagent(),
-            projectSecretIds: this.#projectSecrets(source.snapshot().cwd),
+            onAppendEvent: (event) => this.#publishGlobalEvent(event),
+            projectId: sourceSnapshot.projectId,
+            projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
             secretRegistry: this.#secrets,
             restore: state,
+            ...(sourceSnapshot.workspaceId === undefined
+                ? {}
+                : { workspaceId: sourceSnapshot.workspaceId }),
         });
         this.#sessions.set(session.id, session);
         session.emitCreatedEvent();
@@ -154,6 +199,38 @@ export class InMemorySessionStore implements SessionStore {
         metadata?: SessionAgentMetadata,
         contextMessages?: readonly Message[],
     ): InMemorySession {
+        const inherited =
+            metadata?.parentSessionId === undefined
+                ? undefined
+                : this.get(metadata.parentSessionId)?.snapshot();
+        if (metadata?.parentSessionId !== undefined && inherited === undefined) {
+            throw new Error("The parent session was not found.");
+        }
+        if (inherited?.status === "archived") {
+            throw new Error("An archived session cannot create a subagent.");
+        }
+        const inheritedWorkspace =
+            inherited?.workspaceId === undefined
+                ? undefined
+                : this.#projects.getWorkspace(inherited.projectId, inherited.workspaceId);
+        if (inherited?.workspaceId !== undefined && inheritedWorkspace?.status !== "ready") {
+            throw new Error("The parent session workspace is not ready.");
+        }
+        const ownership = (() => {
+            if (inherited === undefined) {
+                return this.#projects.resolve(request.cwd, request.workspaceId);
+            }
+            const project = this.#projects.getProject(inherited.projectId);
+            if (project === undefined) {
+                throw new Error("The parent session project was not found.");
+            }
+            return {
+                project,
+                ...(inheritedWorkspace === undefined
+                    ? {}
+                    : { workspace: inheritedWorkspace }),
+            };
+        })();
         const session = new InMemorySession({
             agentManager: this.#agentManager,
             createEventId: createEventIdFactory(),
@@ -164,9 +241,14 @@ export class InMemorySessionStore implements SessionStore {
                 : {}),
             ...(metadata !== undefined ? { metadata } : {}),
             ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
-            projectSecretIds: this.#projectSecrets(request.cwd),
+            onAppendEvent: (event) => this.#publishGlobalEvent(event),
+            projectId: ownership.project.id,
+            projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,
             secretRegistry: this.#secrets,
+            ...(ownership.workspace === undefined
+                ? {}
+                : { workspaceId: ownership.workspace.id }),
         });
         this.#sessions.set(session.id, session);
         return session;
@@ -231,6 +313,90 @@ export class InMemorySessionStore implements SessionStore {
         return true;
     }
 
+    getProject(projectId: string): Project | undefined {
+        return this.#projects.getProject(projectId);
+    }
+
+    listProjects(): readonly Project[] {
+        return this.#projects.listProjects();
+    }
+
+    getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
+        return this.#projects.getWorkspace(projectId, workspaceId);
+    }
+
+    listWorkspaces(projectId?: string): readonly ProjectWorkspace[] {
+        return this.#projects.listWorkspaces(projectId);
+    }
+
+    renameProject(projectId: string, name: string): Project | undefined {
+        return this.#projects.renameProject(projectId, name);
+    }
+
+    refreshProject(projectId: string): Project | undefined {
+        return this.#projects.refreshProject(projectId);
+    }
+
+    renameWorkspace(
+        projectId: string,
+        workspaceId: string,
+        name: string,
+        expectedVersion?: number,
+    ): ProjectWorkspace | undefined {
+        return this.#projects.renameWorkspace(projectId, workspaceId, name, expectedVersion);
+    }
+
+    createWorkspace(
+        projectId: string,
+        request: CreateProjectWorkspaceRequest,
+    ): Promise<ProjectWorkspace | undefined> {
+        return this.#projects.createWorkspace(projectId, request);
+    }
+
+    async archiveWorkspace(
+        projectId: string,
+        workspaceId: string,
+        expectedVersion?: number,
+    ): Promise<ProjectWorkspace | undefined> {
+        const workspace = this.#projects.beginWorkspaceArchive(
+            projectId,
+            workspaceId,
+            expectedVersion,
+        );
+        if (workspace === undefined || workspace.status === "archived") return workspace;
+        const cleanup = [...this.#sessions.values()]
+            .filter((session) => session.snapshot().workspaceId === workspaceId)
+            .map((session) => session.archiveForWorkspace(workspaceId));
+        const results = await Promise.allSettled(cleanup);
+        const failure = results.find(
+            (result): result is PromiseRejectedResult => result.status === "rejected",
+        );
+        if (failure !== undefined) {
+            return this.#projects.failWorkspaceArchive(
+                projectId,
+                workspaceId,
+                errorToMessage(failure.reason),
+            );
+        }
+        return this.#projects.removeArchivedWorkspace(projectId, workspaceId);
+    }
+
+    setProjectAvatar(
+        projectId: string,
+        bytes: Buffer,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        return this.#projects.setAvatar(projectId, "user", bytes, expectedVersion);
+    }
+
+    clearProjectAvatar(projectId: string): Project | undefined {
+        return this.#projects.clearAvatar(projectId);
+    }
+
+    getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined> {
+        return this.#projects.avatarAsset(hash);
+    }
+
     changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined {
         const session = this.get(sessionId);
         if (session === undefined) {
@@ -241,8 +407,54 @@ export class InMemorySessionStore implements SessionStore {
         return session;
     }
 
-    #projectSecrets(cwd: string): readonly string[] {
-        return [...(this.#projectSecretIds.get(normalizeProjectCwd(cwd)) ?? [])];
+    #projectSecrets(projectId: string): readonly string[] {
+        return [...(this.#projectSecretIds.get(projectId) ?? [])];
+    }
+
+    #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {
+        if (!shouldPublishGlobalEvent(event)) return;
+        this.#afterTransactionCommit(() => {
+            const entry = this.globalEventQueue.append(event);
+            if (entry !== undefined) this.globalEventQueue.publish(entry);
+        });
+    }
+
+    #transaction<T>(body: () => T): T {
+        if (this.#database.isTransaction) return body();
+        this.#transactionCommitCallbacks = [];
+        this.#database.exec("BEGIN IMMEDIATE");
+        try {
+            const value = body();
+            this.#database.exec("COMMIT");
+            const callbacks = this.#transactionCommitCallbacks;
+            this.#transactionCommitCallbacks = undefined;
+            for (const callback of callbacks) {
+                try {
+                    callback();
+                } catch {
+                    // The project transaction already committed; observers are best effort.
+                }
+            }
+            return value;
+        } catch (error) {
+            this.#transactionCommitCallbacks = undefined;
+            if (this.#database.isTransaction) {
+                try {
+                    this.#database.exec("ROLLBACK");
+                } catch {
+                    // Preserve the transaction's original failure.
+                }
+            }
+            throw error;
+        }
+    }
+
+    #afterTransactionCommit(callback: () => void): void {
+        if (this.#database.isTransaction) {
+            this.#transactionCommitCallbacks?.push(callback);
+            return;
+        }
+        callback();
     }
 }
 

@@ -1,5 +1,10 @@
-export function parseGlobalEventCursor(value: string | null): number | undefined {
-    if (value === null || !/^\d+$/u.test(value)) return undefined;
-    const cursor = Number(value);
-    return Number.isSafeInteger(cursor) ? cursor : undefined;
+export function parseGlobalEventCursor(value: string | null): string | undefined {
+    if (
+        value === null ||
+        value.length > 200 ||
+        !/^[a-z0-9]+\.[a-z0-9]+$/iu.test(value)
+    ) {
+        return undefined;
+    }
+    return value;
 }

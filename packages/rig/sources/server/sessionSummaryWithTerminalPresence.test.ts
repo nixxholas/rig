@@ -20,6 +20,9 @@ describe("sessionSummaryWithTerminalPresence", () => {
             expect(
                 sessionSummaryWithTerminalPresence(summary({ archived: true }), tracker),
             ).toMatchObject({ archived: true, status: "idle" });
+            expect(
+                sessionSummaryWithTerminalPresence(summary({ status: "archived" }), tracker),
+            ).toMatchObject({ archived: true, status: "archived" });
         } finally {
             tracker.dispose();
         }
@@ -84,6 +87,7 @@ function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
         createdAt: 1,
         cwd: "/workspace",
         id: "session-1",
+        projectId: "project-1",
         modelId: "openai/gpt-5.5",
         permissionMode: "workspace_write",
         providerId: "codex",

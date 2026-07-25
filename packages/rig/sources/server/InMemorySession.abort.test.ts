@@ -23,6 +23,108 @@ import type { AgentSessionManager } from "./AgentSessionManager.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
 describe("InMemorySession abort", () => {
+    it("clears a restored durable-run identity when its workspace is archived", async () => {
+        const seed = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog: testCatalog(),
+            request: {
+                cwd: "/tmp/rig-archive-restored-run",
+                modelId: "test/parent-abort",
+                providerId: "test",
+            },
+            workspaceId: "workspace-1",
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog: testCatalog(),
+            request: {
+                cwd: "/tmp/rig-archive-restored-run",
+                modelId: "test/parent-abort",
+                providerId: "test",
+            },
+            restore: {
+                ...seed.state(),
+                activeRunId: "restored-run",
+                status: "running",
+            },
+        });
+
+        await session.archiveForWorkspace("workspace-1");
+
+        expect(session.state()).toMatchObject({
+            archived: true,
+            status: "archived",
+        });
+        expect(session.state().activeRunId).toBeUndefined();
+    });
+
+    it("keeps archived terminal while an active inference shuts down", async () => {
+        const started = deferred<void>();
+        const release = deferred<void>();
+        const settled = deferred<void>();
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/archive-active-run",
+            name: "Archive active run",
+            thinkingLevels: ["off"],
+        });
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream(_model, _context, options) {
+                return {
+                    async *[Symbol.asyncIterator]() {
+                        started.resolve();
+                        try {
+                            await release.promise;
+                            throw new Error(
+                                options?.signal?.aborted === true
+                                    ? "archived"
+                                    : "expected archival",
+                            );
+                        } finally {
+                            settled.resolve();
+                        }
+                    },
+                    async result() {
+                        throw new Error("archived");
+                    },
+                };
+            },
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => createRuntime(options, provider),
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ models: [model], providerId: provider.id }],
+            },
+            request: { cwd: "/tmp/rig-archive-active-run", modelId: model.id },
+            workspaceId: "workspace-1",
+        });
+
+        session.submit({ text: "Keep running until archival." });
+        await started.promise;
+        const archive = session.archiveForWorkspace("workspace-1");
+        release.resolve();
+        await Promise.all([archive, settled.promise]);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(session.snapshot()).toMatchObject({
+            archived: true,
+            status: "archived",
+        });
+        expect(session.state().activeRunId).toBeUndefined();
+        expect(() => session.setArchived(false)).toThrow("cannot be restored");
+        expect(
+            session.events
+                .since(undefined)
+                ?.filter((event) => event.type === "session_workspace_archived"),
+        ).toHaveLength(1);
+    });
+
     it("kills a direct shell watcher before draining daemon shutdown tasks", async () => {
         const model = defineModel({
             defaultThinkingLevel: "off",

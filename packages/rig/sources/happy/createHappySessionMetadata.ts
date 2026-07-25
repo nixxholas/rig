@@ -11,9 +11,11 @@ import { HAPPY_SESSION_RPC_METHODS } from "./handleHappySessionRpc.js";
 export function createHappySessionMetadata(options: {
     configuration: HappyConnectionConfiguration;
     modelCatalog?: ModelCatalog;
+    project?: HappySessionMetadata["project"];
     session: ProtocolSession;
     subagents: readonly SubagentSummary[];
     summaryUpdatedAt: number;
+    workspace?: HappySessionMetadata["workspace"];
 }): HappySessionMetadata {
     const { configuration, modelCatalog, session, subagents, summaryUpdatedAt } = options;
     const providerModels =
@@ -133,6 +135,11 @@ export function createHappySessionMetadata(options: {
         os: `${platform()} ${release()}`,
         path: session.cwd,
         permissionMode: session.permissionMode,
+        project: options.project ?? {
+            id: session.projectId,
+            kind: "regular",
+            name: session.cwd.split(/[\\/]/u).filter(Boolean).at(-1) ?? "Project",
+        },
         provider: currentProvider,
         providers,
         reasoning: {
@@ -153,5 +160,6 @@ export function createHappySessionMetadata(options: {
         thoughtLevels:
             selectedModel?.thinkingLevels.map((level) => ({ code: level, value: level })) ?? [],
         tools: [...session.snapshot.tools],
+        ...(options.workspace === undefined ? {} : { workspace: options.workspace }),
     };
 }
