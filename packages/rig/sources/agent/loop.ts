@@ -535,12 +535,15 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         const preparedPermissionEntries = await raceWithAbort(
             (async () => {
                 const entries: [string, PreparedToolPermission][] = [];
+                const reviewerProvider = options.permissionReviewerProvider ?? options.provider;
                 for (const toolCall of toolCalls) {
                     entries.push([
                         toolCall.id,
                         await prepareToolPermission(toolCall, toolsByName, toolContext, {
                             messages: transcript,
-                            model,
+                            // A dedicated review model keeps Auto cheap; other providers review
+                            // on the model already running the session.
+                            model: reviewerProvider.reviewerModel ?? model,
                             now,
                             onPermissionReview: (review) =>
                                 options.signal?.aborted
@@ -552,7 +555,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                               ...review,
                                           }),
                                       ),
-                            provider: options.permissionReviewerProvider ?? options.provider,
+                            provider: reviewerProvider,
                             ...(options.permissionReviewerSessionId === undefined
                                 ? {}
                                 : { sessionId: options.permissionReviewerSessionId }),

@@ -11,6 +11,8 @@ export interface ExecutorModelProfile {
     collaborationMode?: "direct" | "namespaced";
     contextWindow?: number;
     defaultEffort?: SessionReasoningEffort;
+    /** Reachable for inference but never offered for selection, such as the Auto review model. */
+    hidden?: boolean;
     id: string;
     model: Model;
     name: string;

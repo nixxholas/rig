@@ -94,7 +94,9 @@ export function createModelCatalog(options: CreateModelCatalogOptions = {}): Mod
             });
             continue;
         }
-        const models = definition.profiles.map((profile) => profile.model);
+        const models = definition.profiles
+            .filter((profile) => profile.hidden !== true)
+            .map((profile) => profile.model);
         if (models.length === 0) {
             emptyModelProviderIds.push(id);
             providerCatalogs.push({

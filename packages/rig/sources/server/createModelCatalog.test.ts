@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 import {
     modelAnthropicFable5,
     modelAnthropicOpus5,
+    modelOpenaiCodexAutoReview,
+    modelOpenaiGpt54,
     modelOpenaiGpt56Luna,
     modelOpenaiGpt56Sol,
     modelOpenaiGpt56Terra,
@@ -79,6 +81,22 @@ describe("createModelCatalog", () => {
                 thinkingLevels: expect.not.arrayContaining(["ultra"]),
             }),
         ]);
+    });
+
+    it("never offers the permission review models for selection", () => {
+        const catalog = createModelCatalog({
+            env: {
+                AWS_BEARER_TOKEN_BEDROCK: "bedrock-token",
+                AWS_REGION: "us-east-1",
+            },
+        });
+
+        const offeredIds = [
+            ...catalog.models.map((model) => model.id),
+            ...catalog.providers.flatMap((provider) => provider.models.map((model) => model.id)),
+        ];
+        expect(offeredIds).not.toContain(modelOpenaiCodexAutoReview.id);
+        expect(offeredIds).not.toContain(modelOpenaiGpt54.id);
     });
 
     it("treats a blank bearer token as absent", () => {

@@ -275,6 +275,8 @@ export interface Provider {
     /** Stable provider kind; unlike id, this does not change for named accounts. */
     readonly type: ProfileProviderType | undefined;
     readonly models: readonly Model[];
+    /** Dedicated Auto permission review model, when this provider ships one. */
+    readonly reviewerModel?: Model | undefined;
     readonly serviceTiers: readonly ServiceTier[] | undefined;
     readonly extendProfilePromptContext:
         | ((context: ProfilePromptContext) => ProfilePromptContext | Promise<ProfilePromptContext>)

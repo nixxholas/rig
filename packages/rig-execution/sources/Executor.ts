@@ -20,6 +20,7 @@ import type {
 import type { ExecutorProvider } from "@/ExecutorProvider.js";
 import { DEFAULT_IDENTITY, type Identity } from "@/Identity.js";
 import { createExecutorInferenceStream } from "@/createExecutorInferenceStream.js";
+import { reviewerModelForProvider } from "@/reviewerModelForProvider.js";
 import { runProviderAuxiliaryText } from "@/runProviderAuxiliaryText.js";
 import { toSessionMessages } from "@/toSessionMessages.js";
 import type { ExecutorEnvironment } from "@/prompts/ExecutorEnvironment.js";
@@ -100,7 +101,13 @@ export class Executor {
     }
 
     get models(): readonly Model[] {
-        return this.selectedProvider.profiles.map((profile) => profile.model);
+        return this.selectedProvider.profiles
+            .filter((profile) => profile.hidden !== true)
+            .map((profile) => profile.model);
+    }
+
+    get reviewerModel(): Model | undefined {
+        return reviewerModelForProvider(this.selectedProvider.profiles);
     }
 
     get serviceTiers(): readonly ServiceTier[] | undefined {

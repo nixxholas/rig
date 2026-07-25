@@ -12,6 +12,8 @@ import {
     modelAnthropicOpus5,
     modelAnthropicOpus48,
     modelAnthropicSonnet5,
+    modelOpenaiCodexAutoReview,
+    modelOpenaiGpt54,
     modelOpenaiGpt56Luna,
     modelOpenaiGpt56Sol,
     modelOpenaiGpt56Terra,
@@ -43,15 +45,19 @@ export function builtinModelProfiles(
         ];
     }
     if (providerType === "codex") {
-        return [modelOpenaiGpt56Sol, modelOpenaiGpt56Terra, modelOpenaiGpt56Luna].map(
-            (candidate) => ({
-                ...profile(providerId, providerType, candidate, {
-                    prompt: codex_agent_instructions,
-                }),
-                collaborationMode: "namespaced",
-                toolMode: "code_mode",
+        return [
+            modelOpenaiGpt56Sol,
+            modelOpenaiGpt56Terra,
+            modelOpenaiGpt56Luna,
+            modelOpenaiCodexAutoReview,
+        ].map((candidate) => ({
+            ...profile(providerId, providerType, candidate, {
+                prompt: codex_agent_instructions,
             }),
-        );
+            collaborationMode: "namespaced",
+            toolMode: "code_mode",
+            ...(candidate.id === modelOpenaiCodexAutoReview.id ? { hidden: true } : {}),
+        }));
     }
     if (providerType === "grok") {
         return [
@@ -72,12 +78,24 @@ export function builtinModelProfiles(
                 ...candidate,
                 providerType,
             })),
-            ...builtinModelProfiles(providerId, "codex").map((candidate) => ({
-                ...candidate,
+            ...builtinModelProfiles(providerId, "codex")
+                // Bedrock has no dedicated review model, so it reviews on full-fledged GPT-5.4.
+                .filter((candidate) => candidate.id !== modelOpenaiCodexAutoReview.id)
+                .map((candidate) => ({
+                    ...candidate,
+                    collaborationMode: "direct" as const,
+                    providerType,
+                    toolMode: "standard" as const,
+                })),
+            {
+                ...profile(providerId, "codex", modelOpenaiGpt54, {
+                    prompt: codex_agent_instructions,
+                }),
                 collaborationMode: "direct" as const,
+                hidden: true,
                 providerType,
                 toolMode: "standard" as const,
-            })),
+            },
         ];
     }
     return [];

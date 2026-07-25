@@ -3,6 +3,7 @@ import {
     modelAnthropicOpus5,
     modelAnthropicOpus48,
     modelAnthropicSonnet5,
+    modelOpenaiGpt54,
     modelOpenaiGpt56Luna,
     modelOpenaiGpt56Sol,
     modelOpenaiGpt56Terra,
@@ -123,6 +124,11 @@ export const BEDROCK_MODEL_ROUTES: readonly BedrockModelRoute[] = [
     },
     {
         model: bedrockModel(modelOpenaiGpt56Luna, false),
+        provider: "openai",
+        transports: [{ transport: "mantle", regions: ["us-east-1", "us-east-2", "us-west-2"] }],
+    },
+    {
+        model: modelOpenaiGpt54,
         provider: "openai",
         transports: [{ transport: "mantle", regions: ["us-east-1", "us-east-2", "us-west-2"] }],
     },

@@ -125,6 +125,18 @@ export const modelOpenaiGpt54 = defineModel({
     contextWindow: 272_000,
 });
 
+/**
+ * Reviews one proposed action for Auto permissions. It never appears in the model picker and is
+ * never used for ordinary inference, so it is deliberately absent from the profile catalog.
+ */
+export const modelOpenaiCodexAutoReview = defineModel({
+    id: "openai/codex-auto-review",
+    name: "Codex Auto Review",
+    thinkingLevels: ["low", "medium", "high", "xhigh"],
+    defaultThinkingLevel: "low",
+    contextWindow: 272_000,
+});
+
 export const modelXaiGrokBuild = defineModel({
     id: "xai/grok-build",
     name: "Grok Build",

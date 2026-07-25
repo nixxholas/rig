@@ -8,6 +8,18 @@ export interface CodexModelProperties {
 }
 
 const MODEL_PROPERTIES: Readonly<Record<string, CodexModelProperties>> = {
+    "codex-auto-review": {
+        compactionHash: "2911",
+        contextWindow: 272_000,
+        defaultEffort: "low",
+        responsesLite: false,
+    },
+    "gpt-5.4": {
+        compactionHash: "2911",
+        contextWindow: 272_000,
+        defaultEffort: "medium",
+        responsesLite: false,
+    },
     "gpt-5.5": {
         compactionHash: "2911",
         contextWindow: 272_000,

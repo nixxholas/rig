@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { builtinModelProfiles } from "@/builtinModelProfiles.js";
+import { reviewerModelForProvider } from "@/reviewerModelForProvider.js";
 
 describe("builtinModelProfiles", () => {
     it("exposes Opus 5 with the current Claude capabilities", () => {
@@ -31,6 +32,25 @@ describe("builtinModelProfiles", () => {
         expect(opus5).toContain("mid-conversation system turns");
         expect(opus48).not.toContain("mid-conversation system turns");
         expect(opus5).not.toBe(opus48);
+    });
+
+    it("hides a dedicated review model behind Codex and reviews Bedrock on GPT-5.4", () => {
+        const codex = builtinModelProfiles("codex", "codex");
+        const bedrock = builtinModelProfiles("bedrock", "bedrock");
+
+        expect(reviewerModelForProvider(codex)?.id).toBe("openai/codex-auto-review");
+        expect(reviewerModelForProvider(bedrock)?.id).toBe("openai/gpt-5.4");
+        expect(reviewerModelForProvider(builtinModelProfiles("claude", "claude"))).toBeUndefined();
+        expect(reviewerModelForProvider(builtinModelProfiles("grok", "grok"))).toBeUndefined();
+        expect(
+            codex.find((profile) => profile.id === "openai/codex-auto-review")?.defaultEffort,
+        ).toBe("low");
+        // Bedrock cannot reach the dedicated review model, so it must not be offered there.
+        expect(bedrock.map((profile) => profile.id)).not.toContain("openai/codex-auto-review");
+        for (const profiles of [codex, bedrock]) {
+            const visible = profiles.filter((profile) => profile.hidden !== true);
+            expect(reviewerModelForProvider(visible)).toBeUndefined();
+        }
     });
 
     it("preserves each Grok model's supported default effort", () => {

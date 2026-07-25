@@ -8,6 +8,7 @@ import { createPermissionContext } from "../permissions/index.js";
 import {
     defineModel,
     defineProvider,
+    modelOpenaiCodexAutoReview,
     type AssistantMessage,
     type InferenceStream,
     type Usage,
@@ -166,6 +167,67 @@ describe("Auto permissions", () => {
         expect(reviewerCalls).toEqual(["independent permission reviewer"]);
         await agent.close();
         expect(reviewerClose).toHaveBeenCalledOnce();
+    });
+
+    it("reviews on the dedicated review model when the reviewer provider offers one", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const tool = permissionProbeTool([]);
+        const main = autoReviewProvider("allow");
+        const reviewerCalls: string[] = [];
+        const reviewer = reviewerOnlyProvider("allow", reviewerCalls, vi.fn());
+        const reviewedModelIds: string[] = [];
+        const agent = new Agent({
+            context: harness.context,
+            modelId: main.models[0]?.id ?? "",
+            permissionReviewerProvider: {
+                ...reviewer,
+                reviewerModel: modelOpenaiCodexAutoReview,
+                stream(model, context, streamOptions) {
+                    reviewedModelIds.push(model.id);
+                    return reviewer.stream(model, context, streamOptions);
+                },
+            },
+            printToConsole: false,
+            provider: main,
+            tools: [tool],
+        });
+
+        const result = await agent.send("Run the deployment check.");
+
+        expect(result.stopReason).toBe("stop");
+        expect(reviewerCalls).toEqual(["independent permission reviewer"]);
+        expect(reviewedModelIds).toEqual([modelOpenaiCodexAutoReview.id]);
+        await agent.close();
+    });
+
+    it("reviews on the session model when the reviewer provider has no review model", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const tool = permissionProbeTool([]);
+        const main = autoReviewProvider("allow");
+        const reviewer = reviewerOnlyProvider("allow", [], vi.fn());
+        const reviewedModelIds: string[] = [];
+        const agent = new Agent({
+            context: harness.context,
+            modelId: main.models[0]?.id ?? "",
+            permissionReviewerProvider: {
+                ...reviewer,
+                stream(model, context, streamOptions) {
+                    reviewedModelIds.push(model.id);
+                    return reviewer.stream(model, context, streamOptions);
+                },
+            },
+            printToConsole: false,
+            provider: main,
+            tools: [tool],
+        });
+
+        const result = await agent.send("Run the deployment check.");
+
+        expect(result.stopReason).toBe("stop");
+        expect(reviewedModelIds).toEqual([main.models[0]?.id]);
+        await agent.close();
     });
 
     it("does not elevate a prepared Auto review after the permission mode is reduced", async () => {

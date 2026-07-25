@@ -21,6 +21,7 @@ export function createDebugProvider(
             : { extendProfilePromptContext: provider.extendProfilePromptContext }),
         ...(provider.type === undefined ? {} : { type: provider.type }),
         models: provider.models,
+        ...(provider.reviewerModel === undefined ? {} : { reviewerModel: provider.reviewerModel }),
         ...(provider.serviceTiers === undefined ? {} : { serviceTiers: provider.serviceTiers }),
         stream(model, context, streamOptions = {}) {
             const inferenceId = `${options.source}-${String(++inference).padStart(4, "0")}`;
