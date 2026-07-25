@@ -806,6 +806,7 @@ function protocolSession(model: ReturnType<typeof defineModel>): ProtocolSession
     return {
         agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
         agentId: "agent-1",
+        archived: false,
         cwd: "/workspace",
         id: "session-1",
         modelId: model.id,

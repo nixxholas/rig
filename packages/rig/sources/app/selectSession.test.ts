@@ -39,6 +39,7 @@ describe("selectSession", () => {
 
 function sessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     return {
+        archived: false,
         createdAt: 1_700_000_000_000,
         cwd: "/tmp/rig-resume-picker-test",
         id: "session-1",

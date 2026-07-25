@@ -5,20 +5,21 @@ import { SessionTerminalTracker } from "./SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminalPresence.js";
 
 describe("sessionSummaryWithTerminalPresence", () => {
-    it("shows settled disconnected sessions as idle or archived according to their flag", () => {
+    it("keeps run status separate while deriving archive presentation for settled sessions", () => {
         const tracker = new SessionTerminalTracker({
             isTargetAlive: () => true,
             sweepIntervalMs: 60_000,
         });
         try {
             expect(
-                sessionSummaryWithTerminalPresence(summary({ archiveOnIdle: false }), tracker)
-                    .status,
-            ).toBe("idle");
+                sessionSummaryWithTerminalPresence(summary({ archiveOnIdle: false }), tracker),
+            ).toMatchObject({ archived: false, status: "idle" });
             expect(
-                sessionSummaryWithTerminalPresence(summary({ archiveOnIdle: true }), tracker)
-                    .status,
-            ).toBe("archived");
+                sessionSummaryWithTerminalPresence(summary({ archiveOnIdle: true }), tracker),
+            ).toMatchObject({ archived: true, status: "idle" });
+            expect(
+                sessionSummaryWithTerminalPresence(summary({ archived: true }), tracker),
+            ).toMatchObject({ archived: true, status: "idle" });
         } finally {
             tracker.dispose();
         }
@@ -78,6 +79,7 @@ describe("sessionSummaryWithTerminalPresence", () => {
 
 function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     return {
+        archived: false,
         archiveOnIdle: false,
         createdAt: 1,
         cwd: "/workspace",

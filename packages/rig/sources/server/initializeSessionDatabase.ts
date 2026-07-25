@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 
-const CURRENT_SCHEMA_VERSION = 5;
+const CURRENT_SCHEMA_VERSION = 6;
 
 const sessionColumnMigrations = [
     ["title", "TEXT"],
@@ -20,6 +20,7 @@ const sessionColumnMigrations = [
     ["task_name", "TEXT"],
     ["description", "TEXT"],
     ["archive_on_idle", "INTEGER NOT NULL DEFAULT 0"],
+    ["archived", "INTEGER NOT NULL DEFAULT 0"],
     ["track_unread", "INTEGER NOT NULL DEFAULT 0"],
     ["unread_reason", "TEXT"],
     ["unread_since_ms", "INTEGER"],
@@ -81,6 +82,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 task_name TEXT,
                 description TEXT,
                 archive_on_idle INTEGER NOT NULL DEFAULT 0,
+                archived INTEGER NOT NULL DEFAULT 0,
                 track_unread INTEGER NOT NULL DEFAULT 0,
                 unread_reason TEXT,
                 unread_since_ms INTEGER,

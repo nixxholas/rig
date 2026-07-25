@@ -2228,6 +2228,7 @@ describe("CodingAssistantApp", () => {
                 rootSessionId: "session-1",
                 type: "primary",
             },
+            archived: false,
             id: "session-1",
             agentId: snapshot.id,
             cwd: "/workspace",
@@ -2330,6 +2331,7 @@ describe("CodingAssistantApp", () => {
         const session: ProtocolSession = {
             agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
             agentId: snapshot.id,
+            archived: false,
             cwd: "/workspace",
             id: "session-1",
             modelId: codexModel.id,
@@ -2427,6 +2429,7 @@ describe("CodingAssistantApp", () => {
         const session: ProtocolSession = {
             agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
             agentId: snapshot.id,
+            archived: false,
             cwd: "/workspace",
             id: "session-1",
             modelId: firstModel.id,
@@ -2769,6 +2772,7 @@ describe("CodingAssistantApp", () => {
         const session: ProtocolSession = {
             agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
             agentId: snapshot.id,
+            archived: false,
             cwd: "/workspace",
             id: "session-1",
             modelId: model.id,

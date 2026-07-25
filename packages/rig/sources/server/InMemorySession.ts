@@ -195,6 +195,7 @@ export interface PersistedSessionState {
     activeRunId?: string;
     agent: SessionAgentMetadata;
     agentId: string;
+    archived?: boolean;
     archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
@@ -365,6 +366,7 @@ export class InMemorySession {
     #agentManager: AgentSessionManager | undefined;
     #agentMetadata: SessionAgentMetadata;
     #agentId: string;
+    #archived: boolean;
     #createEventId: () => EventId;
     #createRuntime: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
     #compactionController: AbortController | undefined;
@@ -491,6 +493,7 @@ export class InMemorySession {
             };
         }
         this.#agentId = options.restore?.agentId ?? createId();
+        this.#archived = options.restore?.archived === true;
         const requestedModelId =
             options.restore?.modelId ??
             options.request.modelId ??
@@ -1183,6 +1186,7 @@ export class InMemorySession {
         const id = createId();
         const {
             activeRunId: _activeRunId,
+            archived: _archived,
             goal: _goal,
             interruption: _interruption,
             title: _title,
@@ -1198,6 +1202,7 @@ export class InMemorySession {
             ...rest,
             agent: { depth: 0, rootSessionId: id, type: "primary" },
             agentId: createId(),
+            archived: false,
             id,
             lastMessageAt: this.#now(),
             messages: state.messages.map((message) => ({ ...message })),
@@ -1253,6 +1258,13 @@ export class InMemorySession {
         this.#runtime?.agent.setAppendSystemPrompt(this.#appendSystemPrompt);
         this.#interruption = undefined;
         this.#append("session_updated", { session: this.snapshot() });
+        return this.snapshot();
+    }
+
+    setArchived(archived: boolean): ProtocolSession {
+        if (this.#archived === archived) return this.snapshot();
+        this.#archived = archived;
+        this.#append("session_archived", { archived });
         return this.snapshot();
     }
 
@@ -2128,6 +2140,7 @@ export class InMemorySession {
         return {
             id: this.id,
             agentId: this.#agentId,
+            archived: this.#archived,
             archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -2189,6 +2202,7 @@ export class InMemorySession {
     summary(): SessionSummary {
         return {
             id: this.id,
+            archived: this.#archived,
             archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -2229,6 +2243,7 @@ export class InMemorySession {
             ...(this.#activeSince === undefined ? {} : { activeSince: this.#activeSince }),
             agent: this.agentMetadata(),
             agentId: this.#agentId,
+            archived: this.#archived,
             archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
@@ -2328,6 +2343,9 @@ export class InMemorySession {
                     sessionId: this.id,
                 };
             }
+        }
+        if (options.source === undefined && request.provenance !== "agent") {
+            this.setArchived(false);
         }
         this.#restartMetadataSettlement();
         const runId = createId();
@@ -2459,6 +2477,7 @@ export class InMemorySession {
                 "External functions, durable skills, and the system prompt can only be changed by submitting a message.",
             );
         }
+        this.setArchived(false);
         this.#restartMetadataSettlement();
         const displayText = request.displayText ?? request.text;
         const blocks: readonly ContentBlock[] = request.content ?? [

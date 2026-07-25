@@ -34,6 +34,7 @@ import type {
     ListExternalToolCallsResponse,
     ListModelsResponse,
     ListSecretsResponse,
+    ListSessionsOptions,
     ListSessionsResponse,
     ListSubagentsResponse,
     ProtocolSession,
@@ -50,6 +51,7 @@ import type {
     SearchFilesResponse,
     SecretSessionResponse,
     SessionEvent,
+    SessionArchiveResponse,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
     ShutdownServerResponse,
@@ -434,6 +436,14 @@ export class ProtocolHttpClient {
         return this.#requestJson("PATCH", `/sessions/${encodeURIComponent(sessionId)}`, request);
     }
 
+    archiveSession(sessionId: string): Promise<SessionArchiveResponse> {
+        return this.#requestJson("POST", `/sessions/${encodeURIComponent(sessionId)}/archive`);
+    }
+
+    unarchiveSession(sessionId: string): Promise<SessionArchiveResponse> {
+        return this.#requestJson("POST", `/sessions/${encodeURIComponent(sessionId)}/unarchive`);
+    }
+
     forkSession(sessionId: string): Promise<ForkSessionResponse> {
         return this.#requestJson("POST", `/sessions/${encodeURIComponent(sessionId)}/fork`);
     }
@@ -446,10 +456,17 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/models");
     }
 
-    listSessions(limit?: number): Promise<ListSessionsResponse> {
-        const path =
-            limit === undefined ? "/sessions" : `/sessions?limit=${encodeURIComponent(limit)}`;
-        return this.#requestJson("GET", path);
+    listSessions(options?: number | ListSessionsOptions): Promise<ListSessionsResponse> {
+        const normalized = typeof options === "number" ? { limit: options } : (options ?? {});
+        const parameters = new URLSearchParams();
+        if (normalized.limit !== undefined) {
+            parameters.set("limit", String(normalized.limit));
+        }
+        if (normalized.archived !== undefined) {
+            parameters.set("archived", String(normalized.archived));
+        }
+        const suffix = parameters.size === 0 ? "" : `?${parameters.toString()}`;
+        return this.#requestJson("GET", `/sessions${suffix}`);
     }
 
     listSubagents(sessionId: string): Promise<ListSubagentsResponse> {

@@ -39,7 +39,7 @@ export type SessionStatus =
     | "suspended"
     | "error";
 
-export type SessionSummaryStatus = SessionStatus | "archived";
+export type SessionSummaryStatus = SessionStatus;
 
 export type SessionUnreadReason = "attention_needed" | "turn_finished";
 
@@ -149,6 +149,7 @@ export type UpdateDaemonConfigResponse = GetDaemonConfigResponse;
 export interface ProtocolSession {
     id: string;
     agentId: string;
+    archived: boolean;
     archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
@@ -214,6 +215,7 @@ export interface SubagentSummary {
 
 export interface SessionSummary {
     id: string;
+    archived: boolean;
     archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
@@ -321,6 +323,17 @@ export interface CompactSessionResponse {
 
 export interface ListSessionsResponse {
     sessions: readonly SessionSummary[];
+}
+
+export type ListSessionsArchivedFilter = boolean | "all";
+
+export interface ListSessionsOptions {
+    archived?: ListSessionsArchivedFilter;
+    limit?: number;
+}
+
+export interface SessionArchiveResponse {
+    session: ProtocolSession;
 }
 
 export interface ListSubagentsResponse {
@@ -544,6 +557,7 @@ export interface AbortRunOptions {
 export type SessionEvent =
     | SessionCreatedEvent
     | SessionUpdatedEvent
+    | SessionArchiveChangedEvent
     | MessageSubmittedEvent
     | SteeringAppliedEvent
     | RunStartedEvent
@@ -585,6 +599,11 @@ export interface BaseSessionEvent<TType extends string, TData> {
 export type SessionCreatedEvent = BaseSessionEvent<"session_created", { session: ProtocolSession }>;
 
 export type SessionUpdatedEvent = BaseSessionEvent<"session_updated", { session: ProtocolSession }>;
+
+export type SessionArchiveChangedEvent = BaseSessionEvent<
+    "session_archived",
+    { archived: boolean }
+>;
 
 export type MessageSubmittedEvent = BaseSessionEvent<
     "message_submitted",

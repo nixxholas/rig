@@ -31,7 +31,7 @@ describe("formatSessionSummaries", () => {
     });
 
     it("renders archived session status in human-readable English", () => {
-        const lines = formatSessionSummaries([sessionSummary({ status: "archived" })], {
+        const lines = formatSessionSummaries([sessionSummary({ archived: true })], {
             columns: 120,
             rows: 2,
         });
@@ -43,7 +43,7 @@ describe("formatSessionSummaries", () => {
         const attention = formatSessionSummaries(
             [
                 sessionSummary({
-                    status: "archived",
+                    archived: true,
                     unread: { reason: "attention_needed", since: 1_700_000_001_000 },
                 }),
                 sessionSummary({
@@ -61,6 +61,7 @@ describe("formatSessionSummaries", () => {
 
 function sessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     return {
+        archived: false,
         createdAt: 1_700_000_000_000,
         cwd: "/tmp/rig-monit-test",
         id: "session-1",

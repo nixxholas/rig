@@ -18,7 +18,8 @@ export function sessionSummaryWithTerminalPresence(
     }
     return {
         ...presentedSummary,
-        status: summary.archiveOnIdle ? "archived" : "idle",
+        archived: summary.archived || summary.archiveOnIdle === true,
+        status: "idle",
     };
 }
 

@@ -42,6 +42,7 @@ import type {
     SearchFilesResponse,
     SecretSessionResponse,
     SessionEvent,
+    SessionArchiveResponse,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
     SetGoalRequest,
@@ -524,11 +525,24 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "sessions") {
         const limit = parseLimit(url.searchParams.get("limit"));
-        const sessions = limit === undefined ? store.list() : store.list({ limit });
+        const archived = parseArchivedFilter(url.searchParams.get("archived"));
+        if (url.searchParams.has("archived") && archived === undefined) {
+            sendJson(response, 400, {
+                error: "Archived sessions must be filtered with true, false, or all.",
+            });
+            return;
+        }
+        // Explicit archive state is independent from archiveOnIdle. The presentation helper
+        // combines them only after an archiveOnIdle session settles without a connected terminal.
+        const presented = store
+            .list()
+            .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals));
+        const sessions =
+            archived === "all"
+                ? presented
+                : presented.filter((summary) => summary.archived === (archived ?? false));
         sendJson<ListSessionsResponse>(response, 200, {
-            sessions: sessions.map((summary) =>
-                sessionSummaryWithTerminalPresence(summary, sessionTerminals),
-            ),
+            sessions: limit === undefined ? sessions : sessions.slice(0, limit),
         });
         return;
     }
@@ -650,6 +664,24 @@ async function handleRequest(
         }
         sendJson(response, 200, {
             session: limitProtocolSessionMessages(session.snapshot(), messageLimit),
+        });
+        return;
+    }
+
+    if (request.method === "POST" && (route.name === "archive" || route.name === "unarchive")) {
+        if (session.isSubagent()) {
+            sendJson(response, 409, {
+                error: "Subagent histories are read-only and cannot be archived.",
+            });
+            return;
+        }
+        /*
+         * Archive state controls listing visibility only. It never stops or deletes a session:
+         * running and queued sessions may be hidden, and every archived session remains readable
+         * and resumable by ID. Repeating either action is intentionally idempotent.
+         */
+        sendJson<SessionArchiveResponse>(response, 200, {
+            session: session.setArchived(route.name === "archive"),
         });
         return;
     }
@@ -784,6 +816,7 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
+        // A user working in an explicitly archived session makes it visible again.
         sendJson<SubmitMessageResponse>(response, 202, session.submit(body));
         return;
     }
@@ -1148,6 +1181,13 @@ function parseLimit(value: string | null): number | undefined {
     return Math.min(limit, 500);
 }
 
+function parseArchivedFilter(value: string | null): boolean | "all" | undefined {
+    if (value === null || value === "false") return false;
+    if (value === "true") return true;
+    if (value === "all") return "all";
+    return undefined;
+}
+
 function parseFileSearchLimit(value: string | null): number {
     if (value === null) {
         return 20;
@@ -1183,6 +1223,7 @@ function matchRoute(pathname: string):
           name:
               | "abort"
               | "activity"
+              | "archive"
               | "background-processes-stop"
               | "compact"
               | "current-provider-quota"
@@ -1205,6 +1246,7 @@ function matchRoute(pathname: string):
               | "steer"
               | "subagents"
               | "terminals"
+              | "unarchive"
               | "usage";
           sessionId: string;
       }
@@ -1308,6 +1350,7 @@ function matchRoute(pathname: string):
 
     if (parts[2] === "abort") return { name: "abort", sessionId };
     if (parts[2] === "activity") return { name: "activity", sessionId };
+    if (parts[2] === "archive") return { name: "archive", sessionId };
     if (parts[2] === "compact") return { name: "compact", sessionId };
     if (parts[2] === "current-provider-quota") {
         return { name: "current-provider-quota", sessionId };
@@ -1333,6 +1376,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "subagents") return { name: "subagents", sessionId };
     if (parts[2] === "terminals") return { name: "terminals", sessionId };
     if (parts[2] === "usage") return { name: "usage", sessionId };
+    if (parts[2] === "unarchive") return { name: "unarchive", sessionId };
     return undefined;
 }
 
@@ -1343,6 +1387,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
             [
                 "abort",
                 "activity",
+                "archive",
                 "background-processes-stop",
                 "compact",
                 "external-tool-call",
@@ -1354,6 +1399,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "shell",
                 "steer",
                 "terminals",
+                "unarchive",
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
         (["DELETE", "PUT"].includes(method ?? "") && routeName === "terminal-connection") ||

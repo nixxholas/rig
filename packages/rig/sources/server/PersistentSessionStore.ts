@@ -388,6 +388,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 SELECT
                     id,
                     archive_on_idle,
+                    archived,
                     track_unread,
                     unread_reason,
                     unread_since_ms,
@@ -436,6 +437,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             const unreadSince = readOptionalNumber(row, "unread_since_ms");
             return {
                 id: readString(row, "id"),
+                archived: readNumber(row, "archived") !== 0,
                 archiveOnIdle: readNumber(row, "archive_on_idle") !== 0,
                 trackUnread: readNumber(row, "track_unread") !== 0,
                 ...(unreadReason !== undefined && unreadSince !== undefined
@@ -797,6 +799,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     task_name,
                     description,
                     archive_on_idle,
+                    archived,
                     track_unread,
                     unread_reason,
                     unread_since_ms,
@@ -840,7 +843,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     created_at_ms,
                     updated_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     session_kind = excluded.session_kind,
@@ -851,6 +854,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     task_name = excluded.task_name,
                     description = excluded.description,
                     archive_on_idle = excluded.archive_on_idle,
+                    archived = excluded.archived,
                     track_unread = excluded.track_unread,
                     unread_reason = excluded.unread_reason,
                     unread_since_ms = excluded.unread_since_ms,
@@ -905,6 +909,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 state.agent.taskName ?? null,
                 state.agent.description ?? null,
                 state.archiveOnIdle === true ? 1 : 0,
+                state.archived === true ? 1 : 0,
                 state.trackUnread === true ? 1 : 0,
                 state.unread?.reason ?? null,
                 state.unread?.since ?? null,
@@ -1405,6 +1410,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
         const effort = readOptionalString(row, "effort");
         const archiveOnIdle = readNumber(row, "archive_on_idle") !== 0;
+        const archived = readNumber(row, "archived") !== 0;
         const trackUnread = readNumber(row, "track_unread") !== 0;
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
@@ -1448,6 +1454,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(activeSince !== undefined ? { activeSince } : {}),
             agent,
             agentId: readString(row, "agent_id"),
+            archived,
             archiveOnIdle,
             trackUnread,
             ...(unreadReason !== undefined && unreadSince !== undefined

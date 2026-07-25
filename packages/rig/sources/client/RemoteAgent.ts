@@ -532,6 +532,11 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
 
         this.#session = { ...this.#session, lastEventId: event.id };
 
+        if (event.type === "session_archived") {
+            this.#session = { ...this.#session, archived: event.data.archived };
+            return;
+        }
+
         if (event.type === "message_submitted") {
             if (event.data.delivery === "steer") {
                 this.#pendingSteeringMessages.set(event.data.message.id, {

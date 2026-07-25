@@ -957,6 +957,74 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("archives sessions as an idempotent listing state and unarchives on user activity", async () => {
+        const store = new PersistentSessionStore({
+            databasePath: ":memory:",
+            durableGlobalEventQueue: true,
+        });
+        const globalEventQueue = store.globalEventQueue;
+        if (globalEventQueue === undefined) throw new Error("Expected the global event queue.");
+        const { client, close } = await startServer({
+            globalEventQueue,
+            store,
+        });
+        try {
+            const kept = await client.createSession({ cwd: "/tmp/rig-kept-session" });
+            const hidden = await client.createSession({ cwd: "/tmp/rig-hidden-session" });
+
+            const archived = await client.archiveSession(hidden.session.id);
+            const archivedAgain = await client.archiveSession(hidden.session.id);
+
+            expect(archived.session).toMatchObject({
+                archived: true,
+                id: hidden.session.id,
+                status: "idle",
+            });
+            expect(archivedAgain).toEqual(archived);
+            expect((await client.listSessions()).sessions.map((session) => session.id)).toEqual([
+                kept.session.id,
+            ]);
+            expect(
+                (await client.listSessions({ archived: "all" })).sessions.map(
+                    (session) => session.id,
+                ),
+            ).toEqual([hidden.session.id, kept.session.id]);
+            expect(await client.getSession(hidden.session.id)).toMatchObject({
+                session: { archived: true, id: hidden.session.id },
+            });
+            expect(
+                store.globalEventQueue
+                    ?.list()
+                    ?.filter((entry) => entry.event.type === "session_archived"),
+            ).toHaveLength(1);
+
+            const unarchived = await client.unarchiveSession(hidden.session.id);
+            expect(unarchived.session.archived).toBe(false);
+            expect((await client.listSessions()).sessions.map((session) => session.id)).toEqual([
+                hidden.session.id,
+                kept.session.id,
+            ]);
+
+            await client.archiveSession(hidden.session.id);
+            await client.submitMessage(hidden.session.id, {
+                clientSubmissionId: "resume-hidden-session",
+                text: "Resume this session.",
+            });
+            expect((await client.getSession(hidden.session.id)).session.archived).toBe(false);
+
+            await client.archiveSession(hidden.session.id);
+            await client.submitMessage(hidden.session.id, {
+                clientSubmissionId: "resume-hidden-session",
+                text: "Resume this session.",
+            });
+            expect((await client.getSession(hidden.session.id)).session.archived).toBe(true);
+        } finally {
+            await close();
+            await store.prepareForShutdown("shutdown");
+            store.close();
+        }
+    });
+
     it("changes the service tier through a dedicated endpoint", async () => {
         const { client, close } = await startServer();
         try {
@@ -1505,20 +1573,38 @@ describe("createProtocolHttpServer", () => {
             | Awaited<ReturnType<ProtocolHttpClient["connectSessionTerminal"]>>
             | undefined;
         try {
-            expect(await listedStatus(client, "idle-session")).toBe("idle");
-            expect(await listedStatus(client, "archived-session")).toBe("archived");
+            expect(await listedSession(client, "idle-session")).toMatchObject({
+                archived: false,
+                status: "idle",
+            });
+            expect(await listedSession(client, "archived-session")).toMatchObject({
+                archived: true,
+                status: "idle",
+            });
 
             idleTerminal = await client.connectSessionTerminal("idle-session");
             archivedTerminal = await client.connectSessionTerminal("archived-session");
-            expect(await listedStatus(client, "idle-session")).toBe("completed");
-            expect(await listedStatus(client, "archived-session")).toBe("completed");
+            expect(await listedSession(client, "idle-session")).toMatchObject({
+                archived: false,
+                status: "completed",
+            });
+            expect(await listedSession(client, "archived-session")).toMatchObject({
+                archived: false,
+                status: "completed",
+            });
 
             await idleTerminal.close();
             idleTerminal = undefined;
             await archivedTerminal.close();
             archivedTerminal = undefined;
-            expect(await listedStatus(client, "idle-session")).toBe("idle");
-            expect(await listedStatus(client, "archived-session")).toBe("archived");
+            expect(await listedSession(client, "idle-session")).toMatchObject({
+                archived: false,
+                status: "idle",
+            });
+            expect(await listedSession(client, "archived-session")).toMatchObject({
+                archived: true,
+                status: "idle",
+            });
         } finally {
             await idleTerminal?.close();
             await archivedTerminal?.close();
@@ -1749,6 +1835,8 @@ describe("createProtocolHttpServer", () => {
             await expect(client.reset("subagent-1")).rejects.toThrow("read-only");
             await expect(client.rewind("subagent-1", "message-1")).rejects.toThrow("read-only");
             await expect(client.compact("subagent-1")).rejects.toThrow("read-only");
+            await expect(client.archiveSession("subagent-1")).rejects.toThrow("read-only");
+            await expect(client.unarchiveSession("subagent-1")).rejects.toThrow("read-only");
             await expect(
                 client.broadcastMessage({
                     sessionIds: ["subagent-1"],
@@ -1910,19 +1998,13 @@ function completedPrimaryState(id: string, archiveOnIdle: boolean): PersistedSes
     };
 }
 
-async function listedStatus(
-    client: ProtocolHttpClient,
-    sessionId: string,
-): Promise<string | undefined> {
-    return (await client.listSessions()).sessions.find((session) => session.id === sessionId)
-        ?.status;
-}
-
 async function listedSession(
     client: ProtocolHttpClient,
     sessionId: string,
 ): Promise<SessionSummary | undefined> {
-    return (await client.listSessions()).sessions.find((session) => session.id === sessionId);
+    return (await client.listSessions({ archived: "all" })).sessions.find(
+        (session) => session.id === sessionId,
+    );
 }
 
 function pausedGoalState(): PersistedSessionState {

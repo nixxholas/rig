@@ -11,7 +11,7 @@ export async function runMonit(options: RunMonitOptions = {}): Promise<void> {
     const columns = options.columns ?? process.stdout.columns ?? 100;
     const limit = Math.max(0, rows - 1);
     const localServer = await ensureLocalProtocolServer();
-    const response = await localServer.client.listSessions(limit);
+    const response = await localServer.client.listSessions({ archived: "all", limit });
     const lines = formatSessionSummaries(response.sessions, { columns, rows });
     for (const line of lines) {
         console.log(line);

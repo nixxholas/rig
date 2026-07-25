@@ -48,11 +48,11 @@ function formatTimestamp(value: number | undefined): string {
 function humanizeSessionStatus(session: SessionSummary): string {
     if (session.unread?.reason === "attention_needed") return "Attention";
     if (session.unread?.reason === "turn_finished") return "Finished";
+    if (session.archived) return "Archived";
     return humanizeStatus(session.status);
 }
 
 function humanizeStatus(status: SessionSummaryStatus): string {
-    if (status === "archived") return "Archived";
     if (status === "idle") return "Idle";
     if (status === "queued") return "Queued";
     if (status === "running") return "Running";
