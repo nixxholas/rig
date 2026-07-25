@@ -129,6 +129,26 @@ describe("reconcileAgentsMdMessages", () => {
         expect(textOf(records[0]!)).toBe(textOf(firstTurn[0]!));
     });
 
+    it("records the superseding instructions ahead of the request the user is waiting on", async () => {
+        const workspace = await createWorkspace();
+        await writeFile(join(workspace, "AGENTS.md"), "Always run the linter.\n");
+        const fs = createFileSystem(workspace);
+        const idFactory = createIdFactory();
+
+        const firstTurn = await reconcileAgentsMdMessages({ fs, idFactory, messages: [] });
+        await writeFile(join(workspace, "AGENTS.md"), "Always run the type checker.\n");
+
+        const secondTurn = await reconcileAgentsMdMessages({
+            fs,
+            idFactory,
+            messages: [...firstTurn, userMessage("user-1", "Switch to main.")],
+        });
+
+        expect(secondTurn.at(-1)?.id).toBe("user-1");
+        expect(textOf(secondTurn.at(-1)!)).toBe("Switch to main.");
+        expect(textOf(secondTurn.at(-2)!)).toContain(AGENTS_MD_REPLACEMENT_NOTICE);
+    });
+
     it("appends a superseding record and preserves the original when the file changes", async () => {
         const workspace = await createWorkspace();
         await writeFile(join(workspace, "AGENTS.md"), "Always run the linter.\n");
@@ -149,7 +169,7 @@ describe("reconcileAgentsMdMessages", () => {
         expect(secondTurn[0]).toEqual(original);
         expect(textOf(secondTurn[0]!)).toContain("Always run the linter.");
 
-        const replacement = secondTurn[2]!;
+        const replacement = secondTurn[1]!;
         expect(replacement.role).toBe("user");
         expect(isInternalMessage(replacement)).toBe(true);
         expect(textOf(replacement)).toContain(AGENTS_MD_REPLACEMENT_NOTICE);

@@ -98,6 +98,13 @@ function textOfFirstUserContent(context: Context): string {
     return first.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
+function textOfLastUserContent(context: Context): string {
+    const last = context.messages.at(-1);
+    if (last?.role !== "user") return "";
+    if (typeof last.content === "string") return last.content;
+    return last.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+}
+
 describe("project instructions in the conversation", () => {
     it("hands AGENTS.md to the model ahead of the first user message", async () => {
         const { provider, contexts, systemPrompts } = createRecordingProvider();
@@ -165,6 +172,20 @@ describe("project instructions in the conversation", () => {
             .join("");
         expect(text).toContain(AGENTS_MD_REPLACEMENT_NOTICE);
         expect(text).toContain("Always run the type checker.");
+    });
+
+    it("leaves the user's request as the last thing the model reads after an edit", async () => {
+        const { provider, contexts } = createRecordingProvider();
+        const { agent, writeInstructions } = await createWorkspace(
+            provider,
+            "Always run the linter.\n",
+        );
+
+        await agent.send("Fix the bug.");
+        await writeInstructions("Always run the type checker.\n");
+        await agent.send("Switch to main.");
+
+        expect(textOfLastUserContent(contexts[1]!)).toBe("Switch to main.");
     });
 
     it("adds nothing to a project without instructions", async () => {
