@@ -13,6 +13,10 @@ const websocket = vi.hoisted(() => ({
     failToolCallMidstreamOnce: false,
     failTerminalOnce: false,
     holdWarmupOpenOnce: false,
+    instances: [] as Array<{
+        emitError: (error: Error) => void;
+        errorListenerCount: () => number;
+    }>,
     internalErrorFailures: 0,
     missingPreviousResponseFailures: 0,
     endMidstreamOnce: false,
@@ -69,6 +73,19 @@ vi.mock("openai/resources/responses/ws", () => ({
 
         constructor(_client: unknown, options?: { headers?: Record<string, string> }) {
             websocket.connectionHeaders.push(structuredClone(options?.headers ?? {}));
+            websocket.instances.push({
+                emitError: (error) => this.emitError(error),
+                errorListenerCount: () => this.errorListeners.size,
+            });
+        }
+
+        emitError(error: Error): void {
+            // Mirror the OpenAI SDK: unobserved errors become unhandled rejections.
+            if (this.errorListeners.size === 0) {
+                throw new Error("Mock SDK would create an unhandled WebSocket rejection.");
+            }
+            this.socket.readyState = 3;
+            for (const listener of this.errorListeners) listener(error);
         }
 
         send(request: Record<string, any>): void {
@@ -440,6 +457,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.failToolCallMidstreamOnce = false;
         websocket.failTerminalOnce = false;
         websocket.holdWarmupOpenOnce = false;
+        websocket.instances.splice(0);
         websocket.internalErrorFailures = 0;
         websocket.missingPreviousResponseFailures = 0;
         websocket.endMidstreamOnce = false;
@@ -820,6 +838,97 @@ describe("Codex CLI mode WebSocket goldens", () => {
             role: "user",
             content: "second",
         });
+        session.destroy();
+    });
+
+    it("absorbs an idle Responses WebSocket connection-limit error without crashing", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                { instructions: prompt.instructions, messages: [] },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        const first = { role: "user" as const, content: "first" };
+        await drain(
+            session.run({
+                context: { messages: [first] },
+                effort: "low",
+            }),
+        );
+
+        expect(websocket.instances).toHaveLength(1);
+        expect(websocket.instances[0]!.errorListenerCount()).toBeGreaterThan(0);
+        const connectionLimit = new WebSocketError(
+            "Responses websocket connection limit reached (60 minutes). Create a new websocket " +
+                "connection to continue.",
+            {
+                type: "error",
+                code: "websocket_connection_limit_reached",
+                message:
+                    "Responses websocket connection limit reached (60 minutes). Create a new " +
+                    "websocket connection to continue.",
+                param: null,
+                sequence_number: 2,
+            },
+        );
+        expect(() => websocket.instances[0]!.emitError(connectionLimit)).not.toThrow();
+
+        const events = [];
+        for await (const event of session.run({
+            context: {
+                messages: [first, { role: "user", content: "second" }],
+            },
+            effort: "low",
+        })) {
+            events.push(event);
+        }
+
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(websocket.connectionHeaders).toHaveLength(2);
+        expect(websocket.sent.at(-1)!.previous_response_id).toBeUndefined();
+        expect(JSON.stringify(websocket.sent.at(-1)!.input)).toContain("second");
+        session.destroy();
+    });
+
+    it("rotates a cached WebSocket before OpenAI's sixty-minute connection limit", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const startedAt = 1_700_000_000_000;
+        const now = vi.spyOn(Date, "now").mockReturnValue(startedAt);
+        const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                { instructions: prompt.instructions, messages: [] },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        const first = { role: "user" as const, content: "first" };
+        await drain(
+            session.run({
+                context: { messages: [first] },
+                effort: "low",
+            }),
+        );
+
+        now.mockReturnValue(startedAt + 56 * 60 * 1000);
+        const events = [];
+        for await (const event of session.run({
+            context: {
+                messages: [first, { role: "user", content: "second" }],
+            },
+            effort: "low",
+        })) {
+            events.push(event);
+        }
+
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(websocket.connectionHeaders).toHaveLength(2);
+        expect(websocket.sent.at(-1)!.previous_response_id).toBeUndefined();
+        expect(JSON.stringify(websocket.sent.at(-1)!.input)).toContain("second");
+        now.mockRestore();
         session.destroy();
     });
 

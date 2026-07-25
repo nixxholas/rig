@@ -16,6 +16,13 @@ import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrement
 import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 
 /**
+ * OpenAI closes Responses websockets after sixty minutes. Rotate a few minutes early so a long
+ * session does not discover the limit mid-turn, and always keep an error listener attached so an
+ * idle limit rejection cannot become an unhandled process crash.
+ */
+export const CODEX_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000;
+
+/**
  * The Codex WebSocket, which is a conversation rather than a request.
  *
  * The socket is warmed once, and every later turn may send only what changed since the response
@@ -26,6 +33,7 @@ import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
  */
 export class CodexWebSocketConnection {
     private socket: ResponsesWS | undefined;
+    private openedAtMs = 0;
     private started = false;
     private inferenceStarted = false;
     private needsFullRequest = false;
@@ -50,7 +58,7 @@ export class CodexWebSocketConnection {
         const { request, signal, tools } = options;
         const turnState = this.options.turnState;
         const client = this.options.client();
-        this.socket ??= new ResponsesWS(client, { headers: this.options.headers() });
+        this.ensureSocket(client);
         if (!this.started) {
             for await (const event of this.send(
                 client,
@@ -126,9 +134,43 @@ export class CodexWebSocketConnection {
     }
 
     close(reason: string): void {
-        if (this.socket?.socket.readyState !== undefined && this.socket.socket.readyState < 2)
-            this.socket.close({ code: 1000, reason });
+        const socket = this.socket;
         this.socket = undefined;
+        this.openedAtMs = 0;
+        if (socket?.socket.readyState !== undefined && socket.socket.readyState < 2)
+            socket.close({ code: 1000, reason });
+    }
+
+    private ensureSocket(client: OpenAI): ResponsesWS {
+        const now = Date.now();
+        if (
+            this.socket !== undefined &&
+            this.openedAtMs > 0 &&
+            now - this.openedAtMs >= CODEX_WEBSOCKET_MAX_AGE_MS
+        ) {
+            this.reset("websocket max age");
+        }
+        if (this.socket === undefined) {
+            const socket = new ResponsesWS(client, { headers: this.options.headers() });
+            // The OpenAI SDK turns unobserved socket errors into Promise.reject(...). Keep one
+            // listener for the life of the connection so an idle sixty-minute limit cannot kill
+            // the daemon, and drop the dead socket so the next turn opens a fresh one.
+            socket.on("error", () => {
+                if (this.socket !== socket) return;
+                this.abandonDeadSocket();
+            });
+            this.socket = socket;
+            this.openedAtMs = now;
+        }
+        return this.socket;
+    }
+
+    private abandonDeadSocket(): void {
+        this.needsFullRequest = this.started;
+        this.socket = undefined;
+        this.openedAtMs = 0;
+        this.clearResponseChain();
+        this.inferenceStarted = false;
     }
 
     private send(
