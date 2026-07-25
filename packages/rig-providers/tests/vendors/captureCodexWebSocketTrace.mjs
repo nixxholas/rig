@@ -37,7 +37,6 @@ const server = createServer();
 server.listen(0, "127.0.0.1");
 const port = await listeningPort(server);
 
-let captured = false;
 let upstreamSocket;
 let resolveCapture;
 let rejectCapture;
@@ -119,7 +118,6 @@ server.on("upgrade", (request, socket) => {
                             `${JSON.stringify(extractToolDefinitions(trace), null, 2)}\n`,
                             "utf8",
                         );
-                        captured = true;
                         resolveCapture();
                     }
                 } else if (item.type === "error") {
@@ -127,17 +125,21 @@ server.on("upgrade", (request, socket) => {
                 }
             }
         })();
-        for (;;) {
-            const body = JSON.parse(await frames.next());
-            if (body.generate === false) {
-                warmup = body;
-            } else {
-                inference = body;
-                eventTypes = [];
+        const clientFrames = (async () => {
+            for (;;) {
+                const body = JSON.parse(await frames.next());
+                if (body.generate === false) {
+                    warmup = body;
+                } else {
+                    inference = body;
+                    eventTypes = [];
+                }
+                upstreamSocket.send(body);
             }
-            upstreamSocket.send(body);
-        }
-        await upstreamEvents;
+        })();
+        // The frame loop only ends by throwing, so race it against the upstream pump to
+        // observe whichever side fails first instead of dropping a rejection.
+        await Promise.race([clientFrames, upstreamEvents]);
     })().catch(rejectCapture);
 });
 server.on("error", rejectCapture);

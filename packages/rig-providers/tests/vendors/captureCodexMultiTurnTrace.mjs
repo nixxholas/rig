@@ -84,13 +84,17 @@ server.on("upgrade", (request, socket) => {
                 }
             }
         })();
-        for (;;) {
-            const body = JSON.parse(await frames.next());
-            requests.push(normalizeRequest(body, captureDirectory));
-            responses.push({ eventTypes: [], outputItemTypes: [], terminal: null });
-            upstream.send(body);
-        }
-        await upstreamEvents;
+        const clientFrames = (async () => {
+            for (;;) {
+                const body = JSON.parse(await frames.next());
+                requests.push(normalizeRequest(body, captureDirectory));
+                responses.push({ eventTypes: [], outputItemTypes: [], terminal: null });
+                upstream.send(body);
+            }
+        })();
+        // The frame loop only ends by throwing, so race it against the upstream pump to
+        // observe whichever side fails first instead of dropping a rejection.
+        await Promise.race([clientFrames, upstreamEvents]);
     })().catch(() => socket.destroy());
 });
 server.listen(0, "127.0.0.1");

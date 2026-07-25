@@ -1,5 +1,3 @@
-import { Type } from "@sinclair/typebox";
-
 import type { SessionTool } from "@/core/SessionTool.js";
 
 export const web_search = {

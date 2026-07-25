@@ -259,7 +259,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const firstClose = vi.fn();
-        const query = vi.fn<ClaudeSdkQuery>((parameters) => {
+        const query = vi.fn<ClaudeSdkQuery>(() => {
             if (query.mock.calls.length === 1) return fakeToolCallQuery(firstClose);
             return fakeQuery("RECOVERED");
         });

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -146,7 +146,7 @@ try {
         { role: "assistant", content: second.text },
         { role: "user", content: switchedPrompt },
     ];
-    const switched = await captureTurn(switchedPrompt, switchedContext, switchedModel);
+    await captureTurn(switchedPrompt, switchedContext, switchedModel);
 
     const compactInstructions =
         "Preserve PROVIDER_SKILL_MARKER, PROVIDER_TOOL_MARKER, SECOND, and SWITCHED exactly.";

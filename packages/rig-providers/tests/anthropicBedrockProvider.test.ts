@@ -598,6 +598,7 @@ describe("AnthropicBedrockProvider", () => {
             // Consume the response so the request is captured.
         }
 
+        expect(capturedRequest).toBeDefined();
         expect(capturedRequest?.system).toEqual([
             {
                 type: "text",
@@ -607,7 +608,7 @@ describe("AnthropicBedrockProvider", () => {
         ]);
         // Anthropic has no conversational system role, so the notice keeps its position as a
         // reminder instead of rewriting the cached prompt prefix.
-        expect((capturedRequest?.messages as BetaMessageParam[])[0]).toEqual({
+        expect((capturedRequest?.messages as BetaMessageParam[] | undefined)?.[0]).toEqual({
             role: "user",
             content: "<system-reminder>\nconfigured system message\n</system-reminder>",
         });
