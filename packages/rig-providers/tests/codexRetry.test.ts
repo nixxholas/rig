@@ -23,6 +23,16 @@ import {
 } from "@/vendors/codex/impl/codexRetry.js";
 
 describe("Codex stream retries", () => {
+    it("keeps an HTTP status in non-WebSocket diagnostic errors", () => {
+        const message = "403 User is not authorized to invoke this operation.";
+        const error = Object.assign(new Error(message), {
+            error: { message: "User is not authorized to invoke this operation." },
+            status: 403,
+        });
+
+        expect(codexErrorMessage(error, message)).toBe(message);
+    });
+
     it("recognizes a missing previous response from structured and serialized API errors", () => {
         const responseError = {
             type: "invalid_request_error",

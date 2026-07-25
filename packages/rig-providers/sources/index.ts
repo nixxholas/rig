@@ -139,6 +139,10 @@ export {
     type ClaudeAuthTokenCredentialValue,
 } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
 export {
+    ClaudeCodeCredential,
+    type ClaudeCodeCredentialLoadOptions,
+} from "@/vendors/claude/ClaudeCodeCredential.js";
+export {
     ClaudeOAuthCredential,
     type ClaudeOAuthCredentialLoadOptions,
     type ClaudeOAuthCredentialValue,

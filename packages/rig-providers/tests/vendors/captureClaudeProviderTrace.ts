@@ -7,6 +7,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
+import { ClaudeCodeCredential } from "@/vendors/claude/ClaudeCodeCredential.js";
 import { ClaudeOAuthCredential } from "@/vendors/claude/ClaudeOAuthCredential.js";
 import { ClaudeSession } from "@/vendors/claude/ClaudeSession.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
@@ -66,7 +67,8 @@ if (address === null || typeof address === "string") throw new Error("Missing ca
 
 const credential =
     (await ClaudeAuthTokenCredential.tryLoad({ env: process.env })) ??
-    (await ClaudeOAuthCredential.tryLoad({ env: process.env }));
+    (await ClaudeOAuthCredential.tryLoad({ env: process.env })) ??
+    (await ClaudeCodeCredential.tryLoad({ env: process.env }));
 if (credential === null) throw new Error("Missing Claude Code credentials.");
 const providerEnv = {
     ...process.env,

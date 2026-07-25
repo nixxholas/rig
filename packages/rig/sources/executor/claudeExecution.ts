@@ -1,6 +1,7 @@
 import {
     ClaudeApiKeyCredential,
     ClaudeAuthTokenCredential,
+    ClaudeCodeCredential,
     ClaudeOAuthCredential,
     ClaudeProvider,
 } from "@slopus/rig-providers";
@@ -39,7 +40,10 @@ export function claudeExecution(options: {
                       })) ??
                 (await ClaudeApiKeyCredential.tryLoad({ env: environment })) ??
                 (await ClaudeAuthTokenCredential.tryLoad({ env: environment })) ??
-                (await ClaudeOAuthCredential.tryLoad({
+                (options.config.oauthToken === undefined
+                    ? await ClaudeOAuthCredential.tryLoad({ env: environment })
+                    : null) ??
+                (await ClaudeCodeCredential.tryLoad({
                     env: environment,
                     ...(options.config.configDir === undefined
                         ? {}

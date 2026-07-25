@@ -1,6 +1,7 @@
 import { BedrockBearerTokenCredential } from "@/vendors/bedrock/BedrockBearerTokenCredential.js";
 import { ClaudeApiKeyCredential } from "@/vendors/claude/ClaudeApiKeyCredential.js";
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
+import { ClaudeCodeCredential } from "@/vendors/claude/ClaudeCodeCredential.js";
 import { ClaudeOAuthCredential } from "@/vendors/claude/ClaudeOAuthCredential.js";
 import { CodexApiKeyCredential } from "@/vendors/codex/CodexApiKeyCredential.js";
 import { CodexSessionCredential } from "@/vendors/codex/CodexSessionCredential.js";
@@ -50,12 +51,15 @@ export async function tryLoadCredentials(
         }),
         ClaudeOAuthCredential.tryLoad({
             ...(env === undefined ? {} : { env }),
-            ...(options.claudeConfigDir === undefined
-                ? {}
-                : { configDir: options.claudeConfigDir }),
             ...(options.claudeOAuthToken === undefined
                 ? {}
                 : { oauthToken: options.claudeOAuthToken }),
+        }),
+        ClaudeCodeCredential.tryLoad({
+            ...(env === undefined ? {} : { env }),
+            ...(options.claudeConfigDir === undefined
+                ? {}
+                : { configDir: options.claudeConfigDir }),
         }),
         CodexApiKeyCredential.tryLoad(
             options.codexApiKey === undefined ? {} : { apiKey: options.codexApiKey },

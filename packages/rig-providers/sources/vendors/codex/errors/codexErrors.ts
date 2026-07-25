@@ -64,7 +64,9 @@ export function codexErrorMessage(error: unknown, message: string): string {
     if (isCodexUnauthorizedError(error) && message.includes("Signature expired:")) {
         return BEDROCK_EXPIRED_SIGNATURE_MESSAGE;
     }
-    const serverMessage = stringProperty(readWebSocketServerError(error), "message")?.trim();
+    const serverMessage = isWebSocketError(error)
+        ? stringProperty(readWebSocketServerError(error), "message")?.trim()
+        : undefined;
     if (serverMessage !== undefined && serverMessage.length > 0) return serverMessage;
     return message;
 }

@@ -1,6 +1,7 @@
 import type { BedrockBearerTokenCredential } from "@/vendors/bedrock/BedrockBearerTokenCredential.js";
 import type { ClaudeApiKeyCredential } from "@/vendors/claude/ClaudeApiKeyCredential.js";
 import type { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
+import type { ClaudeCodeCredential } from "@/vendors/claude/ClaudeCodeCredential.js";
 import type { ClaudeOAuthCredential } from "@/vendors/claude/ClaudeOAuthCredential.js";
 import type { CodexApiKeyCredential } from "@/vendors/codex/CodexApiKeyCredential.js";
 import type { CodexSessionCredential } from "@/vendors/codex/CodexSessionCredential.js";
@@ -13,6 +14,7 @@ export type BedrockCredential = BedrockBearerTokenCredential;
 export type ClaudeCredential =
     | ClaudeApiKeyCredential
     | ClaudeAuthTokenCredential
+    | ClaudeCodeCredential
     | ClaudeOAuthCredential;
 
 export type CodexCredential = CodexApiKeyCredential | CodexSessionCredential;

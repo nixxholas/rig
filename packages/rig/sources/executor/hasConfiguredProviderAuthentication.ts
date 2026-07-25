@@ -1,6 +1,7 @@
 import {
     ClaudeApiKeyCredential,
     ClaudeAuthTokenCredential,
+    ClaudeCodeCredential,
     ClaudeOAuthCredential,
     CodexSessionCredential,
     GrokApiKeyCredential,
@@ -37,7 +38,10 @@ export async function hasConfiguredProviderAuthentication(options: {
                       })) ??
                     (await ClaudeApiKeyCredential.tryLoad({ env })) ??
                     (await ClaudeAuthTokenCredential.tryLoad({ env })) ??
-                    (await ClaudeOAuthCredential.tryLoad({
+                    (config.oauthToken === undefined
+                        ? await ClaudeOAuthCredential.tryLoad({ env })
+                        : null) ??
+                    (await ClaudeCodeCredential.tryLoad({
                         env,
                         ...(config.configDir === undefined ? {} : { configDir: config.configDir }),
                     }))) !== null

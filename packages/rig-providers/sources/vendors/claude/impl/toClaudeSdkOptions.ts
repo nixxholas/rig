@@ -100,7 +100,11 @@ function credentialEnvironment(credential: ClaudeCredential): NodeJS.ProcessEnv 
     if (credential.name === "claude-auth-token") {
         return { ANTHROPIC_AUTH_TOKEN: credential.credential.authToken };
     }
-    return { CLAUDE_CODE_OAUTH_TOKEN: credential.credential.accessToken };
+    if (credential.name === "claude-oauth") {
+        return { CLAUDE_CODE_OAUTH_TOKEN: credential.credential.accessToken };
+    }
+    credential.name satisfies "claude-code";
+    return {};
 }
 
 function createClaudeMcpServer(
