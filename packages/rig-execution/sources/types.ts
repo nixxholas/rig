@@ -81,6 +81,19 @@ export type UserContent = TextContent | ImageContent;
 export type AssistantContent = TextContent | ThinkingContent | ToolCall;
 export type ToolResultContent = TextContent | ImageContent;
 
+/**
+ * An out-of-band notice addressed to the model at the position the caller placed it.
+ *
+ * This is conversation content, not prompt content. Codex sends it natively as a `developer`
+ * message; vendors without a conversational system role project it onto a `<system-reminder>`
+ * user turn. Folding it into the system prompt would rewrite the cached prefix instead.
+ */
+export interface SystemMessage {
+    role: "system";
+    content: string;
+    timestamp: number;
+}
+
 export interface UserMessage {
     role: "user";
     content: string | readonly UserContent[];
@@ -125,7 +138,7 @@ export interface ToolResultMessage {
     timestamp: number;
 }
 
-export type Message = UserMessage | AssistantMessage | ToolResultMessage;
+export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
 
 export interface FunctionTool<TParameters extends TSchema = TSchema> {
     kind?: "function";

@@ -89,12 +89,10 @@ function customHeaders(env: NodeJS.ProcessEnv, userAgent: string | undefined): N
     };
 }
 
+// Session system messages stay in the conversation as positional reminders. Only the caller's
+// instructions belong in the prompt, so a mid-conversation notice cannot rewrite the cached prefix.
 function createSystemPrompt(basePrompt: string, context: SessionContext): string {
-    const systemMessages = context.messages
-        .filter((message) => message.role === "system")
-        .flatMap((message) => message.content)
-        .join("\n\n");
-    return [basePrompt, context.instructions, systemMessages].filter(Boolean).join("\n\n");
+    return [basePrompt, context.instructions].filter(Boolean).join("\n\n");
 }
 
 function credentialEnvironment(credential: ClaudeCredential): NodeJS.ProcessEnv {

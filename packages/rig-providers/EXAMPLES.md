@@ -21,7 +21,8 @@ const session = await provider.session("thread-123", {
         // Root Responses API instructions. This is required and is not a context message.
         instructions: "You are a concise coding agent.",
         messages: [
-            // Session `system` messages are sent as developer context.
+            // Codex sends session `system` messages as native developer context. Claude,
+            // Bedrock, and Grok send the same message as a `<system-reminder>` user turn.
             { role: "system", content: "Only edit files inside the workspace." },
         ],
     },

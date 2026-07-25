@@ -5,6 +5,7 @@ import type {
 } from "openai/resources/responses/responses.js";
 
 import type { SessionContext } from "@/core/SessionContext.js";
+import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
 import type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 import { toGrokInputContent } from "@/vendors/grok/impl/toGrokInputContent.js";
 
@@ -20,14 +21,14 @@ export function toGrokResponseInput(context: SessionContext): ResponseInput {
     const toolSearchCallIds = new Set<string>();
     for (const message of context.messages) {
         if (message.role === "system") {
+            // Grok has no system role inside a conversation. Its native client delivers notices as
+            // `<system-reminder>` user turns, keeping the position the caller chose.
+            const reminder = toSessionReminderMessage(message);
             input.push({
                 type: "message",
-                role: "system",
-                content:
-                    typeof message.content === "string"
-                        ? message.content
-                        : message.content.map((text) => ({ type: "input_text", text })),
-            });
+                role: "user",
+                content: toGrokInputContent(reminder.content, reminder.input),
+            } as ResponseInputItem);
             continue;
         }
         if (message.role === "user") {

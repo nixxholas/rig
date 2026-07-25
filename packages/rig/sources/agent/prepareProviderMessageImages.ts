@@ -8,7 +8,7 @@ export async function prepareProviderMessageImages(
 ): Promise<Message[]> {
     return Promise.all(
         messages.map(async (message) => {
-            if (message.role === "assistant") {
+            if (message.role === "assistant" || message.role === "system") {
                 return message;
             }
             if (message.role === "user") {

@@ -15,6 +15,7 @@ import { normalizeToolCallArguments } from "./normalizeToolCallArguments.js";
 import { prepareProviderMessageImages } from "./prepareProviderMessageImages.js";
 import { presentToolCall, type PresentedToolCall } from "./presentToolCall.js";
 import { replaceLastTurnToolResultImages } from "./replaceLastTurnToolResultImages.js";
+import { systemMessageToText } from "./systemMessageToText.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
 import { createProviderPrompt, type ProviderPrompt } from "./createProviderPrompt.js";
 import { ToolLockManager } from "./ToolLockManager.js";
@@ -944,6 +945,13 @@ export function toProviderMessages(
 
     for (const message of messages) {
         if (message.role === "system") {
+            // A notice belongs in the conversation at the position it was raised. Each provider
+            // resolves it into its own native shape, so it never becomes prompt content here.
+            providerMessages.push({
+                role: "system",
+                content: systemMessageToText(message),
+                timestamp: options.now(),
+            });
             continue;
         }
 

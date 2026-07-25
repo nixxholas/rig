@@ -11,7 +11,9 @@ describe("Claude session replay reasoning", () => {
                 {
                     role: "assistant",
                     content: "Renamed the entry point.",
-                    reasoning: [{ text: "The parser entry point is misnamed.", signature: "sig-1" }],
+                    reasoning: [
+                        { text: "The parser entry point is misnamed.", signature: "sig-1" },
+                    ],
                 },
                 { role: "user", content: "Now update the tests." },
             ]),

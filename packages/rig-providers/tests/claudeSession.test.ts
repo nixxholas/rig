@@ -826,9 +826,11 @@ describe("ClaudeSession", () => {
             strictMcpConfig: true,
             tools: [],
         });
+        // Anthropic has no conversational system role, so the configured notices keep their
+        // position as reminders instead of rewriting the cached prompt prefix.
         expect(options?.systemPrompt).toContain("Rig system instructions.");
-        expect(options?.systemPrompt).toContain("Project instructions.");
-        expect(options?.systemPrompt).toContain("Golden skill description.");
+        expect(options?.systemPrompt).not.toContain("Project instructions.");
+        expect(options?.systemPrompt).not.toContain("Golden skill description.");
         expect(options?.env).toMatchObject({
             ...CLAUDE_SDK_PRIVACY_ENVIRONMENT,
             ANTHROPIC_AUTH_TOKEN: "test-token",

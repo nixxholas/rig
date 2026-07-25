@@ -13,6 +13,7 @@ import type {
     SessionTextContent,
     SessionToolResultMessage,
 } from "@/core/SessionContext.js";
+import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
 import { toAnthropicBedrockCompactionBlock } from "@/vendors/bedrock/impl/toAnthropicBedrockCompactionBlock.js";
 import { toAnthropicBedrockToolName } from "@/vendors/bedrock/impl/toAnthropicBedrockToolName.js";
 
@@ -24,7 +25,12 @@ export function toAnthropicBedrockMessages(
     messages: readonly SessionMessage[],
 ): BetaMessageParam[] {
     const converted = messages.flatMap((message): BetaMessageParam[] => {
-        if (message.role === "system") return [];
+        if (message.role === "system") {
+            // Anthropic has no system role inside a conversation, so a notice keeps the position
+            // the caller chose as a `<system-reminder>` user turn.
+            const reminder = toSessionReminderMessage(message);
+            return [{ role: "user", content: toInputContent(reminder.content, reminder.input) }];
+        }
         if (message.role === "compaction") {
             return [{ role: "assistant", content: [toAnthropicBedrockCompactionBlock(message)] }];
         }

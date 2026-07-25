@@ -2,14 +2,12 @@ import type { BetaTextBlockParam } from "@anthropic-ai/sdk/resources/beta/messag
 
 import type { SessionContext } from "@/core/SessionContext.js";
 
+// Session system messages stay in the conversation as positional reminders. Only the caller's
+// instructions belong here, so a mid-conversation notice cannot rewrite the cached prefix.
 export function toAnthropicBedrockSystem(options: {
     context: SessionContext;
 }): BetaTextBlockParam[] {
-    const systemMessages = options.context.messages
-        .filter((message) => message.role === "system")
-        .flatMap((message) => message.content)
-        .join("\n\n");
-    const text = [options.context.instructions, systemMessages].filter(Boolean).join("\n\n");
+    const text = options.context.instructions;
     if (text.length === 0) return [];
     return [
         {

@@ -90,9 +90,12 @@ session instructions and tools. To reproduce vanilla Grok 4.5, use
 `grok_4_5_system_prompt` and `grok_4_5_tools`, both exported by this package.
 
 `impl/toGrokResponseInput.ts` emits the root instructions as the first Responses `system`
-message. Additional Rig `system` messages remain separate `system` messages in their original
-order. User messages are forwarded as supplied. The vanilla prompt expects actual user queries
-inside `<user_query>` tags, so the outer runtime is responsible for that presentation.
+message. That is the only `system` message on the request. Grok has no system role once a
+conversation is under way, so each additional Rig `system` message becomes a user turn wrapped
+in `<system-reminder>`, in the position the caller chose, matching how vanilla Grok delivers
+project instructions and other out-of-band notices. User messages are forwarded as supplied.
+The vanilla prompt expects actual user queries inside `<user_query>` tags, so the outer runtime
+is responsible for that presentation.
 
 The prompt and every built-in tool definition are literal captured assets, formatted as normal
 TypeScript rather than embedded request JSON. `tests/vendors/generateGrokGoldenAssets.mjs`

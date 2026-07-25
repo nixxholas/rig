@@ -52,13 +52,15 @@ The complete model-specific runtime prompts live in `rig-execution`. The provide
 the already assembled instructions through `SessionContext`; prompt files in this package
 are test assets, not runtime prompt sources.
 
-`impl/toClaudeSdkOptions.ts` assembles the supplied prompt in this order:
-
-1. session instructions assembled by the executor;
-2. system messages from the session context.
-
-Skill metadata is ordinary caller-supplied prompt content and arrives through one of those two,
+`impl/toClaudeSdkOptions.ts` supplies the session instructions assembled by the executor, and
+nothing else. Skill metadata is ordinary caller-supplied prompt content that arrives that way,
 so the provider composes nothing of its own.
+
+Session `system` messages are not prompt content. Anthropic exposes no system role once a
+conversation is under way, so `impl/createClaudeSessionReplay.ts` projects each one onto a user
+turn wrapped in `<system-reminder>`, in the position the caller chose. This matches how Claude
+Code delivers out-of-band notices, and it keeps a mid-conversation notice from rewriting the
+cached prompt prefix.
 
 The SDK adds its own small SDK identity and billing blocks on the final Anthropic request.
 The Rig prompt remains a distinct complete system block; the provider golden fixture

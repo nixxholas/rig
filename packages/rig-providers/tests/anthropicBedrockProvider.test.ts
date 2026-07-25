@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { createServer, type IncomingMessage } from "node:http";
 
 import { APIError } from "@anthropic-ai/sdk/error";
+import type { BetaMessageParam } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 import { describe, expect, it } from "vitest";
 
 import { committedSessionEvents } from "@/core/committedSessionEvents.js";
@@ -600,10 +601,16 @@ describe("AnthropicBedrockProvider", () => {
         expect(capturedRequest?.system).toEqual([
             {
                 type: "text",
-                text: "assembled executor prompt\n\nconfigured system message",
+                text: "assembled executor prompt",
                 cache_control: { type: "ephemeral" },
             },
         ]);
+        // Anthropic has no conversational system role, so the notice keeps its position as a
+        // reminder instead of rewriting the cached prompt prefix.
+        expect((capturedRequest?.messages as BetaMessageParam[])[0]).toEqual({
+            role: "user",
+            content: "<system-reminder>\nconfigured system message\n</system-reminder>",
+        });
     });
 
     it("replays signed thinking, tool calls, tool results, and images without flattening", () => {

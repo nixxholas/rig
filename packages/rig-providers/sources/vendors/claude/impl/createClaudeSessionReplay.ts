@@ -14,10 +14,15 @@ import type {
     SessionInputContent,
     SessionMessage,
     SessionReasoning,
+    SessionSystemMessage,
     SessionTextContent,
     SessionToolResultMessage,
     SessionUserMessage,
 } from "@/core/SessionContext.js";
+import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
+
+/** A message Claude can replay, once system notices have been projected onto the user role. */
+type ReplayMessage = Exclude<SessionMessage, SessionSystemMessage>;
 
 export interface ClaudeSessionReplay {
     compactionSummary(): string | undefined;
@@ -33,9 +38,10 @@ export function createClaudeSessionReplay(options: {
     model: string;
     sessionId: string;
 }): ClaudeSessionReplay {
-    const splitIndex = findPromptStart(options.context.messages);
-    const history = options.context.messages.slice(0, splitIndex);
-    const promptMessages = options.context.messages.slice(splitIndex);
+    const messages = toReplayMessages(options.context.messages);
+    const splitIndex = findPromptStart(messages);
+    const history = messages.slice(0, splitIndex);
+    const promptMessages = messages.slice(splitIndex);
     const entries = toSessionStoreEntries(history, options);
     let compactionSummary: string | undefined;
     const sessionStore: SessionStore = {
@@ -44,8 +50,7 @@ export function createClaudeSessionReplay(options: {
             // second history authoritative. Native compaction is the one exception in what we
             // observe: its replacement summary is a result, not resumable session state.
             if (key.sessionId === options.sessionId) {
-                compactionSummary =
-                    findCompactionSummary(appendedEntries) ?? compactionSummary;
+                compactionSummary = findCompactionSummary(appendedEntries) ?? compactionSummary;
             }
             return Promise.resolve();
         },
@@ -64,7 +69,10 @@ export function createClaudeSessionReplay(options: {
     };
 }
 
-export function createClaudeLivePromptMessage(messages: readonly SessionMessage[]): SDKUserMessage {
+export function createClaudeLivePromptMessage(
+    sessionMessages: readonly SessionMessage[],
+): SDKUserMessage {
+    const messages = toReplayMessages(sessionMessages);
     let firstTrailingToolIndex = messages.length;
     while (firstTrailingToolIndex > 0 && messages[firstTrailingToolIndex - 1]?.role === "tool") {
         firstTrailingToolIndex -= 1;
@@ -76,13 +84,23 @@ export function createClaudeLivePromptMessage(messages: readonly SessionMessage[
     );
 }
 
-function findPromptStart(messages: readonly SessionMessage[]): number {
+/**
+ * Anthropic has no system role inside a conversation, so a session system message becomes a
+ * `<system-reminder>` user turn in the position the caller placed it.
+ */
+function toReplayMessages(messages: readonly SessionMessage[]): ReplayMessage[] {
+    return messages.map((message) =>
+        message.role === "system" ? toSessionReminderMessage(message) : message,
+    );
+}
+
+function findPromptStart(messages: readonly ReplayMessage[]): number {
     const lastIndex = Math.max(0, messages.length - 1);
     if (messages[lastIndex]?.role !== "tool") return lastIndex;
     return messages.length;
 }
 
-function toPromptMessage(messages: readonly SessionMessage[]): SDKUserMessage {
+function toPromptMessage(messages: readonly ReplayMessage[]): SDKUserMessage {
     const first = messages[0];
     if (first === undefined) {
         return toSdkUserMessage({
@@ -110,7 +128,7 @@ function toPromptMessage(messages: readonly SessionMessage[]): SDKUserMessage {
 }
 
 function toSessionStoreEntries(
-    messages: readonly SessionMessage[],
+    messages: readonly ReplayMessage[],
     options: { cwd: string; model: string; sessionId: string },
 ): SessionStoreEntry[] {
     let parentUuid: string | null = null;
@@ -118,7 +136,7 @@ function toSessionStoreEntries(
     const entries: SessionStoreEntry[] = [];
     for (let index = 0; index < messages.length; index += 1) {
         const message = messages[index];
-        if (message === undefined || message.role === "system") continue;
+        if (message === undefined) continue;
         if (message.role === "agent") {
             throw new Error("Encrypted Codex agent messages cannot be replayed by Claude.");
         }
@@ -239,7 +257,9 @@ function toSdkAssistantMessage(message: SessionAssistantMessage, model: string, 
     };
 }
 
-function toThinkingBlock(reasoning: SessionReasoning): (
+function toThinkingBlock(
+    reasoning: SessionReasoning,
+): (
     | { type: "thinking"; thinking: string; signature: string }
     | { type: "redacted_thinking"; data: string }
 )[] {
@@ -299,7 +319,11 @@ function stableMessageUuid(sessionId: string, message: SessionMessage, index: nu
     return stableUuid(sessionId, `${index}:${message.role}`);
 }
 
-function stableContentBlockUuid(sessionId: string, messageIndex: number, blockIndex: number): string {
+function stableContentBlockUuid(
+    sessionId: string,
+    messageIndex: number,
+    blockIndex: number,
+): string {
     return stableUuid(sessionId, `${messageIndex}:assistant:${blockIndex}`);
 }
 

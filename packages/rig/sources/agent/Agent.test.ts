@@ -424,9 +424,15 @@ describe("Agent", () => {
         expect(agent.status).toBe("idle");
         expect(agent.queue).toEqual([]);
         expect(agent.messages.map((message) => message.id)).toEqual(["id-2", "id-4", "id-7"]);
+        // Steering is a positional notice, so it reaches the model in the conversation rather
+        // than being folded into the prompt ahead of the turn it belongs to.
         expect(contexts[0]?.systemPrompt).toBe(
-            "Base instructions.\n\nKeep answers short.\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.",
+            "Base instructions.\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.",
         );
+        expect(contexts[0]?.messages[0]).toMatchObject({
+            role: "system",
+            content: "Keep answers short.",
+        });
         expect(logs.map((entry) => entry[0])).toEqual([
             "[system:id-2] Keep answers short.",
             "[user:id-4] Say done.",

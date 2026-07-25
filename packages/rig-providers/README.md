@@ -136,8 +136,12 @@ for await (const event of session.run({ context: { messages }, model, effort, ab
 ### Messages
 
 `SessionMessage` is a union covering `system`, `user`, `assistant`, `tool`, `agent`, and
-`compaction` roles. Two details matter for fidelity:
+`compaction` roles. Three details matter for fidelity:
 
+- **A `system` message is a positional notice, not prompt content.** Codex sends it natively as a
+  `developer` message. Claude, Bedrock, and Grok have no conversational system role, so they
+  project it onto a user turn wrapped in `<system-reminder>` at the same position. No provider
+  folds it into the system prompt, where it would rewrite the cached prefix.
 - **Multimodal content** goes in `input`, an ordered array of text and image parts. When present,
   providers use it instead of `content`.
 - **Opaque provider data** rides along in `vendor`, `responseItems`, and `encryptedReasoning`.

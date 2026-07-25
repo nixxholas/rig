@@ -3,7 +3,6 @@ import { createAvailableModelsInstructions } from "./createAvailableModelsInstru
 import { createPermissionInstructions } from "./createPermissionInstructions.js";
 import { loadSkillInstructions } from "./skills/loadSkillInstructions.js";
 import { formatSkillsForPrompt } from "./skills/formatSkillsForPrompt.js";
-import { systemMessageToText } from "./systemMessageToText.js";
 import type { AnyDefinedTool, Message } from "./types.js";
 import type { Model, Provider } from "@slopus/rig-execution";
 import { createSecretInstructions } from "../secrets/index.js";
@@ -34,11 +33,9 @@ export async function createSystemPrompt(
         parts.push(options.instructions);
     }
 
-    for (const message of options.messages) {
-        if (message.role === "system") {
-            parts.push(systemMessageToText(message));
-        }
-    }
+    // System messages are positional notices delivered in the conversation, so they are
+    // deliberately absent here. Folding one into the prompt would move it away from the turn it
+    // belongs to and rewrite the cached prefix on every notice.
 
     const skillInstructions = await loadSkillInstructions(
         options.context.fs,
