@@ -52,13 +52,14 @@ export async function reviewAutoPermission(options: {
                 return incompleteUserEvidenceReview(review.risk);
             }
             if (!shouldAllowAutoPermissionReview(review)) {
-                return { ...review, decision: "ask" };
+                return { ...review, decision: "deny", denialKind: "rejected" };
             }
         }
         return (
             review ?? {
-                decision: "ask",
-                reason: "The automatic permission review returned an invalid decision.",
+                decision: "deny",
+                denialKind: "rejected",
+                reason: "The automatic permission review returned an unreadable decision.",
                 risk: "medium",
                 userAuthorization: "low",
             }
@@ -86,7 +87,8 @@ function safeJson(value: unknown): string {
 
 function unavailableReview(): AutoPermissionReview {
     return {
-        decision: "ask",
+        decision: "deny",
+        denialKind: "unavailable",
         reason: "The automatic permission review could not make a reliable decision.",
         risk: "medium",
         userAuthorization: "low",
@@ -95,7 +97,8 @@ function unavailableReview(): AutoPermissionReview {
 
 function timedOutReview(): AutoPermissionReview {
     return {
-        decision: "ask",
+        decision: "deny",
+        denialKind: "timed_out",
         reason: "The automatic permission review ran out of time.",
         risk: "medium",
         userAuthorization: "low",
@@ -104,7 +107,8 @@ function timedOutReview(): AutoPermissionReview {
 
 function incompleteUserEvidenceReview(risk: AutoPermissionReview["risk"]): AutoPermissionReview {
     return {
-        decision: "ask",
+        decision: "deny",
+        denialKind: "rejected",
         reason: "The full user authorization history did not fit in the automatic review.",
         risk,
         userAuthorization: "low",

@@ -3387,14 +3387,12 @@ export class CodingAssistantApp implements Component, Focusable {
             }
             this.#statusText = "Working";
         } else if (event.type === "permission_review") {
-            if (event.decision === "ask") {
-                if (!this.#awaitingApprovalToolCallIds.has(event.toolCallId)) {
-                    this.#reviewingPermissionToolCallIds.add(event.toolCallId);
-                }
+            if (event.decision === "deny") {
+                this.#reviewingPermissionToolCallIds.delete(event.toolCallId);
                 this.#refreshToolActivityStatus();
                 const toolEntry = this.#entries.find((entry) => entry.id === event.toolCallId);
                 if (toolEntry !== undefined) {
-                    toolEntry.permissionReview = `Needs approval: ${event.reason} Risk: ${humanizePermissionReviewLevel(event.risk)}. User authorization: ${humanizePermissionReviewLevel(event.userAuthorization)}.`;
+                    toolEntry.permissionReview = `Refused: ${event.reason} Risk: ${humanizePermissionReviewLevel(event.risk)}. User authorization: ${humanizePermissionReviewLevel(event.userAuthorization)}.`;
                 }
             }
         } else if (event.type === "background_processes_changed") {

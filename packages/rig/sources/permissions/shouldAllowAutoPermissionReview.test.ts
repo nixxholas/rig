@@ -31,7 +31,7 @@ describe("shouldAllowAutoPermissionReview", () => {
     it("preserves an explicit ask decision", () => {
         expect(
             shouldAllowAutoPermissionReview({
-                decision: "ask",
+                decision: "deny",
                 reason: "Needs confirmation.",
                 risk: "low",
                 userAuthorization: "high",

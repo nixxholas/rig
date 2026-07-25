@@ -3,8 +3,9 @@ export { INVALID_PERMISSION_MODE_MESSAGE } from "./invalidPermissionModeMessage.
 export { isPermissionMode } from "./isPermissionMode.js";
 export { isPermissionReduction } from "./isPermissionReduction.js";
 export { parsePermissionMode } from "./parsePermissionMode.js";
-export { requestAutoPermissionApproval } from "./requestAutoPermissionApproval.js";
 export { reviewAutoPermission } from "./reviewAutoPermission.js";
+export { describeAutoPermissionDenial } from "./describeAutoPermissionDenial.js";
+export { AutoPermissionDenialCircuitBreaker } from "./AutoPermissionDenialCircuitBreaker.js";
 export type {
     PermissionReviewAgent,
     PermissionReviewRequest,
@@ -15,6 +16,7 @@ export { DEFAULT_PERMISSION_MODE } from "./PermissionMode.js";
 export type { PermissionContext } from "./PermissionContext.js";
 export type { PermissionMode } from "./PermissionMode.js";
 export type {
+    AutoPermissionDenialKind,
     AutoPermissionReview,
     AutoPermissionRisk,
     AutoPermissionUserAuthorization,

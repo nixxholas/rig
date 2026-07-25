@@ -51,7 +51,7 @@ describe("parseAutoPermissionReview", () => {
         ).toBeUndefined();
         expect(
             parseAutoPermissionReview(
-                '{"decision":"deny","risk":"high","user_authorization":"low","reason":"Not supported."}',
+                '{"decision":"escalate","risk":"high","user_authorization":"low","reason":"Not supported."}',
             ),
         ).toBeUndefined();
     });

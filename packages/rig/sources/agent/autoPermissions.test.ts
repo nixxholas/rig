@@ -223,7 +223,7 @@ describe("Auto permissions", () => {
         await agent.close();
     });
 
-    it("asks the user when Auto has no review side agent at all", async () => {
+    it("refuses the action when Auto has no review side agent at all", async () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");
         const observedModes: string[] = [];
@@ -244,7 +244,7 @@ describe("Auto permissions", () => {
             },
         });
 
-        expect(reviews).toEqual(["ask"]);
+        expect(reviews).toEqual(["deny"]);
         expect(observedModes).toEqual([]);
         await agent.close();
     });
@@ -428,12 +428,12 @@ describe("Auto permissions", () => {
         });
     });
 
-    it("asks the user for uncertain actions and honors a denial", async () => {
+    it("returns a refusal to the agent instead of interrupting the user", async () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");
         const observedModes: string[] = [];
         const tool = permissionProbeTool(observedModes);
-        const provider = autoReviewProvider("ask");
+        const provider = autoReviewProvider("deny");
         const request = vi.fn<UserInputContext["request"]>(async () => ({
             answers: { permission: ["Deny"] },
         }));
@@ -450,12 +450,8 @@ describe("Auto permissions", () => {
         await agent.send("Check whether deployment is possible.");
 
         expect(observedModes).toEqual([]);
-        expect(request).toHaveBeenCalledOnce();
-        const permissionRequest = request.mock.calls[0]?.[0];
-        expect(permissionRequest).toMatchObject({
-            requestId: "tool-call-1:permission",
-            questions: [{ header: "Permission", id: "permission" }],
-        });
+        // Auto decides on the user's behalf, so a refusal must never become a question.
+        expect(request).not.toHaveBeenCalled();
         const resultMessage = agent.messages.findLast(
             (message) =>
                 message.role === "agent" &&
@@ -467,12 +463,15 @@ describe("Auto permissions", () => {
                     isError: true,
                     rendered: [
                         expect.objectContaining({
-                            text: expect.stringContaining("Auto mode did not approve"),
+                            text: expect.stringContaining(
+                                "Do not pursue the same outcome by another route",
+                            ),
                         }),
                     ],
                 }),
             ]),
         );
+        await agent.close();
     });
 
     it("stores only the selected values as trusted evidence from a real input tool", async () => {
@@ -662,7 +661,7 @@ function reviewAgentFor(provider: Provider, tools: readonly AnyDefinedTool[] = [
 }
 
 function autoReviewProvider(
-    decision: "allow" | "ask",
+    decision: "allow" | "deny",
     toolCall: { arguments: Record<string, unknown>; name: string } = {
         arguments: {
             target: "production",
@@ -730,7 +729,7 @@ function autoReviewProvider(
     });
 }
 
-function reviewerOnlyProvider(decision: "allow" | "ask", calls: string[], close: () => void) {
+function reviewerOnlyProvider(decision: "allow" | "deny", calls: string[], close: () => void) {
     const model = defineModel({
         id: "openai/gpt-test",
         name: "GPT Test",

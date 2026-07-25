@@ -149,7 +149,6 @@ import {
 import type { AgentMessage, ToolResultBlock } from "../agent/types.js";
 import { createErrorToolResultBlock } from "../agent/createErrorToolResultBlock.js";
 import { createToolResultBlock } from "../agent/createToolResultBlock.js";
-import { executePreapprovedToolCall } from "../agent/executePreapprovedToolCall.js";
 import { createModelSwitchHistoryMessage } from "../agent/createModelSwitchHistoryMessage.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
 import { createDurableSkillTool, type DurableSkillDefinition } from "../external-skills/index.js";
@@ -2743,7 +2742,6 @@ export class InMemorySession {
         if (runId === undefined || !this.hasDurableToolRun()) return;
         this.#reconcileExternalToolConsumption(runId);
         this.#reconcileDurableUserInputConsumption(runId);
-        this.#reconcilePermissionExternalHandoffs(runId);
         while (true) {
             const call = [...this.#durableUserInputs.values()].find(
                 (candidate) =>
@@ -2908,33 +2906,10 @@ export class InMemorySession {
             toolCallIndex: request.toolCallIndex,
             ...(skill === undefined ? {} : { skill: { ...skill } }),
         };
-        const permissionCall = [...this.#durableUserInputs.values()].find(
-            (userInput) =>
-                userInput.runId === runId &&
-                userInput.toolCallId === request.toolCallId &&
-                userInput.kind === "permission" &&
-                !userInput.consumed,
-        );
-        if (permissionCall !== undefined) {
-            permissionCall.consumed = true;
-            permissionCall.status = "completed";
-        }
         if (existing === undefined) {
             this.#externalToolCalls.set(call.id, call);
-            if (
-                permissionCall !== undefined &&
-                this.#persistence?.handoffDurablePermissionToExternalTool !== undefined
-            ) {
-                this.#persistence.handoffDurablePermissionToExternalTool(call, permissionCall);
-            } else {
-                this.#persistence?.upsertExternalToolCall?.(call);
-                if (permissionCall !== undefined) {
-                    this.#persistence?.upsertDurableUserInput?.(permissionCall);
-                }
-            }
+            this.#persistence?.upsertExternalToolCall?.(call);
             this.#append("external_tool_call_requested", { call: cloneExternalToolCall(call) });
-        } else if (permissionCall !== undefined) {
-            this.#persistence?.upsertDurableUserInput?.(permissionCall);
         }
         this.#pruneDurableUserInputs();
         return new Promise<ExternalToolCallResolution>((resolve, reject) => {
@@ -3015,75 +2990,20 @@ export class InMemorySession {
     async #resumeAnsweredDurableUserInput(call: DurableUserInputCall): Promise<void> {
         const response = call.response;
         if (response === undefined || call.status !== "answered") return;
-        if (call.kind === "question") {
-            const runtime = this.#ensureRuntime();
-            const tool = runtime.agent.tools.find((candidate) => candidate.name === call.toolName);
-            if (tool?.resolveUserInput === undefined) {
-                call.result = createErrorToolResultBlock(
-                    { id: call.toolCallId, name: call.toolName },
-                    `Tool '${call.toolName}' cannot restore its durable user answer.`,
-                    { kind: "execution_failed" },
-                );
-            } else {
-                const result = tool.resolveUserInput(response, call.toolArguments as never);
-                call.result = createToolResultBlock(
-                    tool,
-                    call.toolArguments,
-                    result,
-                    call.toolCallId,
-                );
-            }
-            call.status = "completed";
-            this.#persistence?.upsertDurableUserInput?.(call);
-            return;
-        }
-
-        const permission = call.permission;
-        if (permission === undefined) {
-            throw new Error("A durable permission request has no permission context.");
-        }
-        const approved = response.answers.permission?.includes("Allow once") ?? false;
-        if (!approved) {
+        const runtime = this.#ensureRuntime();
+        const tool = runtime.agent.tools.find((candidate) => candidate.name === call.toolName);
+        if (tool?.resolveUserInput === undefined) {
             call.result = createErrorToolResultBlock(
                 { id: call.toolCallId, name: call.toolName },
-                `Auto mode did not approve ${permission.action}. Reason: ${permission.reason}`,
+                `Tool '${call.toolName}' cannot restore its durable user answer.`,
+                { kind: "execution_failed" },
             );
-            call.status = "completed";
-            this.#persistence?.upsertDurableUserInput?.(call);
-            return;
+        } else {
+            const result = tool.resolveUserInput(response, call.toolArguments as never);
+            call.result = createToolResultBlock(tool, call.toolArguments, result, call.toolCallId);
         }
-
-        const runId = this.#restoredActiveRunId;
-        if (runId === undefined) return;
-        const controller = new AbortController();
-        this.#activeRun = { controller, debug: false, kind: "user", runId };
-        this.#status = "running";
-        const runtime = this.#ensureRuntime();
-        try {
-            call.result = await executePreapprovedToolCall({
-                batchId: call.batchId,
-                context: runtime.context,
-                messages: this.#committedMessages(),
-                onBeforeExecute: () => {
-                    call.status = "executing";
-                    this.#persistence?.upsertDurableUserInput?.(call);
-                },
-                signal: controller.signal,
-                toolCall: {
-                    arguments: call.toolArguments,
-                    id: call.toolCallId,
-                    index: call.toolCallIndex,
-                    name: call.toolName,
-                },
-                tools: runtime.agent.tools,
-            });
-            if ((call as DurableUserInputCall).status === "cancelled") return;
-            call.status = "completed";
-            call.resolvedAt = this.#now();
-            this.#persistence?.upsertDurableUserInput?.(call);
-        } finally {
-            if (this.#activeRun?.runId === runId) this.#activeRun = undefined;
-        }
+        call.status = "completed";
+        this.#persistence?.upsertDurableUserInput?.(call);
     }
 
     #reconcileDurableUserInputConsumption(runId: string): void {
@@ -3105,28 +3025,6 @@ export class InMemorySession {
                 continue;
             }
             call.consumed = true;
-            this.#persistence?.upsertDurableUserInput?.(call);
-        }
-        this.#pruneDurableUserInputs();
-    }
-
-    #reconcilePermissionExternalHandoffs(runId: string): void {
-        const externalToolCallIds = new Set(
-            [...this.#externalToolCalls.values()]
-                .filter((call) => call.runId === runId && call.status !== "cancelled")
-                .map((call) => call.toolCallId),
-        );
-        for (const call of this.#durableUserInputs.values()) {
-            if (
-                call.runId !== runId ||
-                call.kind !== "permission" ||
-                call.consumed ||
-                !externalToolCallIds.has(call.toolCallId)
-            ) {
-                continue;
-            }
-            call.consumed = true;
-            call.status = "completed";
             this.#persistence?.upsertDurableUserInput?.(call);
         }
         this.#pruneDurableUserInputs();

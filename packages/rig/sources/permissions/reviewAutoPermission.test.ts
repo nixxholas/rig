@@ -90,7 +90,8 @@ describe("reviewAutoPermission", () => {
                     toolName: "exec_command",
                 }),
             ).resolves.toEqual({
-                decision: "ask",
+                decision: "deny",
+                denialKind: "rejected",
                 reason: "The full user authorization history did not fit in the automatic review.",
                 risk,
                 userAuthorization: "low",
@@ -141,7 +142,8 @@ describe("reviewAutoPermission", () => {
                 toolName: "WebFetch",
             }),
         ).resolves.toEqual({
-            decision: "ask",
+            decision: "deny",
+            denialKind: "timed_out",
             reason: "The automatic permission review ran out of time.",
             risk: "medium",
             userAuthorization: "low",
@@ -163,7 +165,8 @@ describe("reviewAutoPermission", () => {
                 toolName: "WebFetch",
             }),
         ).resolves.toEqual({
-            decision: "ask",
+            decision: "deny",
+            denialKind: "unavailable",
             reason: "The automatic permission review could not make a reliable decision.",
             risk: "medium",
             userAuthorization: "low",
@@ -194,7 +197,7 @@ describe("reviewAutoPermission", () => {
 
 function stubReviewer(
     result: {
-        decision: "allow" | "ask";
+        decision: "allow" | "deny";
         reason: string;
         risk: "low" | "medium" | "high";
         userAuthorization: "low" | "medium" | "high";

@@ -50,8 +50,10 @@ import type {
 } from "@slopus/rig-execution";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import {
-    requestAutoPermissionApproval,
+    AutoPermissionDenialCircuitBreaker,
+    describeAutoPermissionDenial,
     reviewAutoPermission,
+    type AutoPermissionReview,
     type AutoPermissionRisk,
     type AutoPermissionUserAuthorization,
     type PermissionReviewAgent,
@@ -172,11 +174,15 @@ export type AgentLoopEvent =
     | {
           type: "permission_review";
           action: string;
-          decision: "allow" | "ask";
+          decision: "allow" | "deny";
           reason: string;
           risk: AutoPermissionRisk;
           toolCallId: string;
           userAuthorization: AutoPermissionUserAuthorization;
+      }
+    | {
+          type: "permission_denial_limit_reached";
+          reason: string;
       }
     | {
           type: "background_processes_changed";
@@ -194,13 +200,7 @@ type PreparedToolPermission =
     | {
           action: string;
           kind: "review";
-          review: {
-              approvedByUser?: true;
-              decision: "allow" | "ask";
-              reason: string;
-              risk: AutoPermissionRisk;
-              userAuthorization: AutoPermissionUserAuthorization;
-          };
+          review: AutoPermissionReview;
       };
 
 export interface AgentLoopResult {
@@ -255,6 +255,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             providerPrompt,
         });
 
+    const permissionDenials = new AutoPermissionDenialCircuitBreaker();
     let iteration = 0;
     let contextOverflowRecoveryAttempted = false;
     for (;;) {
@@ -583,6 +584,18 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             return interrupted;
         }
         const preparedPermissions = new Map(preparedPermissionEntries);
+        // Auto never interrupts the user, so a turn that keeps being refused has to stop itself.
+        let permissionDenialLimitReached = false;
+        for (const [, prepared] of preparedPermissionEntries) {
+            if (prepared.kind !== "review") continue;
+            if (prepared.review.decision === "allow") {
+                permissionDenials.recordAllowed();
+                continue;
+            }
+            permissionDenialLimitReached = permissionDenials.recordDenial()
+                ? true
+                : permissionDenialLimitReached;
+        }
         const executeToolCalls = (calls: readonly ProviderToolCall[]) =>
             Promise.all(
                 calls.map(async (toolCall) => {
@@ -607,17 +620,9 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                             }),
                         );
                         if (options.signal?.aborted) return interrupted();
-                        const toolCallIndex = toolCalls.indexOf(toolCall);
-                        const preparedPermission = await resolvePermissionPrompt(
-                            toolCall,
-                            preparedPermissions.get(toolCall.id) ?? { kind: "skip" },
-                            toolContext,
-                            {
-                                batchId: agentMessage.id,
-                                toolCallIndex,
-                                ...(options.signal === undefined ? {} : { signal: options.signal }),
-                            },
-                        );
+                        const preparedPermission = preparedPermissions.get(toolCall.id) ?? {
+                            kind: "skip" as const,
+                        };
                         return toolLocks.run(
                             resolveToolLockKeys(toolCall, toolsByName),
                             async () => {
@@ -638,7 +643,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                         messages: transcript,
                                         model,
                                         now,
-                                        toolCallIndex,
+                                        toolCallIndex: toolCalls.indexOf(toolCall),
                                         onProgress: (display) => {
                                             if (options.signal?.aborted) return;
                                             void ignoreOptionalFailure(() =>
@@ -734,14 +739,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 }),
             );
         const immediateCalls = toolCalls.filter(
-            (toolCall) =>
-                resolveTool(toolCall, toolsByName)?.execution !== "durable" &&
-                !isPermissionPrompt(preparedPermissions.get(toolCall.id)),
+            (toolCall) => resolveTool(toolCall, toolsByName)?.execution !== "durable",
         );
         const durableCalls = toolCalls.filter(
-            (toolCall) =>
-                resolveTool(toolCall, toolsByName)?.execution === "durable" ||
-                isPermissionPrompt(preparedPermissions.get(toolCall.id)),
+            (toolCall) => resolveTool(toolCall, toolsByName)?.execution === "durable",
         );
 
         // Durable calls are an execution barrier. Finish and persist every immediate
@@ -774,6 +775,26 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 messages: transcript,
                 contextMessages: contextTranscript,
                 stopReason: "aborted",
+            };
+        }
+        if (permissionDenialLimitReached) {
+            const reason = permissionDenials.describeStop();
+            await ignoreOptionalFailure(() =>
+                options.onEvent?.({ type: "permission_denial_limit_reached", reason }),
+            );
+            const stopMessage: AgentMessage = {
+                role: "agent",
+                id: idFactory(),
+                blocks: [{ type: "text", text: reason }],
+            };
+            transcript.push(stopMessage);
+            contextTranscript.push(stopMessage);
+            await options.onMessage?.(stopMessage);
+            await appendSteering(options, transcript, contextTranscript, providerMessages, now);
+            return {
+                messages: transcript,
+                contextMessages: contextTranscript,
+                stopReason: "stop",
             };
         }
         await compactCurrentContext({
@@ -1108,49 +1129,6 @@ function toProviderToolResultMessage(
     };
 }
 
-function isPermissionPrompt(prepared: PreparedToolPermission | undefined): boolean {
-    return prepared?.kind === "review" && prepared.review.decision === "ask";
-}
-
-async function resolvePermissionPrompt(
-    toolCall: ProviderToolCall,
-    prepared: PreparedToolPermission,
-    context: AgentContext,
-    options: {
-        batchId: string;
-        durable?: boolean;
-        signal?: AbortSignal;
-        toolCallIndex: number;
-    },
-): Promise<PreparedToolPermission> {
-    if (!isPermissionPrompt(prepared) || prepared.kind !== "review") return prepared;
-    const approved = await requestAutoPermissionApproval({
-        action: prepared.action,
-        batchId: options.batchId,
-        ...(options.durable === undefined ? {} : { durable: options.durable }),
-        reason: prepared.review.reason,
-        ...(options.signal === undefined ? {} : { signal: options.signal }),
-        toolArguments: toolCall.arguments,
-        toolCallId: toolCall.id,
-        toolCallIndex: options.toolCallIndex,
-        toolName: toolCall.name,
-        userInput: context.userInput,
-    });
-    if (!approved) {
-        return {
-            kind: "error",
-            result: createErrorToolResultBlock(
-                toolCall,
-                `Auto mode did not approve ${prepared.action}. Reason: ${prepared.review.reason}`,
-            ),
-        };
-    }
-    return {
-        ...prepared,
-        review: { ...prepared.review, approvedByUser: true, decision: "allow" },
-    };
-}
-
 async function prepareToolPermission(
     toolCall: ProviderToolCall,
     toolsByName: ReadonlyMap<string, AnyDefinedTool>,
@@ -1159,7 +1137,7 @@ async function prepareToolPermission(
         messages: readonly Message[];
         onPermissionReview?: (review: {
             action: string;
-            decision: "allow" | "ask";
+            decision: "allow" | "deny";
             reason: string;
             risk: AutoPermissionRisk;
             userAuthorization: AutoPermissionUserAuthorization;
@@ -1187,7 +1165,8 @@ async function prepareToolPermission(
                 tool.describeAutoPermissionAction?.(toolCall.arguments as never, context) ??
                 `running ${tool.name}`;
             const review = {
-                decision: "ask",
+                decision: "deny",
+                denialKind: "unavailable",
                 reason: "No automatic permission reviewer is available for this session.",
                 risk: "medium",
                 userAuthorization: "low",
@@ -1246,14 +1225,13 @@ async function executeToolCall(
         onStatus?: (status: string) => void;
         onPermissionReview?: (review: {
             action: string;
-            decision: "allow" | "ask";
+            decision: "allow" | "deny";
             reason: string;
             risk: AutoPermissionRisk;
             userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
         onError?: (error: unknown) => void | Promise<void>;
         onRawResult?: (result: unknown) => void | Promise<void>;
-        markPermissionExecuting?: boolean;
         preparedPermission: PreparedToolPermission;
         provider: Provider;
         signal?: AbortSignal;
@@ -1300,11 +1278,10 @@ async function executeToolCall(
         let runWithFullAccess = false;
         if (options.preparedPermission.kind === "review") {
             const { review } = options.preparedPermission;
-            if (review.decision === "ask") {
+            if (review.decision === "deny") {
                 return createErrorToolResultBlock(
                     toolCall,
-                    `Tool '${tool.name}' could not resolve its Auto approval before execution.`,
-                    { kind: "execution_failed" },
+                    describeAutoPermissionDenial(options.preparedPermission.action, review),
                 );
             }
             runWithFullAccess = await tool.shouldRunInFullAccessInAutoMode(
@@ -1361,13 +1338,6 @@ async function executeToolCall(
                 );
             }
             runWithFullAccess = false;
-        }
-        if (
-            options.markPermissionExecuting !== false &&
-            options.preparedPermission.kind === "review" &&
-            options.preparedPermission.review.approvedByUser
-        ) {
-            context.userInput?.markExecuting?.(`${toolCall.id}:permission`);
         }
         const result =
             runWithFullAccess && context.permissions !== undefined

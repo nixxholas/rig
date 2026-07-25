@@ -6472,7 +6472,7 @@ describe("CodingAssistantApp", () => {
             data: {
                 event: {
                     action: "Close ticket 42",
-                    decision: "ask",
+                    decision: "deny",
                     reason: "This changes external issue state.",
                     risk: "medium",
                     toolCallId: "mcp-pending",
@@ -6486,47 +6486,39 @@ describe("CodingAssistantApp", () => {
             type: "agent_event",
         });
         const reviewedOnly = stripAnsi(app.render(120).join("\n"));
-        expect(reviewedOnly).toContain("Needs approval: This changes external issue state.");
-        expect(reviewedOnly).toContain("Reviewing permissions");
+        expect(reviewedOnly).toContain("Refused: This changes external issue state.");
+        // Auto decides on the user's behalf, so a refusal never turns into a question.
+        expect(reviewedOnly).not.toContain("Reviewing permissions");
         expect(reviewedOnly).not.toContain("Waiting for approval");
-        app.applySessionEvent({
-            createdAt: 3,
-            data: {
-                requestId: "mcp-pending:permission",
-                questions: [
-                    {
-                        header: "Permission",
-                        id: "permission",
-                        multiSelect: false,
-                        options: [
-                            {
-                                label: "Allow once",
-                                description: "Permit closing this ticket once.",
-                            },
-                            {
-                                label: "Deny",
-                                description: "Reject this tool call.",
-                            },
-                        ],
-                        question: "Allow closing ticket 42?",
-                    },
-                ],
-            },
-            id: "mcp-user-input",
-            sessionId: "session-1",
-            type: "user_input_requested",
-        });
         app.applySessionEvent({
             createdAt: 4,
             data: {
                 event: {
-                    display: "Waiting for approval",
+                    display: "Closing the ticket",
                     toolCallId: "mcp-pending",
                     type: "tool_execution_progress",
                 },
                 runId: "run-1",
             },
             id: "mcp-progress",
+            sessionId: "session-1",
+            type: "agent_event",
+        });
+        app.applySessionEvent({
+            createdAt: 5,
+            data: {
+                event: {
+                    toolCall: {
+                        arguments: { issue: 42 },
+                        id: "mcp-pending",
+                        name: "mcp__issues__close_ticket",
+                        type: "toolCall",
+                    },
+                    type: "tool_execution_start",
+                },
+                runId: "run-1",
+            },
+            id: "mcp-start",
             sessionId: "session-1",
             type: "agent_event",
         });
@@ -6543,15 +6535,14 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("    Try again later.");
         expect(rendered).not.toContain("Failed search.find_docs");
         expect(rendered).toContain('◦ Calling issues.close_ticket({"issue":42})');
-        expect(rendered).toContain("Needs approval: This changes external issue state.");
+        expect(rendered).toContain("Refused: This changes external issue state.");
         expect(rendered).toContain("Risk: Medium. User authorization: Low.");
         expect(rendered).not.toContain("Risk: medium");
-        expect(rendered).toContain("Waiting for approval");
         expect(raw).toContain("\x1b[36mnode_repl");
         expect(raw).toContain("\x1b[31m\x1b[1m•");
 
         app.applySessionEvent({
-            createdAt: 5,
+            createdAt: 6,
             data: {
                 errorMessage: "The daemon restarted during the tool call.",
                 modelLocked: false,
