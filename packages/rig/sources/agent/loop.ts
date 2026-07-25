@@ -64,6 +64,8 @@ import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
 import { toExecutorTool } from "./tools/toExecutorTool.js";
 
 export interface RunAgentLoopOptions {
+    /** Allows a dedicated permission reviewer to use the provider's hidden reviewer model. */
+    allowReviewerModel?: boolean;
     appendSystemPrompt?: string;
     systemPrompt?: string;
     debug?: DebugLog;
@@ -217,7 +219,7 @@ export type AgentLoopResult =
     | (AgentLoopOutcome & { errorMessage?: never; stopReason: Exclude<StopReason, "error"> });
 
 export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentLoopResult> {
-    const model = findModel(options.provider, options.modelId);
+    const model = findModel(options.provider, options.modelId, options.allowReviewerModel === true);
     const idFactory = options.idFactory ?? createId;
     const now = options.now ?? Date.now;
     const startDate = options.startDate ?? toLocalDate(now());
@@ -930,8 +932,12 @@ async function appendInterruptedToolResults(options: {
     };
 }
 
-function findModel(provider: Provider, modelId: string): Model {
-    const model = provider.models.find((candidate) => candidate.id === modelId);
+function findModel(provider: Provider, modelId: string, allowReviewerModel: boolean): Model {
+    const model =
+        provider.models.find((candidate) => candidate.id === modelId) ??
+        (allowReviewerModel && provider.reviewerModel?.id === modelId
+            ? provider.reviewerModel
+            : undefined);
     if (!model) {
         throw new Error(`Unknown model '${modelId}' for provider '${provider.id}'`);
     }

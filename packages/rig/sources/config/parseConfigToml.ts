@@ -104,6 +104,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         assertKnownKeys(settingsTable, "settings", [
             "compact_completed_turns",
             "completion_chime",
+            "daemon_heap_snapshots",
             "durable_global_event_queue",
             "happy_integration",
             "show_reasoning",
@@ -123,6 +124,14 @@ export function parseConfigToml(source: string): PartialRigConfig {
             "settings.completion_chime",
         );
         if (completionChime !== undefined) settings.completionChime = completionChime;
+        const daemonHeapSnapshots = readBoolean(
+            settingsTable,
+            "daemon_heap_snapshots",
+            "settings.daemon_heap_snapshots",
+        );
+        if (daemonHeapSnapshots !== undefined) {
+            settings.daemonHeapSnapshots = daemonHeapSnapshots;
+        }
         const durableGlobalEventQueue = readBoolean(
             settingsTable,
             "durable_global_event_queue",

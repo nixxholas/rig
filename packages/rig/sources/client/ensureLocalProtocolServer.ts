@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 
 import {
     getEnvironmentLocalServerPaths,
+    prepareDaemonDiagnostics,
     prepareLocalServerDirectory,
     readLocalServerToken,
     removeStaleSocket,
@@ -118,18 +119,31 @@ async function spawnLocalServer(paths: LocalServerPaths): Promise<void> {
     }
 
     await rotateDaemonLog(paths.logPath).catch(() => undefined);
+    const daemonSettings = await loadDaemonSettings();
     const log = await open(paths.logPath, "a", 0o600);
     try {
         await log.chmod(0o600);
-        const child = spawn(process.execPath, [...process.execArgv, entrypoint, "--server"], {
-            detached: true,
-            env: {
-                ...process.env,
-                RIG_SERVER_SOCKET_PATH: paths.socketPath,
-                RIG_SERVER_TOKEN_PATH: paths.tokenPath,
-            },
-            stdio: ["ignore", log.fd, log.fd],
+        const diagnosticArguments = await prepareDaemonDiagnostics({
+            heapSnapshots: daemonSettings.daemonHeapSnapshots,
+            path: paths.diagnosticsPath,
+        }).catch(async (error: unknown) => {
+            const message = error instanceof Error ? error.message : String(error);
+            await log.write(`[daemon diagnostics unavailable] ${message}\n`).catch(() => undefined);
+            return [];
         });
+        const child = spawn(
+            process.execPath,
+            [...process.execArgv, ...diagnosticArguments, entrypoint, "--server"],
+            {
+                detached: true,
+                env: {
+                    ...process.env,
+                    RIG_SERVER_SOCKET_PATH: paths.socketPath,
+                    RIG_SERVER_TOKEN_PATH: paths.tokenPath,
+                },
+                stdio: ["ignore", log.fd, log.fd],
+            },
+        );
         child.unref();
     } finally {
         await log.close();

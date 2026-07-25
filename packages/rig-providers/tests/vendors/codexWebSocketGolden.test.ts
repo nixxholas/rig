@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 
+import { WebSocketError } from "openai/resources/responses/internal-base";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const websocket = vi.hoisted(() => ({
@@ -12,6 +13,7 @@ const websocket = vi.hoisted(() => ({
     failToolCallMidstreamOnce: false,
     failTerminalOnce: false,
     holdWarmupOpenOnce: false,
+    internalErrorFailures: 0,
     missingPreviousResponseFailures: 0,
     endMidstreamOnce: false,
     emitTextResponses: false,
@@ -73,9 +75,9 @@ vi.mock("openai/resources/responses/ws", () => ({
             if (websocket.closeBeforeSendOnce) {
                 websocket.closeBeforeSendOnce = false;
                 this.socket.readyState = 3;
-                const error = Object.assign(new Error("cannot send on a closed WebSocket"), {
-                    name: "WebSocketError",
-                });
+                const error = new (class WebSocketError extends Error {})(
+                    "cannot send on a closed WebSocket",
+                );
                 if (this.errorListeners.size === 0) {
                     throw new Error("Mock SDK would create an unhandled WebSocket rejection.");
                 }
@@ -124,6 +126,24 @@ vi.mock("openai/resources/responses/ws", () => ({
                 this.messages.push({
                     type: "error",
                     error: new Error("socket disconnected"),
+                });
+                return;
+            }
+            if (websocket.internalErrorFailures > 0 && request.generate !== false) {
+                websocket.internalErrorFailures -= 1;
+                const event = {
+                    type: "error",
+                    error: {
+                        type: "internal_error",
+                        code: "internal_error",
+                        message: "Internal server error",
+                        param: null,
+                    },
+                    sequence_number: 285,
+                };
+                this.messages.push({
+                    type: "error",
+                    error: new WebSocketError(JSON.stringify(event), event as never),
                 });
                 return;
             }
@@ -420,6 +440,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.failToolCallMidstreamOnce = false;
         websocket.failTerminalOnce = false;
         websocket.holdWarmupOpenOnce = false;
+        websocket.internalErrorFailures = 0;
         websocket.missingPreviousResponseFailures = 0;
         websocket.endMidstreamOnce = false;
         websocket.emitTextResponses = false;
@@ -711,6 +732,45 @@ describe("Codex CLI mode WebSocket goldens", () => {
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
         expect(websocket.connectionHeaders).toHaveLength(2);
         expect(websocket.sent).toHaveLength(2);
+        session.destroy();
+    });
+
+    it("retries a nested Codex internal server error with a human-readable notification", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                { instructions: prompt.instructions, messages: [] },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        websocket.internalErrorFailures = 1;
+
+        const events = [];
+        for await (const event of session.run({
+            context: { messages: [{ role: "user", content: "first" }] },
+            effort: "low",
+        })) {
+            events.push(event);
+        }
+
+        expect(blockLifecycle(events)).toEqual([
+            "block_start",
+            "block_reset",
+            "retrying",
+            "block_start",
+            "block_stop",
+            "done",
+        ]);
+        expect(events).toContainEqual({
+            type: "retrying",
+            attempt: 1,
+            reason: "Stream disconnected; reconnecting: Internal server error",
+        });
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(websocket.connectionHeaders).toHaveLength(2);
+        expect(websocket.sent).toHaveLength(3);
         session.destroy();
     });
 
@@ -1782,6 +1842,34 @@ describe("Codex CLI mode WebSocket goldens", () => {
         expect(events.filter((event) => event.type === "retrying")).toHaveLength(1);
         expect(sse.requests).toHaveLength(1);
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        session.destroy();
+    });
+
+    it("stops when the turn is aborted as it announces the SSE fallback", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        websocket.unavailableOnce = true;
+        const controller = new AbortController();
+        const session = await codexProvider("auto", 0).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                { instructions: prompt.instructions, messages: [] },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        const events = [];
+        for await (const event of session.run({
+            abort: controller.signal,
+            context: { messages: [{ role: "user", content: "fallback" }] },
+            effort: "low",
+        })) {
+            events.push(event);
+            if (event.type === "retrying") controller.abort();
+        }
+
+        expect(events.at(-1)).toEqual({ type: "done", state: "cancelled" });
+        expect(sse.requests).toHaveLength(0);
+        expect(blockLifecycle(events)).toEqual(["block_start", "block_reset", "retrying", "done"]);
         session.destroy();
     });
 });

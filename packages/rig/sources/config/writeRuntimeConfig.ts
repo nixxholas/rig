@@ -23,6 +23,7 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
         settings?: {
             compact_completed_turns?: boolean;
             completion_chime?: boolean;
+            daemon_heap_snapshots?: boolean;
             durable_global_event_queue?: boolean;
             happy_integration?: boolean;
             show_reasoning?: boolean;
@@ -60,6 +61,9 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
         }
         if (settings.completionChime !== undefined) {
             document.settings.completion_chime = settings.completionChime;
+        }
+        if (settings.daemonHeapSnapshots !== undefined) {
+            document.settings.daemon_heap_snapshots = settings.daemonHeapSnapshots;
         }
         if (settings.durableGlobalEventQueue !== undefined) {
             document.settings.durable_global_event_queue = settings.durableGlobalEventQueue;

@@ -50,6 +50,9 @@ export function mergeConfigValues(
         if (config.settings?.completionChime !== undefined) {
             settings.completionChime = config.settings.completionChime;
         }
+        if (config.settings?.daemonHeapSnapshots !== undefined) {
+            settings.daemonHeapSnapshots = config.settings.daemonHeapSnapshots;
+        }
         if (config.settings?.durableGlobalEventQueue !== undefined) {
             settings.durableGlobalEventQueue = config.settings.durableGlobalEventQueue;
         }

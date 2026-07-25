@@ -2,12 +2,16 @@ import { chmod, mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { WebSocketError } from "openai/resources/responses/internal-base";
 import { describe, expect, it } from "vitest";
 
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 import { formatCodexUserAgent } from "@/vendors/codex/impl/codexUserAgent.js";
+import { classifyCodexError } from "@/vendors/codex/errors/codexErrors.js";
+import { codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
+import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { resolveCodexInstallationId } from "@/vendors/codex/impl/resolveCodexInstallationId.js";
 import { resolveCodexInstallationIdAt } from "@/vendors/codex/impl/resolveCodexInstallationIdAt.js";
@@ -69,6 +73,104 @@ describe("Codex stream retries", () => {
         new Error("socket disconnected"),
     ])("recognizes retryable transport errors", (error) => {
         expect(isRetryableCodexStreamError(error)).toBe(true);
+    });
+
+    it("recognizes the real OpenAI WebSocket wrapper for a rejected 503 handshake", () => {
+        const cause = new Error("Unexpected server response: 503");
+        const error = new WebSocketError(cause.message, null);
+        error.cause = cause;
+        const unauthorized = new WebSocketError("Unexpected server response: 401", null);
+        const unavailable = new WebSocketError("Unexpected server response: 426", null);
+        const disconnected = new WebSocketError("cannot send on a closed WebSocket", null);
+
+        expect(error.constructor.name).toBe("WebSocketError");
+        expect(error.name).toBe("Error");
+        expect(isRetryableCodexStreamError(error)).toBe(true);
+        expect(isRetryableCodexStreamError(unauthorized)).toBe(false);
+        expect(isCodexWebSocketUnavailableError(unavailable)).toBe(true);
+        expect(isRetryableCodexStreamError(disconnected)).toBe(true);
+    });
+
+    it("separates transport faults from server rejections inside the WebSocket wrapper", () => {
+        const rejected = new WebSocketError("Invalid 'input': expected an array.", {
+            type: "error",
+            code: "invalid_request_error",
+            message: "Invalid 'input': expected an array.",
+            param: "input",
+            sequence_number: 1,
+        });
+        const connectionLimit = new WebSocketError(
+            "Responses websocket connection limit reached (60 minutes). Create a new websocket " +
+                "connection to continue.",
+            {
+                type: "error",
+                code: "websocket_connection_limit_reached",
+                message:
+                    "Responses websocket connection limit reached (60 minutes). Create a new " +
+                    "websocket connection to continue.",
+                param: null,
+                sequence_number: 2,
+            },
+        );
+
+        expect(isRetryableCodexStreamError(rejected)).toBe(false);
+        expect(isRetryableCodexStreamError(connectionLimit)).toBe(true);
+    });
+
+    it("retries and humanizes Codex WebSocket internal server errors", () => {
+        const event = {
+            type: "error",
+            error: {
+                type: "internal_error",
+                code: "internal_error",
+                message: "Internal server error",
+                param: null,
+            },
+            sequence_number: 285,
+        };
+        const message = JSON.stringify(event);
+        const error = new WebSocketError(message, event as never);
+
+        expect(isRetryableCodexStreamError(error)).toBe(true);
+        expect(classifyCodexError(message)).toBe("internal_error");
+        expect(codexErrorMessage(error, message)).toBe("Internal server error");
+    });
+
+    it("retries and humanizes Codex WebSocket server errors", () => {
+        const serverMessage =
+            "An error occurred while processing your request. You can retry your request. " +
+            "Please include the request ID 2ec492f3-b41e-4329-a884-c3c2b024e1c5.";
+        const event = {
+            type: "error",
+            error: {
+                type: "server_error",
+                code: "server_error",
+                message: serverMessage,
+                param: null,
+            },
+            sequence_number: 6,
+        };
+        const message = JSON.stringify(event);
+        const error = new WebSocketError(message, event as never);
+
+        expect(isRetryableCodexStreamError(error)).toBe(true);
+        expect(classifyCodexError(message)).toBe("internal_error");
+        expect(codexErrorMessage(error, message)).toBe(serverMessage);
+    });
+
+    it("recovers the credential for a WebSocket handshake rejected as unauthorized", () => {
+        expect(
+            isCodexUnauthorizedError(new WebSocketError("Unexpected server response: 401", null)),
+        ).toBe(true);
+        expect(
+            isCodexUnauthorizedError(new WebSocketError("Unexpected server response: 503", null)),
+        ).toBe(false);
+    });
+
+    it("reads a rejected handshake as a server-side failure", () => {
+        expect(classifyCodexError("Unexpected server response: 503")).toBe("internal_error");
+        expect(classifyCodexError("Unexpected server response: 500")).toBe("internal_error");
+        expect(classifyCodexError("Unexpected server response: 400")).toBe("unknown");
     });
 
     it.each([

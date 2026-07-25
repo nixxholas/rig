@@ -53,6 +53,8 @@ export interface AgentSnapshot {
 }
 
 export interface AgentOptions {
+    /** Allows this dedicated side agent to use the provider's hidden permission-review model. */
+    allowReviewerModel?: boolean;
     appendSystemPrompt?: string;
     provider: Provider;
     /** Creates the sister agent that reviews Auto permission decisions, on first use. */
@@ -113,6 +115,7 @@ export class Agent {
     readonly context: AgentContext;
 
     readonly #createPermissionReviewAgent: (() => PermissionReviewAgent) | undefined;
+    readonly #allowReviewerModel: boolean;
     readonly #projectInstructions: "include" | "exclude";
     #permissionReviewAgent: PermissionReviewAgent | undefined;
     #appendSystemPrompt: string | undefined;
@@ -148,8 +151,9 @@ export class Agent {
         this.id = options.id ?? this.#idFactory();
         this.provider = options.provider;
         this.#createPermissionReviewAgent = options.createPermissionReviewAgent;
+        this.#allowReviewerModel = options.allowReviewerModel === true;
         this.#projectInstructions = options.projectInstructions ?? "include";
-        this.#model = this.#findModel(options.modelId);
+        this.#model = this.#findModel(options.modelId, this.#allowReviewerModel);
         this.context = options.context;
         this.#effort = options.effort ?? this.#model.defaultThinkingLevel;
         this.#serviceTier = this.#validateServiceTier(options.serviceTier);
@@ -436,6 +440,7 @@ export class Agent {
 
             let contextCompactedDuringRun = false;
             const loopOptions: Parameters<typeof runAgentLoop>[0] = {
+                ...(this.#allowReviewerModel ? { allowReviewerModel: true } : {}),
                 provider,
                 ...(this.#createPermissionReviewAgent === undefined
                     ? {}
@@ -564,8 +569,12 @@ export class Agent {
         };
     }
 
-    #findModel(modelId: string): Model {
-        const model = this.provider.models.find((candidate) => candidate.id === modelId);
+    #findModel(modelId: string, allowReviewerModel = false): Model {
+        const model =
+            this.provider.models.find((candidate) => candidate.id === modelId) ??
+            (allowReviewerModel && this.provider.reviewerModel?.id === modelId
+                ? this.provider.reviewerModel
+                : undefined);
         if (!model) {
             throw new Error(`Unknown model '${modelId}' for provider '${this.provider.id}'`);
         }

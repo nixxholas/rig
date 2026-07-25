@@ -113,6 +113,7 @@ service_tier = "fast"
 [settings]
 compact_completed_turns = true
 completion_chime = true
+daemon_heap_snapshots = true
 durable_global_event_queue = true
 happy_integration = false
 show_reasoning = false
@@ -166,6 +167,7 @@ mounts = [
             settings: {
                 compactCompletedTurns: true,
                 completionChime: true,
+                daemonHeapSnapshots: true,
                 durableGlobalEventQueue: true,
                 happyIntegration: false,
                 showReasoning: false,
@@ -402,6 +404,7 @@ model = "openai/gpt-5.4"
 effort = "low"
 permission_mode = "read_only"
 [settings]
+daemon_heap_snapshots = false
 durable_global_event_queue = false
 happy_integration = false
 show_reasoning = false
@@ -423,6 +426,7 @@ effort = "high"
 instructions = "Hide project tool activity."
 permission_mode = "full_access"
 [settings]
+daemon_heap_snapshots = true
 durable_global_event_queue = true
 happy_integration = true
 show_reasoning = true
@@ -467,6 +471,7 @@ effort = "minimal"
             expect(loaded.config.settings).toEqual({
                 compactCompletedTurns: false,
                 completionChime: false,
+                daemonHeapSnapshots: false,
                 durableGlobalEventQueue: false,
                 happyIntegration: false,
                 showReasoning: true,
@@ -485,7 +490,7 @@ effort = "minimal"
                 workingDirectory: "/repo",
             });
             expect(createProjectConfigSecurityNotice(loaded.sources.local.values)).toBe(
-                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, the durable event queue, and the Happy integration under your machine-level control.",
+                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, daemon heap snapshots, the durable event queue, and the Happy integration under your machine-level control.",
             );
 
             const emptyCwd = join(root, "empty-repo");
@@ -497,6 +502,7 @@ effort = "minimal"
             expect(defaultLoaded.config.settings).toEqual({
                 compactCompletedTurns: false,
                 completionChime: false,
+                daemonHeapSnapshots: false,
                 durableGlobalEventQueue: false,
                 happyIntegration: true,
                 showReasoning: false,
@@ -528,6 +534,7 @@ effort = "minimal"
                 settings: {
                     compactCompletedTurns: true,
                     completionChime: true,
+                    daemonHeapSnapshots: true,
                     durableGlobalEventQueue: true,
                     happyIntegration: false,
                     showReasoning: true,
@@ -580,6 +587,7 @@ effort = "minimal"
                     "[settings]",
                     "compact_completed_turns = true",
                     "completion_chime = true",
+                    "daemon_heap_snapshots = true",
                     "durable_global_event_queue = true",
                     "happy_integration = false",
                     "show_reasoning = true",

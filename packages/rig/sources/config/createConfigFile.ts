@@ -32,6 +32,7 @@ export async function createConfigFile(
             settings: {
                 compact_completed_turns: config.settings.compactCompletedTurns,
                 completion_chime: config.settings.completionChime,
+                daemon_heap_snapshots: config.settings.daemonHeapSnapshots,
                 durable_global_event_queue: config.settings.durableGlobalEventQueue,
                 happy_integration: config.settings.happyIntegration,
                 show_reasoning: config.settings.showReasoning,

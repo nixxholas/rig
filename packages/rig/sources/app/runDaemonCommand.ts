@@ -15,6 +15,7 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             confirmRestart: async () => true,
         });
         console.log(`Daemon is running at ${connection.paths.socketPath}`);
+        console.log(`Daemon diagnostics: ${connection.paths.diagnosticsPath}`);
         return;
     }
 
@@ -27,23 +28,28 @@ export async function runDaemonCommand(command: DaemonCommand): Promise<void> {
             confirmRestart: async () => true,
         });
         console.log(`Daemon is running at ${reloaded.paths.socketPath}`);
+        console.log(`Daemon diagnostics: ${reloaded.paths.diagnosticsPath}`);
         return;
     }
 
     if (command === "status") {
         if (connection === undefined) {
             console.log("Daemon is not running.");
+            console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
             return;
         }
         if (connection.health.status === "error") {
             console.log(`Daemon could not start: ${connection.health.error}`);
+            console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
             return;
         }
         if (connection.health.status === "starting") {
             console.log(`Daemon is starting at ${connection.client.socketPath}`);
+            console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
             return;
         }
         console.log(`Daemon is running at ${connection.client.socketPath}`);
+        console.log(`Daemon diagnostics: ${getEnvironmentLocalServerPaths().diagnosticsPath}`);
         return;
     }
 

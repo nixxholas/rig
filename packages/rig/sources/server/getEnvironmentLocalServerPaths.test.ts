@@ -18,6 +18,7 @@ describe("getEnvironmentLocalServerPaths", () => {
 
         expect(getEnvironmentLocalServerPaths({ RIG_SERVER_DIRECTORY: directory }, 501)).toEqual({
             databasePath: `${directory}/sessions.sqlite`,
+            diagnosticsPath: `${directory}/diagnostics`,
             directory,
             logPath: `${directory}/server.log`,
             registryPath: `${directory}/server.json`,

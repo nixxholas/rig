@@ -13,6 +13,9 @@ export function classifyCodexError(message: string): SessionErrorKind {
         return "context_overflow";
     if (/billing|credit|quota|usage limit|insufficient_quota/iu.test(message))
         return "billing_error";
+    if (/\b(?:internal(?:_| server )error|server_error)\b/iu.test(message)) return "internal_error";
+    const handshakeStatus = readCodexWebSocketHandshakeStatus(message);
+    if (handshakeStatus !== undefined && handshakeStatus >= 500) return "internal_error";
     if (
         /status 5\d\d|fetch failed|socket|websocket|timed? ?out|service unavailable/iu.test(message)
     )
@@ -61,13 +64,21 @@ export function codexErrorMessage(error: unknown, message: string): string {
     if (isCodexUnauthorizedError(error) && message.includes("Signature expired:")) {
         return BEDROCK_EXPIRED_SIGNATURE_MESSAGE;
     }
+    const serverMessage = stringProperty(readWebSocketServerError(error), "message")?.trim();
+    if (serverMessage !== undefined && serverMessage.length > 0) return serverMessage;
     return message;
 }
 
+/**
+ * A rejected WebSocket upgrade never becomes an API error object, so its status only survives in
+ * the handshake sentence. Reading it here lets credential recovery run for a WebSocket 401 the
+ * same way it does for an SSE one.
+ */
 function hasUnauthorized(error: unknown, seen: Set<object>): boolean {
     if (typeof error !== "object" || error === null || seen.has(error)) return false;
     seen.add(error);
     if ("status" in error && error.status === 401) return true;
+    if (readCodexWebSocketHandshakeStatus(stringProperty(error, "message")) === 401) return true;
     return "cause" in error && hasUnauthorized(error.cause, seen);
 }
 
@@ -96,7 +107,7 @@ function readDetails(
         "cause" in error
             ? readDetails((error as { cause?: unknown }).cause, seen)
             : { messages: [], statuses: [] };
-    const status =
+    const numericStatus =
         "status" in error && typeof (error as { status?: unknown }).status === "number"
             ? [(error as { status: number }).status]
             : [];
@@ -104,9 +115,12 @@ function readDetails(
         "message" in error && typeof (error as { message?: unknown }).message === "string"
             ? [(error as { message: string }).message]
             : [];
+    const messageStatus = message
+        .map(readCodexWebSocketHandshakeStatus)
+        .filter((status): status is number => status !== undefined);
     return {
         messages: [...message, ...nested.messages],
-        statuses: [...status, ...nested.statuses],
+        statuses: [...numericStatus, ...messageStatus, ...nested.statuses],
     };
 }
 
@@ -123,13 +137,21 @@ function isRetryable(error: unknown, seen: Set<object>): boolean {
         if (seen.has(error)) return false;
         seen.add(error);
     }
-    const status = numericProperty(error, "status");
+    if (isCodexWebSocketConnectionLimitError(error) || isCodexWebSocketRetryableServerError(error))
+        return true;
+    const status =
+        numericProperty(error, "status") ??
+        readCodexWebSocketHandshakeStatus(stringProperty(error, "message"));
     if (status !== undefined)
         return status === 408 || status === 409 || status === 429 || status >= 500;
     const code = stringProperty(error, "code") ?? stringProperty(error, "errno");
     if (code !== undefined && RETRYABLE_CODES.has(code.toUpperCase())) return true;
-    const name = stringProperty(error, "name");
-    if (name !== undefined && RETRYABLE_NAMES.has(name)) return true;
+    if (isWebSocketError(error)) {
+        if (readWebSocketServerEvent(error) === undefined) return true;
+    } else {
+        const name = stringProperty(error, "name");
+        if (name !== undefined && RETRYABLE_NAMES.has(name)) return true;
+    }
     const message = error instanceof Error ? error.message : "";
     if (RETRYABLE_MESSAGE.test(message)) return true;
     const cause =
@@ -162,11 +184,86 @@ const RETRYABLE_NAMES = new Set([
     "APIConnectionError",
     "APIConnectionTimeoutError",
     "TimeoutError",
-    "WebSocketError",
 ]);
+
+const WEBSOCKET_ERROR_NAME = "WebSocketError";
+
+/**
+ * The OpenAI SDK reports two very different failures through one wrapper: a transport fault it
+ * observed itself, and a rejection the server described in an error event. Only the first is a
+ * reason to reconnect, so the server event decides which one arrived. The wrapper's runtime `name`
+ * stays `"Error"`, so recognition goes through the constructor.
+ */
+function isWebSocketError(error: unknown): boolean {
+    if (typeof error !== "object" || error === null) return false;
+    return (
+        stringProperty(error, "name") === WEBSOCKET_ERROR_NAME ||
+        error.constructor?.name === WEBSOCKET_ERROR_NAME
+    );
+}
+
+function readWebSocketServerEvent(error: unknown): Record<string, unknown> | undefined {
+    if (typeof error !== "object" || error === null) return undefined;
+    const event = (error as { error?: unknown }).error;
+    return typeof event === "object" && event !== null
+        ? (event as Record<string, unknown>)
+        : undefined;
+}
+
+function readWebSocketServerError(error: unknown): Record<string, unknown> | undefined {
+    const event = readWebSocketServerEvent(error);
+    if (event === undefined) return undefined;
+    const nested = event.error;
+    return typeof nested === "object" && nested !== null
+        ? (nested as Record<string, unknown>)
+        : event;
+}
+
+const WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE = "websocket_connection_limit_reached";
+const WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE = /responses websocket connection limit reached/iu;
+const RETRYABLE_WEBSOCKET_SERVER_ERROR_CODES = new Set(["internal_error", "server_error"]);
+
+/**
+ * The hourly connection limit arrives as a server error event rather than a transport fault, and
+ * the native client answers it by opening a new connection, so it stays retryable even though the
+ * other server events do not.
+ */
+function isCodexWebSocketConnectionLimitError(error: unknown): boolean {
+    const event = readWebSocketServerEvent(error);
+    const serverError = readWebSocketServerError(error);
+    const texts = [
+        stringProperty(error, "message"),
+        stringProperty(error, "code"),
+        event === undefined ? undefined : stringProperty(event, "message"),
+        event === undefined ? undefined : stringProperty(event, "code"),
+        serverError === undefined ? undefined : stringProperty(serverError, "message"),
+        serverError === undefined ? undefined : stringProperty(serverError, "code"),
+    ];
+    return texts.some(
+        (text) =>
+            text !== undefined &&
+            (text.includes(WEBSOCKET_CONNECTION_LIMIT_REACHED_CODE) ||
+                WEBSOCKET_CONNECTION_LIMIT_REACHED_MESSAGE.test(text)),
+    );
+}
+
+function isCodexWebSocketRetryableServerError(error: unknown): boolean {
+    const serverError = readWebSocketServerError(error);
+    if (serverError === undefined) return false;
+    return [stringProperty(serverError, "type"), stringProperty(serverError, "code")].some(
+        (value) => value !== undefined && RETRYABLE_WEBSOCKET_SERVER_ERROR_CODES.has(value),
+    );
+}
 
 const RETRYABLE_MESSAGE =
     /\b(connection (?:closed|dropped|failed|lost|reset)|fetch failed|network error|socket (?:closed|disconnected|error|hang up)|stream (?:closed|disconnected)|timed? out|websocket (?:closed|disconnected|error))\b/i;
+
+function readCodexWebSocketHandshakeStatus(message: string | undefined): number | undefined {
+    const match = message?.match(/\bUnexpected server response:\s*(\d{3})\b/iu);
+    if (match?.[1] === undefined) return undefined;
+    const status = Number(match[1]);
+    return status >= 100 && status <= 599 ? status : undefined;
+}
 
 function isAbortError(error: unknown): boolean {
     return (

@@ -566,6 +566,7 @@ export class CodexSession extends BaseSession {
                     return;
                 }
                 const message = error instanceof Error ? error.message : String(error);
+                const displayMessage = codexErrorMessage(error, message);
                 if (isCodexUnauthorizedError(error)) {
                     const recovered = await recoverCodexUnauthorizedCredential(
                         this.credential,
@@ -601,7 +602,7 @@ export class CodexSession extends BaseSession {
                     yield {
                         type: "retrying",
                         attempt: reportedAttempt,
-                        reason: `Stream disconnected; reconnecting: ${message}`,
+                        reason: `Stream disconnected; reconnecting: ${displayMessage}`,
                     };
                     try {
                         await waitForCodexRetry(transportRetries, error, request.abort);
@@ -626,15 +627,19 @@ export class CodexSession extends BaseSession {
                     yield {
                         type: "retrying",
                         attempt: reportedAttempt,
-                        reason: `WebSocket retries exhausted; falling back to SSE: ${message}`,
+                        reason: `WebSocket retries exhausted; falling back to SSE: ${displayMessage}`,
                     };
+                    if (request.abort?.aborted) {
+                        yield { type: "done", state: "cancelled" };
+                        return;
+                    }
                     continue;
                 }
                 yield {
                     type: "done",
                     state: "error",
                     kind: classifyCodexError(message),
-                    message: codexErrorMessage(error, message),
+                    message: displayMessage,
                 };
                 return;
             }

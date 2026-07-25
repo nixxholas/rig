@@ -11,6 +11,7 @@ export function withoutProjectMachineSettings(config: PartialRigConfig): Partial
     } = config;
     const { permissionMode: _permissionMode, ...defaults } = projectDefaults ?? {};
     const {
+        daemonHeapSnapshots: _daemonHeapSnapshots,
         durableGlobalEventQueue: _durableGlobalEventQueue,
         happyIntegration: _happyIntegration,
         ...settings

@@ -4,9 +4,10 @@ export function createProjectConfigSecurityNotice(config: PartialRigConfig): str
     const permission = config.defaults?.permissionMode !== undefined;
     const docker = config.docker !== undefined;
     const providers = config.providerDefaultEnable !== undefined || config.providers !== undefined;
+    const daemonHeapSnapshots = config.settings?.daemonHeapSnapshots !== undefined;
     const durableEventQueue = config.settings?.durableGlobalEventQueue !== undefined;
     const happyIntegration = config.settings?.happyIntegration !== undefined;
-    if (!durableEventQueue && !happyIntegration) {
+    if (!daemonHeapSnapshots && !durableEventQueue && !happyIntegration) {
         if (!permission && !docker && !providers) return undefined;
         if (providers && !permission && !docker) {
             return "This project's rig.toml requested provider availability. Rig applied the other project preferences but kept provider and native authentication choices under your machine-level control.";
@@ -31,6 +32,7 @@ export function createProjectConfigSecurityNotice(config: PartialRigConfig): str
         ...(permission ? ["permissions"] : []),
         ...(docker ? ["container execution"] : []),
         ...(providers ? ["provider availability"] : []),
+        ...(daemonHeapSnapshots ? ["daemon heap snapshots"] : []),
         ...(durableEventQueue ? ["the durable event queue"] : []),
         ...(happyIntegration ? ["the Happy integration"] : []),
     ];

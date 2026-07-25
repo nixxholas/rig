@@ -1,12 +1,58 @@
 import { describe, expect, it } from "vitest";
 
-import { defineModel, defineProvider, type Context } from "@slopus/rig-execution";
+import {
+    defineModel,
+    defineProvider,
+    type Context,
+    type Model,
+    type StreamOptions,
+} from "@slopus/rig-execution";
+import { Agent } from "../agent/Agent.js";
 import type { Message } from "../agent/types.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
 import { createPermissionContext } from "./createPermissionContext.js";
 import { createPermissionReviewSideAgent } from "./createPermissionReviewSideAgent.js";
 
 describe("createPermissionReviewSideAgent", () => {
+    it("runs a dedicated reviewer model without exposing it as a selectable model", async () => {
+        const recorded = recordingProvider();
+        const reviewerModel = defineModel({
+            id: "openai/codex-auto-review",
+            name: "Codex Auto Review",
+            thinkingLevels: ["low"],
+            defaultThinkingLevel: "low",
+        });
+        const requestedModels: string[] = [];
+        const provider = {
+            ...recorded.provider,
+            reviewerModel,
+            stream<TThinkingLevel extends string>(
+                model: Model<TThinkingLevel>,
+                context: Context,
+                options?: StreamOptions<TThinkingLevel>,
+            ) {
+                requestedModels.push(model.id);
+                return recorded.provider.stream(model, context, options);
+            },
+        };
+
+        expect(provider.models.map((model) => model.id)).not.toContain(reviewerModel.id);
+        expect(
+            () =>
+                new Agent({
+                    context: createJustBashToolHarness().context,
+                    modelId: reviewerModel.id,
+                    provider,
+                    tools: [],
+                }),
+        ).toThrow(`Unknown model '${reviewerModel.id}'`);
+        const reviewer = sideAgent(provider, reviewerModel as never);
+        await reviewer.review({ action: "review this", messages: [user("u1", "AUTHORIZED")] });
+
+        expect(requestedModels).toEqual([reviewerModel.id]);
+        await reviewer.close();
+    });
+
     it("sends only new conversation once it already has its own history", async () => {
         const { provider, model, requests } = recordingProvider();
         const reviewer = sideAgent(provider, model);

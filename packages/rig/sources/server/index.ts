@@ -30,6 +30,7 @@ export {
 } from "./createProtocolHttpServer.js";
 export { getProviderIdForModel } from "./getProviderIdForModel.js";
 export { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
+export { prepareDaemonDiagnostics } from "./prepareDaemonDiagnostics.js";
 export { readLocalServerToken } from "./readLocalServerToken.js";
 export { readLocalServerProcessId } from "./readLocalServerProcessId.js";
 export { removeStaleSocket } from "./removeStaleSocket.js";

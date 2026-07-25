@@ -5,6 +5,7 @@ import { getDefaultSessionDatabasePath } from "./getDefaultSessionDatabasePath.j
 
 export interface LocalServerPaths {
     databasePath: string;
+    diagnosticsPath: string;
     directory: string;
     logPath: string;
     registryPath: string;
@@ -24,6 +25,7 @@ export function getLocalServerPaths(
     const directory = options.directory ?? join(tmpdir(), `rig-${uid}`);
     return {
         databasePath: options.databasePath ?? getDefaultSessionDatabasePath(),
+        diagnosticsPath: join(directory, "diagnostics"),
         directory,
         logPath: join(directory, "server.log"),
         registryPath: join(directory, "server.json"),

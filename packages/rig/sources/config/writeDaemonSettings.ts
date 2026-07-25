@@ -3,7 +3,7 @@ import type { DaemonSettings, LoadConfigOptions, PartialRigConfig } from "./type
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 
 export async function writeDaemonSettings(
-    settings: DaemonSettings,
+    settings: Pick<DaemonSettings, "durableGlobalEventQueue">,
     options: LoadConfigOptions = {},
 ): Promise<void> {
     const loaded = await loadConfig(options);

@@ -37,6 +37,7 @@ export function createPermissionReviewSideAgent(options: {
         throw new Error("The permission review agent must not run in Auto mode.");
     }
     const agent = new Agent({
+        allowReviewerModel: true,
         context: options.context,
         id: options.id,
         modelId: options.model.id,

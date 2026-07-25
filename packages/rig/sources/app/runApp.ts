@@ -108,6 +108,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     let compactCompletedTurns =
         options.compactCompletedTurns ?? loadedConfig.config.settings.compactCompletedTurns;
     let completionChime = loadedConfig.config.settings.completionChime;
+    const daemonHeapSnapshots = loadedConfig.config.settings.daemonHeapSnapshots;
     let durableGlobalEventQueue = loadedConfig.config.settings.durableGlobalEventQueue;
     let showReasoning = options.showReasoning ?? loadedConfig.config.settings.showReasoning;
     let showUsage = options.showUsage ?? loadedConfig.config.settings.showUsage;
@@ -307,6 +308,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                         settings: {
                             compactCompletedTurns,
                             completionChime,
+                            daemonHeapSnapshots,
                             durableGlobalEventQueue,
                             showReasoning,
                             showUsage,
@@ -329,7 +331,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                             permissionMode: agent.permissionMode,
                             serviceTier: agent.confirmedServiceTier ?? null,
                         },
-                        settings,
+                        settings: { ...settings, daemonHeapSnapshots },
                         ...(runtimeTheme === undefined ? {} : { theme: runtimeTheme }),
                     }),
                 );

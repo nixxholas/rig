@@ -717,6 +717,31 @@ uses twice the plan usage.
 </details>
 
 <details>
+<summary><strong>Daemon crash diagnostics</strong></summary>
+
+On Node.js runtimes that support environment redaction, Rig starts its daemon
+with private diagnostic reports for fatal runtime errors and uncaught
+exceptions. Run `rig daemon status` to see the diagnostics directory. Rig
+retains at most three crash reports. On older Node.js releases, Rig fails closed
+instead of writing credentials into a report and leaves an explanatory
+`crash-reports-unavailable.txt` file in that directory.
+
+Full heap snapshots near the memory limit are opt-in because they are large and
+can contain prompts, tool results, credentials held in memory, and other
+sensitive process data. Enable them only in the machine-level config and then
+restart the daemon:
+
+```toml
+[settings]
+daemon_heap_snapshots = true
+```
+
+Rig retains at most two heap snapshots. Repository `rig.toml` files cannot
+enable this setting.
+
+</details>
+
+<details>
 <summary><strong>Workflows and app event synchronization</strong></summary>
 
 Workflows are on by default. Disable them globally or per repository:

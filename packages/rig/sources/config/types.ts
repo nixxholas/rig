@@ -25,6 +25,7 @@ export interface PartialConfigDefaults {
 export interface ConfigSettings {
     compactCompletedTurns: boolean;
     completionChime: boolean;
+    daemonHeapSnapshots: boolean;
     durableGlobalEventQueue: boolean;
     happyIntegration: boolean;
     showReasoning: boolean;
@@ -34,6 +35,7 @@ export interface ConfigSettings {
 export interface PartialConfigSettings {
     compactCompletedTurns?: boolean;
     completionChime?: boolean;
+    daemonHeapSnapshots?: boolean;
     durableGlobalEventQueue?: boolean;
     happyIntegration?: boolean;
     showReasoning?: boolean;
@@ -160,5 +162,6 @@ export interface LoadConfigOptions {
 }
 
 export interface DaemonSettings {
+    daemonHeapSnapshots: boolean;
     durableGlobalEventQueue: boolean;
 }
