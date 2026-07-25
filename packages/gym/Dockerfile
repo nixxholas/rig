@@ -29,7 +29,12 @@ RUN pnpm --filter @slopus/rig-codemode-codex build
 RUN pnpm --filter @slopus/rig-providers build
 RUN pnpm --filter @slopus/rig-execution build
 RUN pnpm --filter @slopus/rig build
-RUN pnpm --filter @slopus/rig deploy --prod --legacy /prod/rig
+# The gym runs Rig from the TypeScript sources it mounts over this image, so the deployment keeps
+# development dependencies: the published bundle compiles them in, but the sources still import
+# them directly.
+RUN pnpm --filter @slopus/rig deploy --legacy /prod/rig
+# The deployed @slopus/ghostty-web ships only its build output, so point its exports at the build
+# instead of the TypeScript sources it normally resolves to inside the workspace.
 RUN node --input-type=module --eval "import { readFileSync, writeFileSync } from 'node:fs'; const path = '/prod/rig/node_modules/@slopus/ghostty-web/package.json'; const manifest = JSON.parse(readFileSync(path, 'utf8')); manifest.exports['.'] = { types: './dist/index.d.ts', default: './dist/index.js' }; writeFileSync(path, JSON.stringify(manifest, null, 2) + '\\n')"
 RUN pnpm --filter @slopus/rig-gym-tests deploy --prod --legacy /prod/gym
 
