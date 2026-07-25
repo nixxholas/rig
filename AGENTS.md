@@ -40,12 +40,7 @@ When adding or changing permission-sensitive behavior, test the real tool defini
 
 ## Retry policy
 
-Inference retry semantics are owned by each provider and must reproduce the native provider's
-retry, rollback, and transport-fallback behavior. The outer agent loop must never replay a
-provider request, tool, command, or session mutation on its own. A provider may retry after
-response content begins only when its protocol exposes an explicit rollback boundary that removes
-the tentative output before replay and its tests prove that no tool effect or visible output can
-be duplicated.
+The outer agent loop never replays a provider request, tool, command, or session mutation on its own. Retry semantics belong to each provider; see [`packages/rig-providers/AGENTS.md`](packages/rig-providers/AGENTS.md) before changing them.
 
 ## Model catalogs
 
@@ -67,7 +62,7 @@ Always use `pnpm` for this project. Do not use `npm`, `npx`, or `yarn` for insta
 
 ## Code organization
 
-Favor one function per file when adding or reshaping source code.
+A file should hold one coherent piece of behavior. Most product code lands at one function per file; keep small helpers alongside the thing they serve rather than splitting every function out on principle. Match the surrounding package — `rig-providers` deliberately keeps larger files and documents why.
 
 ## Change discipline
 
@@ -77,7 +72,7 @@ Compatibility migrations and startup repair must be atomic, idempotent, and sele
 
 Keep optional work off correctness and interaction critical paths. Telemetry, quota observation, debug logging, metadata, discovery, and status enrichment must have explicit time and size bounds, must release listeners and resources, and must not turn a successful agent run into a failure. Do not create unbounded promise chains, event buffers, transcript caches, image stores, debug directories, or live-work rows without an explicit retention, compaction, or backpressure strategy.
 
-Keep provider discovery and runtime construction on one shared path, so every model shown as available can actually be instantiated with the same configuration, credentials, filters, and routing. Provider-native prompts, tools, and schemas may differ, but lifecycle, persistence, permissions, retry safety, and error semantics remain shared contracts. Never retry inference after user-visible content or tool effects have begun unless the protocol proves the continuation is idempotent and tests prove no output or action can be duplicated.
+Keep provider discovery and runtime construction on one shared path, so every model shown as available can actually be instantiated with the same configuration, credentials, filters, and routing. Provider-native prompts, tools, and schemas may differ, but lifecycle, persistence, permissions, retry safety, and error semantics remain shared contracts.
 
 For bug fixes, first add the smallest deterministic test that reproduces the failure at the layer where the broken contract is observable. Preserve that test unchanged while fixing production code, then add lower-level tests only where they clarify an invariant. Keep each commit coherent and green; avoid follow-up commits whose only purpose is repairing timing assumptions, lint, or incomplete coverage that could have shipped with the original change.
 

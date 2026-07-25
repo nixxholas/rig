@@ -226,9 +226,9 @@ huge object very quickly. The session should drive a connection, not contain one
 
 ### Prefer fewer, larger files
 
-This package **overrides** the repository's one-function-per-file convention. That convention was
-applied here past the point of usefulness, leaving directories full of three- to sixteen-line
-files that were harder to read than the thing they were meant to clarify.
+This package sits at the far end of the repository's code-organization guidance. One function per
+file was applied here past the point of usefulness, leaving directories full of three- to
+sixteen-line files that were harder to read than the thing they were meant to clarify.
 
 Keep related network code together in one file rather than splitting every helper into its own.
 A file should hold a coherent piece of behavior with its small helpers alongside it. Split when a
@@ -318,8 +318,3 @@ not take a `skills` option.
 Trace fidelity is unaffected by any of this. Requests must still be reproduced exactly and covered
 by golden-trace tests, including vendor-native skill headers, location formats, ordering, and
 closing text.
-
-Not yet done. `sources/index.ts` still re-exports the Codex prompts, tools, and skills and the Grok
-prompt and tools, and `skills` still exists as a session option on `SessionOptions`,
-`SessionModelConfiguration`, and all four vendor session types. The exports and the option go; the
-directories stay. No consumer outside this package imports them today, so removal is unblocked.
