@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ResponsesSession } from "@/responses/ResponsesSession.js";
+import { ResponsesSession } from "@/core/responses/ResponsesSession.js";
 
 describe("SessionCompaction", () => {
     it("returns a structural completed result", async () => {

@@ -130,8 +130,8 @@ export {
     bedrockMantleEndpoint,
     bedrockRuntimeEndpoint,
 } from "@/vendors/bedrock/impl/bedrockConstants.js";
-export { ResponsesProvider } from "@/responses/ResponsesProvider.js";
-export { ResponsesSession } from "@/responses/ResponsesSession.js";
+export { ResponsesProvider } from "@/core/responses/ResponsesProvider.js";
+export { ResponsesSession } from "@/core/responses/ResponsesSession.js";
 export {
     BedrockBearerTokenCredential,
     type BedrockBearerTokenCredentialLoadOptions,

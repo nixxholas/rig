@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { ResponsesProvider } from "@/responses/ResponsesProvider.js";
+import { ResponsesProvider } from "@/core/responses/ResponsesProvider.js";
 import { collectSessionEvents } from "./helpers/collectSessionEvents.js";
 
 const LIVE = process.env.RIG_LIVE_TEST === "1";

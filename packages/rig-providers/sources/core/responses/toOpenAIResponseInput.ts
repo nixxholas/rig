@@ -1,7 +1,7 @@
 import type { ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
 import type { SessionContext } from "@/core/SessionContext.js";
-import { toOpenAIInputContent } from "@/responses/toOpenAIInputContent.js";
+import { toOpenAIInputContent } from "@/core/responses/toOpenAIInputContent.js";
 import type { CodexToolVendor } from "@/vendors/codex/CodexToolVendor.js";
 
 export function toOpenAIResponseInput(context: SessionContext): ResponseInput {

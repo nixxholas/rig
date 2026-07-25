@@ -2,8 +2,8 @@ import type { ResponseCreateParamsStreaming } from "openai/resources/responses/r
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
-import { toOpenAIResponseInput } from "@/responses/toOpenAIResponseInput.js";
-import { toOpenAIReasoningEffort } from "@/vendors/grok/impl/toOpenAIReasoningEffort.js";
+import { toOpenAIResponseInput } from "@/core/responses/toOpenAIResponseInput.js";
+import { toOpenAIReasoningEffort } from "@/core/responses/toOpenAIReasoningEffort.js";
 
 export function createOpenAIResponseRequest(options: {
     context: SessionContext;

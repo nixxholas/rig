@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { toOpenAIResponseInput } from "@/responses/toOpenAIResponseInput.js";
+import { toOpenAIResponseInput } from "@/core/responses/toOpenAIResponseInput.js";
 
 describe("Codex agent messages", () => {
     it("serializes an encrypted collaboration task as a native agent_message", () => {

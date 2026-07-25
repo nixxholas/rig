@@ -4,7 +4,7 @@ import type {
 } from "openai/resources/responses/responses.js";
 
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
-import { toSessionCacheUsage } from "@/responses/toSessionCacheUsage.js";
+import { toSessionCacheUsage } from "@/core/responses/toSessionCacheUsage.js";
 
 export interface CollectedCodexCompaction {
     readonly item: ResponseCompactionItemParam;

@@ -4,7 +4,7 @@ import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort, SessionServiceTier } from "@/core/SessionRunRequest.js";
 import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { createOpenAIResponseRequest } from "@/responses/createOpenAIResponseRequest.js";
+import { createOpenAIResponseRequest } from "@/core/responses/createOpenAIResponseRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";

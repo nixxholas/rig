@@ -3,7 +3,7 @@ import type { ResponseStreamEvent } from "openai/resources/responses/responses.j
 import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionToolCall } from "@/core/SessionContext.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
-import { toSessionCacheUsage } from "@/responses/toSessionCacheUsage.js";
+import { toSessionCacheUsage } from "@/core/responses/toSessionCacheUsage.js";
 import type { CodexToolVendor } from "@/vendors/codex/CodexToolVendor.js";
 import type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 
@@ -17,7 +17,7 @@ interface ActiveOutputItem {
     receivedTextDelta?: boolean;
 }
 
-export interface GrokRunResult {
+export interface OpenAIResponseRunResult {
     assistantText: string;
     encryptedReasoning?: string | undefined;
     responseItems: readonly string[];
@@ -26,7 +26,13 @@ export interface GrokRunResult {
     usage: SessionCacheUsage;
 }
 
-export async function* mapGrokResponseStream(
+/**
+ * Maps the OpenAI Responses event protocol shared by Codex, Grok, and Bedrock Mantle.
+ *
+ * The vendor only selects how tool-call metadata is stamped; the event grammar is identical.
+ * It defaults to Grok, so Codex callers must pass it explicitly.
+ */
+export async function* mapOpenAIResponseStream(
     responseStream: AsyncIterable<ResponseStreamEvent>,
     options: {
         signal?: AbortSignal;
@@ -34,7 +40,7 @@ export async function* mapGrokResponseStream(
         requireTerminalEvent?: boolean;
         vendor?: "codex" | "grok";
     },
-): AsyncGenerator<SessionEvent, GrokRunResult> {
+): AsyncGenerator<SessionEvent, OpenAIResponseRunResult> {
     const activeItems = new Map<number, ActiveOutputItem>();
     let assistantText = "";
     let encryptedReasoning: string | undefined;

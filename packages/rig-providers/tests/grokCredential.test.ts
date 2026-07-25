@@ -110,7 +110,8 @@ describe("Grok session credential", () => {
                 [GROK_OAUTH_SCOPE]: {
                     key: "token-from-grok-cli",
                     refresh_token: "stale-refresh-token",
-                    expires_at: "2026-07-25T00:00:00.000Z",
+                    // Relative so the token stays unexpired whenever the suite runs.
+                    expires_at: new Date(Date.now() + 60 * 60 * 1_000).toISOString(),
                     oidc_issuer: issuer.origin,
                     oidc_client_id: "grok-client",
                 },

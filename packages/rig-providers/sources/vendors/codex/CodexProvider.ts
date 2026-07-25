@@ -1,6 +1,6 @@
 import type { ProviderModality } from "@/core/ProviderModality.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
-import { ResponsesProvider } from "@/responses/ResponsesProvider.js";
+import { ResponsesProvider } from "@/core/responses/ResponsesProvider.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import {
     BEDROCK_DEFAULT_REGION,

@@ -1,6 +1,6 @@
 import type { ProviderModality } from "@/core/ProviderModality.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
-import { ResponsesProvider } from "@/responses/ResponsesProvider.js";
+import { ResponsesProvider } from "@/core/responses/ResponsesProvider.js";
 import { assertGrokCredential } from "@/vendors/grok/impl/assertGrokCredential.js";
 import { GROK_DEFAULT_ENDPOINT } from "@/vendors/grok/impl/grokConstants.js";
 import { GrokSession } from "@/vendors/grok/GrokSession.js";

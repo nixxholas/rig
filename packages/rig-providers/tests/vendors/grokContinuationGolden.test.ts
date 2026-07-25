@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
 import { createGrokOpenAIRequest } from "@/vendors/grok/impl/createGrokOpenAIRequest.js";
-import { mapGrokResponseStream } from "@/vendors/grok/impl/mapGrokResponseStream.js";
+import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 import { grok_compaction_prompt } from "@/vendors/grok/prompts/grok_compaction_prompt.js";
 
@@ -90,7 +90,7 @@ describe("Grok continuation goldens", () => {
 
     it("maps reasoning, tool calls, encrypted continuation, usage, and completion", async () => {
         const events = await collect(
-            mapGrokResponseStream(
+            mapOpenAIResponseStream(
                 stream([
                     {
                         type: "response.output_item.added",
@@ -198,7 +198,7 @@ describe("Grok continuation goldens", () => {
 
     it("maps max-output truncation without reporting a normal completion", async () => {
         const events = await collect(
-            mapGrokResponseStream(
+            mapOpenAIResponseStream(
                 stream([
                     {
                         type: "response.incomplete",
@@ -223,7 +223,7 @@ describe("Grok continuation goldens", () => {
     it("surfaces typed stream failures", async () => {
         await expect(
             collect(
-                mapGrokResponseStream(
+                mapOpenAIResponseStream(
                     stream([
                         {
                             type: "response.failed",
@@ -239,7 +239,7 @@ describe("Grok continuation goldens", () => {
     it("rejects a stream that closes without a terminal response event", async () => {
         await expect(
             collect(
-                mapGrokResponseStream(
+                mapOpenAIResponseStream(
                     stream([
                         {
                             type: "response.output_text.delta",

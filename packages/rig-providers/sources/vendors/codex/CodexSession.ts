@@ -15,7 +15,7 @@ import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { mapOpenAIResponseStream } from "@/responses/mapOpenAIResponseStream.js";
+import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import { classifyCodexError } from "@/vendors/codex/impl/classifyCodexError.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";
@@ -350,6 +350,8 @@ export class CodexSession extends BaseSession {
                 const stream = await this.sse(payload, [], model, signal);
                 const mapped = mapOpenAIResponseStream(stream, {
                     failureMessage: `${model} failed to compact the conversation.`,
+                    requireTerminalEvent: true,
+                    vendor: "codex",
                     ...(signal === undefined ? {} : { signal }),
                 });
                 let result: Awaited<ReturnType<typeof mapped.next>>["value"] | undefined;
@@ -475,6 +477,8 @@ export class CodexSession extends BaseSession {
                     : this.websocket(payload, configuration.tools ?? [], request.abort);
                 const mapped = mapOpenAIResponseStream(responseStream, {
                     failureMessage: `${model} failed to generate a response.`,
+                    requireTerminalEvent: true,
+                    vendor: "codex",
                     ...(request.abort === undefined ? {} : { signal: request.abort }),
                 });
                 let result: Awaited<ReturnType<typeof mapped.next>>["value"] | undefined;

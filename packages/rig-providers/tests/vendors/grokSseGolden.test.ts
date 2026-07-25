@@ -8,7 +8,7 @@ import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
 import { GrokProvider } from "@/vendors/grok/GrokProvider.js";
 import { GROK_DEFAULT_ENDPOINT } from "@/vendors/grok/impl/grokConstants.js";
 import { createGrokRequestHeaders } from "@/vendors/grok/impl/createGrokRequestHeaders.js";
-import { mapGrokResponseStream } from "@/vendors/grok/impl/mapGrokResponseStream.js";
+import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
 import { toGrokToolDefinitions } from "@/vendors/grok/impl/toGrokToolDefinitions.js";
 import { grok_4_5_system_prompt } from "@/vendors/grok/prompts/grok_4_5_system_prompt.js";
 import { grok_4_5_tools } from "@/vendors/grok/tools/index.js";
@@ -40,7 +40,7 @@ describe("Grok SSE goldens", () => {
                 }>;
                 expect(golden.response.status).toBe(200);
                 const capturedEvents = await collectEvents(
-                    mapGrokResponseStream(stream(golden.response.events), {
+                    mapOpenAIResponseStream(stream(golden.response.events), {
                         failureMessage: "Captured Grok response failed.",
                     }),
                 );

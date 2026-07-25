@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { toOpenAIResponseInput } from "@/responses/toOpenAIResponseInput.js";
-import { mapOpenAIResponseStream } from "@/responses/mapOpenAIResponseStream.js";
+import { toOpenAIResponseInput } from "@/core/responses/toOpenAIResponseInput.js";
+import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import { tool_search } from "@/vendors/codex/tools/tool_search.js";
@@ -35,7 +35,7 @@ describe("Codex response items", () => {
                     },
                 } as never;
             })(),
-            { failureMessage: "failed" },
+            { failureMessage: "failed", requireTerminalEvent: true, vendor: "codex" },
         );
         const events = [];
         let result: Awaited<ReturnType<typeof mapped.next>>["value"];
@@ -293,7 +293,7 @@ describe("Codex response items", () => {
                     },
                 } as never;
             })(),
-            { failureMessage: "failed" },
+            { failureMessage: "failed", requireTerminalEvent: true, vendor: "codex" },
         );
         const events = [];
         let result: Awaited<ReturnType<typeof mapped.next>>["value"];

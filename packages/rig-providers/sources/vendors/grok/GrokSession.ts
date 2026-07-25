@@ -38,9 +38,9 @@ import { isGrokStateReminderMessage } from "@/vendors/grok/impl/isGrokStateRemin
 import { isGrokUserInfoMessage } from "@/vendors/grok/impl/isGrokUserInfoMessage.js";
 import { isRetryableGrokCompactionError } from "@/vendors/grok/impl/isRetryableGrokCompactionError.js";
 import {
-    mapGrokResponseStream,
-    type GrokRunResult,
-} from "@/vendors/grok/impl/mapGrokResponseStream.js";
+    mapOpenAIResponseStream,
+    type OpenAIResponseRunResult,
+} from "@/core/responses/mapOpenAIResponseStream.js";
 import { waitForGrokCompactionRetry } from "@/vendors/grok/impl/waitForGrokCompactionRetry.js";
 import { wrapGrokUserQuery } from "@/vendors/grok/impl/wrapGrokUserQuery.js";
 import { resolveGrokModelConfiguration } from "@/vendors/grok/impl/resolveGrokModelConfiguration.js";
@@ -261,7 +261,7 @@ export class GrokSession extends BaseSession {
             ...(abort === undefined ? {} : { abort }),
             turnIndex: this.turnIndex,
         });
-        let result: GrokRunResult | undefined;
+        let result: OpenAIResponseRunResult | undefined;
         let terminal: Extract<SessionEvent, { type: "done" }> | undefined;
         for (;;) {
             const next = await inference.next();
@@ -389,7 +389,7 @@ export class GrokSession extends BaseSession {
         turnIndex?: number;
         compaction?: boolean;
         retryAfterContent?: boolean;
-    }): AsyncGenerator<SessionEvent, GrokRunResult | undefined> {
+    }): AsyncGenerator<SessionEvent, OpenAIResponseRunResult | undefined> {
         const { abort } = options;
         await this.refreshCredentialIfExpiring();
         let client = await this.resolveClient();
@@ -429,7 +429,7 @@ export class GrokSession extends BaseSession {
                     },
                 );
 
-                const mapped = mapGrokResponseStream(responseStream, {
+                const mapped = mapOpenAIResponseStream(responseStream, {
                     ...(abort === undefined ? {} : { signal: abort }),
                     failureMessage: `${options.model} failed to generate a response.`,
                     requireTerminalEvent: true,

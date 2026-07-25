@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { toOpenAIResponseInput } from "@/responses/toOpenAIResponseInput.js";
+import { toOpenAIResponseInput } from "@/core/responses/toOpenAIResponseInput.js";
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 
 describe("Codex image input", () => {
