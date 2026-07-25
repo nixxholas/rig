@@ -1,5 +1,4 @@
 import type { Message } from "../agent/types.js";
-import { createAutoPermissionTranscript } from "./createAutoPermissionTranscript.js";
 import {
     parseAutoPermissionReview,
     type AutoPermissionReview,
@@ -23,33 +22,33 @@ export async function reviewAutoPermission(options: {
     timeoutMs?: number;
     toolName: string;
 }): Promise<AutoPermissionReview> {
-    const transcript = createAutoPermissionTranscript(options.messages);
+    if (options.signal?.aborted) throw new Error("Permission review was stopped.");
     const action = safeJson({
         description: options.action,
         tool: options.toolName,
         arguments: options.args,
     });
-    if (options.signal?.aborted) throw new Error("Permission review was stopped.");
     const deadline = new AbortController();
     const timeout = setTimeout(
         () => deadline.abort(),
         options.timeoutMs ?? AUTO_PERMISSION_REVIEW_TIMEOUT_MS,
     );
     try {
-        const text = await raceWithAbort(
+        const response = await raceWithAbort(
             options.reviewer.review({
-                prompt: `<conversation>\n${transcript.text}\n</conversation>\n\n<proposed_action>\n${action}\n</proposed_action>`,
+                action,
+                messages: options.messages,
                 signal: anySignal([options.signal, deadline.signal]),
             }),
             options.signal,
         );
-        if (text === ABORTED_BY_SIGNAL) throw new Error("Permission review was stopped.");
+        if (response === ABORTED_BY_SIGNAL) throw new Error("Permission review was stopped.");
         if (deadline.signal.aborted) return timedOutReview();
-        const review = parseAutoPermissionReview(text);
+        const review = parseAutoPermissionReview(response.text);
         if (review?.decision === "allow") {
             // Routine low-risk work does not depend on historical authorization. Actions with
             // meaningful impact must still fail closed when that evidence is incomplete.
-            if (transcript.userEvidenceOmitted && review.risk !== "low") {
+            if (response.userEvidenceOmitted && review.risk !== "low") {
                 return incompleteUserEvidenceReview(review.risk);
             }
             if (!shouldAllowAutoPermissionReview(review)) {

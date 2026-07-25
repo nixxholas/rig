@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { Message } from "../agent/types.js";
-import type { PermissionReviewAgent } from "./PermissionReviewAgent.js";
+import type { PermissionReviewAgent, PermissionReviewRequest } from "./PermissionReviewAgent.js";
 import { reviewAutoPermission } from "./reviewAutoPermission.js";
 
 describe("reviewAutoPermission", () => {
@@ -42,18 +41,21 @@ describe("reviewAutoPermission", () => {
     });
 
     it("still reviews low-risk actions when older user evidence exceeds the budget", async () => {
-        const { reviewer, review } = stubReviewer({
-            decision: "allow",
-            reason: "This is a routine local development action.",
-            risk: "low",
-            userAuthorization: "low",
-        });
+        const { reviewer, review } = stubReviewer(
+            {
+                decision: "allow",
+                reason: "This is a routine local development action.",
+                risk: "low",
+                userAuthorization: "low",
+            },
+            true,
+        );
 
         await expect(
             reviewAutoPermission({
                 action: 'running "pnpm test". Access: unrestricted filesystem and network access',
                 args: { sandbox_permissions: "require_escalated" },
-                messages: oversizedUserHistory(),
+                messages: [],
                 reviewer,
                 toolName: "exec_command",
             }),
@@ -69,18 +71,21 @@ describe("reviewAutoPermission", () => {
     it.each(["medium", "high"] as const)(
         "keeps %s-risk actions fail-closed when user evidence is incomplete",
         async (risk) => {
-            const { reviewer, review } = stubReviewer({
-                decision: "allow",
-                reason: "The retained messages authorize this action.",
-                risk,
-                userAuthorization: "high",
-            });
+            const { reviewer, review } = stubReviewer(
+                {
+                    decision: "allow",
+                    reason: "The retained messages authorize this action.",
+                    risk,
+                    userAuthorization: "high",
+                },
+                true,
+            );
 
             await expect(
                 reviewAutoPermission({
                     action: 'running "pnpm test". Access: unrestricted filesystem and network access',
                     args: { sandbox_permissions: "require_escalated" },
-                    messages: oversizedUserHistory(),
+                    messages: [],
                     reviewer,
                     toolName: "exec_command",
                 }),
@@ -95,7 +100,7 @@ describe("reviewAutoPermission", () => {
     );
 
     it("sends the tool-owned action description to the reviewer", async () => {
-        const { reviewer, prompts } = stubReviewer({
+        const { reviewer, actions } = stubReviewer({
             decision: "allow",
             reason: "This is a routine local development action.",
             risk: "low",
@@ -112,14 +117,14 @@ describe("reviewAutoPermission", () => {
             toolName: "Write",
         });
 
-        expect(prompts[0]).toContain(`"description":${JSON.stringify(action)}`);
+        expect(actions[0]).toContain(`"description":${JSON.stringify(action)}`);
     });
 
     it("asks the user when the reviewer runs out of time", async () => {
         const reviewer: PermissionReviewAgent = {
             close: vi.fn(async () => {}),
             review: ({ signal }) =>
-                new Promise((_resolve, reject) => {
+                new Promise<never>((_resolve, reject) => {
                     signal?.addEventListener("abort", () => {
                         reject(new Error("The review deadline passed."));
                     });
@@ -168,7 +173,7 @@ describe("reviewAutoPermission", () => {
     it("waits for a permission reviewer until the caller aborts", async () => {
         const reviewer: PermissionReviewAgent = {
             close: vi.fn(async () => {}),
-            review: () => new Promise<string>(() => {}),
+            review: () => new Promise(() => {}),
         };
         const controller = new AbortController();
 
@@ -187,34 +192,27 @@ describe("reviewAutoPermission", () => {
     });
 });
 
-function oversizedUserHistory(): Message[] {
-    return Array.from({ length: 7 }, (_, index) => ({
-        role: "user",
-        id: `user-${String(index)}`,
-        blocks: [
-            {
-                type: "text",
-                text: `USER_EVIDENCE_${String(index)} ${"e".repeat(10_000)}`,
-            },
-        ],
-    }));
-}
-
-function stubReviewer(result: {
-    decision: "allow" | "ask";
-    reason: string;
-    risk: "low" | "medium" | "high";
-    userAuthorization: "low" | "medium" | "high";
-}) {
-    const prompts: string[] = [];
-    const review = vi.fn(async ({ prompt }: { prompt: string }) => {
-        prompts.push(prompt);
-        return JSON.stringify({
-            decision: result.decision,
-            reason: result.reason,
-            risk: result.risk,
-            user_authorization: result.userAuthorization,
-        });
+function stubReviewer(
+    result: {
+        decision: "allow" | "ask";
+        reason: string;
+        risk: "low" | "medium" | "high";
+        userAuthorization: "low" | "medium" | "high";
+    },
+    userEvidenceOmitted = false,
+) {
+    const actions: string[] = [];
+    const review = vi.fn(async (request: PermissionReviewRequest) => {
+        actions.push(request.action);
+        return {
+            text: JSON.stringify({
+                decision: result.decision,
+                reason: result.reason,
+                risk: result.risk,
+                user_authorization: result.userAuthorization,
+            }),
+            userEvidenceOmitted,
+        };
     });
-    return { prompts, review, reviewer: { close: vi.fn(async () => {}), review } };
+    return { actions, review, reviewer: { close: vi.fn(async () => {}), review } };
 }

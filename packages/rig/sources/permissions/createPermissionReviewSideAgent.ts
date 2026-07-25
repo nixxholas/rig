@@ -6,7 +6,12 @@ import {
 } from "../agent/prompt/permissionReviewInstructions.js";
 import type { AnyDefinedTool, Message } from "../agent/types.js";
 import type { Model, Provider } from "@slopus/rig-execution";
-import type { PermissionReviewAgent } from "./PermissionReviewAgent.js";
+import { createAutoPermissionTranscript } from "./createAutoPermissionTranscript.js";
+import type {
+    PermissionReviewAgent,
+    PermissionReviewRequest,
+    PermissionReviewResponse,
+} from "./PermissionReviewAgent.js";
 
 /**
  * Builds the sister agent that reviews Auto permission decisions.
@@ -16,9 +21,9 @@ import type { PermissionReviewAgent } from "./PermissionReviewAgent.js";
  * agent it reviews. Its permission mode is never Auto, which is what stops a review from
  * recursing into another review.
  *
- * The reviewer keeps its history across reviews, matching Codex's guardian. What it learned about
- * the workspace while judging one action stays useful for the next, so later reviews are both
- * cheaper and better informed.
+ * The reviewer keeps its history across reviews, matching Codex's guardian. Because it does, each
+ * review sends only the conversation it has not already seen; resending the whole transcript would
+ * duplicate every earlier review's context inside the next one.
  */
 export function createPermissionReviewSideAgent(options: {
     context: AgentContext;
@@ -44,18 +49,40 @@ export function createPermissionReviewSideAgent(options: {
         systemPrompt: PERMISSION_REVIEW_INSTRUCTIONS,
         tools: options.tools,
     });
-    let reviewed = false;
+    let reviewedMessageCount = 0;
     return {
-        async review(request) {
-            const prompt = reviewed
-                ? `${PERMISSION_REVIEW_FOLLOWUP_REMINDER}\n\n${request.prompt}`
-                : request.prompt;
-            reviewed = true;
+        async review(request: PermissionReviewRequest): Promise<PermissionReviewResponse> {
+            const first = reviewedMessageCount === 0;
+            // Older turns are already in the reviewer's own history, so only the new ones are
+            // sent. Budgeting still runs over the whole conversation, because whether user
+            // authorization survived the budget is a property of all of it, not of the delta.
+            const whole = createAutoPermissionTranscript(request.messages);
+            const delta = first
+                ? whole
+                : createAutoPermissionTranscript(request.messages.slice(reviewedMessageCount));
+            reviewedMessageCount = request.messages.length;
+            const conversation =
+                delta.text.length === 0
+                    ? "No new conversation since your last review."
+                    : delta.text;
+            const prompt = [
+                ...(first ? [] : [PERMISSION_REVIEW_FOLLOWUP_REMINDER, ""]),
+                `<conversation${first ? "" : ' continued="true"'}>`,
+                conversation,
+                "</conversation>",
+                "",
+                "<proposed_action>",
+                request.action,
+                "</proposed_action>",
+            ].join("\n");
             const result = await agent.send(
                 prompt,
                 request.signal === undefined ? {} : { signal: request.signal },
             );
-            return finalText(result.messages);
+            return {
+                text: finalText(result.messages),
+                userEvidenceOmitted: whole.userEvidenceOmitted,
+            };
         },
         async close() {
             await agent.close();
