@@ -50,6 +50,7 @@ export interface ClaudeSessionOptions {
     pathToClaudeCodeExecutable?: string;
     query?: ClaudeSdkQuery;
     tools?: readonly SessionTool[];
+    userAgent?: string;
 }
 
 export class ClaudeSession extends BaseSession {
@@ -58,6 +59,7 @@ export class ClaudeSession extends BaseSession {
     readonly env: NodeJS.ProcessEnv;
     readonly model: string | undefined;
     readonly pathToClaudeCodeExecutable: string | undefined;
+    readonly userAgent: string | undefined;
     readonly tools: readonly SessionTool[] | undefined;
 
     private activeEffort: SessionReasoningEffort | undefined;
@@ -84,6 +86,7 @@ export class ClaudeSession extends BaseSession {
         this.model = options.model;
         this.activeModel = options.model;
         this.pathToClaudeCodeExecutable = options.pathToClaudeCodeExecutable;
+        this.userAgent = options.userAgent;
         this.tools = options.tools;
         this.modelConfigurations = options.modelConfigurations;
         this.query = options.query ?? defaultClaudeSdkQuery;
@@ -315,6 +318,7 @@ export class ClaudeSession extends BaseSession {
                     sessionId: this.sdkSessionId,
                     systemPrompt,
                     tools,
+                    ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
                     callTool: (name) => toolBridge.execute(name),
                 });
                 if (replayableMessageCount > 1) {

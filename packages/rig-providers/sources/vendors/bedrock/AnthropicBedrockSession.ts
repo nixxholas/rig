@@ -43,6 +43,7 @@ export interface AnthropicBedrockSessionOptions {
     region: string;
     tools?: readonly SessionTool[];
     transport: AnthropicBedrockTransport;
+    userAgent?: string;
 }
 
 export class AnthropicBedrockSession extends BaseSession {
@@ -52,6 +53,7 @@ export class AnthropicBedrockSession extends BaseSession {
     readonly region: string;
     readonly tools: readonly SessionTool[] | undefined;
     readonly transport: AnthropicBedrockTransport;
+    readonly userAgent: string | undefined;
 
     private activeEffort: SessionReasoningEffort | undefined;
     private activeModel: string | undefined;
@@ -71,6 +73,7 @@ export class AnthropicBedrockSession extends BaseSession {
         this.region = options.region;
         this.tools = options.tools;
         this.transport = options.transport;
+        this.userAgent = options.userAgent;
         this.modelConfigurations = options.modelConfigurations;
         this.client = options.client;
         this.context = {
@@ -363,6 +366,7 @@ export class AnthropicBedrockSession extends BaseSession {
             ...(this.endpoint === undefined ? {} : { endpoint: this.endpoint }),
             region: this.region,
             transport: this.transport,
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
         }));
     }
 

@@ -27,6 +27,7 @@ export function toClaudeSdkOptions(options: {
     sessionId: string;
     systemPrompt: string;
     tools: readonly SessionTool[];
+    userAgent?: string;
     compaction?: boolean;
     callTool?: (name: string) => Promise<CallToolResult>;
     registerAbortCleanup?: (cleanup: () => void) => void;
@@ -49,6 +50,7 @@ export function toClaudeSdkOptions(options: {
             ...withoutClaudeCredentials(options.env),
             ...credentialEnvironment(options.credential),
             ...CLAUDE_SDK_PRIVACY_ENVIRONMENT,
+            ...customHeaders(options.env, options.userAgent),
             CLAUDE_AGENT_SDK_DISABLE_BUILTIN_AGENTS: "1",
             CLAUDE_AGENT_SDK_MCP_NO_PREFIX: "1",
             CLAUDE_CODE_DISABLE_ATTACHMENTS: "1",
@@ -69,6 +71,21 @@ export function toClaudeSdkOptions(options: {
         tools: [],
         ...(abortController === undefined ? {} : { abortController }),
         ...thinkingOptions(options.effort),
+    };
+}
+
+/**
+ * Claude Code spreads these headers over its own defaults, so this is where a user agent wins.
+ * The caller's existing headers come first, since the override is the more specific request.
+ */
+function customHeaders(env: NodeJS.ProcessEnv, userAgent: string | undefined): NodeJS.ProcessEnv {
+    const identification = userAgent?.trim();
+    if (identification === undefined || identification.length === 0) return {};
+    const existing = env.ANTHROPIC_CUSTOM_HEADERS?.trim();
+    const header = `User-Agent: ${identification}`;
+    return {
+        ANTHROPIC_CUSTOM_HEADERS:
+            existing === undefined || existing.length === 0 ? header : `${existing}\n${header}`,
     };
 }
 

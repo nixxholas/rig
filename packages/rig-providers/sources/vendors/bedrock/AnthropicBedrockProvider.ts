@@ -17,6 +17,8 @@ export interface AnthropicBedrockProviderOptions {
     model?: string;
     region?: string;
     transport?: AnthropicBedrockTransport;
+    /** Identifies the caller instead of the Anthropic SDK, which is the default. */
+    userAgent?: string;
 }
 
 export class AnthropicBedrockProvider extends BaseProvider {
@@ -30,6 +32,7 @@ export class AnthropicBedrockProvider extends BaseProvider {
     readonly model: string | undefined;
     readonly region: string;
     readonly transport: AnthropicBedrockTransport;
+    readonly userAgent: string | undefined;
 
     constructor(options: AnthropicBedrockProviderOptions) {
         super();
@@ -40,6 +43,7 @@ export class AnthropicBedrockProvider extends BaseProvider {
         this.model = options.model;
         this.region = options.region?.trim() || BEDROCK_DEFAULT_REGION;
         this.transport = options.transport ?? "mantle";
+        this.userAgent = options.userAgent;
     }
 
     override async session(id: string, options: SessionOptions): Promise<AnthropicBedrockSession> {
@@ -51,6 +55,7 @@ export class AnthropicBedrockProvider extends BaseProvider {
             ...(this.model === undefined ? {} : { model: this.model }),
             region: this.region,
             transport: this.transport,
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
         });
     }
 }

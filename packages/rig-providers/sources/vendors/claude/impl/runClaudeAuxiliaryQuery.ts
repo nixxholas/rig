@@ -15,7 +15,7 @@ import { toClaudeSdkOptions } from "@/vendors/claude/impl/toClaudeSdkOptions.js"
 export async function runClaudeAuxiliaryQuery(
     options: Pick<
         ClaudeSessionOptions,
-        "credential" | "cwd" | "env" | "pathToClaudeCodeExecutable" | "query"
+        "credential" | "cwd" | "env" | "pathToClaudeCodeExecutable" | "query" | "userAgent"
     > & {
         model: string;
         request: ClaudeAuxiliaryQueryRequest;
@@ -34,6 +34,7 @@ export async function runClaudeAuxiliaryQuery(
         sessionId: randomUUID(),
         systemPrompt: options.request.systemPrompt,
         tools: [],
+        ...(options.userAgent === undefined ? {} : { userAgent: options.userAgent }),
     });
     configureBuiltinTools(sdkOptions, options.request.tools ?? []);
     const stream = (options.query ?? defaultClaudeSdkQuery)({

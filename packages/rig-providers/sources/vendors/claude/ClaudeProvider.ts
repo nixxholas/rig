@@ -17,6 +17,8 @@ export interface ClaudeProviderOptions {
     model?: string;
     pathToClaudeCodeExecutable?: string;
     query?: ClaudeSdkQuery;
+    /** Identifies the caller instead of Claude Code, which is the default. */
+    userAgent?: string;
 }
 
 export class ClaudeProvider extends BaseProvider {
@@ -30,6 +32,7 @@ export class ClaudeProvider extends BaseProvider {
     readonly model: string | undefined;
     readonly pathToClaudeCodeExecutable: string | undefined;
     readonly query: ClaudeSdkQuery | undefined;
+    readonly userAgent: string | undefined;
 
     constructor(options: ClaudeProviderOptions) {
         super();
@@ -39,6 +42,7 @@ export class ClaudeProvider extends BaseProvider {
         this.model = options.model === undefined ? undefined : resolveClaudeModelId(options.model);
         this.pathToClaudeCodeExecutable = options.pathToClaudeCodeExecutable;
         this.query = options.query;
+        this.userAgent = options.userAgent;
     }
 
     override async session(id: string, options: SessionOptions): Promise<ClaudeSession> {
@@ -52,6 +56,7 @@ export class ClaudeProvider extends BaseProvider {
                 ? {}
                 : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
             ...(this.query === undefined ? {} : { query: this.query }),
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
         });
     }
 
@@ -68,6 +73,7 @@ export class ClaudeProvider extends BaseProvider {
                 ? {}
                 : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
             ...(this.query === undefined ? {} : { query: this.query }),
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
             request,
         });
     }
