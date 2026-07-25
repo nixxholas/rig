@@ -1,7 +1,6 @@
 import type { AgentContext } from "./context/AgentContext.js";
 import { createAvailableModelsInstructions } from "./createAvailableModelsInstructions.js";
 import { createPermissionInstructions } from "./createPermissionInstructions.js";
-import { loadAgentsMdInstructions } from "./loadAgentsMdInstructions.js";
 import { loadSkillInstructions } from "./skills/loadSkillInstructions.js";
 import { formatSkillsForPrompt } from "./skills/formatSkillsForPrompt.js";
 import { systemMessageToText } from "./systemMessageToText.js";
@@ -39,11 +38,6 @@ export async function createSystemPrompt(
         if (message.role === "system") {
             parts.push(systemMessageToText(message));
         }
-    }
-
-    const agentsMdInstructions = await loadAgentsMdInstructions(options.context.fs);
-    if (agentsMdInstructions !== undefined) {
-        parts.push(agentsMdInstructions);
     }
 
     const skillInstructions = await loadSkillInstructions(

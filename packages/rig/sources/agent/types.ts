@@ -103,6 +103,11 @@ export interface UserMessage {
     agentMessageTriggerTurn?: boolean;
     /** Durable model context that must never be presented as user-authored content. */
     internal?: true;
+    /** Marks a durable record of the project instructions the model has been given. */
+    agentsMd?: {
+        /** Fingerprint of the instructions, or null once they were deleted from disk. */
+        fingerprint: string | null;
+    };
 }
 
 export interface AgentMessage {

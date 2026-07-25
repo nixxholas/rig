@@ -11,6 +11,7 @@ import { toProviderMessages } from "./loop.js";
 import { toExecutorTool } from "./tools/toExecutorTool.js";
 import { createProviderPrompt } from "./createProviderPrompt.js";
 import { prepareProviderMessageImages } from "./prepareProviderMessageImages.js";
+import { reconcileAgentsMdMessages } from "./reconcileAgentsMdMessages.js";
 import { createDebugProvider, type DebugLog } from "../debug/index.js";
 import { printAgentMessageToConsole, type AgentConsole } from "./printAgentMessageToConsole.js";
 import type { AnyDefinedTool, ContentBlock, Message, SystemMessage, UserMessage } from "./types.js";
@@ -402,6 +403,18 @@ export class Agent {
                 if (!options.signal?.aborted) {
                     this.#console.error?.(`[agent:${this.id}] automatic compaction failed`, error);
                 }
+            }
+
+            const beforeAgentsMd = this.#contextMessages ?? this.#messages;
+            const withAgentsMd = await reconcileAgentsMdMessages({
+                fs: this.context.fs,
+                idFactory: this.#idFactory,
+                messages: beforeAgentsMd,
+            });
+            // Recording the project instructions makes the model's history diverge from the
+            // visible transcript, which is what keeps superseded instructions readable later.
+            if (withAgentsMd !== beforeAgentsMd) {
+                this.#contextMessages = [...withAgentsMd];
             }
 
             let contextCompactedDuringRun = false;
