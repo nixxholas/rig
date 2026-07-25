@@ -6,6 +6,11 @@ import { claude_sonnet_5_system_prompt } from "@/vendors/claude/prompts/claude_s
 const TRACE_INSTRUCTIONS =
     "This is a deterministic provider trace. Follow exact reply and tool instructions.";
 
+// The trace advertises a skill. The caller owns that text, so it is written here rather than
+// composed by the session, and it trails the instructions exactly as the capture recorded it.
+const TRACE_SKILLS =
+    '<skills>\n<skill name="provider-golden" source="file" location="/virtual/provider-golden/SKILL.md">The exact provider skill marker is PROVIDER_SKILL_MARKER.</skill>\n</skills>';
+
 export function createClaudeTestInstructions(
     model: string,
     options: { cwd: string; env: NodeJS.ProcessEnv },
@@ -16,5 +21,5 @@ export function createClaudeTestInstructions(
         : normalized.includes("fable")
           ? claude_fable_5_system_prompt
           : claude_opus_4_8_system_prompt;
-    return `${renderClaudeSystemPrompt(prompt, options)}\n\n${TRACE_INSTRUCTIONS}`;
+    return `${renderClaudeSystemPrompt(prompt, options)}\n\n${TRACE_INSTRUCTIONS}\n\n${TRACE_SKILLS}`;
 }

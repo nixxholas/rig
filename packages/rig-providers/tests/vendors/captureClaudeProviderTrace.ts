@@ -106,14 +106,6 @@ const session = new ClaudeSession(sessionId, {
     },
     model: initialModel,
     tools: resolveClaudeTools(initialModel),
-    skills: [
-        {
-            name: "provider-golden",
-            description: "The exact provider skill marker is PROVIDER_SKILL_MARKER.",
-            source: "file",
-            location: "/virtual/provider-golden/SKILL.md",
-        },
-    ],
 });
 
 const turns: CapturedTurn[] = [];

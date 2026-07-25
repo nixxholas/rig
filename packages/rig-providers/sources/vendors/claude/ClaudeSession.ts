@@ -18,15 +18,16 @@ import type {
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 import { ClaudePromptQueue } from "@/vendors/claude/impl/ClaudePromptQueue.js";
+import {
+    classifyClaudeError,
+    claudeResultErrorMessage,
+} from "@/vendors/claude/errors/claudeErrors.js";
 import { ClaudeToolBridge } from "@/vendors/claude/impl/ClaudeToolBridge.js";
-import { claudeResultErrorMessage } from "@/vendors/claude/impl/claudeResultErrorMessage.js";
-import { classifyClaudeError } from "@/vendors/claude/impl/classifyClaudeError.js";
 import {
     createClaudeLivePromptMessage,
     createClaudeSessionReplay,
@@ -48,7 +49,6 @@ export interface ClaudeSessionOptions {
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     pathToClaudeCodeExecutable?: string;
     query?: ClaudeSdkQuery;
-    skills?: readonly SessionSkill[];
     tools?: readonly SessionTool[];
 }
 
@@ -58,7 +58,6 @@ export class ClaudeSession extends BaseSession {
     readonly env: NodeJS.ProcessEnv;
     readonly model: string | undefined;
     readonly pathToClaudeCodeExecutable: string | undefined;
-    readonly skills: readonly SessionSkill[] | undefined;
     readonly tools: readonly SessionTool[] | undefined;
 
     private activeEffort: SessionReasoningEffort | undefined;
@@ -85,7 +84,6 @@ export class ClaudeSession extends BaseSession {
         this.model = options.model;
         this.activeModel = options.model;
         this.pathToClaudeCodeExecutable = options.pathToClaudeCodeExecutable;
-        this.skills = options.skills;
         this.tools = options.tools;
         this.modelConfigurations = options.modelConfigurations;
         this.query = options.query ?? defaultClaudeSdkQuery;
@@ -227,7 +225,6 @@ export class ClaudeSession extends BaseSession {
     }): AsyncGenerator<SessionEvent> {
         yield { type: "block_start" };
         const modelConfiguration = this.modelConfigurations?.[options.model];
-        const skills = modelConfiguration?.skills ?? this.skills ?? [];
         const tools = modelConfiguration?.tools ?? this.tools ?? [];
         const systemPrompt = "";
         const configuredContext =
@@ -316,7 +313,6 @@ export class ClaudeSession extends BaseSession {
                         ? {}
                         : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
                     sessionId: this.sdkSessionId,
-                    skills,
                     systemPrompt,
                     tools,
                     callTool: (name) => toolBridge.execute(name),

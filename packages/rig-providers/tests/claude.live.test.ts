@@ -154,14 +154,6 @@ describe.skipIf(!live)("Claude live session", () => {
                 credential,
                 cwd: process.cwd(),
                 model: "opus[1m]",
-                skills: [
-                    {
-                        name: "live-marker",
-                        description: "The exact marker for this session is RIG_CLAUDE_SKILL.",
-                        source: "file",
-                        location: "/virtual/live-marker/SKILL.md",
-                    },
-                ],
             });
             try {
                 const first = await collectSessionEvents(

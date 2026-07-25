@@ -32,7 +32,6 @@ export async function runClaudeAuxiliaryQuery(
             ? {}
             : { pathToClaudeCodeExecutable: options.pathToClaudeCodeExecutable }),
         sessionId: randomUUID(),
-        skills: [],
         systemPrompt: options.request.systemPrompt,
         tools: [],
     });

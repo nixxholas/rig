@@ -9,7 +9,6 @@ import { Type } from "@sinclair/typebox";
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivacyEnvironment.js";
@@ -26,7 +25,6 @@ export function toClaudeSdkOptions(options: {
     model: string;
     pathToClaudeCodeExecutable?: string;
     sessionId: string;
-    skills: readonly SessionSkill[];
     systemPrompt: string;
     tools: readonly SessionTool[];
     compaction?: boolean;
@@ -67,34 +65,19 @@ export function toClaudeSdkOptions(options: {
         settings: { env: CLAUDE_SDK_PRIVACY_ENVIRONMENT },
         skills: [],
         strictMcpConfig: true,
-        systemPrompt: createSystemPrompt(options.systemPrompt, options.context, options.skills),
+        systemPrompt: createSystemPrompt(options.systemPrompt, options.context),
         tools: [],
         ...(abortController === undefined ? {} : { abortController }),
         ...thinkingOptions(options.effort),
     };
 }
 
-function createSystemPrompt(
-    basePrompt: string,
-    context: SessionContext,
-    skills: readonly SessionSkill[],
-): string {
+function createSystemPrompt(basePrompt: string, context: SessionContext): string {
     const systemMessages = context.messages
         .filter((message) => message.role === "system")
         .flatMap((message) => message.content)
         .join("\n\n");
-    const skillPrompt =
-        skills.length === 0
-            ? ""
-            : `<skills>\n${skills
-                  .map(
-                      (skill) =>
-                          `<skill name="${skill.name}" source="${skill.source}" location="${skill.location}">${skill.description}</skill>`,
-                  )
-                  .join("\n")}\n</skills>`;
-    return [basePrompt, context.instructions, systemMessages, skillPrompt]
-        .filter(Boolean)
-        .join("\n\n");
+    return [basePrompt, context.instructions, systemMessages].filter(Boolean).join("\n\n");
 }
 
 function credentialEnvironment(credential: ClaudeCredential): NodeJS.ProcessEnv {

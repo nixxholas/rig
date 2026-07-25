@@ -119,14 +119,6 @@ describe("Claude provider golden", () => {
                 },
             },
             model: golden.scenario.initialModel,
-            skills: [
-                {
-                    name: "provider-golden",
-                    description: "The exact provider skill marker is PROVIDER_SKILL_MARKER.",
-                    source: "file",
-                    location: "/virtual/provider-golden/SKILL.md",
-                },
-            ],
             tools: resolveClaudeTools(golden.scenario.initialModel),
         });
 

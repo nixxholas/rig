@@ -1,4 +1,17 @@
-import type { SDKAssistantMessageError, SDKRateLimitInfo } from "@anthropic-ai/claude-agent-sdk";
+/**
+ * Recognition of the Claude Code SDK failures the session has to describe to a person.
+ *
+ * The SDK reports a failure twice over: a coarse assistant error code alongside rate-limit
+ * bookkeeping, and a result message carrying whatever the run collected. The first decides which
+ * taxonomy case the caller sees, the second supplies the sentence shown when the run had nothing
+ * better to say.
+ */
+
+import type {
+    SDKAssistantMessageError,
+    SDKRateLimitInfo,
+    SDKResultMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 
 import type { SessionProviderError } from "@/core/SessionEvent.js";
 
@@ -44,6 +57,24 @@ export function classifyClaudeError(options: {
         };
     }
     return { type: "unclassified" };
+}
+
+export function claudeResultErrorMessage(
+    result: Exclude<SDKResultMessage, { subtype: "success" }>,
+): string {
+    const errors = result.errors.map((error) => error.trim()).filter((error) => error.length > 0);
+    if (errors.length > 0) return errors.join("\n");
+
+    switch (result.subtype) {
+        case "error_during_execution":
+            return "Claude encountered an error while running the request.";
+        case "error_max_turns":
+            return "Claude reached the maximum number of turns.";
+        case "error_max_budget_usd":
+            return "Claude reached the configured spending limit.";
+        case "error_max_structured_output_retries":
+            return "Claude could not produce valid structured output after repeated attempts.";
+    }
 }
 
 function earliestResetAt(rateLimitInfo: SDKRateLimitInfo | undefined): number | undefined {

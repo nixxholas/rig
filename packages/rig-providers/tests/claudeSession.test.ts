@@ -75,7 +75,6 @@ describe("ClaudeSession", () => {
                 const generator = messages();
                 return Object.assign(generator, { close: () => {} });
             }) as unknown as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -130,7 +129,6 @@ describe("ClaudeSession", () => {
                 const generator = messages();
                 return Object.assign(generator, { close: () => {} });
             }) as unknown as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -174,7 +172,6 @@ describe("ClaudeSession", () => {
                 const generator = messages();
                 return Object.assign(generator, { close: () => {} });
             }) as unknown as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -214,7 +211,6 @@ describe("ClaudeSession", () => {
                 const generator = messages();
                 return Object.assign(generator, { close: () => {} });
             }) as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -277,7 +273,6 @@ describe("ClaudeSession", () => {
             cwd: "/tmp/rig-claude-interrupted-tool-test",
             model: "sonnet[1m]",
             query,
-            skills: [],
             tools: [
                 {
                     name: "Bash",
@@ -348,7 +343,6 @@ describe("ClaudeSession", () => {
                 const generator = messages();
                 return Object.assign(generator, { close: () => {} });
             }) as ClaudeSdkQuery,
-            skills: [],
             tools: [
                 {
                     name: "Read",
@@ -433,7 +427,6 @@ describe("ClaudeSession", () => {
             query: (() => {
                 throw new Error("SDK construction failed.");
             }) as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -472,7 +465,6 @@ describe("ClaudeSession", () => {
                     return never;
                 },
             })) as unknown as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
         const controller = new AbortController();
@@ -520,7 +512,6 @@ describe("ClaudeSession", () => {
             cwd: "/tmp/rig-claude-rotate-after-abort-test",
             model: "sonnet[1m]",
             query,
-            skills: [],
             tools: [],
         });
         const controller = new AbortController();
@@ -570,7 +561,6 @@ describe("ClaudeSession", () => {
                     next: vi.fn(() => new Promise<never>(() => {})),
                 };
             }) as unknown as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -615,7 +605,6 @@ describe("ClaudeSession", () => {
                 const generator = messages();
                 return Object.assign(generator, { close: () => {} });
             }) as ClaudeSdkQuery,
-            skills: [],
             tools: [],
         });
 
@@ -711,7 +700,10 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("session-id", {
             context: {
                 instructions: "Rig system instructions.",
-                messages: [{ role: "system", content: "Project instructions." }],
+                messages: [
+                    { role: "system", content: "Project instructions." },
+                    { role: "system", content: "Golden skill description." },
+                ],
             },
             credential,
             cwd: "/tmp/rig-claude-test",
@@ -738,14 +730,6 @@ describe("ClaudeSession", () => {
                       )
                     : fakeQuery(replies[calls.length - 1] ?? "OK");
             }) as ClaudeSdkQuery,
-            skills: [
-                {
-                    name: "golden",
-                    description: "Golden skill description.",
-                    source: "file",
-                    location: "/skills/golden/SKILL.md",
-                },
-            ],
             tools: [
                 {
                     name: "Read",
@@ -791,6 +775,7 @@ describe("ClaudeSession", () => {
                 instructions: "Rig system instructions.",
                 messages: [
                     { role: "system", content: "Project instructions." },
+                    { role: "system", content: "Golden skill description." },
                     { role: "user", content: "SUMMARY" },
                 ],
             },
@@ -817,7 +802,6 @@ describe("ClaudeSession", () => {
             persistSession: false,
             sessionId: expect.any(String),
             settingSources: [],
-            skills: [],
             strictMcpConfig: true,
             tools: [],
         });
