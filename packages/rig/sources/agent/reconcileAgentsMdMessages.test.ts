@@ -6,9 +6,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { AGENTS_MD_PROJECT_DOC_MAX_BYTES } from "./agentsMdProjectDocMaxBytes.js";
 import { AGENTS_MD_REMOVAL_NOTICE, AGENTS_MD_REPLACEMENT_NOTICE } from "./agentsMdNotices.js";
-import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
+import { AGENTS_MD_SPEC } from "./prompt/agentsMdSpec.js";
 import { createNodeFileSystemContext } from "./context/createNodeFileSystemContext.js";
-import { createSystemPrompt } from "./createSystemPrompt.js";
+import { createSystemPrompt } from "./prompt/createSystemPrompt.js";
 import { findLatestAgentsMdRecord } from "./findLatestAgentsMdRecord.js";
 import { isInternalMessage } from "./isInternalMessage.js";
 import { reconcileAgentsMdMessages } from "./reconcileAgentsMdMessages.js";

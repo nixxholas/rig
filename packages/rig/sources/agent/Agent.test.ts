@@ -7,7 +7,7 @@ import { validPng32Base64 } from "../tools/testing/validImageFixtures.js";
 import { getImageProcessor } from "../images/getImageProcessor.js";
 import { selectToolsForModel } from "../runtime/selectToolsForModel.js";
 import { Agent } from "./Agent.js";
-import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
+import { AGENTS_MD_SPEC } from "./prompt/agentsMdSpec.js";
 import type { AgentLoopEvent } from "./loop.js";
 import { defineTool, type Message } from "./types.js";
 import {

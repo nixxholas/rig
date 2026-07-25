@@ -433,14 +433,12 @@ export class AgentSessionManager {
                 taskName,
                 type: "subagent",
             };
-            const childModelId = request.modelId ?? parentRequest.modelId;
             const childRequest = {
                 ...parentRequest,
                 instructions: createSubagentInstructions(
                     parentRequest.instructions,
                     depth,
                     this.maxDepth,
-                    childModelId,
                 ),
                 ...(request.effort === undefined ? {} : { effort: request.effort }),
                 ...(request.modelId === undefined ? {} : { modelId: request.modelId }),

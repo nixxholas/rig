@@ -1,15 +1,16 @@
 import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
-import type { AgentContext } from "./context/AgentContext.js";
-import { createAvailableModelsInstructions } from "./createAvailableModelsInstructions.js";
-import { createPermissionInstructions } from "./createPermissionInstructions.js";
-import { loadSkillInstructions } from "./skills/loadSkillInstructions.js";
-import { formatSkillsForPrompt } from "./skills/formatSkillsForPrompt.js";
-import type { AnyDefinedTool, Message } from "./types.js";
-import type { Model, Provider } from "@slopus/rig-execution";
-import { createSecretInstructions } from "../secrets/index.js";
-import type { DurableSkillDefinition } from "../external-skills/types.js";
-import { RIG_AGENT_TOOL_INSTRUCTIONS } from "./rigAgentToolInstructions.js";
-import { createCodexCollaborationInstructions } from "./createCodexCollaborationInstructions.js";
+import { createCodexCollaborationInstructions } from "./codexInstructions.js";
+import {
+    createAvailableModelsInstructions,
+    createPermissionInstructions,
+    RIG_AGENT_TOOL_INSTRUCTIONS,
+} from "./instructions.js";
+import type { AgentContext } from "../context/AgentContext.js";
+import { loadSkillInstructions } from "../skills/loadSkillInstructions.js";
+import type { AnyDefinedTool, Message } from "../types.js";
+import type { Model, PreambleMessage, Provider } from "@slopus/rig-execution";
+import { createSecretInstructions } from "../../secrets/index.js";
+import type { DurableSkillDefinition } from "../../external-skills/types.js";
 
 export interface CreateSystemPromptOptions {
     appendSystemPrompt?: string;
@@ -98,4 +99,22 @@ export async function createSystemPrompt(
     }
 
     return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
+export interface ProviderPrompt {
+    systemPrompt?: string;
+    systemPromptOverride?: string;
+    preamble?: readonly PreambleMessage[];
+}
+
+export async function createProviderPrompt(
+    options: CreateSystemPromptOptions,
+): Promise<ProviderPrompt> {
+    const systemPrompt = await createSystemPrompt(options);
+    return {
+        ...(systemPrompt === undefined ? {} : { systemPrompt }),
+        ...(options.systemPrompt === undefined
+            ? {}
+            : { systemPromptOverride: options.systemPrompt }),
+    };
 }

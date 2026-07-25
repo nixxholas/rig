@@ -1,3 +1,7 @@
+import type { AgentContext } from "../context/AgentContext.js";
+import type { PermissionMode } from "../../permissions/index.js";
+import { escapeXml } from "../skills/escapeXml.js";
+
 export function createCodexCollaborationInstructions(options: {
     canSpawn: boolean;
     depth: number;
@@ -96,4 +100,47 @@ There are ${options.maxActive} available concurrency slots, meaning that up to $
     return [usageHint, sharedHint, ...(options.canSpawn ? [modelOverrideHint] : []), policy].join(
         "\n\n",
     );
+}
+
+export function createCodexPermissionInstructions(mode: PermissionMode): string {
+    const sandbox =
+        mode === "full_access"
+            ? "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `danger-full-access`: No filesystem sandboxing - all commands are permitted. Network access is enabled."
+            : mode === "read_only"
+              ? "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `read-only`: The sandbox only permits reading files. Network access is restricted."
+              : "Filesystem sandboxing defines which files can be read or written. `sandbox_mode` is `workspace-write`: The sandbox permits reading files, and editing files in `cwd` and `writable_roots`. Editing files in other directories requires approval. Network access is restricted.";
+    const approval =
+        mode === "auto"
+            ? "`approvals_reviewer` is `auto_review`: Sandbox escalations with require_escalated will be reviewed for compliance with the policy. If a rejection happens, you should proceed only with a materially safer alternative, or inform the user of the risk and send a final message to ask for approval."
+            : "Approval policy is currently never. Do not provide the `sandbox_permissions` for any reason, commands will be rejected.";
+    return `<permissions instructions>\n${sandbox}\n${approval}\n</permissions instructions>`;
+}
+
+export function createCodexBedrockEnvironmentContext(context: AgentContext): string {
+    const currentDate = new Intl.DateTimeFormat("en-CA", {
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+    }).format(new Date());
+    const permissionMode = context.permissions?.mode ?? "full_access";
+    const cwd = escapeXml(context.fs.cwd);
+    const shell = escapeXml(process.env.SHELL ?? "zsh");
+    const date = escapeXml(currentDate);
+    const timezone = escapeXml(Intl.DateTimeFormat().resolvedOptions().timeZone);
+    const fileSystem =
+        permissionMode === "full_access"
+            ? '<permission_profile type="disabled"><file_system type="unrestricted" /></permission_profile>'
+            : permissionMode === "read_only"
+              ? '<permission_profile type="managed"><file_system type="restricted"><entry access="read"><special>:root</special></entry></file_system></permission_profile>'
+              : `<permission_profile type="managed"><file_system type="restricted"><entry access="write"><path>${cwd}</path></entry></file_system></permission_profile>`;
+    return [
+        "<environment_context>",
+        `  <cwd>${cwd}</cwd>`,
+        `  <shell>${shell}</shell>`,
+        `  <current_date>${date}</current_date>`,
+        `  <timezone>${timezone}</timezone>`,
+        `  <filesystem><workspace_roots><root>${cwd}</root></workspace_roots>${fileSystem}</filesystem>`,
+        "</environment_context>",
+    ].join("\n");
 }

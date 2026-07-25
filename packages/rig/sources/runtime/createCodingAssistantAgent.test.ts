@@ -10,7 +10,7 @@ import {
     modelXaiGrok45,
     modelXaiGrokBuild,
 } from "@slopus/rig-execution";
-import { createSystemPrompt } from "../agent/createSystemPrompt.js";
+import { createSystemPrompt } from "../agent/prompt/createSystemPrompt.js";
 import { createCodingAssistantAgent } from "./createCodingAssistantAgent.js";
 
 describe("createCodingAssistantAgent", () => {

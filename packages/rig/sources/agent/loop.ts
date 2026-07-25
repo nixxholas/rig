@@ -17,7 +17,7 @@ import { presentToolCall, type PresentedToolCall } from "./presentToolCall.js";
 import { replaceLastTurnToolResultImages } from "./replaceLastTurnToolResultImages.js";
 import { systemMessageToText } from "./systemMessageToText.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
-import { createProviderPrompt, type ProviderPrompt } from "./createProviderPrompt.js";
+import { createProviderPrompt, type ProviderPrompt } from "./prompt/createSystemPrompt.js";
 import { ToolLockManager } from "./ToolLockManager.js";
 import { toToolExecutionEndResult } from "./toToolExecutionEndResult.js";
 import { errorToMessage } from "../errorToMessage.js";
