@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { delayBeforeGrokRetry, isRetryableGrokError } from "@/vendors/grok/impl/grokRetry.js";
-import { isRetryableGrokCompactionError } from "@/vendors/grok/impl/isRetryableGrokCompactionError.js";
+import { isRetryableGrokCompactionError } from "@/vendors/grok/errors/grokErrors.js";
 
 describe("Grok retry contract", () => {
     it.each([

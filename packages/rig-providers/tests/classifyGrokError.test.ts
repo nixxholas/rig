@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { classifyGrokError } from "@/vendors/grok/impl/classifyGrokError.js";
+import { classifyGrokError } from "@/vendors/grok/errors/grokErrors.js";
 
 describe("classifyGrokError", () => {
     it("classifies context overflow messages like grok-build", () => {

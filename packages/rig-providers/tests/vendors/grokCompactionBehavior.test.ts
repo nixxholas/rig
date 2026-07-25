@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
 import { GrokProvider } from "@/vendors/grok/GrokProvider.js";
-import { formatGrokCompactionSummary } from "@/vendors/grok/impl/formatGrokCompactionSummary.js";
+import { formatGrokCompactionSummary } from "@/vendors/grok/impl/grokCompaction.js";
 import { grok_compaction_prompt } from "@/vendors/grok/prompts/grok_compaction_prompt.js";
 
 vi.mock("@/vendors/grok/impl/waitForGrokCompactionRetry.js", () => ({
@@ -44,14 +44,6 @@ describe("Grok compaction behavior", () => {
                         instructions: "Switched prompt.",
                         messages: [{ role: "system", content: "Switched system message." }],
                     },
-                    skills: [
-                        {
-                            name: "switched-skill",
-                            description: "Switched skill description.",
-                            source: "file",
-                            location: "/skills/switched/SKILL.md",
-                        },
-                    ],
                     tools: [
                         {
                             name: "switched_tool",
@@ -80,7 +72,6 @@ describe("Grok compaction behavior", () => {
         for (const request of requests) {
             expect(JSON.stringify(request.input)).toContain("Switched prompt.");
             expect(JSON.stringify(request.input)).toContain("Switched system message.");
-            expect(JSON.stringify(request.input)).toContain("switched-skill");
             expect(request.tools).toEqual([
                 expect.objectContaining({ type: "function", name: "switched_tool" }),
             ]);

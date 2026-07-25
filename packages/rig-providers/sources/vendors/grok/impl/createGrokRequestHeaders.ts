@@ -9,11 +9,12 @@ export function createGrokRequestHeaders(options: {
     model: string;
     sessionId?: string;
     turnIndex?: number;
+    userAgent?: string;
 }): Record<string, string> {
     const sessionId = options.sessionId ?? randomUUID();
     return {
         accept: "text/event-stream",
-        "user-agent": createGrokUserAgent(),
+        "user-agent": createGrokUserAgent(options.userAgent),
         "x-grok-agent-id": sessionId,
         "x-grok-client-identifier": "grok-shell",
         "x-grok-client-version": GROK_BUILD_CLIENT_VERSION,

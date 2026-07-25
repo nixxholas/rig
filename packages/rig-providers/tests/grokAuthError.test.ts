@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isGrokAuthError } from "@/vendors/grok/impl/isGrokAuthError.js";
+import { isGrokAuthError } from "@/vendors/grok/errors/grokErrors.js";
 
 describe("Grok authentication errors", () => {
     it("recognizes the upstream expired credential rejection", () => {

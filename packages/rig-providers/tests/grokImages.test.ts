@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { isGrokImageStripError } from "@/vendors/grok/impl/isGrokImageStripError.js";
+import { isGrokImageStripError } from "@/vendors/grok/errors/grokErrors.js";
 import { stripGrokContextImages } from "@/vendors/grok/impl/stripGrokContextImages.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 

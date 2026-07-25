@@ -4,11 +4,10 @@ import type { SessionCompaction, SessionCompactionOptions } from "@/core/Session
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import { isSessionErrorDone } from "@/core/SessionEvent.js";
-import { isGrokAuthError } from "@/vendors/grok/impl/isGrokAuthError.js";
+import { isGrokAuthError } from "@/vendors/grok/errors/grokErrors.js";
 import type { SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import type { GrokCredential } from "@/vendors/VendorCredential.js";
@@ -19,30 +18,30 @@ import {
 } from "@/vendors/grok/impl/createGrokOpenAIClient.js";
 import { createGrokOpenAIRequest } from "@/vendors/grok/impl/createGrokOpenAIRequest.js";
 import { createGrokRequestHeaders } from "@/vendors/grok/impl/createGrokRequestHeaders.js";
-import { classifyGrokError } from "@/vendors/grok/impl/classifyGrokError.js";
-import { countGrokUserQueries } from "@/vendors/grok/impl/countGrokUserQueries.js";
-import { createGrokCompactionContinuation } from "@/vendors/grok/impl/createGrokCompactionContinuation.js";
-import { createGrokCompactionPrompt } from "@/vendors/grok/impl/createGrokCompactionPrompt.js";
+import { classifyGrokError } from "@/vendors/grok/errors/grokErrors.js";
+import { countGrokUserQueries } from "@/vendors/grok/impl/grokMessages.js";
+import { createGrokCompactionContinuation } from "@/vendors/grok/impl/grokCompaction.js";
+import { createGrokCompactionPrompt } from "@/vendors/grok/impl/grokCompaction.js";
 import {
     delayBeforeGrokRetry,
     grokErrorStatus,
     isRetryableGrokError,
 } from "@/vendors/grok/impl/grokRetry.js";
-import { extractGrokUserQuery } from "@/vendors/grok/impl/extractGrokUserQuery.js";
-import { findLastGrokUserQuery } from "@/vendors/grok/impl/findLastGrokUserQuery.js";
-import { formatGrokCompactionSummary } from "@/vendors/grok/impl/formatGrokCompactionSummary.js";
-import { isDegenerateGrokCompactionSummary } from "@/vendors/grok/impl/isDegenerateGrokCompactionSummary.js";
-import { isGrokProjectInstructionsMessage } from "@/vendors/grok/impl/isGrokProjectInstructionsMessage.js";
-import { isGrokImageStripError } from "@/vendors/grok/impl/isGrokImageStripError.js";
-import { isGrokStateReminderMessage } from "@/vendors/grok/impl/isGrokStateReminderMessage.js";
-import { isGrokUserInfoMessage } from "@/vendors/grok/impl/isGrokUserInfoMessage.js";
-import { isRetryableGrokCompactionError } from "@/vendors/grok/impl/isRetryableGrokCompactionError.js";
+import { extractGrokUserQuery } from "@/vendors/grok/impl/grokMessages.js";
+import { findLastGrokUserQuery } from "@/vendors/grok/impl/grokMessages.js";
+import { formatGrokCompactionSummary } from "@/vendors/grok/impl/grokCompaction.js";
+import { isDegenerateGrokCompactionSummary } from "@/vendors/grok/impl/grokCompaction.js";
+import { isGrokProjectInstructionsMessage } from "@/vendors/grok/impl/grokMessages.js";
+import { isGrokImageStripError } from "@/vendors/grok/errors/grokErrors.js";
+import { isGrokStateReminderMessage } from "@/vendors/grok/impl/grokMessages.js";
+import { isGrokUserInfoMessage } from "@/vendors/grok/impl/grokMessages.js";
+import { isRetryableGrokCompactionError } from "@/vendors/grok/errors/grokErrors.js";
 import {
     mapOpenAIResponseStream,
     type OpenAIResponseRunResult,
 } from "@/core/responses/mapOpenAIResponseStream.js";
 import { waitForGrokCompactionRetry } from "@/vendors/grok/impl/waitForGrokCompactionRetry.js";
-import { wrapGrokUserQuery } from "@/vendors/grok/impl/wrapGrokUserQuery.js";
+import { wrapGrokUserQuery } from "@/vendors/grok/impl/grokMessages.js";
 import { resolveGrokModelConfiguration } from "@/vendors/grok/impl/resolveGrokModelConfiguration.js";
 import { resolveGrokModelId } from "@/vendors/grok/impl/resolveGrokModelId.js";
 import { stripGrokContextImages } from "@/vendors/grok/impl/stripGrokContextImages.js";
@@ -52,6 +51,8 @@ export interface GrokSessionOptions extends SessionOptions {
     credential: GrokCredential;
     endpoint: string;
     model?: string;
+    /** Identifies this client upstream instead of reproducing the grok-build user agent. */
+    userAgent?: string;
 }
 
 export class GrokSession extends BaseSession {
@@ -67,9 +68,9 @@ export class GrokSession extends BaseSession {
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
         | undefined;
-    private readonly skills: readonly SessionSkill[];
     private initialMessages: SessionContext["messages"];
     private turnIndex: number;
+    private readonly userAgent: string | undefined;
 
     constructor(id: string, options: GrokSessionOptions) {
         super(id);
@@ -81,8 +82,8 @@ export class GrokSession extends BaseSession {
         this.model = options.model;
         this.activeModel = options.model;
         this.modelConfigurations = options.modelConfigurations;
-        this.skills = options.skills ?? [];
         this.tools = options.tools ?? [];
+        this.userAgent = options.userAgent;
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -110,7 +111,6 @@ export class GrokSession extends BaseSession {
         }
         const configured = resolveGrokModelConfiguration({
             context,
-            defaultSkills: this.skills,
             defaultTools: this.tools,
             ...(this.modelConfigurations?.[model] === undefined
                 ? {}
@@ -239,7 +239,6 @@ export class GrokSession extends BaseSession {
         this.activeModel = model;
         const configured = resolveGrokModelConfiguration({
             context,
-            defaultSkills: this.skills,
             defaultTools: this.tools,
             ...(this.modelConfigurations?.[model] === undefined
                 ? {}
@@ -421,6 +420,7 @@ export class GrokSession extends BaseSession {
                             baseUrl: this.endpoint,
                             model: options.model,
                             sessionId: this.id,
+                            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
                             ...(options.turnIndex === undefined
                                 ? {}
                                 : { turnIndex: options.turnIndex }),

@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import type { SessionContext, SessionMessage } from "@/core/SessionContext.js";
 import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
 import { GrokProvider } from "@/vendors/grok/GrokProvider.js";
-import { createGrokCompactionContinuation } from "@/vendors/grok/impl/createGrokCompactionContinuation.js";
+import { createGrokCompactionContinuation } from "@/vendors/grok/impl/grokCompaction.js";
 import { grok_compaction_prompt } from "@/vendors/grok/prompts/grok_compaction_prompt.js";
 import { grok_4_5_tools } from "@/vendors/grok/tools/index.js";
 

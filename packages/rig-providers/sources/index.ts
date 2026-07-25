@@ -94,8 +94,6 @@ export {
 export { GROK_DEFAULT_ENDPOINT } from "@/vendors/grok/impl/grokConstants.js";
 export { GrokSession, type GrokSessionOptions } from "@/vendors/grok/GrokSession.js";
 export type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
-export { grok_4_5_system_prompt } from "@/vendors/grok/prompts/grok_4_5_system_prompt.js";
-export { grok_4_5_tools } from "@/vendors/grok/tools/index.js";
 export { CodexProvider, type CodexProviderOptions } from "@/vendors/codex/CodexProvider.js";
 export {
     fetchCodexProviderQuota,

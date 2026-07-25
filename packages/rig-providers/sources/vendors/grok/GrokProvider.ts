@@ -11,6 +11,8 @@ export interface GrokProviderOptions {
     credential: GrokCredential;
     endpoint?: string;
     model?: string;
+    /** Identifies this client upstream instead of reproducing the grok-build user agent. */
+    userAgent?: string;
 }
 
 export class GrokProvider extends ResponsesProvider {
@@ -21,6 +23,7 @@ export class GrokProvider extends ResponsesProvider {
     readonly credential: GrokCredential;
     readonly endpoint: string;
     readonly model: string | undefined;
+    readonly userAgent: string | undefined;
 
     constructor(options: GrokProviderOptions) {
         super();
@@ -29,6 +32,7 @@ export class GrokProvider extends ResponsesProvider {
         const endpoint = options.endpoint?.trim();
         this.endpoint = endpoint && endpoint.length > 0 ? endpoint : GROK_DEFAULT_ENDPOINT;
         this.model = options.model === undefined ? undefined : resolveGrokModelId(options.model);
+        this.userAgent = options.userAgent;
     }
 
     override async session(id: string, options: SessionOptions): Promise<GrokSession> {
@@ -37,6 +41,7 @@ export class GrokProvider extends ResponsesProvider {
             credential: this.credential,
             endpoint: this.endpoint,
             ...(this.model === undefined ? {} : { model: this.model }),
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
         });
     }
 }
