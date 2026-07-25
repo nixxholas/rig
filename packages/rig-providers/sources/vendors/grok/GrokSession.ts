@@ -12,12 +12,7 @@ import type { SessionTool } from "@/core/SessionTool.js";
 import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import type { GrokCredential } from "@/vendors/VendorCredential.js";
 import { GROK_INFERENCE_MAX_RETRIES } from "@/vendors/grok/impl/grokConstants.js";
-import {
-    createGrokOpenAIClient,
-    type GrokOpenAIClient,
-} from "@/vendors/grok/impl/createGrokOpenAIClient.js";
-import { createGrokOpenAIRequest } from "@/vendors/grok/impl/createGrokOpenAIRequest.js";
-import { createGrokRequestHeaders } from "@/vendors/grok/impl/createGrokRequestHeaders.js";
+import { GrokConnection } from "@/vendors/grok/impl/GrokConnection.js";
 import { classifyGrokError } from "@/vendors/grok/errors/grokErrors.js";
 import { countGrokUserQueries } from "@/vendors/grok/impl/grokMessages.js";
 import { createGrokCompactionContinuation } from "@/vendors/grok/impl/grokCompaction.js";
@@ -36,10 +31,7 @@ import { isGrokImageStripError } from "@/vendors/grok/errors/grokErrors.js";
 import { isGrokStateReminderMessage } from "@/vendors/grok/impl/grokMessages.js";
 import { isGrokUserInfoMessage } from "@/vendors/grok/impl/grokMessages.js";
 import { isRetryableGrokCompactionError } from "@/vendors/grok/errors/grokErrors.js";
-import {
-    mapOpenAIResponseStream,
-    type OpenAIResponseRunResult,
-} from "@/core/responses/mapOpenAIResponseStream.js";
+import type { OpenAIResponseRunResult } from "@/core/responses/mapOpenAIResponseStream.js";
 import { waitForGrokCompactionRetry } from "@/vendors/grok/impl/waitForGrokCompactionRetry.js";
 import { wrapGrokUserQuery } from "@/vendors/grok/impl/grokMessages.js";
 import { resolveGrokModelConfiguration } from "@/vendors/grok/impl/resolveGrokModelConfiguration.js";
@@ -62,8 +54,7 @@ export class GrokSession extends BaseSession {
     readonly tools: readonly SessionTool[];
 
     private activeModel: string | undefined;
-    private client: GrokOpenAIClient | undefined;
-    private clientToken: string | undefined;
+    private readonly connection: GrokConnection;
     private context: SessionContext;
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
@@ -84,6 +75,14 @@ export class GrokSession extends BaseSession {
         this.modelConfigurations = options.modelConfigurations;
         this.tools = options.tools ?? [];
         this.userAgent = options.userAgent;
+
+        this.connection = new GrokConnection({
+            baseUrl: this.endpoint,
+            sessionId: this.id,
+            token: () => this.credential.credential.token,
+            tools: this.tools,
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
+        });
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -216,8 +215,7 @@ export class GrokSession extends BaseSession {
     }
 
     destroy(): void {
-        void this.client?.close();
-        this.client = undefined;
+        this.connection.close();
     }
 
     private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
@@ -391,7 +389,6 @@ export class GrokSession extends BaseSession {
     }): AsyncGenerator<SessionEvent, OpenAIResponseRunResult | undefined> {
         const { abort } = options;
         await this.refreshCredentialIfExpiring();
-        let client = await this.resolveClient();
         let requestContext = options.context;
         let attempt = 0;
         let rateLimitRetries = 0;
@@ -405,34 +402,14 @@ export class GrokSession extends BaseSession {
             }
 
             try {
-                const responseStream = await client.responses.create(
-                    createGrokOpenAIRequest({
-                        apiModelId: options.model,
-                        context: requestContext,
-                        ...(options.effort === undefined ? {} : { effort: options.effort }),
-                        tools: options.tools ?? this.tools,
-                        ...(options.compaction === undefined
-                            ? {}
-                            : { compaction: options.compaction }),
-                    }),
-                    {
-                        headers: createGrokRequestHeaders({
-                            baseUrl: this.endpoint,
-                            model: options.model,
-                            sessionId: this.id,
-                            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
-                            ...(options.turnIndex === undefined
-                                ? {}
-                                : { turnIndex: options.turnIndex }),
-                        }),
-                        ...(abort === undefined ? {} : { signal: abort }),
-                    },
-                );
-
-                const mapped = mapOpenAIResponseStream(responseStream, {
-                    ...(abort === undefined ? {} : { signal: abort }),
-                    failureMessage: `${options.model} failed to generate a response.`,
-                    requireTerminalEvent: true,
+                const mapped = await this.connection.stream({
+                    ...(abort === undefined ? {} : { abort }),
+                    ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
+                    context: requestContext,
+                    ...(options.effort === undefined ? {} : { effort: options.effort }),
+                    model: options.model,
+                    ...(options.tools === undefined ? {} : { tools: options.tools }),
+                    ...(options.turnIndex === undefined ? {} : { turnIndex: options.turnIndex }),
                 });
                 for (;;) {
                     const next = await mapped.next();
@@ -471,7 +448,7 @@ export class GrokSession extends BaseSession {
                 ) {
                     refreshedCredential = true;
                     if (await this.credential.refreshAfterUnauthorized()) {
-                        client = await this.rebuildClient(false);
+                        await this.connection.rebuild(false);
                         continue;
                     }
                 }
@@ -493,7 +470,7 @@ export class GrokSession extends BaseSession {
                     attempt += 1;
                     if (status === 429) rateLimitRetries += 1;
                     if (attempt === 1 && status !== 429) {
-                        client = await this.rebuildClient(true);
+                        await this.connection.rebuild(true);
                     }
                     yield { type: "retrying", attempt, reason: message };
                     await delayBeforeGrokRetry(attempt, abort, error);
@@ -520,32 +497,6 @@ export class GrokSession extends BaseSession {
         if (this.credential instanceof GrokSessionCredential) {
             await this.credential.ensureFresh();
         }
-    }
-
-    private async resolveClient(): Promise<GrokOpenAIClient> {
-        const token = this.credential.credential.token;
-        if (this.client !== undefined && this.clientToken === token) {
-            return this.client;
-        }
-        if (this.client !== undefined) {
-            // A rotated token invalidates the client that captured the previous one.
-            await this.client.close();
-        }
-
-        this.clientToken = token;
-        this.client = createGrokOpenAIClient({ baseUrl: this.endpoint, token });
-        return this.client;
-    }
-
-    private async rebuildClient(forceHttp1: boolean): Promise<GrokOpenAIClient> {
-        await this.client?.close();
-        this.clientToken = this.credential.credential.token;
-        this.client = createGrokOpenAIClient({
-            baseUrl: this.endpoint,
-            token: this.credential.credential.token,
-            forceHttp1,
-        });
-        return this.client;
     }
 }
 

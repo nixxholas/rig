@@ -18,7 +18,7 @@ import {
     waitForAnthropicBedrockRetry,
 } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
 import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
-import { createAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
+import { AnthropicBedrockConnection } from "@/vendors/bedrock/impl/AnthropicBedrockConnection.js";
 import type { AnthropicBedrockClient as CreatedAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
 import { createAnthropicBedrockRequest } from "@/vendors/bedrock/impl/createAnthropicBedrockRequest.js";
 import { mapAnthropicBedrockStream } from "@/vendors/bedrock/impl/mapAnthropicBedrockStream.js";
@@ -57,7 +57,7 @@ export class AnthropicBedrockSession extends BaseSession {
 
     private activeEffort: SessionReasoningEffort | undefined;
     private activeModel: string | undefined;
-    private client: AnthropicBedrockClient | undefined;
+    private readonly connection: AnthropicBedrockConnection;
     private context: SessionContext;
     private readonly fixedMessages: SessionContext["messages"];
     private readonly modelConfigurations:
@@ -75,7 +75,14 @@ export class AnthropicBedrockSession extends BaseSession {
         this.transport = options.transport;
         this.userAgent = options.userAgent;
         this.modelConfigurations = options.modelConfigurations;
-        this.client = options.client;
+        this.connection = new AnthropicBedrockConnection({
+            bearerToken: () => this.credential.credential.bearerToken,
+            ...(options.client === undefined ? {} : { client: options.client }),
+            ...(this.endpoint === undefined ? {} : { endpoint: this.endpoint }),
+            region: this.region,
+            transport: this.transport,
+            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
+        });
         this.context = {
             instructions: options.context.instructions,
             messages: [...options.context.messages],
@@ -115,7 +122,7 @@ export class AnthropicBedrockSession extends BaseSession {
         if ((options.inputTokens ?? 0) >= NATIVE_COMPACTION_TRIGGER_TOKENS) {
             try {
                 const native = await requestAnthropicBedrockCompaction({
-                    client: this.resolveClient(),
+                    client: this.connection.client(),
                     request: this.createRequest({
                         compactionInstructions: prompt,
                         context: original,
@@ -225,7 +232,7 @@ export class AnthropicBedrockSession extends BaseSession {
     }
 
     destroy(): void {
-        this.client = undefined;
+        this.connection.close();
     }
 
     private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
@@ -314,9 +321,9 @@ export class AnthropicBedrockSession extends BaseSession {
             while (true) {
                 let responseContentStarted = false;
                 try {
-                    const response = await this.resolveClient().beta.messages.create(
+                    const response = await this.connection.stream(
                         request,
-                        options.signal === undefined ? undefined : { signal: options.signal },
+                        ...(options.signal === undefined ? [] : ([options.signal] as const)),
                     );
                     for await (const event of mapAnthropicBedrockStream(response, { tools })) {
                         if (event.type === "block_start") blockStarted = true;
@@ -358,16 +365,6 @@ export class AnthropicBedrockSession extends BaseSession {
                 message: error instanceof Error ? error.message : String(error),
             };
         }
-    }
-
-    private resolveClient(): AnthropicBedrockClient {
-        return (this.client ??= createAnthropicBedrockClient({
-            bearerToken: this.credential.credential.bearerToken,
-            ...(this.endpoint === undefined ? {} : { endpoint: this.endpoint }),
-            region: this.region,
-            transport: this.transport,
-            ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
-        }));
     }
 
     private createRequest(options: {
