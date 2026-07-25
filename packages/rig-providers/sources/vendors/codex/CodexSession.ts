@@ -38,12 +38,14 @@ import { preserveCodexLocalCompactionMessages } from "@/vendors/codex/impl/prese
 import { recoverCodexUnauthorizedCredential } from "@/vendors/codex/impl/recoverCodexUnauthorizedCredential.js";
 import { resolveCodexReasoningEffort } from "@/vendors/codex/impl/resolveCodexReasoningEffort.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
-import { resolveCodexStreamIdleTimeout } from "@/vendors/codex/impl/resolveCodexStreamIdleTimeout.js";
-import { resolveCodexStreamMaxRetries } from "@/vendors/codex/impl/resolveCodexStreamMaxRetries.js";
+import {
+    resolveCodexStreamIdleTimeout,
+    resolveCodexStreamMaxRetries,
+    waitForCodexCompactionRetry,
+    waitForCodexRetry,
+} from "@/vendors/codex/impl/codexRetry.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
 import { stripCodexInitialMessages } from "@/vendors/codex/impl/stripCodexInitialMessages.js";
-import { waitForCodexCompactionRetry } from "@/vendors/codex/impl/waitForCodexCompactionRetry.js";
-import { waitForCodexRetry } from "@/vendors/codex/impl/waitForCodexRetry.js";
 import {
     context_checkpoint_compaction_instructions,
     context_checkpoint_summary_prefix,

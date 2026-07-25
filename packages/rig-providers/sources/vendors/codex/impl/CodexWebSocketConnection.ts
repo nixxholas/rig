@@ -13,7 +13,7 @@ import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSse
 import { createCodexCliWebSocketInferenceRequest } from "@/vendors/codex/impl/createCodexCliWebSocketInferenceRequest.js";
 import { createCodexWebSocketStream } from "@/vendors/codex/impl/createCodexWebSocketStream.js";
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
-import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/withCodexStreamIdleTimeout.js";
+import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 
 /**
  * The Codex WebSocket, which is a conversation rather than a request.

@@ -11,10 +11,12 @@ import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/cod
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { resolveCodexInstallationId } from "@/vendors/codex/impl/resolveCodexInstallationId.js";
 import { resolveCodexInstallationIdAt } from "@/vendors/codex/impl/resolveCodexInstallationIdAt.js";
-import { resolveCodexRetryDelay } from "@/vendors/codex/impl/resolveCodexRetryDelay.js";
-import { resolveCodexStreamIdleTimeout } from "@/vendors/codex/impl/resolveCodexStreamIdleTimeout.js";
-import { resolveCodexStreamMaxRetries } from "@/vendors/codex/impl/resolveCodexStreamMaxRetries.js";
-import { waitForCodexRetry } from "@/vendors/codex/impl/waitForCodexRetry.js";
+import {
+    resolveCodexRetryDelay,
+    resolveCodexStreamIdleTimeout,
+    resolveCodexStreamMaxRetries,
+    waitForCodexRetry,
+} from "@/vendors/codex/impl/codexRetry.js";
 
 describe("Codex stream retries", () => {
     it("recognizes a missing previous response from structured and serialized API errors", () => {

@@ -11,8 +11,10 @@ import { assertCodexCredential } from "@/vendors/codex/impl/assertCodexCredentia
 import { resolveCodexInstallationId } from "@/vendors/codex/impl/resolveCodexInstallationId.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
 import { resolveCodexUserAgent } from "@/vendors/codex/impl/codexUserAgent.js";
-import { resolveCodexStreamIdleTimeout } from "@/vendors/codex/impl/resolveCodexStreamIdleTimeout.js";
-import { resolveCodexStreamMaxRetries } from "@/vendors/codex/impl/resolveCodexStreamMaxRetries.js";
+import {
+    resolveCodexStreamIdleTimeout,
+    resolveCodexStreamMaxRetries,
+} from "@/vendors/codex/impl/codexRetry.js";
 import {
     CODEX_API_ENDPOINT,
     CODEX_CHATGPT_ENDPOINT,

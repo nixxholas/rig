@@ -8,7 +8,7 @@ import { createCodexBedrockRequest } from "@/vendors/codex/impl/createCodexBedro
 import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
 import { createCodexRequestHeaders } from "@/vendors/codex/impl/createCodexRequestHeaders.js";
 import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
-import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/withCodexStreamIdleTimeout.js";
+import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 
 /**
  * One Codex request over server-sent events.

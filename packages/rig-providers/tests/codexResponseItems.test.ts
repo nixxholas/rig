@@ -7,7 +7,7 @@ import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStrea
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import { tool_search } from "@/vendors/codex/tools/tool_search.js";
-import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/withCodexStreamIdleTimeout.js";
+import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 
 describe("Codex response items", () => {
