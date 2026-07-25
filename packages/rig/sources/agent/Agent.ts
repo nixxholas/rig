@@ -94,10 +94,10 @@ export interface AgentRunOptions {
     onMessage?: (message: Message) => void | Promise<void>;
 }
 
-export interface AgentRunResult extends AgentLoopResult {
+export type AgentRunResult = AgentLoopResult & {
     debugDirectory?: string;
     runId: string;
-}
+};
 
 export interface AgentCompactionResult {
     compacted: boolean;

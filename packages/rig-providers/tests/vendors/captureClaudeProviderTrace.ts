@@ -80,7 +80,6 @@ const session = new ClaudeSession(sessionId, {
         messages: [],
     },
     credential,
-    cwd,
     env: providerEnv,
     modelConfigurations: {
         [resolveClaudeModelId(initialModel)]: {

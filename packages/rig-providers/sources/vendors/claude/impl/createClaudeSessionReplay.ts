@@ -34,7 +34,6 @@ export interface ClaudeSessionReplay {
 
 export function createClaudeSessionReplay(options: {
     context: SessionContext;
-    cwd: string;
     model: string;
     sessionId: string;
 }): ClaudeSessionReplay {
@@ -129,7 +128,7 @@ function toPromptMessage(messages: readonly ReplayMessage[]): SDKUserMessage {
 
 function toSessionStoreEntries(
     messages: readonly ReplayMessage[],
-    options: { cwd: string; model: string; sessionId: string },
+    options: { model: string; sessionId: string },
 ): SessionStoreEntry[] {
     let parentUuid: string | null = null;
     const assistantUuidByToolCallId = new Map<string, string>();
@@ -142,7 +141,9 @@ function toSessionStoreEntries(
         }
         const uuid = stableMessageUuid(options.sessionId, message, index);
         const base = {
-            cwd: options.cwd,
+            // Rig runs every tool itself, so Claude Code never works from a caller-owned
+            // directory. The transcript still needs the field expected by its resume path.
+            cwd: process.cwd(),
             entrypoint: "sdk-ts",
             isSidechain: false,
             parentUuid,

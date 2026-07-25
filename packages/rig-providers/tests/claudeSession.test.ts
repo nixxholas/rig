@@ -13,7 +13,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("quota-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-quota-test",
             model: "sonnet[1m]",
             query: (() => {
                 async function* messages() {
@@ -100,7 +99,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("empty-error-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-empty-error-test",
             model: "sonnet[1m]",
             query: (() => {
                 async function* messages() {
@@ -152,7 +150,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("retry-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-retry-test",
             model: "sonnet[1m]",
             query: (() => {
                 async function* messages() {
@@ -194,7 +191,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("tool-result-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-tool-result-test",
             model: "sonnet[1m]",
             query: ((parameters) => {
                 async function* messages() {
@@ -270,7 +266,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("interrupted-tool-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-interrupted-tool-test",
             model: "sonnet[1m]",
             query,
             tools: [
@@ -330,7 +325,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("parallel-tool-replay-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-parallel-tool-replay-test",
             model: "sonnet[1m]",
             query: ((parameters) => {
                 async function* messages() {
@@ -443,7 +437,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("throwing-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-throwing-test",
             model: "sonnet[1m]",
             query: (() => {
                 throw new Error("SDK construction failed.");
@@ -473,7 +466,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("stuck-abort-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-stuck-abort-test",
             model: "sonnet[1m]",
             query: (() => ({
                 [Symbol.asyncIterator]() {
@@ -530,7 +522,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("rotate-after-abort-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-rotate-after-abort-test",
             model: "sonnet[1m]",
             query,
             tools: [],
@@ -570,7 +561,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("construction-abort-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-construction-abort-test",
             model: "sonnet[1m]",
             query: (() => {
                 controller.abort();
@@ -608,7 +598,6 @@ describe("ClaudeSession", () => {
         const session = new ClaudeSession("image-session", {
             context: { instructions: "", messages: [] },
             credential,
-            cwd: "/tmp/rig-claude-image-test",
             model: "sonnet[1m]",
             query: ((parameters) => {
                 async function* messages() {
@@ -718,16 +707,16 @@ describe("ClaudeSession", () => {
         const replies = ["FIRST", "SWITCHED"];
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
+        const systemMessages = [
+            { role: "system" as const, content: "Project instructions." },
+            { role: "system" as const, content: "Golden skill description." },
+        ];
         const session = new ClaudeSession("session-id", {
             context: {
                 instructions: "Rig system instructions.",
-                messages: [
-                    { role: "system", content: "Project instructions." },
-                    { role: "system", content: "Golden skill description." },
-                ],
+                messages: systemMessages,
             },
             credential,
-            cwd: "/tmp/rig-claude-test",
             env: {
                 PATH: process.env.PATH,
                 ANTHROPIC_API_KEY: "wrong-api-key",
@@ -767,7 +756,9 @@ describe("ClaudeSession", () => {
         const first = await collectSessionEvents(
             session.run({
                 abort: abortController.signal,
-                context: { messages: [{ role: "user", content: "First turn." }] },
+                context: {
+                    messages: [...systemMessages, { role: "user", content: "First turn." }],
+                },
             }),
         );
         const switched = await collectSessionEvents(
@@ -775,6 +766,7 @@ describe("ClaudeSession", () => {
                 model: "sonnet[1m]",
                 context: {
                     messages: [
+                        ...systemMessages,
                         { role: "user", content: "First turn." },
                         { role: "assistant", content: "FIRST" },
                         { role: "user", content: "Switch models." },
@@ -862,6 +854,89 @@ describe("ClaudeSession", () => {
             allowedTools: ["mcp__rig__Read"],
             extraArgs: {},
             tools: [],
+        });
+    });
+
+    it("replaces restored conversation history after compaction", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const replayEntries: unknown[] = [];
+        let queryIndex = 0;
+        let postCompactionPrompt: unknown;
+        const compactionPrompts: string[] = [];
+        const query = ((parameters) => {
+            const index = queryIndex;
+            queryIndex += 1;
+            async function* messages() {
+                replayEntries[index] = await parameters.options?.sessionStore?.load({
+                    projectKey: "test",
+                    sessionId: parameters.options.resume ?? "restored-session",
+                });
+                if (index === 0) {
+                    yield* fakeNativeCompactQuery(parameters, "SUMMARY", compactionPrompts);
+                    return;
+                }
+                if (typeof parameters.prompt !== "string") {
+                    postCompactionPrompt = (await parameters.prompt[Symbol.asyncIterator]().next())
+                        .value;
+                }
+                yield* fakeQuery("CONTINUED");
+            }
+            return Object.assign(messages(), { close: () => {} });
+        }) as ClaudeSdkQuery;
+        const systemMessage = { role: "system" as const, content: "Project instructions." };
+        const compactedPrefix = [
+            systemMessage,
+            { role: "user" as const, content: "OLD QUESTION" },
+            { role: "assistant" as const, content: "OLD ANSWER" },
+        ];
+        const retainedMessage = {
+            role: "user" as const,
+            content: "RETAIN THIS LATEST TURN",
+        };
+        const session = new ClaudeSession("restored-session", {
+            context: {
+                instructions: "Rig system instructions.",
+                messages: [...compactedPrefix, retainedMessage],
+            },
+            credential,
+            model: "opus[1m]",
+            query,
+            tools: [],
+        });
+
+        const compacted = await session.compact({
+            context: { messages: compactedPrefix },
+        });
+        await collectSessionEvents(
+            session.run({
+                context: {
+                    messages: [
+                        systemMessage,
+                        {
+                            role: "user",
+                            content: "<conversation_summary>\nSUMMARY\n</conversation_summary>",
+                        },
+                        retainedMessage,
+                    ],
+                },
+            }),
+        );
+
+        expect(compacted).toMatchObject({
+            status: "completed",
+            preservedMessages: [systemMessage],
+            context: {
+                messages: [systemMessage, { role: "user", content: "SUMMARY" }],
+            },
+        });
+        expect(JSON.stringify(replayEntries[0])).not.toContain(retainedMessage.content);
+        expect(JSON.stringify(replayEntries[1])).not.toContain("OLD QUESTION");
+        expect(JSON.stringify(replayEntries[1])).not.toContain("OLD ANSWER");
+        expect(JSON.stringify(replayEntries[1])).toContain("SUMMARY");
+        expect(postCompactionPrompt).toMatchObject({
+            type: "user",
+            message: { content: retainedMessage.content },
         });
     });
 });

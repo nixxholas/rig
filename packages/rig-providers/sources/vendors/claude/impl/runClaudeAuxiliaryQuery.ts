@@ -15,7 +15,7 @@ import { toClaudeSdkOptions } from "@/vendors/claude/impl/toClaudeSdkOptions.js"
 export async function runClaudeAuxiliaryQuery(
     options: Pick<
         ClaudeSessionOptions,
-        "credential" | "cwd" | "env" | "pathToClaudeCodeExecutable" | "query" | "userAgent"
+        "credential" | "env" | "pathToClaudeCodeExecutable" | "query" | "userAgent"
     > & {
         model: string;
         request: ClaudeAuxiliaryQueryRequest;
@@ -25,7 +25,6 @@ export async function runClaudeAuxiliaryQuery(
         ...(options.request.signal === undefined ? {} : { abort: options.request.signal }),
         context: { instructions: "", messages: [] },
         credential: options.credential,
-        cwd: options.cwd,
         env: options.env ?? process.env,
         model: options.model,
         ...(options.pathToClaudeCodeExecutable === undefined

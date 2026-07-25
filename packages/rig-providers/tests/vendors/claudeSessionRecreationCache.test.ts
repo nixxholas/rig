@@ -168,7 +168,6 @@ async function withServer(
                 const session = new ClaudeSession("<SESSION_ID>", {
                     context: { instructions: "You are a careful engineer.", messages: [] },
                     credential,
-                    cwd,
                     env,
                     model: "anthropic/opus-4-8",
                     query: claudeSdkQuery,

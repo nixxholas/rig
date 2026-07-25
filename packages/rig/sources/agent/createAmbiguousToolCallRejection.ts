@@ -4,6 +4,7 @@ import type { AssistantContent, AssistantMessage, ToolCall } from "@slopus/rig-e
 
 export interface AmbiguousToolCallRejection {
     assistantMessage: AgentMessage;
+    errorMessage: string;
     originalToolCallIds: readonly string[];
     resultMessage: AgentMessage;
 }
@@ -58,6 +59,7 @@ export function createAmbiguousToolCallRejection(
 
     return {
         assistantMessage: safeAssistantMessage,
+        errorMessage: rejection,
         originalToolCallIds: toolCalls.map((toolCall) => toolCall.id),
         resultMessage: {
             role: "agent",

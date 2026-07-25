@@ -203,12 +203,18 @@ type PreparedToolPermission =
           review: AutoPermissionReview;
       };
 
-export interface AgentLoopResult {
-    errorMessage?: string;
+interface AgentLoopOutcome {
     messages: readonly Message[];
     contextMessages: readonly Message[];
-    stopReason: StopReason;
 }
+
+/**
+ * A failed run always carries the text that explains the failure, so no exit path can
+ * report an error the session and the transcript are unable to describe.
+ */
+export type AgentLoopResult =
+    | (AgentLoopOutcome & { errorMessage: string; stopReason: "error" })
+    | (AgentLoopOutcome & { errorMessage?: never; stopReason: Exclude<StopReason, "error"> });
 
 export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentLoopResult> {
     const model = findModel(options.provider, options.modelId);
@@ -424,6 +430,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             await options.onMessage?.(ambiguousToolCallRejection.resultMessage);
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
             return {
+                errorMessage: ambiguousToolCallRejection.errorMessage,
                 messages: transcript,
                 contextMessages: contextTranscript,
                 stopReason: "error",
@@ -479,9 +486,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         if (assistantMessage.stopReason === "error") {
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
             return {
-                ...(assistantMessage.errorMessage === undefined
-                    ? {}
-                    : { errorMessage: assistantMessage.errorMessage }),
+                errorMessage: assistantMessage.errorMessage ?? "The model response failed.",
                 messages: transcript,
                 contextMessages: contextTranscript,
                 stopReason: assistantMessage.stopReason,

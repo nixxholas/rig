@@ -23,6 +23,18 @@ export function mapSessionEventToHappyMessages(
         ];
     }
     if (event.type === "run_finished") {
+        if (event.data.stopReason === "error") {
+            return [
+                agentMessage(event, `${event.id}:error`, event.data.runId, {
+                    t: "service",
+                    text: event.data.errorMessage ?? "The model response failed.",
+                }),
+                agentMessage(event, `${event.id}:turn-end`, event.data.runId, {
+                    status: "failed",
+                    t: "turn-end",
+                }),
+            ];
+        }
         const status = event.data.stopReason === "aborted" ? "cancelled" : "completed";
         return [
             agentMessage(event, `${event.id}:turn-end`, event.data.runId, {

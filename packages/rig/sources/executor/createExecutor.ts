@@ -80,7 +80,6 @@ function configuredExecutor(
           })
         : config.type === "claude"
           ? claudeExecution({
-                agentContext: options.agentContext,
                 config,
                 env: options.env,
                 id,

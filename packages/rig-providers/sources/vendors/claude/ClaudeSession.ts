@@ -20,7 +20,6 @@ import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 import { ClaudePromptQueue } from "@/vendors/claude/impl/ClaudePromptQueue.js";
@@ -44,7 +43,6 @@ const CLAUDE_QUERY_ABORTED = Symbol("claude_query_aborted");
 export interface ClaudeSessionOptions {
     context: SessionContext;
     credential: ClaudeCredential;
-    cwd: string;
     env?: NodeJS.ProcessEnv;
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
@@ -56,7 +54,6 @@ export interface ClaudeSessionOptions {
 
 export class ClaudeSession extends BaseSession {
     readonly credential: ClaudeCredential;
-    readonly cwd: string;
     readonly env: NodeJS.ProcessEnv;
     readonly model: string | undefined;
     readonly pathToClaudeCodeExecutable: string | undefined;
@@ -65,7 +62,6 @@ export class ClaudeSession extends BaseSession {
 
     private activeEffort: SessionReasoningEffort | undefined;
     private activeModel: string | undefined;
-    private readonly initialMessages: SessionContext["messages"];
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
         | undefined;
@@ -82,7 +78,6 @@ export class ClaudeSession extends BaseSession {
     constructor(id: string, options: ClaudeSessionOptions) {
         super(id);
         this.credential = options.credential;
-        this.cwd = options.cwd;
         this.env = options.env ?? process.env;
         this.model = options.model;
         this.activeModel = options.model;
@@ -95,7 +90,6 @@ export class ClaudeSession extends BaseSession {
             instructions: options.context.instructions,
             messages: [...options.context.messages],
         };
-        this.initialMessages = [...options.context.messages];
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -104,7 +98,13 @@ export class ClaudeSession extends BaseSession {
     }
 
     async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
-        const original = this.context;
+        const original =
+            options.context === undefined
+                ? this.context
+                : {
+                      instructions: this.context.instructions,
+                      messages: [...options.context.messages],
+                  };
         const { instructions, signal } = options;
         if (signal?.aborted) return { status: "cancelled", context: original };
         const model = this.activeModel ?? this.model;
@@ -161,7 +161,7 @@ export class ClaudeSession extends BaseSession {
                 context: original,
             };
         }
-        const preservedMessages = [...this.initialMessages];
+        const preservedMessages = original.messages.filter((message) => message.role === "system");
         this.context = {
             instructions: original.instructions,
             messages: [...preservedMessages, { role: "user", content: summary }],
@@ -189,9 +189,7 @@ export class ClaudeSession extends BaseSession {
         this.activeEffort = effort;
         this.context = {
             instructions: this.context.instructions,
-            messages: withInitialSessionMessages(this.initialMessages, [
-                ...request.context.messages,
-            ]),
+            messages: [...request.context.messages],
         };
         let assistantText = "";
         let reasoningText = "";
@@ -277,7 +275,6 @@ export class ClaudeSession extends BaseSession {
         const { abort: _abort, ...sdkRequestOptions } = options;
         const replay = createClaudeSessionReplay({
             context: configuredContext,
-            cwd: this.cwd,
             model: options.model,
             sessionId: this.sdkSessionId,
         });
@@ -326,7 +323,6 @@ export class ClaudeSession extends BaseSession {
                     ...sdkRequestOptions,
                     context: configuredContext,
                     credential: this.credential,
-                    cwd: this.cwd,
                     env: this.env,
                     ...(this.pathToClaudeCodeExecutable === undefined
                         ? {}

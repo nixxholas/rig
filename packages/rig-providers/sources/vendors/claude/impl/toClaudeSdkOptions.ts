@@ -19,7 +19,6 @@ export function toClaudeSdkOptions(options: {
     abort?: AbortSignal;
     context: SessionContext;
     credential: ClaudeCredential;
-    cwd: string;
     effort?: SessionReasoningEffort;
     env: NodeJS.ProcessEnv;
     model: string;
@@ -37,7 +36,6 @@ export function toClaudeSdkOptions(options: {
     options.registerAbortCleanup?.(cleanup);
     return {
         allowedTools: mcpToolNames,
-        cwd: options.cwd,
         mcpServers: {
             [RIG_MCP_SERVER_NAME]: createClaudeMcpServer(options.tools, options.callTool),
         },

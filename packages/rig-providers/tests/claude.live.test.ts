@@ -87,7 +87,6 @@ describe.skipIf(!live)("Claude live session", () => {
                     messages: [],
                 },
                 credential,
-                cwd: process.cwd(),
                 env: {
                     ...process.env,
                     ANTHROPIC_BASE_URL: `http://127.0.0.1:${address.port}`,
@@ -152,7 +151,6 @@ describe.skipIf(!live)("Claude live session", () => {
                     messages: [],
                 },
                 credential,
-                cwd: process.cwd(),
                 model: "opus[1m]",
             });
             try {
@@ -241,7 +239,6 @@ describe.skipIf(!live)("Claude live session", () => {
                 ],
             },
             credential,
-            cwd: process.cwd(),
             model: "sonnet[1m]",
         });
         try {

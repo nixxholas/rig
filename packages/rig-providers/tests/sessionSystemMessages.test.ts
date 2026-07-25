@@ -23,7 +23,6 @@ describe("Session system messages", () => {
     it("keeps a Claude notice in position instead of folding it into the prompt", () => {
         const replay = createClaudeSessionReplay({
             context: CONTEXT,
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "11111111-1111-4111-8111-111111111111",
         });

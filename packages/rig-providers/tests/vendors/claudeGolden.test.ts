@@ -94,7 +94,6 @@ describe("Claude provider golden", () => {
                 messages: [],
             },
             credential,
-            cwd,
             env: providerEnv,
             modelConfigurations: {
                 [resolveClaudeModelId(golden.scenario.initialModel)]: {
@@ -305,12 +304,14 @@ function toSse(events: readonly unknown[]): string {
 function normalize(value: unknown, cwd: string): unknown {
     const home = homedir();
     const homeRelativeCwd = cwd.replace(home, "<HOME>");
+    const sdkDefaultWorkspaceSlug = process.cwd().replaceAll("/", "-");
     const visit = (item: unknown): unknown => {
         if (typeof item === "string") {
             return item
                 .replaceAll(cwd, "<WORKSPACE>")
                 .replaceAll(home, "<HOME>")
                 .replaceAll(homeRelativeCwd, "<WORKSPACE>")
+                .replaceAll(sdkDefaultWorkspaceSlug, "<WORKSPACE_SLUG>")
                 .replace(
                     /(?:\/tmp|\/var\/folders\/[^/\s"]+\/[^/\s"]+\/T)(?=\/claude-resume-)/gu,
                     "<TMP>",

@@ -287,6 +287,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         let finished:
             | {
                   agentRunId?: string;
+                  errorMessage?: string;
                   messages: AgentSnapshot["messages"];
                   stopReason: StopReason;
               }
@@ -329,6 +330,9 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
                         ...(event.data.agentRunId !== undefined
                             ? { agentRunId: event.data.agentRunId }
                             : {}),
+                        ...(event.data.errorMessage === undefined
+                            ? {}
+                            : { errorMessage: event.data.errorMessage }),
                         messages: this.#session.snapshot.messages,
                         stopReason: event.data.stopReason,
                     };
@@ -342,26 +346,47 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         if (failure !== undefined) {
             throw failure;
         }
+        const debug =
+            submitted.debugDirectory === undefined
+                ? {}
+                : { debugDirectory: submitted.debugDirectory };
+        const contextMessages =
+            this.#session.snapshot.contextMessages ?? this.#session.snapshot.messages;
         if (finished === undefined) {
+            const messages = this.#session.snapshot.messages;
+            if (aborted) {
+                return {
+                    ...debug,
+                    messages,
+                    contextMessages,
+                    runId: submitted.runId,
+                    stopReason: "aborted",
+                };
+            }
             return {
-                ...(submitted.debugDirectory === undefined
-                    ? {}
-                    : { debugDirectory: submitted.debugDirectory }),
-                messages: this.#session.snapshot.messages,
-                contextMessages:
-                    this.#session.snapshot.contextMessages ?? this.#session.snapshot.messages,
+                ...debug,
+                errorMessage: "The remote run ended without a completion event.",
+                messages,
+                contextMessages,
                 runId: submitted.runId,
-                stopReason: aborted ? "aborted" : "error",
+                stopReason: "error",
             };
         }
 
+        if (finished.stopReason === "error") {
+            return {
+                ...debug,
+                errorMessage: finished.errorMessage ?? "The model response failed.",
+                messages: finished.messages,
+                contextMessages,
+                runId: finished.agentRunId ?? submitted.runId,
+                stopReason: "error",
+            };
+        }
         return {
-            ...(submitted.debugDirectory === undefined
-                ? {}
-                : { debugDirectory: submitted.debugDirectory }),
+            ...debug,
             messages: finished.messages,
-            contextMessages:
-                this.#session.snapshot.contextMessages ?? this.#session.snapshot.messages,
+            contextMessages,
             runId: finished.agentRunId ?? submitted.runId,
             stopReason: finished.stopReason,
         };

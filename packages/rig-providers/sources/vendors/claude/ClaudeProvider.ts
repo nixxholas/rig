@@ -12,7 +12,6 @@ import { runClaudeAuxiliaryQuery } from "@/vendors/claude/impl/runClaudeAuxiliar
 
 export interface ClaudeProviderOptions {
     credential: ClaudeCredential;
-    cwd: string;
     env?: NodeJS.ProcessEnv;
     model?: string;
     pathToClaudeCodeExecutable?: string;
@@ -27,7 +26,6 @@ export class ClaudeProvider extends BaseProvider {
     static override readonly outputTypes: readonly ProviderModality[] = ["text"];
 
     readonly credential: ClaudeCredential;
-    readonly cwd: string;
     readonly env: NodeJS.ProcessEnv | undefined;
     readonly model: string | undefined;
     readonly pathToClaudeCodeExecutable: string | undefined;
@@ -37,7 +35,6 @@ export class ClaudeProvider extends BaseProvider {
     constructor(options: ClaudeProviderOptions) {
         super();
         this.credential = options.credential;
-        this.cwd = options.cwd;
         this.env = options.env;
         this.model = options.model === undefined ? undefined : resolveClaudeModelId(options.model);
         this.pathToClaudeCodeExecutable = options.pathToClaudeCodeExecutable;
@@ -49,7 +46,6 @@ export class ClaudeProvider extends BaseProvider {
         return new ClaudeSession(id, {
             ...options,
             credential: this.credential,
-            cwd: this.cwd,
             ...(this.env === undefined ? {} : { env: this.env }),
             ...(this.model === undefined ? {} : { model: this.model }),
             ...(this.pathToClaudeCodeExecutable === undefined
@@ -66,7 +62,6 @@ export class ClaudeProvider extends BaseProvider {
     ): Promise<ClaudeAuxiliaryQueryResponse> {
         return runClaudeAuxiliaryQuery({
             credential: this.credential,
-            cwd: this.cwd,
             ...(this.env === undefined ? {} : { env: this.env }),
             model: resolveClaudeModelId(model),
             ...(this.pathToClaudeCodeExecutable === undefined

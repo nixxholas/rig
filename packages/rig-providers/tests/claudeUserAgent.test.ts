@@ -36,7 +36,6 @@ async function runOnce(options: {
     let env: NodeJS.ProcessEnv | undefined;
     const provider = new ClaudeProvider({
         credential,
-        cwd: "/tmp/rig-claude-user-agent",
         env: { PATH: process.env.PATH, ...options.env },
         model: "sonnet[1m]",
         query: ((parameters: { options?: { env?: NodeJS.ProcessEnv } }) => {

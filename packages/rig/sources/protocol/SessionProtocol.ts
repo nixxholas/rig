@@ -627,6 +627,8 @@ export type RunFinishedEvent = BaseSessionEvent<
     "run_finished",
     {
         agentRunId?: string;
+        /** Present whenever `stopReason` is `error`, so the failure stays readable in history. */
+        errorMessage?: string;
         modelLocked: boolean;
         runId: string;
         stopReason: StopReason;

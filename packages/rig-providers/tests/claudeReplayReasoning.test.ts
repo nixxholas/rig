@@ -17,7 +17,6 @@ describe("Claude session replay reasoning", () => {
                 },
                 { role: "user", content: "Now update the tests." },
             ]),
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });
@@ -46,7 +45,6 @@ describe("Claude session replay reasoning", () => {
                 },
                 { role: "user", content: "Thanks." },
             ]),
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });
@@ -67,7 +65,6 @@ describe("Claude session replay reasoning", () => {
                 },
                 { role: "user", content: "Thanks." },
             ]),
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });
@@ -84,7 +81,6 @@ describe("Claude session replay reasoning", () => {
                 { role: "assistant", content: "Done." },
                 { role: "user", content: "Thanks." },
             ]),
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });
@@ -102,7 +98,6 @@ describe("Claude session replay reasoning", () => {
                 { role: "user", content: "Second." },
                 { role: "user", content: "Third." },
             ]),
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });
@@ -125,7 +120,6 @@ describe("Claude session replay reasoning", () => {
         const original = structuredClone(source);
         const replay = createClaudeSessionReplay({
             context: source,
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });
@@ -141,7 +135,6 @@ describe("Claude session replay reasoning", () => {
                 { role: "assistant", content: "Done." },
                 { role: "user", content: "Second." },
             ]),
-            cwd: "/workspace",
             model: "claude-opus-4-8",
             sessionId: "replay-session",
         });

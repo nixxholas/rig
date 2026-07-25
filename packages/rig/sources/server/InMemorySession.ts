@@ -3467,6 +3467,7 @@ export class InMemorySession {
         }
         this.#append("run_finished", {
             agentRunId: result.runId,
+            ...(result.errorMessage === undefined ? {} : { errorMessage: result.errorMessage }),
             modelLocked: this.#modelLocked(),
             runId,
             stopReason,

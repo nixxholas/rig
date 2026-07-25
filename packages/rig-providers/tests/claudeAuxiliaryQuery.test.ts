@@ -15,7 +15,6 @@ describe("Claude auxiliary query", () => {
         });
         const provider = new ClaudeProvider({
             credential,
-            cwd: "/tmp/rig-claude-auxiliary-test",
             env: {
                 ANTHROPIC_AUTH_TOKEN: "unselected-global-token",
                 PATH: process.env.PATH,

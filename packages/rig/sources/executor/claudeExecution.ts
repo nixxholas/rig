@@ -6,12 +6,10 @@ import {
 } from "@slopus/rig-providers";
 import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
-import type { AgentContext } from "../agent/context/AgentContext.js";
 import type { ConfigClaudeProvider } from "../config/types.js";
 import { createConfiguredClaudeEnvironment } from "./createConfiguredClaudeEnvironment.js";
 
 export function claudeExecution(options: {
-    agentContext: AgentContext;
     config: ConfigClaudeProvider;
     env: NodeJS.ProcessEnv;
     id: string;
@@ -54,7 +52,6 @@ export function claudeExecution(options: {
             }
             return new ClaudeProvider({
                 credential,
-                cwd: options.agentContext.fs.cwd,
                 env: environment,
                 ...(pathToClaudeCodeExecutable === undefined ? {} : { pathToClaudeCodeExecutable }),
             });
