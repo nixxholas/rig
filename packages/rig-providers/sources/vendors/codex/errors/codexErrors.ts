@@ -45,6 +45,25 @@ export function isCodexUnauthorizedError(error: unknown): boolean {
     return hasUnauthorized(error, new Set());
 }
 
+const BEDROCK_EXPIRED_SIGNATURE_MESSAGE =
+    "Amazon Bedrock rejected the request because its AWS signature has expired. Refresh your " +
+    "AWS credentials and retry. If AWS_BEARER_TOKEN_BEDROCK is set, update or unset it, then " +
+    "start a new session.";
+
+/**
+ * Turns a failure into the sentence shown to a person.
+ *
+ * An expired AWS signature reads as a bare authorization failure, which tells the reader nothing
+ * about the credential that actually went stale, so Bedrock names it the way the native client
+ * does. Everything else already describes itself.
+ */
+export function codexErrorMessage(error: unknown, message: string): string {
+    if (isCodexUnauthorizedError(error) && message.includes("Signature expired:")) {
+        return BEDROCK_EXPIRED_SIGNATURE_MESSAGE;
+    }
+    return message;
+}
+
 function hasUnauthorized(error: unknown, seen: Set<object>): boolean {
     if (typeof error !== "object" || error === null || seen.has(error)) return false;
     seen.add(error);

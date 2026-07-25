@@ -16,7 +16,7 @@ import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRu
 import type { SessionTool } from "@/core/SessionTool.js";
 import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
-import { classifyCodexError } from "@/vendors/codex/errors/codexErrors.js";
+import { classifyCodexError, codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";
 import { collectCodexCompaction } from "@/vendors/codex/impl/collectCodexCompaction.js";
 import { createCodexBedrockRequest } from "@/vendors/codex/impl/createCodexBedrockRequest.js";
@@ -613,7 +613,7 @@ export class CodexSession extends BaseSession {
                     type: "done",
                     state: "error",
                     kind: classifyCodexError(message),
-                    message,
+                    message: codexErrorMessage(error, message),
                 };
                 return;
             }

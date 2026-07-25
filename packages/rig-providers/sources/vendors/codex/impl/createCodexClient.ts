@@ -1,6 +1,36 @@
-import OpenAI, { BedrockOpenAI } from "openai";
+import OpenAI, { APIError, BedrockOpenAI } from "openai";
 
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
+
+/**
+ * Bedrock's client, taught to keep the diagnostic AWS actually sent.
+ *
+ * The SDK builds an error message from a nested `error` object, which is the OpenAI envelope. AWS
+ * reports a top-level `message` instead, so the SDK sees a body it does not recognize, discards
+ * it, and says there was none. Presenting the body as the error preserves the only description of
+ * the failure a person can act on.
+ */
+class MantleOpenAI extends BedrockOpenAI {
+    protected override makeStatusError(
+        status: number,
+        body: Object,
+        message: string | undefined,
+        headers: Headers,
+    ): APIError {
+        // The SDK reads the failure out of `body.error`, so an AWS body has to be moved there.
+        const describesItself =
+            typeof body === "object" &&
+            body !== null &&
+            !("error" in body) &&
+            typeof (body as { message?: unknown }).message === "string";
+        return super.makeStatusError(
+            status,
+            describesItself ? { error: body } : body,
+            message,
+            headers,
+        );
+    }
+}
 
 export function createCodexClient(options: {
     credential: CodexProviderCredential;
@@ -11,7 +41,7 @@ export function createCodexClient(options: {
     windowId: string;
 }): OpenAI {
     if (options.credential.name === "bedrock-bearer-token") {
-        return new BedrockOpenAI({
+        return new MantleOpenAI({
             apiKey: options.credential.credential.bearerToken,
             awsRegion: "us-east-1",
             baseURL: options.endpoint,
