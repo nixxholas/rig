@@ -65,9 +65,7 @@ describe("Auto reviewer inference session isolation", () => {
 
         const screen = await gym.terminal.waitForText("REVIEWER_SESSION_ISOLATED", 30_000);
         expect(screen.text).not.toContain("Allow once");
-        await expect(gym.readFile("reviewer-session.txt")).resolves.toBe(
-            "isolated reviewer\n",
-        );
+        await expect(gym.readFile("reviewer-session.txt")).resolves.toBe("isolated reviewer\n");
 
         const requests = gym.inference.requests.filter(
             (request) => !request.options.sessionId?.endsWith(":title"),
@@ -76,8 +74,7 @@ describe("Auto reviewer inference session isolation", () => {
             request.context.systemPrompt?.includes("independent permission reviewer"),
         );
         const agent = requests.filter(
-            (request) =>
-                !request.context.systemPrompt?.includes("independent permission reviewer"),
+            (request) => !request.context.systemPrompt?.includes("independent permission reviewer"),
         );
         expect(reviewer?.options.sessionId).toMatch(/:auto-reviewer$/u);
         expect(agent).toHaveLength(2);

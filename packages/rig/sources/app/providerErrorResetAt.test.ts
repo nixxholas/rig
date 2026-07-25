@@ -11,4 +11,3 @@ describe("providerErrorResetAt", () => {
         expect(providerErrorResetAt(undefined)).toBeUndefined();
     });
 });
-
