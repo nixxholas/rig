@@ -460,6 +460,8 @@ export class CodingAssistantApp implements Component, Focusable {
     #statusText = "Idle";
     #stopped = false;
     #streamEntryId: string | undefined;
+    /** Streamed assistant entries still waiting for their durable message, oldest first. */
+    #unreconciledStreamEntryIds: string[] = [];
     #subagents: readonly SubagentSummary[];
     #subagentRefreshTimer: ReturnType<typeof setInterval> | undefined;
     #tasks: readonly SessionTask[];
@@ -826,6 +828,8 @@ export class CodingAssistantApp implements Component, Focusable {
         if (event.type === "run_started") {
             this.#usageRequestVersion += 1;
             this.#abortNotified = false;
+            // A new run must never adopt a streamed entry left behind by the previous one.
+            this.#unreconciledStreamEntryIds = [];
             this.#activeSessionRunId = event.data.runId;
             this.#latestSessionRunId = event.data.runId;
             if (this.#activeRun !== undefined) {
@@ -2670,6 +2674,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#deferredTurnSeparator = true;
         this.#statusText = "Running";
         this.#streamEntryId = undefined;
+        this.#unreconciledStreamEntryIds = [];
         this.#thinkingEntryIdsByContentIndex.clear();
         this.#streamingThinkingEntryIds.clear();
         this.#toolCallEntryIdsByContentIndex.clear();
@@ -3559,6 +3564,7 @@ export class CodingAssistantApp implements Component, Focusable {
 
         const entry = this.#appendEntry({ role: "assistant", text: "" });
         this.#streamEntryId = entry.id;
+        this.#unreconciledStreamEntryIds.push(entry.id);
         return entry;
     }
 
@@ -3734,18 +3740,43 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     #finishAssistantMessage(messageId: string, text: string): void {
-        if (this.#streamEntryId !== undefined) {
-            const entry = this.#entries.find((candidate) => candidate.id === this.#streamEntryId);
-            if (entry !== undefined) {
-                entry.id = messageId;
-                if (!this.#abortNotified && text.trim().length > 0) entry.text = text;
-                this.#streamEntryId = undefined;
-                return;
-            }
+        // A durable message can arrive after its streamed entry was orphaned by a run or
+        // iteration boundary, and the event stream can redeliver it after a reconnect. Both
+        // must land on the entry the text already occupies instead of appending a copy.
+        const settled = this.#entries.find(
+            (candidate) => candidate.id === messageId && candidate.role === "assistant",
+        );
+        const entry = settled ?? this.#takeStreamedAssistantEntry();
+        if (entry !== undefined) {
+            entry.id = messageId;
+            if (!this.#abortNotified && text.trim().length > 0) entry.text = text;
+            return;
         }
 
         if (text.trim().length === 0) return;
         this.#appendEntry({ id: messageId, role: "assistant", text });
+    }
+
+    /** Claims the oldest streamed assistant entry that no durable message has adopted yet. */
+    #takeStreamedAssistantEntry(): AppTranscriptEntry | undefined {
+        const streaming =
+            this.#streamEntryId === undefined
+                ? undefined
+                : this.#entries.find((candidate) => candidate.id === this.#streamEntryId);
+        if (streaming !== undefined) {
+            this.#unreconciledStreamEntryIds = this.#unreconciledStreamEntryIds.filter(
+                (id) => id !== streaming.id,
+            );
+            this.#streamEntryId = undefined;
+            return streaming;
+        }
+
+        while (this.#unreconciledStreamEntryIds.length > 0) {
+            const id = this.#unreconciledStreamEntryIds.shift();
+            const orphan = this.#entries.find((candidate) => candidate.id === id);
+            if (orphan !== undefined) return orphan;
+        }
+        return undefined;
     }
 
     #reconcileSubmittedUserEntry(messageId: string, displayText: string): boolean {
@@ -3842,6 +3873,7 @@ export class CodingAssistantApp implements Component, Focusable {
 
     #clearEntries(): void {
         this.#entries = [];
+        this.#unreconciledStreamEntryIds = [];
         this.#activeTurnEntryStart = undefined;
         this.#pendingSubmittedUserEntries = [];
         this.#streamedToolCallEntries.clear();
