@@ -161,6 +161,7 @@ export interface ProtocolSession {
     providerId: string;
     permissionMode: PermissionMode;
     modelId: string;
+    orderKey: string;
     effort?: string;
     serviceTier?: ServiceTier;
     secretIds: readonly string[];
@@ -227,6 +228,7 @@ export interface SessionSummary {
     cwd: string;
     providerId: string;
     modelId: string;
+    orderKey: string;
     permissionMode: PermissionMode;
     effort?: string;
     serviceTier?: ServiceTier;

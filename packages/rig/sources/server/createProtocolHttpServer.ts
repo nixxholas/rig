@@ -34,6 +34,7 @@ import type {
     ModelCatalog,
     ProjectResponse,
     ProjectWorkspaceResponse,
+    ReorderRequest,
     RewindSessionRequest,
     RewindSessionResponse,
     RecordSessionActivityResponse,
@@ -286,9 +287,7 @@ async function handleRequest(
             projects: store.listProjects(),
             sessions: sessions
                 .slice(0, 500)
-                .map((summary) =>
-                    sessionSummaryWithTerminalPresence(summary, sessionTerminals),
-                ),
+                .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals)),
             workspaces: store.listWorkspaces(),
         });
         return;
@@ -350,6 +349,32 @@ async function handleRequest(
                 return;
             }
             sendJson<ProjectResponse>(response, 202, { project });
+        } catch (error) {
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
+        return;
+    }
+
+    if (route.name === "project-reorder" && request.method === "POST") {
+        const body = await readJson<unknown>(request);
+        if (!isReorderRequest(body)) {
+            sendJson(response, 400, {
+                error: "The preceding project ID must be text or null.",
+            });
+            return;
+        }
+        const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+        if (expectedVersion === undefined) {
+            sendJson(response, 400, { error: "The project version is invalid." });
+            return;
+        }
+        try {
+            const project = store.reorderProject(route.projectId, body, expectedVersion);
+            if (project === undefined) {
+                sendJson(response, 404, { error: "Project not found" });
+                return;
+            }
+            sendJson<ProjectResponse>(response, 200, { project });
         } catch (error) {
             sendJson(response, 409, { error: errorToMessage(error) });
         }
@@ -510,6 +535,37 @@ async function handleRequest(
                 return;
             }
             sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
+        } catch (error) {
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
+        return;
+    }
+
+    if (route.name === "project-workspace-reorder" && request.method === "POST") {
+        const body = await readJson<unknown>(request);
+        if (!isReorderRequest(body)) {
+            sendJson(response, 400, {
+                error: "The preceding workspace ID must be text or null.",
+            });
+            return;
+        }
+        const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+        if (expectedVersion === undefined) {
+            sendJson(response, 400, { error: "The workspace version is invalid." });
+            return;
+        }
+        try {
+            const workspace = store.reorderWorkspace(
+                route.projectId,
+                route.workspaceId,
+                body,
+                expectedVersion,
+            );
+            if (workspace === undefined) {
+                sendJson(response, 404, { error: "Workspace not found" });
+                return;
+            }
+            sendJson<ProjectWorkspaceResponse>(response, 200, { workspace });
         } catch (error) {
             sendJson(response, 409, { error: errorToMessage(error) });
         }
@@ -904,6 +960,30 @@ async function handleRequest(
         sendJson(response, 200, {
             session: limitProtocolSessionMessages(session.snapshot(), messageLimit),
         });
+        return;
+    }
+
+    if (request.method === "POST" && route.name === "reorder") {
+        if (session.isSubagent()) {
+            sendJson(response, 409, {
+                error: "Subagent histories are read-only and cannot be reordered.",
+            });
+            return;
+        }
+        const body = await readJson<unknown>(request);
+        if (!isReorderRequest(body)) {
+            sendJson(response, 400, {
+                error: "The preceding chat ID must be text or null.",
+            });
+            return;
+        }
+        try {
+            sendJson(response, 200, {
+                session: store.reorderSession(sessionId, body)!.snapshot(),
+            });
+        } catch (error) {
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
         return;
     }
 
@@ -1467,12 +1547,17 @@ function matchRoute(pathname: string):
       }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | {
-          name: "project" | "project-avatar" | "project-refresh" | "project-workspaces";
+          name:
+              | "project"
+              | "project-avatar"
+              | "project-refresh"
+              | "project-reorder"
+              | "project-workspaces";
           projectId: string;
           sessionId?: undefined;
       }
     | {
-          name: "project-workspace" | "project-workspace-archive";
+          name: "project-workspace" | "project-workspace-archive" | "project-workspace-reorder";
           projectId: string;
           sessionId?: undefined;
           workspaceId: string;
@@ -1495,6 +1580,7 @@ function matchRoute(pathname: string):
               | "messages"
               | "model"
               | "permissions"
+              | "reorder"
               | "reset"
               | "rewind"
               | "shell"
@@ -1561,6 +1647,9 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "refresh") {
             return { name: "project-refresh", projectId };
         }
+        if (globalParts.length === 3 && globalParts[2] === "reorder") {
+            return { name: "project-reorder", projectId };
+        }
         if (globalParts.length === 3 && globalParts[2] === "workspaces") {
             return { name: "project-workspaces", projectId };
         }
@@ -1575,6 +1664,9 @@ function matchRoute(pathname: string):
             }
             if (globalParts.length === 5 && globalParts[4] === "archive") {
                 return { name: "project-workspace-archive", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "reorder") {
+                return { name: "project-workspace-reorder", projectId, workspaceId };
             }
         }
     }
@@ -1592,6 +1684,9 @@ function matchRoute(pathname: string):
 
     const sessionId = decodeURIComponent(parts[1]);
     if (parts.length === 2) return { name: "session", sessionId };
+    if (parts.length === 3 && parts[2] === "reorder") {
+        return { name: "reorder", sessionId };
+    }
     if (parts.length === 4 && parts[2] === "terminals" && parts[3] !== undefined) {
         return {
             name: "terminal",
@@ -1690,6 +1785,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "external-tool-call",
                 "fork",
                 "messages",
+                "reorder",
                 "reset",
                 "rewind",
                 "secrets",
@@ -1729,8 +1825,10 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
             "project",
             "project-avatar",
             "project-refresh",
+            "project-reorder",
             "project-workspace",
             "project-workspace-archive",
+            "project-workspace-reorder",
             "project-workspaces",
         ].includes(route.name)
     ) {
@@ -1755,9 +1853,13 @@ function hasOnlyObjectKeys(
 ): value is Record<string, unknown> {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const keys = Object.keys(value);
+    return keys.length === expectedKeys.length && keys.every((key) => expectedKeys.includes(key));
+}
+
+function isReorderRequest(value: unknown): value is ReorderRequest {
     return (
-        keys.length === expectedKeys.length &&
-        keys.every((key) => expectedKeys.includes(key))
+        hasOnlyObjectKeys(value, ["afterId"]) &&
+        (typeof value.afterId === "string" || value.afterId === null)
     );
 }
 

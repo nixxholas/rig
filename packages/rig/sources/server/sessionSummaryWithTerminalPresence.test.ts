@@ -88,6 +88,7 @@ function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
         cwd: "/workspace",
         id: "session-1",
         projectId: "project-1",
+        orderKey: "a0",
         modelId: "openai/gpt-5.5",
         permissionMode: "workspace_write",
         providerId: "codex",

@@ -46,6 +46,7 @@ import type {
     ProjectWorkspaceResponse,
     RenameProjectRequest,
     RenameProjectWorkspaceRequest,
+    ReorderRequest,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
     ResolveExternalToolCallRequest,
@@ -489,21 +490,24 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", `/projects/${encodeURIComponent(projectId)}`);
     }
 
-    renameProject(
-        projectId: string,
-        request: RenameProjectRequest,
-    ): Promise<ProjectResponse> {
-        return this.#requestJson(
-            "PATCH",
-            `/projects/${encodeURIComponent(projectId)}`,
-            request,
-        );
+    renameProject(projectId: string, request: RenameProjectRequest): Promise<ProjectResponse> {
+        return this.#requestJson("PATCH", `/projects/${encodeURIComponent(projectId)}`, request);
     }
 
     refreshProject(projectId: string): Promise<ProjectResponse> {
+        return this.#requestJson("POST", `/projects/${encodeURIComponent(projectId)}/refresh`);
+    }
+
+    reorderProject(
+        projectId: string,
+        request: ReorderRequest,
+        expectedVersion: number,
+    ): Promise<ProjectResponse> {
         return this.#requestJson(
             "POST",
-            `/projects/${encodeURIComponent(projectId)}/refresh`,
+            `/projects/${encodeURIComponent(projectId)}/reorder`,
+            request,
+            { "if-match": `"${String(expectedVersion)}"` },
         );
     }
 
@@ -525,17 +529,11 @@ export class ProtocolHttpClient {
     }
 
     clearProjectAvatar(projectId: string): Promise<ProjectResponse> {
-        return this.#requestJson(
-            "DELETE",
-            `/projects/${encodeURIComponent(projectId)}/avatar`,
-        );
+        return this.#requestJson("DELETE", `/projects/${encodeURIComponent(projectId)}/avatar`);
     }
 
     listProjectWorkspaces(projectId: string): Promise<ListProjectWorkspacesResponse> {
-        return this.#requestJson(
-            "GET",
-            `/projects/${encodeURIComponent(projectId)}/workspaces`,
-        );
+        return this.#requestJson("GET", `/projects/${encodeURIComponent(projectId)}/workspaces`);
     }
 
     createProjectWorkspace(
@@ -573,6 +571,31 @@ export class ProtocolHttpClient {
             `/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/archive`,
             {},
             { "if-match": `"${String(expectedVersion)}"` },
+        );
+    }
+
+    reorderProjectWorkspace(
+        projectId: string,
+        workspaceId: string,
+        request: ReorderRequest,
+        expectedVersion: number,
+    ): Promise<ProjectWorkspaceResponse> {
+        return this.#requestJson(
+            "POST",
+            `/projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/reorder`,
+            request,
+            { "if-match": `"${String(expectedVersion)}"` },
+        );
+    }
+
+    reorderSession(
+        sessionId: string,
+        request: ReorderRequest,
+    ): Promise<{ session: ProtocolSession }> {
+        return this.#requestJson(
+            "POST",
+            `/sessions/${encodeURIComponent(sessionId)}/reorder`,
+            request,
         );
     }
 

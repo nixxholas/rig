@@ -10,6 +10,7 @@ import type {
     ModelCatalog,
     Project,
     ProjectWorkspace,
+    ReorderRequest,
     RegisterSecretRequest,
     SecretSummary,
     SessionAgentMetadata,
@@ -26,13 +27,12 @@ import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
 import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
-import {
-    ProjectRepository,
-    type ProjectAvatarAsset,
-} from "./ProjectRepository.js";
+import { ProjectRepository, type ProjectAvatarAsset } from "./ProjectRepository.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { generateKeyBetween } from "../utils/fractionalIndexing.js";
+import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -184,7 +184,13 @@ export class InMemorySessionStore implements SessionStore {
             projectId: sourceSnapshot.projectId,
             projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
             secretRegistry: this.#secrets,
-            restore: state,
+            restore: {
+                ...state,
+                orderKey: this.#newLastSessionOrderKey(
+                    sourceSnapshot.projectId,
+                    sourceSnapshot.workspaceId,
+                ),
+            },
             ...(sourceSnapshot.workspaceId === undefined
                 ? {}
                 : { workspaceId: sourceSnapshot.workspaceId }),
@@ -226,9 +232,7 @@ export class InMemorySessionStore implements SessionStore {
             }
             return {
                 project,
-                ...(inheritedWorkspace === undefined
-                    ? {}
-                    : { workspace: inheritedWorkspace }),
+                ...(inheritedWorkspace === undefined ? {} : { workspace: inheritedWorkspace }),
             };
         })();
         const session = new InMemorySession({
@@ -242,13 +246,15 @@ export class InMemorySessionStore implements SessionStore {
             ...(metadata !== undefined ? { metadata } : {}),
             ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
+            orderKey:
+                inherited === undefined
+                    ? this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id)
+                    : generateKeyBetween(null, null),
             projectId: ownership.project.id,
             projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,
             secretRegistry: this.#secrets,
-            ...(ownership.workspace === undefined
-                ? {}
-                : { workspaceId: ownership.workspace.id }),
+            ...(ownership.workspace === undefined ? {} : { workspaceId: ownership.workspace.id }),
         });
         this.#sessions.set(session.id, session);
         return session;
@@ -259,10 +265,16 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {
+        const projectOrder = new Map(
+            this.#projects.listProjects().map((project) => [project.id, project.orderKey]),
+        );
+        const workspaceOrder = new Map(
+            this.#projects.listWorkspaces().map((workspace) => [workspace.id, workspace.orderKey]),
+        );
         const sessions = [...this.#sessions.values()]
             .filter((session) => !session.isSubagent())
             .map((session) => session.summary())
-            .sort((left, right) => sortSummariesByActivity(left, right));
+            .sort((left, right) => sortSummariesByOrder(left, right, projectOrder, workspaceOrder));
         return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
     }
 
@@ -335,6 +347,44 @@ export class InMemorySessionStore implements SessionStore {
 
     refreshProject(projectId: string): Project | undefined {
         return this.#projects.refreshProject(projectId);
+    }
+
+    reorderProject(
+        projectId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): Project | undefined {
+        return this.#projects.reorderProject(projectId, request, expectedVersion);
+    }
+
+    reorderSession(sessionId: string, request: ReorderRequest): InMemorySession | undefined {
+        const session = this.get(sessionId);
+        if (session === undefined) return undefined;
+        if (session.isSubagent()) {
+            throw new Error("Subagent histories cannot be reordered.");
+        }
+        const snapshot = session.snapshot();
+        const siblings = [...this.#sessions.values()]
+            .filter((candidate) => {
+                if (candidate.isSubagent()) return false;
+                const candidateSnapshot = candidate.snapshot();
+                return (
+                    candidateSnapshot.projectId === snapshot.projectId &&
+                    candidateSnapshot.workspaceId === snapshot.workspaceId
+                );
+            })
+            .map((candidate) => candidate.summary());
+        session.setOrderKey(orderKeyAfter(siblings, sessionId, request.afterId));
+        return session;
+    }
+
+    reorderWorkspace(
+        projectId: string,
+        workspaceId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): ProjectWorkspace | undefined {
+        return this.#projects.reorderWorkspace(projectId, workspaceId, request, expectedVersion);
     }
 
     renameWorkspace(
@@ -411,6 +461,19 @@ export class InMemorySessionStore implements SessionStore {
         return [...(this.#projectSecretIds.get(projectId) ?? [])];
     }
 
+    #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {
+        const last = [...this.#sessions.values()]
+            .filter((session) => {
+                if (session.isSubagent()) return false;
+                const snapshot = session.snapshot();
+                return snapshot.projectId === projectId && snapshot.workspaceId === workspaceId;
+            })
+            .map((session) => session.summary())
+            .sort((left, right) => compareOrderKeys(left.orderKey, right.orderKey))
+            .at(-1);
+        return generateKeyBetween(last?.orderKey ?? null, null);
+    }
+
     #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {
         if (!shouldPublishGlobalEvent(event)) return;
         this.#afterTransactionCommit(() => {
@@ -458,9 +521,27 @@ export class InMemorySessionStore implements SessionStore {
     }
 }
 
-function sortSummariesByActivity(left: SessionSummary, right: SessionSummary): number {
+function compareOrderKeys(left: string, right: string): number {
+    return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function sortSummariesByOrder(
+    left: SessionSummary,
+    right: SessionSummary,
+    projectOrder: ReadonlyMap<string, string>,
+    workspaceOrder: ReadonlyMap<string, string>,
+): number {
     return (
-        (right.lastMessageAt ?? right.updatedAt) - (left.lastMessageAt ?? left.updatedAt) ||
-        right.updatedAt - left.updatedAt
+        compareOrderKeys(
+            projectOrder.get(left.projectId) ?? "",
+            projectOrder.get(right.projectId) ?? "",
+        ) ||
+        Number(left.workspaceId !== undefined) - Number(right.workspaceId !== undefined) ||
+        compareOrderKeys(
+            left.workspaceId === undefined ? "" : (workspaceOrder.get(left.workspaceId) ?? ""),
+            right.workspaceId === undefined ? "" : (workspaceOrder.get(right.workspaceId) ?? ""),
+        ) ||
+        compareOrderKeys(left.orderKey, right.orderKey) ||
+        compareOrderKeys(left.id, right.id)
     );
 }

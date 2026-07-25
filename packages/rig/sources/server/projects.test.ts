@@ -20,7 +20,7 @@ afterEach(async () => {
 
 describe("projects", () => {
     it("assigns canonical directories immediately and distinguishes nested projects", async () => {
-        const fixture = await createFixture();
+        const fixture = await createFixture({ durableGlobalEventQueue: true });
         const projectDirectory = join(fixture.root, "project");
         const nestedDirectory = join(projectDirectory, "nested");
         const alias = join(fixture.root, "alias");
@@ -33,13 +33,43 @@ describe("projects", () => {
 
         expect(first.snapshot().projectId).toBe(second.snapshot().projectId);
         expect(nested.snapshot().projectId).not.toBe(first.snapshot().projectId);
-        expect(fixture.store.listProjects()).toHaveLength(2);
+        expect(fixture.store.listProjects().map((project) => project.id)).toEqual([
+            nested.snapshot().projectId,
+            first.snapshot().projectId,
+        ]);
+        expect(
+            fixture.store
+                .list()
+                .filter((session) => session.projectId === first.snapshot().projectId)
+                .map((session) => session.id),
+        ).toEqual([first.id, second.id]);
+
+        const movedProject = fixture.store.reorderProject(
+            nested.snapshot().projectId,
+            { afterId: first.snapshot().projectId },
+            fixture.store.getProject(nested.snapshot().projectId)!.version,
+        );
+        expect(movedProject).toBeDefined();
+        expect(fixture.store.listProjects().map((project) => project.id)).toEqual([
+            first.snapshot().projectId,
+            nested.snapshot().projectId,
+        ]);
+
+        fixture.store.reorderSession(second.id, { afterId: null });
+        expect(
+            fixture.store
+                .list()
+                .filter((session) => session.projectId === first.snapshot().projectId)
+                .map((session) => session.id),
+        ).toEqual([second.id, first.id]);
         expect(fixture.store.globalEventQueue.list()?.map((entry) => entry.event.type)).toEqual([
             "project_created",
             "session_created",
             "session_created",
             "project_created",
             "session_created",
+            "project_updated",
+            "session_updated",
         ]);
     });
 
@@ -82,8 +112,10 @@ describe("projects", () => {
             .toFile(join(repository, "logo.png"));
 
         const session = fixture.store.create({ cwd: repository });
-        const project = await waitForProject(fixture.store, session.snapshot().projectId, (value) =>
-            value.initializationStatus === "ready",
+        const project = await waitForProject(
+            fixture.store,
+            session.snapshot().projectId,
+            (value) => value.initializationStatus === "ready",
         );
         expect(project).toMatchObject({
             initializationStatus: "ready",
@@ -186,13 +218,35 @@ describe("projects", () => {
             throw new Error("Expected recovery workspaces.");
         }
         const [readyFirst, readySecond] = await Promise.all([
-            waitForWorkspace(fixture.store, first.projectId, first.id, (value) =>
-                value.status === "ready",
+            waitForWorkspace(
+                fixture.store,
+                first.projectId,
+                first.id,
+                (value) => value.status === "ready",
             ),
-            waitForWorkspace(fixture.store, second.projectId, second.id, (value) =>
-                value.status === "ready",
+            waitForWorkspace(
+                fixture.store,
+                second.projectId,
+                second.id,
+                (value) => value.status === "ready",
             ),
         ]);
+        expect(
+            fixture.store
+                .listWorkspaces(source.snapshot().projectId)
+                .map((workspace) => workspace.id),
+        ).toEqual([readySecond.id, readyFirst.id]);
+        fixture.store.reorderWorkspace(
+            source.snapshot().projectId,
+            readyFirst.id,
+            { afterId: null },
+            readyFirst.version,
+        );
+        expect(
+            fixture.store
+                .listWorkspaces(source.snapshot().projectId)
+                .map((workspace) => workspace.id),
+        ).toEqual([readyFirst.id, readySecond.id]);
         const attached = fixture.store.create({
             cwd: readySecond.path,
             workspaceId: readySecond.id,
@@ -216,15 +270,21 @@ describe("projects", () => {
         try {
             expect(
                 (
-                    await waitForWorkspace(recovered, first.projectId, first.id, (value) =>
-                        value.status === "ready" || value.status === "failed",
+                    await waitForWorkspace(
+                        recovered,
+                        first.projectId,
+                        first.id,
+                        (value) => value.status === "ready" || value.status === "failed",
                     )
                 ).status,
             ).toBe("ready");
             expect(
                 (
-                    await waitForWorkspace(recovered, second.projectId, second.id, (value) =>
-                        value.status === "archived" || value.status === "archive_failed",
+                    await waitForWorkspace(
+                        recovered,
+                        second.projectId,
+                        second.id,
+                        (value) => value.status === "archived" || value.status === "archive_failed",
                     )
                 ).status,
             ).toBe("archived");
@@ -296,7 +356,12 @@ describe("projects", () => {
     });
 });
 
-async function createFixture(options: { projectGit?: ProjectGitRunner } = {}): Promise<{
+async function createFixture(
+    options: {
+        durableGlobalEventQueue?: boolean;
+        projectGit?: ProjectGitRunner;
+    } = {},
+): Promise<{
     home: string;
     databasePath: string;
     root: string;
@@ -310,6 +375,9 @@ async function createFixture(options: { projectGit?: ProjectGitRunner } = {}): P
     const databasePath = join(state, "sessions.sqlite");
     const store = new PersistentSessionStore({
         databasePath,
+        ...(options.durableGlobalEventQueue === undefined
+            ? {}
+            : { durableGlobalEventQueue: options.durableGlobalEventQueue }),
         homeDirectory: home,
         ...(options.projectGit === undefined ? {} : { projectGit: options.projectGit }),
         stateDirectory: state,
@@ -365,10 +433,7 @@ function deferred<T>(): {
     return { promise, reject, resolve };
 }
 
-async function waitFor<T>(
-    read: () => T | undefined,
-    predicate: (value: T) => boolean,
-): Promise<T> {
+async function waitFor<T>(read: () => T | undefined, predicate: (value: T) => boolean): Promise<T> {
     const deadline = Date.now() + 10_000;
     for (;;) {
         const value = read();

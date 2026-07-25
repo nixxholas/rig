@@ -1,15 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-    lstat,
-    mkdir,
-    readFile,
-    readdir,
-    rename,
-    rm,
-    writeFile,
-} from "node:fs/promises";
+import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
@@ -27,8 +19,11 @@ import {
     type ProjectEvent,
     type ProjectWorkspace,
     type ProjectWorkspaceEvent,
+    type ReorderRequest,
 } from "../protocol/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { generateKeyBetween } from "../utils/fractionalIndexing.js";
+import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import {
@@ -116,10 +111,7 @@ export class ProjectRepository {
             this.#runBackgroundTask(() => this.#collectAvatarGarbage());
         });
         for (const project of this.listProjects()) {
-            if (
-                project.kind === "regular" &&
-                project.initializationStatus === "initializing"
-            ) {
+            if (project.kind === "regular" && project.initializationStatus === "initializing") {
                 this.scheduleInitialization(project.id);
             } else if (
                 project.kind === "regular" &&
@@ -185,10 +177,10 @@ export class ProjectRepository {
                 .prepare(
                     `
                     INSERT INTO projects (
-                        id, path, storage_key, kind, name, name_key, name_source,
+                        id, path, storage_key, kind, name, name_key, name_source, order_key,
                         initialization_status, initialization_attempt, version,
                         created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
                     `,
                 )
                 .run(
@@ -199,6 +191,7 @@ export class ProjectRepository {
                     name,
                     projectNameKey(name),
                     "folder",
+                    this.#newFirstProjectOrderKey(),
                     kind === "home" ? "ready" : "initializing",
                     now,
                     now,
@@ -224,7 +217,7 @@ export class ProjectRepository {
 
     listProjects(): readonly Project[] {
         return this.#database
-            .prepare("SELECT * FROM projects ORDER BY updated_at_ms DESC, id ASC")
+            .prepare("SELECT * FROM projects ORDER BY order_key ASC, id ASC")
             .all()
             .map((row) => this.#readProject(row));
     }
@@ -234,12 +227,18 @@ export class ProjectRepository {
             projectId === undefined
                 ? this.#database
                       .prepare(
-                          "SELECT * FROM project_workspaces ORDER BY updated_at_ms DESC, id ASC",
+                          `
+                          SELECT project_workspaces.*
+                          FROM project_workspaces
+                          JOIN projects ON projects.id = project_workspaces.project_id
+                          ORDER BY projects.order_key ASC, project_workspaces.order_key ASC,
+                              project_workspaces.id ASC
+                          `,
                       )
                       .all()
                 : this.#database
                       .prepare(
-                          "SELECT * FROM project_workspaces WHERE project_id = ? ORDER BY updated_at_ms DESC, id ASC",
+                          "SELECT * FROM project_workspaces WHERE project_id = ? ORDER BY order_key ASC, id ASC",
                       )
                       .all(projectId);
         return rows.map(readWorkspace);
@@ -279,6 +278,32 @@ export class ProjectRepository {
                     `,
                 )
                 .run(name, projectNameKey(name), this.#now(), projectId);
+            return this.#publishedProject(projectId);
+        });
+    }
+
+    reorderProject(
+        projectId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): Project | undefined {
+        const current = this.getProject(projectId);
+        if (current === undefined) return undefined;
+        if (expectedVersion !== undefined && expectedVersion !== current.version) {
+            throw new Error("The project changed before it could be reordered.");
+        }
+        const orderKey = orderKeyAfter(this.listProjects(), projectId, request.afterId);
+        if (orderKey === current.orderKey) return current;
+        return this.#transaction(() => {
+            this.#database
+                .prepare(
+                    `
+                    UPDATE projects
+                    SET order_key = ?, version = version + 1, updated_at_ms = ?
+                    WHERE id = ?
+                    `,
+                )
+                .run(orderKey, this.#now(), projectId);
             return this.#publishedProject(projectId);
         });
     }
@@ -365,9 +390,7 @@ export class ProjectRepository {
                         expectedVersion !== undefined &&
                         readNumber(latest, "version") !== expectedVersion
                     ) {
-                        throw new Error(
-                            "The project changed before the avatar could be saved.",
-                        );
+                        throw new Error("The project changed before the avatar could be saved.");
                     }
                     if (
                         source !== "user" &&
@@ -403,10 +426,7 @@ export class ProjectRepository {
                             `,
                         )
                         .run(normalized.hash, source, now, projectId);
-                    if (
-                        previousHash !== undefined &&
-                        previousHash !== normalized.hash
-                    ) {
+                    if (previousHash !== undefined && previousHash !== normalized.hash) {
                         this.#dereferenceAvatar(previousHash, now);
                     }
                     return this.#publishedProject(projectId);
@@ -517,7 +537,11 @@ export class ProjectRepository {
         const gitCommonDir = normalizeProjectCwd(
             resolve(
                 project.path,
-                await this.#git(project.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+                await this.#git(project.path, [
+                    "rev-parse",
+                    "--path-format=absolute",
+                    "--git-common-dir",
+                ]),
             ),
         );
         const commit = await this.#git(project.path, [
@@ -550,26 +574,18 @@ export class ProjectRepository {
             }
 
             const visibleName = this.#reserveWorkspaceName(projectId, name);
-            const storageKey = this.#reserveWorkspaceStorageKey(
-                projectId,
-                projectStorageKey(name),
-            );
-            const path = join(
-                this.#stateDirectory,
-                "workspaces",
-                project.storageKey,
-                storageKey,
-            );
+            const storageKey = this.#reserveWorkspaceStorageKey(projectId, projectStorageKey(name));
+            const path = join(this.#stateDirectory, "workspaces", project.storageKey, storageKey);
             const now = this.#now();
             const workspaceId = createId();
             this.#database
                 .prepare(
                     `
                     INSERT INTO project_workspaces (
-                        id, project_id, path, storage_key, name, name_key, kind, status,
+                        id, project_id, path, storage_key, name, name_key, order_key, kind, status,
                         base_ref, git_common_dir, client_request_id, version,
                         created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, 'git_worktree', 'initializing', ?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'git_worktree', 'initializing', ?, ?, ?, 1, ?, ?)
                     `,
                 )
                 .run(
@@ -579,6 +595,7 @@ export class ProjectRepository {
                     storageKey,
                     visibleName,
                     projectNameKey(visibleName),
+                    this.#newFirstWorkspaceOrderKey(projectId),
                     baseRef,
                     gitCommonDir,
                     clientRequestId,
@@ -630,6 +647,37 @@ export class ProjectRepository {
                     `,
                 )
                 .run(name, projectNameKey(name), this.#now(), workspaceId, projectId);
+            return this.#publishedWorkspace(projectId, workspaceId);
+        });
+    }
+
+    reorderWorkspace(
+        projectId: string,
+        workspaceId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): ProjectWorkspace | undefined {
+        const current = this.getWorkspace(projectId, workspaceId);
+        if (current === undefined) return undefined;
+        if (expectedVersion !== undefined && expectedVersion !== current.version) {
+            throw new Error("The workspace changed before it could be reordered.");
+        }
+        const orderKey = orderKeyAfter(
+            this.listWorkspaces(projectId),
+            workspaceId,
+            request.afterId,
+        );
+        if (orderKey === current.orderKey) return current;
+        return this.#transaction(() => {
+            this.#database
+                .prepare(
+                    `
+                    UPDATE project_workspaces
+                    SET order_key = ?, version = version + 1, updated_at_ms = ?
+                    WHERE id = ? AND project_id = ?
+                    `,
+                )
+                .run(orderKey, this.#now(), workspaceId, projectId);
             return this.#publishedWorkspace(projectId, workspaceId);
         });
     }
@@ -705,14 +753,28 @@ export class ProjectRepository {
         return reserveUnique(base, (key) => {
             const row =
                 excludeId === undefined
-                    ? this.#database
-                          .prepare("SELECT 1 FROM projects WHERE name_key = ?")
-                          .get(key)
+                    ? this.#database.prepare("SELECT 1 FROM projects WHERE name_key = ?").get(key)
                     : this.#database
                           .prepare("SELECT 1 FROM projects WHERE name_key = ? AND id != ?")
                           .get(key, excludeId);
             return row !== undefined;
         });
+    }
+
+    #newFirstProjectOrderKey(): string {
+        const row = this.#database
+            .prepare("SELECT order_key FROM projects ORDER BY order_key ASC LIMIT 1")
+            .get();
+        return generateKeyBetween(null, row === undefined ? null : readString(row, "order_key"));
+    }
+
+    #newFirstWorkspaceOrderKey(projectId: string): string {
+        const row = this.#database
+            .prepare(
+                "SELECT order_key FROM project_workspaces WHERE project_id = ? ORDER BY order_key ASC LIMIT 1",
+            )
+            .get(projectId);
+        return generateKeyBetween(null, row === undefined ? null : readString(row, "order_key"));
     }
 
     #reserveProjectStorageKey(base: string): string {
@@ -865,11 +927,13 @@ export class ProjectRepository {
             this.#activeInitializations += 1;
             const initialize = () => this.#initialize(projectId);
             const task = this.#taskDrain?.run(initialize) ?? initialize();
-            void task.finally(() => {
-                this.#activeInitializations -= 1;
-                this.#initializing.delete(projectId);
-                this.#drainInitializations();
-            }).catch(() => undefined);
+            void task
+                .finally(() => {
+                    this.#activeInitializations -= 1;
+                    this.#initializing.delete(projectId);
+                    this.#drainInitializations();
+                })
+                .catch(() => undefined);
         }
     }
 
@@ -970,9 +1034,9 @@ export class ProjectRepository {
                 });
             }
         }
-        for (const candidate of candidates.sort(
-            (left, right) => right.score - left.score || left.path.localeCompare(right.path),
-        ).slice(0, 32)) {
+        for (const candidate of candidates
+            .sort((left, right) => right.score - left.score || left.path.localeCompare(right.path))
+            .slice(0, 32)) {
             if (Date.now() >= deadline) break;
             try {
                 const info = await lstat(candidate.path);
@@ -1017,15 +1081,8 @@ export class ProjectRepository {
                 signal: controller.signal,
             });
             if (!metadata.ok) return undefined;
-            const metadataBytes = await readBoundedResponseBytes(
-                metadata,
-                1_048_576,
-                controller,
-            );
-            const json = JSON.parse(metadataBytes.toString("utf8")) as Record<
-                string,
-                unknown
-            >;
+            const metadataBytes = await readBoundedResponseBytes(metadata, 1_048_576, controller);
+            const json = JSON.parse(metadataBytes.toString("utf8")) as Record<string, unknown>;
             const avatarUrl =
                 repository.host === "bitbucket.org"
                     ? readNestedString(json, ["links", "avatar", "href"])
@@ -1040,7 +1097,8 @@ export class ProjectRepository {
                     : repository.host === "gitlab.com"
                       ? new Set(["gitlab.com", "secure.gravatar.com"])
                       : new Set(["bitbucket.org", "secure.gravatar.com"]);
-            if (avatar.protocol !== "https:" || !allowedHosts.has(avatar.hostname)) return undefined;
+            if (avatar.protocol !== "https:" || !allowedHosts.has(avatar.hostname))
+                return undefined;
             const response = await fetch(avatar, {
                 headers: { accept: "image/*", "user-agent": "Rig" },
                 redirect: "error",
@@ -1166,10 +1224,7 @@ export class ProjectRepository {
         }
     }
 
-    async #removeWorkspaceDirectory(
-        project: Project,
-        workspace: ProjectWorkspace,
-    ): Promise<void> {
+    async #removeWorkspaceDirectory(project: Project, workspace: ProjectWorkspace): Promise<void> {
         const validStorageKey = /^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/u;
         if (
             !validStorageKey.test(project.storageKey) ||
@@ -1340,10 +1395,7 @@ export class ProjectRepository {
         });
     }
 
-    #markWorkspaceInitializationFailed(
-        workspace: ProjectWorkspace,
-        error: string,
-    ): void {
+    #markWorkspaceInitializationFailed(workspace: ProjectWorkspace, error: string): void {
         this.#transaction(() => {
             const result = this.#database
                 .prepare(
@@ -1354,11 +1406,7 @@ export class ProjectRepository {
                     WHERE id = ? AND status = 'initializing'
                     `,
                 )
-                .run(
-                    error.slice(0, PROJECT_ERROR_LENGTH),
-                    this.#now(),
-                    workspace.id,
-                );
+                .run(error.slice(0, PROJECT_ERROR_LENGTH), this.#now(), workspace.id);
             if (result.changes > 0) {
                 this.#publishedWorkspace(workspace.projectId, workspace.id);
             }
@@ -1422,10 +1470,7 @@ export class ProjectRepository {
         void promise.catch(() => undefined);
     }
 
-    async #withAvatarLifecycleLock<T>(
-        hash: string,
-        task: () => Promise<T>,
-    ): Promise<T> {
+    async #withAvatarLifecycleLock<T>(hash: string, task: () => Promise<T>): Promise<T> {
         const previous = this.#avatarLifecycle.get(hash) ?? Promise.resolve();
         let release!: () => void;
         const barrier = new Promise<void>((resolveBarrier) => {
@@ -1444,10 +1489,7 @@ export class ProjectRepository {
         }
     }
 
-    async #withWorkspaceLifecycleLock<T>(
-        workspaceId: string,
-        task: () => Promise<T>,
-    ): Promise<T> {
+    async #withWorkspaceLifecycleLock<T>(workspaceId: string, task: () => Promise<T>): Promise<T> {
         const previous = this.#workspaceLifecycle.get(workspaceId) ?? Promise.resolve();
         let release!: () => void;
         const barrier = new Promise<void>((resolveBarrier) => {
@@ -1522,9 +1564,7 @@ export class ProjectRepository {
             .get(hash);
         if (readNumber(references ?? {}, "count") === 0) {
             this.#database
-                .prepare(
-                    "UPDATE project_avatar_assets SET dereferenced_at_ms = ? WHERE hash = ?",
-                )
+                .prepare("UPDATE project_avatar_assets SET dereferenced_at_ms = ? WHERE hash = ?")
                 .run(now, hash);
         }
     }
@@ -1580,7 +1620,10 @@ async function readBoundedResponseBytes(
     } finally {
         reader.releaseLock();
     }
-    return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)), byteLength);
+    return Buffer.concat(
+        chunks.map((chunk) => Buffer.from(chunk)),
+        byteLength,
+    );
 }
 
 async function runGit(cwd: string, args: readonly string[]): Promise<string> {
@@ -1606,6 +1649,7 @@ function readProject(row: Record<string, unknown>): Project {
         kind: readString(row, "kind") as Project["kind"],
         name: readString(row, "name"),
         nameSource: readString(row, "name_source") as Project["nameSource"],
+        orderKey: readString(row, "order_key"),
         path: readString(row, "path"),
         storageKey: readString(row, "storage_key"),
         updatedAt: readNumber(row, "updated_at_ms"),
@@ -1631,6 +1675,7 @@ function readWorkspace(row: Record<string, unknown>): ProjectWorkspace {
         id: readString(row, "id"),
         kind: readString(row, "kind") as ProjectWorkspace["kind"],
         name: readString(row, "name"),
+        orderKey: readString(row, "order_key"),
         path: readString(row, "path"),
         projectId: readString(row, "project_id"),
         status: readString(row, "status") as ProjectWorkspace["status"],
@@ -1698,7 +1743,10 @@ async function normalizeAvatar(
     };
 }
 
-function readNestedString(value: Record<string, unknown>, path: readonly string[]): string | undefined {
+function readNestedString(
+    value: Record<string, unknown>,
+    path: readonly string[],
+): string | undefined {
     let current: unknown = value;
     for (const key of path) {
         if (current === null || typeof current !== "object" || Array.isArray(current)) {

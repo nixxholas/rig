@@ -66,6 +66,7 @@ function sessionSummary(overrides: Partial<SessionSummary> = {}): SessionSummary
         cwd: "/tmp/rig-monit-test",
         id: "session-1",
         projectId: "project-1",
+        orderKey: "a0",
         lastMessageAt: 1_700_000_000_000,
         modelId: "openai/gpt-5.5",
         permissionMode: "workspace_write",

@@ -12,6 +12,7 @@ import type {
     ModelCatalog,
     Project,
     ProjectWorkspace,
+    ReorderRequest,
     GlobalEvent,
     RegisterSecretRequest,
     SecretSummary,
@@ -61,6 +62,8 @@ import {
 } from "./ProjectRepository.js";
 import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { generateKeyBetween } from "../utils/fractionalIndexing.js";
+import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -299,7 +302,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 projectId: sourceSnapshot.projectId,
                 projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
                 secretRegistry: this.#secrets,
-                restore: state,
+                restore: {
+                    ...state,
+                    orderKey: this.#newLastSessionOrderKey(
+                        sourceSnapshot.projectId,
+                        sourceSnapshot.workspaceId,
+                    ),
+                },
                 ...(sourceSnapshot.workspaceId === undefined
                     ? {}
                     : { workspaceId: sourceSnapshot.workspaceId }),
@@ -337,10 +346,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 inherited?.workspaceId === undefined
                     ? undefined
                     : this.#projects.getWorkspace(inherited.projectId, inherited.workspaceId);
-            if (
-                inherited?.workspaceId !== undefined &&
-                inheritedWorkspace?.status !== "ready"
-            ) {
+            if (inherited?.workspaceId !== undefined && inheritedWorkspace?.status !== "ready") {
                 throw new Error("The parent session workspace is not ready.");
             }
             const ownership = (() => {
@@ -353,9 +359,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 }
                 return {
                     project,
-                    ...(inheritedWorkspace === undefined
-                        ? {}
-                        : { workspace: inheritedWorkspace }),
+                    ...(inheritedWorkspace === undefined ? {} : { workspace: inheritedWorkspace }),
                 };
             })();
             session = new InMemorySession({
@@ -375,6 +379,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : {}),
                 ...(id === undefined ? {} : { id }),
                 onAppendEvent: (event) => this.#appendEvent(event),
+                orderKey:
+                    inherited === undefined
+                        ? this.#newLastSessionOrderKey(
+                              ownership.project.id,
+                              ownership.workspace?.id,
+                          )
+                        : generateKeyBetween(null, null),
                 persistence: this,
                 projectId: ownership.project.id,
                 projectSecretIds: this.#projectSecrets(ownership.project.id),
@@ -486,40 +497,49 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const rows = this.#database
             .prepare(
                 `
-                SELECT
-                    id,
-                    project_id,
-                    workspace_id,
-                    archive_on_idle,
-                    archived,
-                    track_unread,
-                    unread_reason,
-                    unread_since_ms,
-                    cwd,
-                    docker_json,
-                    secret_ids_json,
-                    provider_id,
-                    model_id,
-                    permission_mode,
-                    effort,
-                    service_tier,
-                    status,
-                    title,
-                    title_status,
-                    title_error,
-                    recap,
-                    metadata_updated_at_ms,
-                    metadata_run_id,
-                    interruption_json,
-                    created_at_ms,
-                    updated_at_ms,
-                    last_message_at_ms
-                FROM sessions
-                WHERE parent_session_id IS NULL
+                SELECT listed_sessions.*
+                FROM (
+                    SELECT
+                        id,
+                        project_id,
+                        workspace_id,
+                        order_key,
+                        archive_on_idle,
+                        archived,
+                        track_unread,
+                        unread_reason,
+                        unread_since_ms,
+                        cwd,
+                        docker_json,
+                        secret_ids_json,
+                        provider_id,
+                        model_id,
+                        permission_mode,
+                        effort,
+                        service_tier,
+                        status,
+                        title,
+                        title_status,
+                        title_error,
+                        recap,
+                        metadata_updated_at_ms,
+                        metadata_run_id,
+                        interruption_json,
+                        created_at_ms,
+                        updated_at_ms,
+                        last_message_at_ms
+                    FROM sessions
+                    WHERE parent_session_id IS NULL
+                ) AS listed_sessions
+                JOIN projects ON projects.id = listed_sessions.project_id
+                LEFT JOIN project_workspaces
+                    ON project_workspaces.id = listed_sessions.workspace_id
                 ORDER BY
-                    last_message_at_ms IS NULL ASC,
-                    last_message_at_ms DESC,
-                    updated_at_ms DESC
+                    projects.order_key ASC,
+                    listed_sessions.workspace_id IS NOT NULL ASC,
+                    project_workspaces.order_key ASC,
+                    listed_sessions.order_key ASC,
+                    listed_sessions.id ASC
                 LIMIT ?
                 `,
             )
@@ -543,6 +563,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 id: readString(row, "id"),
                 archived: readNumber(row, "archived") !== 0,
                 projectId: readString(row, "project_id"),
+                orderKey: readString(row, "order_key"),
                 ...(workspaceId === undefined ? {} : { workspaceId }),
                 archiveOnIdle: readNumber(row, "archive_on_idle") !== 0,
                 trackUnread: readNumber(row, "track_unread") !== 0,
@@ -701,6 +722,43 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#projects.refreshProject(projectId);
     }
 
+    reorderProject(
+        projectId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): Project | undefined {
+        return this.#projects.reorderProject(projectId, request, expectedVersion);
+    }
+
+    reorderSession(sessionId: string, request: ReorderRequest): InMemorySession | undefined {
+        this.#assertAcceptingMutations();
+        const session = this.get(sessionId);
+        if (session === undefined) return undefined;
+        if (session.isSubagent()) {
+            throw new Error("Subagent histories cannot be reordered.");
+        }
+        const snapshot = session.snapshot();
+        this.#transaction(() => {
+            session.setOrderKey(
+                orderKeyAfter(
+                    this.#sessionOrderItems(snapshot.projectId, snapshot.workspaceId),
+                    sessionId,
+                    request.afterId,
+                ),
+            );
+        });
+        return session;
+    }
+
+    reorderWorkspace(
+        projectId: string,
+        workspaceId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): ProjectWorkspace | undefined {
+        return this.#projects.reorderWorkspace(projectId, workspaceId, request, expectedVersion);
+    }
+
     renameWorkspace(
         projectId: string,
         workspaceId: string,
@@ -722,8 +780,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         workspaceId: string,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        const archive = () =>
-            this.#archiveWorkspace(projectId, workspaceId, expectedVersion);
+        const archive = () => this.#archiveWorkspace(projectId, workspaceId, expectedVersion);
         return this.#taskDrain?.run(archive) ?? archive();
     }
 
@@ -1001,6 +1058,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     agent_id,
                     project_id,
                     workspace_id,
+                    order_key,
                     session_kind,
                     parent_session_id,
                     root_session_id,
@@ -1053,11 +1111,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     created_at_ms,
                     updated_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     project_id = excluded.project_id,
                     workspace_id = excluded.workspace_id,
+                    order_key = excluded.order_key,
                     session_kind = excluded.session_kind,
                     parent_session_id = excluded.parent_session_id,
                     root_session_id = excluded.root_session_id,
@@ -1115,6 +1174,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 state.agentId,
                 projectId,
                 state.workspaceId ?? null,
+                state.orderKey,
                 state.agent.type,
                 state.agent.parentSessionId ?? null,
                 state.agent.rootSessionId,
@@ -1414,10 +1474,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#globalEventQueue.durable && globalEntry !== undefined) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => queue.publish(globalEntry!));
-        } else if (
-            !this.#globalEventQueue.durable &&
-            shouldPublishGlobalEvent(event)
-        ) {
+        } else if (!this.#globalEventQueue.durable && shouldPublishGlobalEvent(event)) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => {
                 const entry = queue.append(event);
@@ -1682,6 +1739,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const id = readString(row, "id");
         const projectId = readString(row, "project_id");
         const workspaceId = readOptionalString(row, "workspace_id");
+        const orderKey = readString(row, "order_key");
         const agent: SessionAgentMetadata = {
             depth: readNumber(row, "depth"),
             rootSessionId: readOptionalString(row, "root_session_id") ?? id,
@@ -1734,6 +1792,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             skills: JSON.parse(readString(row, "durable_skills_json")) as DurableSkillDefinition[],
             modelId,
             models: JSON.parse(readString(row, "models_json")) as Model[],
+            orderKey,
             providerId: readString(row, "provider_id"),
             permissionMode,
             projectId,
@@ -1824,6 +1883,47 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             sessions.push(session);
         }
         return sessions;
+    }
+
+    #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {
+        const items = this.#sessionOrderItems(projectId, workspaceId);
+        return generateKeyBetween(items.at(-1)?.orderKey ?? null, null);
+    }
+
+    #sessionOrderItems(
+        projectId: string,
+        workspaceId: string | undefined,
+    ): { id: string; orderKey: string }[] {
+        const rows =
+            workspaceId === undefined
+                ? this.#database
+                      .prepare(
+                          `
+                          SELECT id, order_key
+                          FROM sessions
+                          WHERE parent_session_id IS NULL
+                              AND project_id = ?
+                              AND workspace_id IS NULL
+                          ORDER BY order_key ASC, id ASC
+                          `,
+                      )
+                      .all(projectId)
+                : this.#database
+                      .prepare(
+                          `
+                          SELECT id, order_key
+                          FROM sessions
+                          WHERE parent_session_id IS NULL
+                              AND project_id = ?
+                              AND workspace_id = ?
+                          ORDER BY order_key ASC, id ASC
+                          `,
+                      )
+                      .all(projectId, workspaceId);
+        return rows.map((row) => ({
+            id: readString(row, "id"),
+            orderKey: readString(row, "order_key"),
+        }));
     }
 
     #projectSecrets(projectId: string): readonly string[] {

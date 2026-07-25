@@ -999,9 +999,9 @@ describe("PersistentSessionStore", () => {
                 END;
             `);
 
-            expect(() =>
-                store.create({ cwd: "/tmp/rig-atomic-project-session" }),
-            ).toThrow("rejected project event");
+            expect(() => store.create({ cwd: "/tmp/rig-atomic-project-session" })).toThrow(
+                "rejected project event",
+            );
             expect(store.listProjects()).toEqual([]);
             expect(store.list()).toEqual([]);
             expect(store.globalEventQueue.list()).toEqual([]);
@@ -2870,6 +2870,7 @@ function sessionState(overrides: Partial<PersistedSessionState> = {}): Persisted
         messages: [],
         modelId: "openai/gpt-5.5",
         models: [],
+        orderKey: "a0",
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],

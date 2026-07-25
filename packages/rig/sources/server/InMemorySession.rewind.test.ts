@@ -86,6 +86,7 @@ function createRestoredSession(deleteMessagesFrom: (sessionId: string, position:
         })),
         modelId: model.id,
         models: [model],
+        orderKey: "a0",
         nextTaskId: 1,
         permissionMode: "workspace_write",
         providerId: "test",

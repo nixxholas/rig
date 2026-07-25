@@ -1,5 +1,14 @@
 # Third-party notices
 
+## Fractional Indexing
+
+This package contains a TypeScript conversion of
+[rocicorp/fractional-indexing](https://github.com/rocicorp/fractional-indexing),
+used to generate stable ordering keys.
+
+The original work was dedicated to the public domain under CC0 1.0 Universal
+(no rights reserved).
+
 ## OpenAI Codex
 
 This package contains a macOS Seatbelt base policy and Linux Bubblewrap policy adapted from

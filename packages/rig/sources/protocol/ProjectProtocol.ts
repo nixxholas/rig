@@ -26,6 +26,7 @@ export interface Project {
     kind: ProjectKind;
     name: string;
     nameSource: ProjectNameSource;
+    orderKey: string;
     path: string;
     storageKey: string;
     updatedAt: number;
@@ -51,6 +52,7 @@ export interface ProjectWorkspace {
     id: string;
     kind: ProjectWorkspaceKind;
     name: string;
+    orderKey: string;
     path: string;
     projectId: string;
     status: ProjectWorkspaceStatus;
@@ -75,6 +77,10 @@ export interface RenameProjectRequest {
 
 export interface RenameProjectWorkspaceRequest {
     name: string;
+}
+
+export interface ReorderRequest {
+    afterId: string | null;
 }
 
 export interface ListProjectsResponse {

@@ -6,6 +6,7 @@ import type {
     CreateSessionRequest,
     Project,
     ProjectWorkspace,
+    ReorderRequest,
     RegisterSecretRequest,
     SecretSummary,
     SubagentSummary,
@@ -62,6 +63,18 @@ export interface SessionStore {
         expectedVersion?: number,
     ): ProjectWorkspace | undefined;
     refreshProject(projectId: string): Project | undefined;
+    reorderProject(
+        projectId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): Project | undefined;
+    reorderSession(sessionId: string, request: ReorderRequest): InMemorySession | undefined;
+    reorderWorkspace(
+        projectId: string,
+        workspaceId: string,
+        request: ReorderRequest,
+        expectedVersion?: number,
+    ): ProjectWorkspace | undefined;
     archiveWorkspace(
         projectId: string,
         workspaceId: string,

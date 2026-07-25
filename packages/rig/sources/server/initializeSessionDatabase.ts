@@ -5,18 +5,16 @@ import type { DatabaseSync } from "node:sqlite";
 import { createId } from "@paralleldrive/cuid2";
 
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
-import {
-    folderProjectName,
-    projectNameKey,
-    projectStorageKey,
-} from "./projectIdentity.js";
+import { folderProjectName, projectNameKey, projectStorageKey } from "./projectIdentity.js";
 import { initializePersistentGlobalEventQueueSchema } from "./PersistentGlobalEventQueue.js";
+import { generateKeyBetween, generateNKeysBetween } from "../utils/fractionalIndexing.js";
 
-const CURRENT_SCHEMA_VERSION = 7;
+const CURRENT_SCHEMA_VERSION = 8;
 
 const sessionColumnMigrations = [
     ["project_id", "TEXT"],
     ["workspace_id", "TEXT"],
+    ["order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''"],
     ["title", "TEXT"],
     ["docker_json", "TEXT"],
     ["secret_ids_json", "TEXT NOT NULL DEFAULT '[]'"],
@@ -157,6 +155,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 name TEXT NOT NULL,
                 name_key TEXT NOT NULL UNIQUE,
                 name_source TEXT NOT NULL,
+                order_key TEXT NOT NULL COLLATE BINARY DEFAULT '',
                 avatar_hash TEXT REFERENCES project_avatar_assets(hash),
                 avatar_source TEXT,
                 initialization_status TEXT NOT NULL,
@@ -174,6 +173,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 storage_key TEXT NOT NULL COLLATE NOCASE,
                 name TEXT NOT NULL,
                 name_key TEXT NOT NULL,
+                order_key TEXT NOT NULL COLLATE BINARY DEFAULT '',
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 base_ref TEXT,
@@ -195,6 +195,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 agent_id TEXT NOT NULL,
                 project_id TEXT REFERENCES projects(id),
                 workspace_id TEXT REFERENCES project_workspaces(id),
+                order_key TEXT NOT NULL COLLATE BINARY DEFAULT '',
                 session_kind TEXT NOT NULL DEFAULT 'primary',
                 parent_session_id TEXT,
                 root_session_id TEXT,
@@ -363,6 +364,14 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             );
         `);
 
+        ensureColumn(database, "projects", "order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''");
+        ensureColumn(
+            database,
+            "project_workspaces",
+            "order_key",
+            "TEXT NOT NULL COLLATE BINARY DEFAULT ''",
+        );
+
         if (legacyGlobalEventTable) {
             const streamId = createId();
             const legacyEventRange = database
@@ -378,10 +387,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             const lastPosition =
                 legacyGlobalEventState === undefined
                     ? lastLegacyCursor
-                    : Math.max(
-                          lastLegacyCursor,
-                          readNumber(legacyGlobalEventState, "last_cursor"),
-                      );
+                    : Math.max(lastLegacyCursor, readNumber(legacyGlobalEventState, "last_cursor"));
             const trimmedThrough =
                 legacyGlobalEventState === undefined
                     ? Math.max(0, (firstLegacyCursor ?? 1) - 1)
@@ -431,6 +437,10 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             database.exec(`ALTER TABLE sessions ADD COLUMN ${name} ${definition}`);
         }
 
+        if (schemaVersion < 8) {
+            backfillProjectOrderKeys(database);
+        }
+
         const historicalSessions = database
             .prepare(
                 "SELECT DISTINCT cwd FROM sessions WHERE project_id IS NULL ORDER BY created_at_ms ASC",
@@ -456,6 +466,10 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                     "INSERT OR IGNORE INTO project_secret_attachments (project_id, secret_id) VALUES (?, ?)",
                 )
                 .run(projectId, attachment.secretId);
+        }
+        if (schemaVersion < 8) {
+            backfillWorkspaceOrderKeys(database);
+            backfillSessionOrderKeys(database);
         }
 
         const queuedRunColumns = new Set(
@@ -490,10 +504,16 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 ON sessions(project_id, last_message_at_ms DESC, updated_at_ms DESC);
             CREATE INDEX IF NOT EXISTS sessions_workspace_activity
                 ON sessions(workspace_id, last_message_at_ms DESC, updated_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS sessions_parent_order
+                ON sessions(project_id, workspace_id, order_key);
             CREATE INDEX IF NOT EXISTS projects_updated
                 ON projects(updated_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS projects_order
+                ON projects(order_key);
             CREATE INDEX IF NOT EXISTS project_workspaces_project_updated
                 ON project_workspaces(project_id, updated_at_ms DESC);
+            CREATE INDEX IF NOT EXISTS project_workspaces_project_order
+                ON project_workspaces(project_id, order_key);
             CREATE INDEX IF NOT EXISTS external_tool_calls_session_created
                 ON external_tool_calls(session_id, created_at_ms);
             CREATE INDEX IF NOT EXISTS durable_user_inputs_session_created
@@ -513,11 +533,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
     }
 }
 
-function ensureProject(
-    database: DatabaseSync,
-    path: string,
-    canonicalHome: string,
-): string {
+function ensureProject(database: DatabaseSync, path: string, canonicalHome: string): string {
     const existing = database.prepare("SELECT id FROM projects WHERE path = ?").get(path);
     if (existing !== undefined) return readString(existing, "id");
 
@@ -536,9 +552,9 @@ function ensureProject(
             `
             INSERT INTO projects (
                 id, path, storage_key, kind, name, name_key, name_source,
-                initialization_status, initialization_error,
+                order_key, initialization_status, initialization_error,
                 initialization_attempt, version, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, 'folder', ?, ?, 0, 1, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, 'folder', ?, ?, ?, 0, 1, ?, ?)
             `,
         )
         .run(
@@ -548,11 +564,8 @@ function ensureProject(
             kind,
             name,
             projectNameKey(name),
-            available && kind === "regular"
-                ? "initializing"
-                : available
-                  ? "ready"
-                  : "failed",
+            newFirstProjectOrderKey(database),
+            available && kind === "regular" ? "initializing" : available ? "ready" : "failed",
             available ? null : "Project directory is unavailable.",
             now,
             now,
@@ -560,13 +573,123 @@ function ensureProject(
     return id;
 }
 
+function ensureColumn(
+    database: DatabaseSync,
+    table: string,
+    name: string,
+    definition: string,
+): void {
+    const columns = new Set(
+        database
+            .prepare(`PRAGMA table_info(${table})`)
+            .all()
+            .map((column) => String(column.name)),
+    );
+    if (!columns.has(name)) {
+        database.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+    }
+}
+
+function backfillProjectOrderKeys(database: DatabaseSync): void {
+    const rows = database
+        .prepare("SELECT id FROM projects ORDER BY updated_at_ms DESC, id ASC")
+        .all();
+    const keys = generateNKeysBetween(null, null, rows.length);
+    const update = database.prepare("UPDATE projects SET order_key = ? WHERE id = ?");
+    rows.forEach((row, index) => {
+        update.run(keys[index]!, readString(row, "id"));
+    });
+}
+
+function backfillWorkspaceOrderKeys(database: DatabaseSync): void {
+    const projects = database.prepare("SELECT id FROM projects").all();
+    const update = database.prepare("UPDATE project_workspaces SET order_key = ? WHERE id = ?");
+    for (const project of projects) {
+        const rows = database
+            .prepare(
+                `
+                SELECT id
+                FROM project_workspaces
+                WHERE project_id = ?
+                ORDER BY updated_at_ms DESC, id ASC
+                `,
+            )
+            .all(readString(project, "id"));
+        const keys = generateNKeysBetween(null, null, rows.length);
+        rows.forEach((row, index) => {
+            update.run(keys[index]!, readString(row, "id"));
+        });
+    }
+}
+
+function backfillSessionOrderKeys(database: DatabaseSync): void {
+    database
+        .prepare("UPDATE sessions SET order_key = 'a0' WHERE parent_session_id IS NOT NULL")
+        .run();
+    const scopes = database
+        .prepare(
+            `
+            SELECT DISTINCT project_id, workspace_id
+            FROM sessions
+            WHERE parent_session_id IS NULL
+            `,
+        )
+        .all();
+    const update = database.prepare("UPDATE sessions SET order_key = ? WHERE id = ?");
+    for (const scope of scopes) {
+        const projectId = readString(scope, "project_id");
+        const workspaceId = readOptionalString(scope, "workspace_id");
+        const rows =
+            workspaceId === undefined
+                ? database
+                      .prepare(
+                          `
+                          SELECT id
+                          FROM sessions
+                          WHERE parent_session_id IS NULL
+                              AND project_id = ?
+                              AND workspace_id IS NULL
+                          ORDER BY last_message_at_ms IS NULL ASC,
+                              last_message_at_ms DESC, updated_at_ms DESC, id ASC
+                          `,
+                      )
+                      .all(projectId)
+                : database
+                      .prepare(
+                          `
+                          SELECT id
+                          FROM sessions
+                          WHERE parent_session_id IS NULL
+                              AND project_id = ?
+                              AND workspace_id = ?
+                          ORDER BY last_message_at_ms IS NULL ASC,
+                              last_message_at_ms DESC, updated_at_ms DESC, id ASC
+                          `,
+                      )
+                      .all(projectId, workspaceId);
+        const keys = generateNKeysBetween(null, null, rows.length);
+        rows.forEach((row, index) => {
+            update.run(keys[index]!, readString(row, "id"));
+        });
+    }
+}
+
+function newFirstProjectOrderKey(database: DatabaseSync): string {
+    const row = database
+        .prepare(
+            "SELECT order_key FROM projects WHERE order_key != '' ORDER BY order_key ASC LIMIT 1",
+        )
+        .get();
+    return generateKeyBetween(null, row === undefined ? null : readString(row, "order_key"));
+}
+
 function reserveName(database: DatabaseSync, base: string): string {
     for (let suffix = 1; ; suffix += 1) {
         const candidate = suffix === 1 ? base : `${base} (${String(suffix)})`;
         if (
-            database.prepare("SELECT 1 FROM projects WHERE name_key = ?").get(
-                projectNameKey(candidate),
-            ) === undefined
+            database
+                .prepare("SELECT 1 FROM projects WHERE name_key = ?")
+                .get(projectNameKey(candidate)) === undefined
         ) {
             return candidate;
         }
@@ -597,6 +720,15 @@ function readNumber(row: Record<string, unknown>, key: string): number {
     if (typeof value === "number") return value;
     if (typeof value === "bigint") return Number(value);
     throw new Error(`Expected numeric SQLite column '${key}'.`);
+}
+
+function readOptionalString(
+    row: Record<string, unknown> | undefined,
+    key: string,
+): string | undefined {
+    if (row === undefined) return undefined;
+    const value = row[key];
+    return typeof value === "string" ? value : undefined;
 }
 
 function readOptionalNumber(

@@ -29,7 +29,7 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived"),
             ).toMatchObject({ dflt_value: "0", notnull: 1, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 7 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 8 });
         } finally {
             database.close();
         }
@@ -67,10 +67,10 @@ describe("initializeSessionDatabase", () => {
     it("refuses to open a database from a newer Rig schema", () => {
         const database = new DatabaseSync(":memory:");
         try {
-            database.exec("PRAGMA user_version = 8");
+            database.exec("PRAGMA user_version = 9");
 
             expect(() => initializeSessionDatabase(database)).toThrow(
-                "The session database uses schema version 8, but this Rig version supports up to 7.",
+                "The session database uses schema version 9, but this Rig version supports up to 8.",
             );
             expect(
                 database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),
@@ -140,6 +140,27 @@ describe("initializeSessionDatabase", () => {
             database
                 .prepare(
                     `
+                    INSERT INTO sessions (
+                        id, agent_id, cwd, provider_id, model_id, status,
+                        models_json, tools_json, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                )
+                .run(
+                    "session-2",
+                    "agent-2",
+                    "/tmp/rig-historical-project",
+                    "codex",
+                    "openai/gpt-test",
+                    "idle",
+                    "[]",
+                    "[]",
+                    2,
+                    2,
+                );
+            database
+                .prepare(
+                    `
                     INSERT INTO durable_global_events (
                         event_id, session_id, type, created_at_ms, data_json
                     ) VALUES (?, ?, ?, ?, ?)
@@ -171,6 +192,24 @@ describe("initializeSessionDatabase", () => {
                 path: "/tmp/rig-historical-project",
                 project_id: expect.any(String),
             });
+            expect(
+                database
+                    .prepare(
+                        `
+                        SELECT id, order_key
+                        FROM sessions
+                        WHERE cwd = '/tmp/rig-historical-project'
+                        ORDER BY order_key
+                        `,
+                    )
+                    .all(),
+            ).toEqual([
+                { id: "session-2", order_key: "a0" },
+                { id: "session-1", order_key: "a1" },
+            ]);
+            expect(
+                database.prepare("SELECT order_key FROM projects ORDER BY order_key").all(),
+            ).toEqual([{ order_key: "Zz" }, { order_key: "a0" }]);
             expect(
                 database
                     .prepare(
@@ -235,9 +274,7 @@ describe("initializeSessionDatabase", () => {
             ).toEqual({ last_position: 7, trimmed_through: 3 });
             expect(
                 database
-                    .prepare(
-                        "SELECT position FROM durable_global_events ORDER BY position",
-                    )
+                    .prepare("SELECT position FROM durable_global_events ORDER BY position")
                     .all(),
             ).toEqual([{ position: 4 }, { position: 7 }]);
         } finally {

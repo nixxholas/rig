@@ -57,6 +57,12 @@ describe("createProtocolHttpServer", () => {
                     method: "POST",
                 }),
             ).resolves.toMatchObject({ statusCode: 400 });
+            await expect(
+                requestRawJson(socketPath, `${workspacePath}/reorder`, {
+                    body: '{"afterId":null}',
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 400 });
 
             let workspace = response.workspace;
             await vi.waitFor(
@@ -73,6 +79,16 @@ describe("createProtocolHttpServer", () => {
             const attached = await client.createSession({
                 cwd: workspace.path,
                 workspaceId: workspace.id,
+            });
+            await expect(
+                client.reorderProjectWorkspace(
+                    created.session.projectId,
+                    workspace.id,
+                    { afterId: null },
+                    workspace.version,
+                ),
+            ).resolves.toMatchObject({
+                workspace: { id: workspace.id, orderKey: expect.any(String) },
             });
             await client.archiveProjectWorkspace(
                 created.session.projectId,
@@ -117,6 +133,37 @@ describe("createProtocolHttpServer", () => {
             });
             expect(firstProject.project.name).toBe("Shared");
             expect(secondProject.project.name).toBe("Shared (2)");
+            expect((await client.listProjects()).projects.map((project) => project.id)).toEqual([
+                second.session.projectId,
+                first.session.projectId,
+            ]);
+            const reorderedProject = await client.reorderProject(
+                first.session.projectId,
+                { afterId: null },
+                firstProject.project.version,
+            );
+            expect((await client.listProjects()).projects.map((project) => project.id)).toEqual([
+                first.session.projectId,
+                second.session.projectId,
+            ]);
+
+            const laterChat = await client.createSession({
+                cwd: "/tmp/rig-project-api/one/project",
+            });
+            expect(
+                (await client.listSessions({ archived: "all" })).sessions
+                    .filter((session) => session.projectId === first.session.projectId)
+                    .map((session) => session.id),
+            ).toEqual([first.session.id, laterChat.session.id]);
+            const reorderedChat = await client.reorderSession(laterChat.session.id, {
+                afterId: null,
+            });
+            expect(reorderedChat.session.orderKey < first.session.orderKey).toBe(true);
+            expect(
+                (await client.listSessions({ archived: "all" })).sessions
+                    .filter((session) => session.projectId === first.session.projectId)
+                    .map((session) => session.id),
+            ).toEqual([laterChat.session.id, first.session.id]);
 
             await expect(client.globalState()).resolves.toMatchObject({
                 cursor: expect.any(String),
@@ -147,7 +194,7 @@ describe("createProtocolHttpServer", () => {
                 first.session.projectId,
                 png,
                 "image/png",
-                firstProject.project.version,
+                reorderedProject.project.version,
             );
             expect(withAvatar.project.avatar).toMatchObject({
                 hash: expect.stringMatching(/^[a-f0-9]{64}$/u),
@@ -159,7 +206,7 @@ describe("createProtocolHttpServer", () => {
                     first.session.projectId,
                     png,
                     "image/png",
-                    firstProject.project.version,
+                    reorderedProject.project.version,
                 ),
             ).rejects.toThrow("changed");
             expect(
@@ -2127,6 +2174,7 @@ function readOnlySubagentState(): PersistedSessionState {
         messages: [],
         modelId: modelOpenaiGpt55.id,
         models: [],
+        orderKey: "a0",
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],
@@ -2149,6 +2197,7 @@ function completedPrimaryState(id: string, archiveOnIdle: boolean): PersistedSes
         messages: [],
         modelId: modelOpenaiGpt55.id,
         models: [],
+        orderKey: "a0",
         nextTaskId: 1,
         permissionMode: "workspace_write",
         providerId: "codex",
@@ -2184,6 +2233,7 @@ function pausedGoalState(): PersistedSessionState {
         messages: [],
         modelId: modelOpenaiGpt55.id,
         models: [],
+        orderKey: "a0",
         nextTaskId: 1,
         permissionMode: "workspace_write",
         providerId: "codex",

@@ -25,6 +25,7 @@ export type {
     ProjectWorkspaceStatus,
     RenameProjectRequest,
     RenameProjectWorkspaceRequest,
+    ReorderRequest,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
 } from "./ProjectProtocol.js";

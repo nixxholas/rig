@@ -64,6 +64,7 @@ import type {
     SteerMessageResponse,
     UpdateSessionRequest,
 } from "../protocol/index.js";
+import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { sessionUnreadStateAfterEvent } from "./sessionUnreadStateAfterEvent.js";
 import { aggregateSessionTokenCount } from "../sessionTokenCount/aggregateSessionTokenCount.js";
 import { sessionTokenCountAfterEvent } from "../sessionTokenCount/sessionTokenCountAfterEvent.js";
@@ -216,6 +217,7 @@ export interface PersistedSessionState {
     messages: readonly PersistedSessionMessage[];
     modelId: string;
     models: readonly Model[];
+    orderKey: string;
     providerId: string;
     permissionMode: PermissionMode;
     projectId?: string;
@@ -283,6 +285,7 @@ export interface InMemorySessionOptions {
     metadata?: SessionAgentMetadata;
     mcpToolProvider?: McpToolProvider;
     onAppendEvent?: (event: SessionEvent) => void;
+    orderKey?: string;
     persistence?: InMemorySessionPersistence;
     request: CreateSessionRequest;
     projectSecretIds?: readonly string[];
@@ -416,6 +419,7 @@ export class InMemorySession {
     #modelId: string;
     #models: readonly Model[];
     #now: () => number;
+    #orderKey: string;
     #partialPositions = new Set<number>();
     #pendingSteeringMessages = new Map<string, PendingSteeringMessage>();
     #pendingSteeringContinuations = new Map<string, PendingSteeringContinuation>();
@@ -523,6 +527,8 @@ export class InMemorySession {
         );
         this.#projectId = options.restore?.projectId ?? options.projectId ?? createId();
         this.#workspaceId = options.restore?.workspaceId ?? options.workspaceId;
+        this.#orderKey =
+            options.restore?.orderKey ?? options.orderKey ?? generateKeyBetween(null, null);
         this.#appendSystemPrompt =
             options.restore?.appendSystemPrompt ?? options.request.appendSystemPrompt;
         this.#systemPrompt = options.restore?.systemPrompt;
@@ -1268,6 +1274,16 @@ export class InMemorySession {
         this.#appendSystemPrompt = request.appendSystemPrompt ?? undefined;
         this.#runtime?.agent.setAppendSystemPrompt(this.#appendSystemPrompt);
         this.#interruption = undefined;
+        this.#append("session_updated", { session: this.snapshot() });
+        return this.snapshot();
+    }
+
+    setOrderKey(orderKey: string): ProtocolSession {
+        if (this.isSubagent()) {
+            throw new Error("Subagent histories cannot be reordered.");
+        }
+        if (this.#orderKey === orderKey) return this.snapshot();
+        this.#orderKey = orderKey;
         this.#append("session_updated", { session: this.snapshot() });
         return this.snapshot();
     }
@@ -2202,6 +2218,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
             modelId: this.#modelId,
+            orderKey: this.#orderKey,
             modelLocked: this.#modelLocked(),
             models: this.#models,
             projectSecretIds: this.#secrets.projectIds(),
@@ -2263,6 +2280,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
             modelId: this.#modelId,
+            orderKey: this.#orderKey,
             ...(this.#effort !== undefined ? { effort: this.#effort } : {}),
             ...(this.#serviceTier !== undefined ? { serviceTier: this.#serviceTier } : {}),
             status: this.#status,
@@ -2320,6 +2338,7 @@ export class InMemorySession {
             messages: [...this.#messages],
             modelId: this.#modelId,
             models: this.#models,
+            orderKey: this.#orderKey,
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
             projectId: this.#projectId,
