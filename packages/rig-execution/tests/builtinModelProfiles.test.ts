@@ -12,7 +12,7 @@ describe("builtinModelProfiles", () => {
             contextWindow: 1_000_000,
             defaultEffort: "medium",
             model: {
-                autoCompactWindow: 200_000,
+                autoCompactWindow: 333_000,
                 id: "anthropic/opus-5",
                 name: "Opus 5 1M",
                 thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],

@@ -12,7 +12,7 @@ export const modelAnthropicFable5 = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicOpus5 = defineModel({
@@ -21,7 +21,7 @@ export const modelAnthropicOpus5 = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicOpus48 = defineModel({
@@ -30,7 +30,7 @@ export const modelAnthropicOpus48 = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicOpus47 = defineModel({
@@ -39,7 +39,7 @@ export const modelAnthropicOpus47 = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicOpus46 = defineModel({
@@ -48,7 +48,7 @@ export const modelAnthropicOpus46 = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "max"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicSonnet5 = defineModel({
@@ -57,7 +57,7 @@ export const modelAnthropicSonnet5 = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicSonnet461m = defineModel({
@@ -66,7 +66,7 @@ export const modelAnthropicSonnet461m = defineModel({
     thinkingLevels: ["off", "low", "medium", "high", "max"],
     defaultThinkingLevel: "medium",
     contextWindow: 1_000_000,
-    autoCompactWindow: 200_000,
+    autoCompactWindow: 333_000,
 });
 
 export const modelAnthropicSonnet46 = defineModel({
