@@ -76,10 +76,6 @@ Keep provider discovery and runtime construction on one shared path, so every mo
 
 For bug fixes, first add the smallest deterministic test that reproduces the failure at the layer where the broken contract is observable. Preserve that test unchanged while fixing production code, then add lower-level tests only where they clarify an invariant. Keep each commit coherent and green; avoid follow-up commits whose only purpose is repairing timing assumptions, lint, or incomplete coverage that could have shipped with the original change.
 
-## One feature per worktree
-
-Working on multiple features in the same worktree is prohibited until the current feature has been merged into `main`. If the user asks to begin another feature before that merge, do not start it in the current worktree. Instruct the user to create a new Conductor workspace/worktree for the additional feature and continue there instead.
-
 ## Gym end-to-end tests
 
 The gym exercises the built Rig agent through a real PTY in a fresh Docker container. Only model inference is mocked; the filesystem, shell, processes, daemon, tools, and terminal behavior remain real, with `libghostty-vt` providing user-visible screen and scroll state.
@@ -112,12 +108,12 @@ When the user says `sync to main`, treat it as an explicit instruction to upstre
 
 Do the following:
 
-1. Review the current worktree.
+1. Review the current changes.
 2. Commit the current changes.
 3. Rebase the current branch on `origin/main`.
 4. Push directly to `main`.
 5. Do not force push.
 6. If the push or rebase is rejected because `main` moved, fetch/rebase and retry the non-force push.
-7. Repeat until the current worktree/branch changes are upstreamed to `main`, or until a real conflict/blocker requires user input.
+7. Repeat until the current branch changes are upstreamed to `main`, or until a real conflict/blocker requires user input.
 
 Do not open a pull request for `sync to main` unless the user explicitly asks for one.
