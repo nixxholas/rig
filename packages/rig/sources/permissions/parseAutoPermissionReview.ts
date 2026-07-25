@@ -1,9 +1,20 @@
+export type AutoPermissionRisk = "low" | "medium" | "high" | "critical";
+export type AutoPermissionUserAuthorization = "unknown" | "low" | "medium" | "high";
+
 export interface AutoPermissionReview {
     decision: "allow" | "ask";
     reason: string;
-    risk: "low" | "medium" | "high";
-    userAuthorization: "low" | "medium" | "high";
+    risk: AutoPermissionRisk;
+    userAuthorization: AutoPermissionUserAuthorization;
 }
+
+const RISKS: readonly AutoPermissionRisk[] = ["low", "medium", "high", "critical"];
+const AUTHORIZATIONS: readonly AutoPermissionUserAuthorization[] = [
+    "unknown",
+    "low",
+    "medium",
+    "high",
+];
 
 export function parseAutoPermissionReview(text: string): AutoPermissionReview | undefined {
     const candidate = /```(?:json)?\s*([\s\S]*?)```/iu.exec(text)?.[1] ?? text;
@@ -15,24 +26,19 @@ export function parseAutoPermissionReview(text: string): AutoPermissionReview | 
         if (value === null || typeof value !== "object") return undefined;
         const record = value as Record<string, unknown>;
         if (record.decision !== "allow" && record.decision !== "ask") return undefined;
-        if (record.risk !== "low" && record.risk !== "medium" && record.risk !== "high") {
-            return undefined;
-        }
-        if (
-            record.user_authorization !== "low" &&
-            record.user_authorization !== "medium" &&
-            record.user_authorization !== "high"
-        ) {
-            return undefined;
-        }
+        const risk = RISKS.find((candidate) => candidate === record.risk);
+        const userAuthorization = AUTHORIZATIONS.find(
+            (candidate) => candidate === record.user_authorization,
+        );
+        if (risk === undefined || userAuthorization === undefined) return undefined;
         if (typeof record.reason !== "string" || record.reason.trim().length === 0) {
             return undefined;
         }
         return {
             decision: record.decision,
             reason: normalizeReason(record.reason),
-            risk: record.risk,
-            userAuthorization: record.user_authorization,
+            risk,
+            userAuthorization,
         };
     } catch {
         return undefined;

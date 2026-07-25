@@ -72,6 +72,7 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
         "For Bash, request full-access execution with dangerouslyDisableSandbox: true only when the workspace sandbox blocks necessary work. The command remains sandboxed when this field is false or omitted.",
     describeAutoPermissionAction: ({ command }, context) =>
         summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ dangerouslyDisableSandbox }) => dangerouslyDisableSandbox === true,
     shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox }) =>
         dangerouslyDisableSandbox === true,

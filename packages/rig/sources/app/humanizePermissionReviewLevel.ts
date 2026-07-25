@@ -1,5 +1,11 @@
-export function humanizePermissionReviewLevel(level: "low" | "medium" | "high"): string {
+import type { AutoPermissionRisk, AutoPermissionUserAuthorization } from "../permissions/index.js";
+
+export function humanizePermissionReviewLevel(
+    level: AutoPermissionRisk | AutoPermissionUserAuthorization,
+): string {
+    if (level === "unknown") return "Unknown";
     if (level === "low") return "Low";
     if (level === "medium") return "Medium";
+    if (level === "critical") return "Critical";
     return "High";
 }

@@ -71,6 +71,7 @@ export const codexWriteStdinTool = defineTool({
     returnType: unifiedExecOutputSchema,
     describeAutoPermissionAction: ({ chars, session_id }) =>
         `sending ${quoteVisibleExact(chars ?? "")} to shell session ${String(session_id)}`,
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ chars }) => chars !== undefined && chars.length > 0,
     execute: async (
         { session_id, chars = "", yield_time_ms, max_output_tokens },

@@ -66,6 +66,7 @@ export const claudeReadTool = defineTool({
     returnType: claudeReadReturnSchema,
     describeAutoPermissionAction: ({ file_path }, context) =>
         describeFileAutoPermissionAction(file_path, context, "reading"),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ file_path }, context) =>
         shouldReviewPathInAutoMode(file_path, context, { write: false }),
     shouldRunInFullAccessInAutoMode: ({ file_path }, context) =>

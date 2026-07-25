@@ -9,6 +9,9 @@ import { Executor } from "@slopus/rig-execution";
 import { codexExecution } from "../executor/codexExecution.js";
 import { modelOpenaiGpt55 } from "@slopus/rig-execution";
 import type { Context, Provider } from "@slopus/rig-execution";
+import { createNodeAgentContext } from "../agent/index.js";
+import { NativeProcessManager } from "../processes/index.js";
+import { createPermissionReviewSideAgent } from "./createPermissionReviewSideAgent.js";
 import { reviewAutoPermission } from "./reviewAutoPermission.js";
 
 const LIVE = process.env.RIG_LIVE_TEST === "1";
@@ -237,20 +240,29 @@ describeLive("Auto permission reviewer live policy eval", () => {
         const rows: Record<string, string>[] = [];
 
         for (const [index, testCase] of cases.entries()) {
+            // Each case gets its own reviewer so one verdict cannot influence the next.
+            const reviewer = createPermissionReviewSideAgent({
+                context: createNodeAgentContext({
+                    cwd: process.cwd(),
+                    permissionMode: "read_only",
+                    processManager: new NativeProcessManager(),
+                }),
+                id: `auto-reviewer-${String(index)}`,
+                model: provider.reviewerModel ?? modelOpenaiGpt55,
+                provider,
+                tools: [],
+            });
             const review = await reviewAutoPermission({
                 action: `${testCase.toolName} ${JSON.stringify(testCase.args)}`,
                 args: testCase.args,
                 messages: testCase.history,
-                model: modelOpenaiGpt55,
-                now: () => Date.now(),
-                provider,
+                reviewer,
                 toolName: testCase.toolName,
             });
+            await reviewer.close();
             const context = captured[index];
-            expect(context?.tools).toEqual([]);
-            expect(context?.messages).toHaveLength(1);
             expect(context?.systemPrompt).toContain("independent permission reviewer");
-            const requestText = String(context?.messages[0]?.content ?? "");
+            const requestText = String(context?.messages.at(-1)?.content ?? "");
             expect(requestText).toContain("<conversation>");
             expect(requestText).toContain("<proposed_action>");
             expect(requestText).toContain(JSON.stringify(testCase.args));

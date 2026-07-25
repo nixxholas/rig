@@ -54,6 +54,7 @@ Usage notes:
         'For run_terminal_command, request full-access execution with sandbox_permissions: "require_escalated". Explain why in the description. Keep sandbox_permissions at "use_default" or omit it for ordinary commands.',
     describeAutoPermissionAction: ({ command }, context) =>
         summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>

@@ -64,6 +64,7 @@ export const grokGrepTool = defineTool({
     returnType: textOutputSchema,
     describeAutoPermissionAction: ({ path }, context) =>
         describeFileAutoPermissionAction(path ?? ".", context, "searching"),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ path }, context) =>
         shouldReviewPathInAutoMode(path ?? ".", context, { write: false }),
     shouldRunInFullAccessInAutoMode: ({ path }, context) =>

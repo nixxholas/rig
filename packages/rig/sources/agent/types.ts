@@ -215,6 +215,8 @@ export interface DefinedTool<
     interruptionMessage?: string;
     /** Provider-specific Auto-mode guidance included only while this tool is active. */
     autoPermissionInstructions?: string;
+    /** Offered to the read-only side agent that reviews Auto permission decisions. */
+    availableToPermissionReviewer: boolean;
     /** Describes the exact reviewed boundary in permission events and approval prompts. */
     describeAutoPermissionAction?: AutoPermissionActionDescriber<Static<TArgsSchema>>;
     requiresAutoOrFullAccess: boolean;
@@ -252,6 +254,7 @@ export interface AnyDefinedTool {
     toUI: (result: never, args: never) => string;
     interruptionMessage?: string;
     autoPermissionInstructions?: string;
+    availableToPermissionReviewer: boolean;
     describeAutoPermissionAction?: AutoPermissionActionDescriber<never>;
     requiresAutoOrFullAccess: boolean;
     shouldReviewInAutoMode: AutoPermissionPredicate<never>;
@@ -308,6 +311,7 @@ export function defineTool<
     toUI: (result: Static<TReturnSchema>, args: Static<TArgsSchema>) => string;
     interruptionMessage?: string;
     autoPermissionInstructions?: string;
+    availableToPermissionReviewer?: boolean;
     describeAutoPermissionAction?: AutoPermissionActionDescriber<Static<TArgsSchema>>;
     requiresAutoOrFullAccess?: boolean;
     execution?: "immediate" | "durable";
@@ -320,6 +324,7 @@ export function defineTool<
         ...tool,
         execution: tool.execution ?? "immediate",
         steerable: tool.steerable ?? false,
+        availableToPermissionReviewer: tool.availableToPermissionReviewer ?? false,
         requiresAutoOrFullAccess: tool.requiresAutoOrFullAccess ?? false,
         shouldRunInFullAccessInAutoMode: tool.shouldRunInFullAccessInAutoMode ?? (() => false),
     };

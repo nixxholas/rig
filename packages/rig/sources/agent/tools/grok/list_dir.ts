@@ -28,6 +28,7 @@ Other details:
     returnType: textOutputSchema,
     describeAutoPermissionAction: ({ target_directory }, context) =>
         describeFileAutoPermissionAction(target_directory, context, "listing"),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ target_directory }, context) =>
         shouldReviewPathInAutoMode(target_directory, context, { write: false }),
     shouldRunInFullAccessInAutoMode: ({ target_directory }, context) =>

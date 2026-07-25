@@ -49,7 +49,13 @@ import type {
     UserContent as ProviderUserContent,
 } from "@slopus/rig-execution";
 import { toLocalDate } from "../executor/toLocalDate.js";
-import { requestAutoPermissionApproval, reviewAutoPermission } from "../permissions/index.js";
+import {
+    requestAutoPermissionApproval,
+    reviewAutoPermission,
+    type AutoPermissionRisk,
+    type AutoPermissionUserAuthorization,
+    type PermissionReviewAgent,
+} from "../permissions/index.js";
 import type { DebugLog } from "../debug/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
 import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
@@ -61,8 +67,8 @@ export interface RunAgentLoopOptions {
     debug?: DebugLog;
     provider: Provider;
     /** Provider whose session is isolated from the coding agent and has no tools. */
-    permissionReviewerProvider?: Provider;
-    permissionReviewerSessionId?: string;
+    /** Lazily returns the sister agent that reviews Auto permission decisions. */
+    permissionReviewAgent?: () => PermissionReviewAgent;
     modelId: string;
     effort?: string;
     serviceTier?: ServiceTier;
@@ -168,9 +174,9 @@ export type AgentLoopEvent =
           action: string;
           decision: "allow" | "ask";
           reason: string;
-          risk: "low" | "medium" | "high";
+          risk: AutoPermissionRisk;
           toolCallId: string;
-          userAuthorization: "low" | "medium" | "high";
+          userAuthorization: AutoPermissionUserAuthorization;
       }
     | {
           type: "background_processes_changed";
@@ -192,8 +198,8 @@ type PreparedToolPermission =
               approvedByUser?: true;
               decision: "allow" | "ask";
               reason: string;
-              risk: "low" | "medium" | "high";
-              userAuthorization: "low" | "medium" | "high";
+              risk: AutoPermissionRisk;
+              userAuthorization: AutoPermissionUserAuthorization;
           };
       };
 
@@ -535,16 +541,11 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         const preparedPermissionEntries = await raceWithAbort(
             (async () => {
                 const entries: [string, PreparedToolPermission][] = [];
-                const reviewerProvider = options.permissionReviewerProvider ?? options.provider;
                 for (const toolCall of toolCalls) {
                     entries.push([
                         toolCall.id,
                         await prepareToolPermission(toolCall, toolsByName, toolContext, {
                             messages: transcript,
-                            // A dedicated review model keeps Auto cheap; other providers review
-                            // on the model already running the session.
-                            model: reviewerProvider.reviewerModel ?? model,
-                            now,
                             onPermissionReview: (review) =>
                                 options.signal?.aborted
                                     ? Promise.resolve()
@@ -555,11 +556,9 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                               ...review,
                                           }),
                                       ),
-                            provider: reviewerProvider,
-                            ...(options.permissionReviewerSessionId === undefined
+                            ...(options.permissionReviewAgent === undefined
                                 ? {}
-                                : { sessionId: options.permissionReviewerSessionId }),
-                            startDate,
+                                : { permissionReviewAgent: options.permissionReviewAgent }),
                             ...(options.signal === undefined ? {} : { signal: options.signal }),
                         }),
                     ]);
@@ -1158,19 +1157,15 @@ async function prepareToolPermission(
     context: AgentContext,
     options: {
         messages: readonly Message[];
-        model: Model;
-        now: () => number;
         onPermissionReview?: (review: {
             action: string;
             decision: "allow" | "ask";
             reason: string;
-            risk: "low" | "medium" | "high";
-            userAuthorization: "low" | "medium" | "high";
+            risk: AutoPermissionRisk;
+            userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
-        provider: Provider;
-        sessionId?: string;
+        permissionReviewAgent?: () => PermissionReviewAgent;
         signal?: AbortSignal;
-        startDate: string;
     },
 ): Promise<PreparedToolPermission> {
     const tool = resolveTool(toolCall, toolsByName);
@@ -1184,6 +1179,21 @@ async function prepareToolPermission(
     try {
         if (!(await tool.shouldReviewInAutoMode(toolCall.arguments as never, context))) {
             return { kind: "skip" };
+        }
+        const reviewAgent = options.permissionReviewAgent;
+        if (reviewAgent === undefined) {
+            // Auto without a reviewer must fall back to the user, never to silent execution.
+            const action =
+                tool.describeAutoPermissionAction?.(toolCall.arguments as never, context) ??
+                `running ${tool.name}`;
+            const review = {
+                decision: "ask",
+                reason: "No automatic permission reviewer is available for this session.",
+                risk: "medium",
+                userAuthorization: "low",
+            } as const;
+            await options.onPermissionReview?.({ action, ...review });
+            return { action, kind: "review", review };
         }
         if (tool.describeAutoPermissionAction === undefined) {
             return {
@@ -1199,11 +1209,7 @@ async function prepareToolPermission(
             action,
             args: toolCall.arguments,
             messages: options.messages,
-            model: options.model,
-            now: options.now,
-            provider: options.provider,
-            ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
-            startDate: options.startDate,
+            reviewer: reviewAgent(),
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             toolName: tool.name,
         });
@@ -1242,8 +1248,8 @@ async function executeToolCall(
             action: string;
             decision: "allow" | "ask";
             reason: string;
-            risk: "low" | "medium" | "high";
-            userAuthorization: "low" | "medium" | "high";
+            risk: AutoPermissionRisk;
+            userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
         onError?: (error: unknown) => void | Promise<void>;
         onRawResult?: (result: unknown) => void | Promise<void>;

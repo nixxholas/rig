@@ -145,21 +145,6 @@ export class Executor {
         this.selectedProviderId = providerId;
     }
 
-    fork(options: { sessionId: string }): Executor {
-        const fork = new Executor(
-            this.providers.map((provider) => ({
-                ...provider,
-                sessionId: options.sessionId,
-            })),
-            {
-                environment: this.environment,
-                identity: this.identity,
-            },
-        );
-        fork.selectProvider(this.selectedProviderId);
-        return fork;
-    }
-
     async systemPrompt(
         selection: ExecutorSelection,
         contextInstructions?: string,

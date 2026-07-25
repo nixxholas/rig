@@ -1,8 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { NativeProcessManager } from "../processes/index.js";
 import {
-    Executor,
     modelAnthropicFable5,
     modelAnthropicOpus5,
     modelOpenaiGpt56Luna,
@@ -51,23 +50,22 @@ describe("createCodingAssistantAgent", () => {
         );
     });
 
-    it("allocates a dedicated executor session for Auto permission review", async () => {
-        const fork = vi.spyOn(Executor.prototype, "fork");
-        try {
-            const runtime = createCodingAssistantAgent({
-                agentId: "agent-session",
-                cwd: "/tmp/rig-app-test",
-                env: {},
-            });
+    it("gives the Auto permission reviewer read-only tools and its own permissions", async () => {
+        const runtime = createCodingAssistantAgent({
+            agentId: "agent-session",
+            cwd: "/tmp/rig-app-test",
+            env: {},
+            permissionMode: "auto",
+        });
 
-            expect(fork).toHaveBeenCalledWith({
-                sessionId: "agent-session:auto-reviewer",
-            });
+        const reviewerTools = runtime.agent.tools.filter(
+            (tool) => tool.availableToPermissionReviewer,
+        );
+        expect(reviewerTools.map((tool) => tool.name)).toEqual(["exec_command", "write_stdin"]);
+        // The reviewer must never receive a tool that can change the workspace.
+        expect(reviewerTools.map((tool) => tool.name)).not.toContain("apply_patch");
 
-            await runtime.agent.close();
-        } finally {
-            fork.mockRestore();
-        }
+        await runtime.agent.close();
     });
 
     it("creates a Claude SDK agent for Anthropic models", () => {

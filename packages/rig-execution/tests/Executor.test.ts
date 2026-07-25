@@ -193,41 +193,6 @@ describe("Executor", () => {
         expect(native.options[1]?.tools?.map((candidate) => candidate.name)).toEqual(["write"]);
     });
 
-    it("forks an isolated provider session without replacing the primary session", async () => {
-        const natives: RecordingProvider[] = [];
-        const executor = new Executor(
-            [
-                {
-                    id: "codex",
-                    native: async () => {
-                        const native = new RecordingProvider();
-                        natives.push(native);
-                        return native;
-                    },
-                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
-                    sessionId: "agent-session",
-                },
-            ],
-            { environment: TEST_ENVIRONMENT },
-        );
-        const reviewer = executor.fork({ sessionId: "agent-session:auto-reviewer" });
-        const request = {
-            context: { messages: [] },
-            selection: { modelId: "openai/sol", providerId: "codex" },
-        };
-
-        await collect(executor.run(request));
-        await collect(reviewer.run(request));
-        await collect(executor.run(request));
-
-        expect(natives).toHaveLength(2);
-        expect(natives[0]?.sessions.map((session) => session.id)).toEqual(["agent-session"]);
-        expect(natives[0]?.sessions[0]?.requests).toHaveLength(2);
-        expect(natives[1]?.sessions.map((session) => session.id)).toEqual([
-            "agent-session:auto-reviewer",
-        ]);
-    });
-
     it("replaces only the execution-owned base prompt", async () => {
         const native = new RecordingProvider();
         const executor = new Executor(

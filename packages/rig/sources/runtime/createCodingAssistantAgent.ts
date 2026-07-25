@@ -1,4 +1,6 @@
 import { createId } from "@paralleldrive/cuid2";
+
+import { createPermissionReviewSideAgent } from "../permissions/index.js";
 import { Executor, type Identity } from "@slopus/rig-execution";
 
 import {
@@ -158,18 +160,24 @@ export function createCodingAssistantAgent(
             executor.selectProvider(providerId);
             return executor;
         })();
+    // The reviewer gets its own context so its read-only permissions are its own. Reusing the
+    // agent's context would let the agent under review widen the reviewer along with itself.
+    const createPermissionReviewContext = () =>
+        process.env.RIG_GYM_RUNTIME === "just-bash"
+            ? createGymJustBashAgentContext({ permissionMode: "read_only" })
+            : options.docker === undefined
+              ? createNodeAgentContext({
+                    cwd: options.cwd,
+                    permissionMode: "read_only",
+                    processManager,
+                })
+              : createDockerAgentContext({
+                    docker: options.docker,
+                    permissionMode: "read_only",
+                    sessionId: `${options.sessionId ?? options.agentId ?? "standalone"}:auto-reviewer`,
+                });
     if (nativeProvider instanceof Executor) nativeProvider.selectProvider(providerId);
-    // Permission mode can change after runtime creation. Fork the lightweight executor now; its
-    // native provider session remains lazy until Auto actually needs a review.
-    const nativePermissionReviewer =
-        nativeProvider instanceof Executor
-            ? nativeProvider.fork({ sessionId: `${agentId}:auto-reviewer` })
-            : nativeProvider;
     const provider = routeProviderThroughGym(nativeProvider, env);
-    const permissionReviewerProvider =
-        nativePermissionReviewer === nativeProvider
-            ? provider
-            : routeProviderThroughGym(nativePermissionReviewer, env);
     const model = provider.models.find((candidate) => candidate.id === modelId);
     if (model === undefined) {
         throw new Error(`Unknown model '${modelId}' for provider '${provider.id}'`);
@@ -226,7 +234,15 @@ export function createCodingAssistantAgent(
             ? { appendSystemPrompt: options.appendSystemPrompt }
             : {}),
         provider,
-        permissionReviewerProvider,
+        createPermissionReviewAgent: () =>
+            createPermissionReviewSideAgent({
+                context: createPermissionReviewContext(),
+                id: `${agentId}:auto-reviewer`,
+                model: provider.reviewerModel ?? model,
+                provider,
+                ...(options.startDate === undefined ? {} : { startDate: options.startDate }),
+                tools: tools.filter((tool) => tool.availableToPermissionReviewer),
+            }),
         modelId,
         context,
         id: agentId,

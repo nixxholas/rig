@@ -38,6 +38,7 @@ Usage:
     returnType: readFileReturnSchema,
     describeAutoPermissionAction: ({ target_file }, context) =>
         describeFileAutoPermissionAction(target_file, context, "reading"),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ target_file }, context) =>
         shouldReviewPathInAutoMode(target_file, context, { write: false }),
     shouldRunInFullAccessInAutoMode: ({ target_file }, context) =>

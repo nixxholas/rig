@@ -17,7 +17,7 @@ import { printAgentMessageToConsole, type AgentConsole } from "./printAgentMessa
 import type { AnyDefinedTool, ContentBlock, Message, SystemMessage, UserMessage } from "./types.js";
 import type { Context, Model, Provider, ServiceTier } from "@slopus/rig-execution";
 import { toLocalDate } from "../executor/toLocalDate.js";
-import type { PermissionMode } from "../permissions/index.js";
+import type { PermissionMode, PermissionReviewAgent } from "../permissions/index.js";
 import { isPermissionReduction } from "../permissions/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
 import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
@@ -55,8 +55,13 @@ export interface AgentSnapshot {
 export interface AgentOptions {
     appendSystemPrompt?: string;
     provider: Provider;
-    /** Tool-free inference provider reserved for Auto permission review. */
-    permissionReviewerProvider?: Provider;
+    /** Creates the sister agent that reviews Auto permission decisions, on first use. */
+    createPermissionReviewAgent?: () => PermissionReviewAgent;
+    /**
+     * Delivers the project's AGENTS.md instructions to the model. The permission reviewer turns
+     * this off, because repository content must never instruct the agent judging an action.
+     */
+    projectInstructions?: "include" | "exclude";
     modelId: string;
     context: AgentContext;
     id?: string;
@@ -107,7 +112,9 @@ export class Agent {
     readonly provider: Provider;
     readonly context: AgentContext;
 
-    readonly #permissionReviewerProvider: Provider;
+    readonly #createPermissionReviewAgent: (() => PermissionReviewAgent) | undefined;
+    readonly #projectInstructions: "include" | "exclude";
+    #permissionReviewAgent: PermissionReviewAgent | undefined;
     #appendSystemPrompt: string | undefined;
     #model: Model;
     #effort: string | undefined;
@@ -140,7 +147,8 @@ export class Agent {
         this.#idFactory = options.idFactory ?? createId;
         this.id = options.id ?? this.#idFactory();
         this.provider = options.provider;
-        this.#permissionReviewerProvider = options.permissionReviewerProvider ?? options.provider;
+        this.#createPermissionReviewAgent = options.createPermissionReviewAgent;
+        this.#projectInstructions = options.projectInstructions ?? "include";
         this.#model = this.#findModel(options.modelId);
         this.context = options.context;
         this.#effort = options.effort ?? this.#model.defaultThinkingLevel;
@@ -273,12 +281,9 @@ export class Agent {
     }
 
     async close(): Promise<void> {
-        await Promise.all([
-            this.provider.close?.(),
-            ...(this.#permissionReviewerProvider === this.provider
-                ? []
-                : [this.#permissionReviewerProvider.close?.()]),
-        ]);
+        const reviewer = this.#permissionReviewAgent;
+        this.#permissionReviewAgent = undefined;
+        await Promise.all([this.provider.close?.(), reviewer?.close()]);
     }
 
     addSteering(text: string): SystemMessage {
@@ -395,16 +400,6 @@ export class Agent {
                       runId,
                       source: "agent",
                   });
-        const permissionReviewerProvider =
-            this.#permissionReviewerProvider === this.provider
-                ? provider
-                : options.debug === undefined
-                  ? this.#permissionReviewerProvider
-                  : createDebugProvider(this.#permissionReviewerProvider, {
-                        log: options.debug,
-                        runId,
-                        source: "reviewer",
-                    });
 
         try {
             try {
@@ -425,11 +420,14 @@ export class Agent {
             }
 
             const beforeAgentsMd = this.#contextMessages ?? this.#messages;
-            const withAgentsMd = await reconcileAgentsMdMessages({
-                fs: this.context.fs,
-                idFactory: this.#idFactory,
-                messages: beforeAgentsMd,
-            });
+            const withAgentsMd =
+                this.#projectInstructions === "exclude"
+                    ? beforeAgentsMd
+                    : await reconcileAgentsMdMessages({
+                          fs: this.context.fs,
+                          idFactory: this.#idFactory,
+                          messages: beforeAgentsMd,
+                      });
             // Recording the project instructions makes the model's history diverge from the
             // visible transcript, which is what keeps superseded instructions readable later.
             if (withAgentsMd !== beforeAgentsMd) {
@@ -439,8 +437,15 @@ export class Agent {
             let contextCompactedDuringRun = false;
             const loopOptions: Parameters<typeof runAgentLoop>[0] = {
                 provider,
-                permissionReviewerProvider,
-                permissionReviewerSessionId: `${this.id}:auto-reviewer`,
+                ...(this.#createPermissionReviewAgent === undefined
+                    ? {}
+                    : {
+                          // Auto may be selected long after the agent is built, so the sister
+                          // agent stays unbuilt until a review actually needs it.
+                          permissionReviewAgent: () =>
+                              (this.#permissionReviewAgent ??=
+                                  this.#createPermissionReviewAgent!()),
+                      }),
                 modelId: this.#model.id,
                 tools: this.#tools,
                 messages: this.#messages,

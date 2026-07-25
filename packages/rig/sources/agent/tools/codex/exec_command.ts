@@ -113,6 +113,7 @@ export const codexExecCommandTool = defineTool({
             cwd: workdir ?? context.fs.cwd,
             ...(shell === undefined ? {} : { shell }),
         }),
+    availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>

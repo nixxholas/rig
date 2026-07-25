@@ -5,7 +5,13 @@ export { isPermissionReduction } from "./isPermissionReduction.js";
 export { parsePermissionMode } from "./parsePermissionMode.js";
 export { requestAutoPermissionApproval } from "./requestAutoPermissionApproval.js";
 export { reviewAutoPermission } from "./reviewAutoPermission.js";
+export type { PermissionReviewAgent } from "./PermissionReviewAgent.js";
+export { createPermissionReviewSideAgent } from "./createPermissionReviewSideAgent.js";
 export { DEFAULT_PERMISSION_MODE } from "./PermissionMode.js";
 export type { PermissionContext } from "./PermissionContext.js";
 export type { PermissionMode } from "./PermissionMode.js";
-export type { AutoPermissionReview } from "./parseAutoPermissionReview.js";
+export type {
+    AutoPermissionReview,
+    AutoPermissionRisk,
+    AutoPermissionUserAuthorization,
+} from "./parseAutoPermissionReview.js";

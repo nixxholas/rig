@@ -5,10 +5,15 @@ import { shouldAllowAutoPermissionReview } from "./shouldAllowAutoPermissionRevi
 describe("shouldAllowAutoPermissionReview", () => {
     it.each([
         ["low", "low", true],
+        ["low", "unknown", true],
         ["medium", "low", true],
+        ["medium", "unknown", true],
+        ["high", "unknown", false],
         ["high", "low", false],
         ["high", "medium", true],
         ["high", "high", true],
+        ["critical", "high", false],
+        ["critical", "medium", false],
     ] as const)(
         "treats %s risk with %s authorization as allowed=%s",
         (risk, userAuthorization, allowed) => {
