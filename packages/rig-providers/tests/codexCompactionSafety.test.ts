@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import type { SessionTool } from "@/core/SessionTool.js";
 import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
-import { estimateCodexContextTokens } from "@/vendors/codex/impl/estimateCodexContextTokens.js";
-import { fitCodexCompactionRequest } from "@/vendors/codex/impl/fitCodexCompactionRequest.js";
+import {
+    estimateCodexContextTokens,
+    fitCodexCompactionRequest,
+} from "@/vendors/codex/impl/codexCompaction.js";
 
 describe("Codex compaction request safety", () => {
     it("rewrites huge tool output before sending an over-window compaction request", () => {

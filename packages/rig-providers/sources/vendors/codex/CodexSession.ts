@@ -13,18 +13,22 @@ import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStrea
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import { classifyCodexError, codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";
-import { collectCodexCompaction } from "@/vendors/codex/impl/collectCodexCompaction.js";
+import {
+    type CodexCompactionMetadata,
+    collectCodexCompaction,
+    createCodexCompactionRequest,
+    fitCodexCompactionRequest,
+    preserveCodexCompactionMessages,
+    preserveCodexLocalCompactionMessages,
+} from "@/vendors/codex/impl/codexCompaction.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import { createCodexClient } from "@/vendors/codex/impl/createCodexClient.js";
 import { createCodexClientMetadata } from "@/vendors/codex/impl/createCodexClientMetadata.js";
-import { createCodexCompactionRequest } from "@/vendors/codex/impl/createCodexCompactionRequest.js";
 import { CodexSseConnection } from "@/vendors/codex/impl/CodexSseConnection.js";
 import { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
 import { CodexWebSocketConnection } from "@/vendors/codex/impl/CodexWebSocketConnection.js";
 import { createCodexCliRequest } from "@/vendors/codex/impl/createCodexCliRequest.js";
 import { createCodexModelSwitchMessage } from "@/vendors/codex/impl/createCodexModelSwitchMessage.js";
-import type { CodexCompactionMetadata } from "@/vendors/codex/impl/CodexCompactionMetadata.js";
-import { fitCodexCompactionRequest } from "@/vendors/codex/impl/fitCodexCompactionRequest.js";
 import { getCodexContextSuffix } from "@/vendors/codex/impl/getCodexContextSuffix.js";
 import { getCodexModelProperties } from "@/vendors/codex/impl/getCodexModelProperties.js";
 import { getCodexTurnKey } from "@/vendors/codex/impl/getCodexTurnKey.js";
@@ -33,8 +37,6 @@ import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/cod
 import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
-import { preserveCodexCompactionMessages } from "@/vendors/codex/impl/preserveCodexCompactionMessages.js";
-import { preserveCodexLocalCompactionMessages } from "@/vendors/codex/impl/preserveCodexLocalCompactionMessages.js";
 import { recoverCodexUnauthorizedCredential } from "@/vendors/codex/impl/recoverCodexUnauthorizedCredential.js";
 import { resolveCodexReasoningEffort } from "@/vendors/codex/impl/resolveCodexReasoningEffort.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";

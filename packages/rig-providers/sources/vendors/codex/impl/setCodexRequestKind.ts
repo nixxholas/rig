@@ -1,4 +1,4 @@
-import type { CodexCompactionMetadata } from "@/vendors/codex/impl/CodexCompactionMetadata.js";
+import type { CodexCompactionMetadata } from "@/vendors/codex/impl/codexCompaction.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 
 export function setCodexRequestKind(

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { preserveCodexCompactionMessages } from "@/vendors/codex/impl/preserveCodexCompactionMessages.js";
-import { preserveCodexLocalCompactionMessages } from "@/vendors/codex/impl/preserveCodexLocalCompactionMessages.js";
-import { truncateCodexText } from "@/vendors/codex/impl/truncateCodexText.js";
+import {
+    preserveCodexCompactionMessages,
+    preserveCodexLocalCompactionMessages,
+    truncateCodexText,
+} from "@/vendors/codex/impl/codexCompaction.js";
 import { context_checkpoint_summary_prefix } from "@/vendors/codex/prompts/context_checkpoint_compaction_instructions.js";
 
 describe("Codex remote-v2 compaction history", () => {
