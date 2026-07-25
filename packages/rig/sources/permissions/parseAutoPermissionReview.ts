@@ -1,3 +1,5 @@
+import { parseJsonFromModelOutput } from "../utils/parseJsonFromModelOutput.js";
+
 export type AutoPermissionRisk = "low" | "medium" | "high" | "critical";
 export type AutoPermissionUserAuthorization = "unknown" | "low" | "medium" | "high";
 
@@ -17,14 +19,10 @@ const AUTHORIZATIONS: readonly AutoPermissionUserAuthorization[] = [
 ];
 
 export function parseAutoPermissionReview(text: string): AutoPermissionReview | undefined {
-    const candidate = /```(?:json)?\s*([\s\S]*?)```/iu.exec(text)?.[1] ?? text;
-    const start = candidate.indexOf("{");
-    const end = candidate.lastIndexOf("}");
-    if (start < 0 || end <= start) return undefined;
-    try {
-        const value: unknown = JSON.parse(candidate.slice(start, end + 1));
-        if (value === null || typeof value !== "object") return undefined;
-        const record = value as Record<string, unknown>;
+    const value = parseJsonFromModelOutput(text);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
+    const record = value as Record<string, unknown>;
+    {
         if (record.decision !== "allow" && record.decision !== "ask") return undefined;
         const risk = RISKS.find((candidate) => candidate === record.risk);
         const userAuthorization = AUTHORIZATIONS.find(
@@ -40,8 +38,6 @@ export function parseAutoPermissionReview(text: string): AutoPermissionReview | 
             risk,
             userAuthorization,
         };
-    } catch {
-        return undefined;
     }
 }
 

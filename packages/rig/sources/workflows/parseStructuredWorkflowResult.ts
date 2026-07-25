@@ -1,20 +1,11 @@
+import { parseJsonFromModelOutput } from "../utils/parseJsonFromModelOutput.js";
+
 export function parseStructuredWorkflowResult(
     text: string,
     schema: Record<string, unknown>,
 ): unknown {
-    const fenced = /```(?:json)?\s*([\s\S]*?)```/i.exec(text)?.[1];
-    const candidates = [fenced, text].filter(
-        (candidate): candidate is string => candidate !== undefined,
-    );
-    for (const candidate of candidates) {
-        try {
-            const value: unknown = JSON.parse(candidate.trim());
-            const error = validateJsonSchema(value, schema, "$");
-            if (error === undefined) return value;
-        } catch {
-            // Try the next representation before reporting one useful error.
-        }
-    }
+    const value = parseJsonFromModelOutput(text);
+    if (value !== undefined && validateJsonSchema(value, schema, "$") === undefined) return value;
     throw new Error("The workflow agent did not return JSON matching its schema.");
 }
 
