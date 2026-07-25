@@ -2,14 +2,12 @@ import type { ResponseInputItem } from "openai/resources/responses/responses.js"
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort, SessionServiceTier } from "@/core/SessionRunRequest.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { createOpenAIResponseRequest } from "@/core/responses/createOpenAIResponseRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
-import { withCodexSkills } from "@/vendors/codex/impl/withCodexSkills.js";
 import { responseInputItems } from "@/vendors/codex/impl/responseInputItems.js";
 
 export function createCodexCliRequest(options: {
@@ -19,14 +17,10 @@ export function createCodexCliRequest(options: {
     model: string;
     parallelToolCalls?: boolean;
     promptCacheKey: string;
-    skills: readonly SessionSkill[];
     serviceTier?: SessionServiceTier;
     tools: readonly SessionTool[];
 }): CodexResponseRequest {
-    const request: CodexResponseRequest = createOpenAIResponseRequest({
-        ...options,
-        context: withCodexSkills(options.context, options.skills, options.model),
-    });
+    const request: CodexResponseRequest = createOpenAIResponseRequest(options);
     request.tool_choice = "auto";
     request.client_metadata = { ...options.clientMetadata };
     if (options.serviceTier !== undefined) request.service_tier = options.serviceTier;

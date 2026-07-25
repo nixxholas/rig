@@ -15,7 +15,6 @@ describe("Codex parallel tool calls", () => {
             effort: "low",
             model,
             promptCacheKey: "session",
-            skills: [],
             tools: [],
         });
 
@@ -33,7 +32,6 @@ describe("Codex parallel tool calls", () => {
             model,
             parallelToolCalls,
             promptCacheKey: "session",
-            skills: [],
             tools: [],
         });
 
@@ -48,7 +46,6 @@ describe("Codex parallel tool calls", () => {
             model: "gpt-5.6-sol",
             parallelToolCalls: true,
             promptCacheKey: "session",
-            skills: [],
             tools: [],
         });
 

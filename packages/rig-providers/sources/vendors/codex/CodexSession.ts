@@ -13,11 +13,10 @@ import type { SessionContext, SessionMessage } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
-import { classifyCodexError } from "@/vendors/codex/impl/classifyCodexError.js";
+import { classifyCodexError } from "@/vendors/codex/errors/codexErrors.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";
 import { collectCodexCompaction } from "@/vendors/codex/impl/collectCodexCompaction.js";
 import { createCodexBedrockRequest } from "@/vendors/codex/impl/createCodexBedrockRequest.js";
@@ -40,12 +39,12 @@ import { getCodexContextSuffix } from "@/vendors/codex/impl/getCodexContextSuffi
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
 import { getCodexModelProperties } from "@/vendors/codex/impl/getCodexModelProperties.js";
 import { getCodexTurnKey } from "@/vendors/codex/impl/getCodexTurnKey.js";
-import { isCodexContextWindowError } from "@/vendors/codex/impl/isCodexContextWindowError.js";
-import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/impl/isCodexPreviousResponseNotFoundError.js";
-import { isCodexUnauthorizedError } from "@/vendors/codex/impl/isCodexUnauthorizedError.js";
+import { isCodexContextWindowError } from "@/vendors/codex/errors/codexErrors.js";
+import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
+import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
-import { isCodexWebSocketUnavailableError } from "@/vendors/codex/impl/isCodexWebSocketUnavailableError.js";
-import { isRetryableCodexStreamError } from "@/vendors/codex/impl/isRetryableCodexStreamError.js";
+import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
+import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
 import { preserveCodexCompactionMessages } from "@/vendors/codex/impl/preserveCodexCompactionMessages.js";
 import { preserveCodexLocalCompactionMessages } from "@/vendors/codex/impl/preserveCodexLocalCompactionMessages.js";
 import { recoverCodexUnauthorizedCredential } from "@/vendors/codex/impl/recoverCodexUnauthorizedCredential.js";
@@ -76,7 +75,6 @@ export interface CodexSessionOptions {
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     parallelToolCalls?: boolean;
-    skills?: readonly SessionSkill[];
     /** Maximum stream reconnection attempts per transport, matching upstream Codex. */
     streamMaxRetries?: number;
     streamIdleTimeoutMs?: number;
@@ -90,7 +88,6 @@ export class CodexSession extends BaseSession {
     readonly endpoint: string;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
-    readonly skills: readonly SessionSkill[];
     readonly streamMaxRetries: number;
     readonly streamIdleTimeoutMs: number;
     readonly tools: readonly SessionTool[];
@@ -125,7 +122,6 @@ export class CodexSession extends BaseSession {
         this.model = options.model;
         this.parallelToolCalls = options.parallelToolCalls;
         this.activeModel = options.model;
-        this.skills = options.skills ?? [];
         this.streamMaxRetries = resolveCodexStreamMaxRetries(options.streamMaxRetries);
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.tools = options.tools ?? [];
@@ -134,7 +130,6 @@ export class CodexSession extends BaseSession {
 
         const baseConfiguration = cloneConfiguration({
             context: options.context,
-            skills: this.skills,
             tools: this.tools,
         });
         for (const [model, configuration] of Object.entries(options.modelConfigurations ?? {})) {
@@ -329,7 +324,6 @@ export class CodexSession extends BaseSession {
         };
         const compactionConfiguration: SessionModelConfiguration = {
             context: configuration.context,
-            skills: [],
             tools: [],
         };
         const basePayload = this.createRequest(
@@ -654,7 +648,6 @@ export class CodexSession extends BaseSession {
                 ? {}
                 : { parallelToolCalls: this.parallelToolCalls }),
             promptCacheKey: this.id,
-            skills: configuration.skills ?? [],
             ...(serviceTier === undefined ? {} : { serviceTier }),
             tools: configuration.tools ?? [],
         });
@@ -881,7 +874,6 @@ export class CodexSession extends BaseSession {
 function cloneConfiguration(configuration: SessionModelConfiguration): SessionModelConfiguration {
     return {
         context: cloneContext(configuration.context),
-        skills: [...(configuration.skills ?? [])],
         tools: [...(configuration.tools ?? [])],
     };
 }

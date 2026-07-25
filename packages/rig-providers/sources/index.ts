@@ -104,9 +104,6 @@ export type {
     CodexToolDefinitionVendor,
     CodexToolVendor,
 } from "@/vendors/codex/CodexToolVendor.js";
-export * from "@/vendors/codex/prompts/index.js";
-export * from "@/vendors/codex/skills/index.js";
-export * from "@/vendors/codex/tools/index.js";
 export {
     CODEX_API_ENDPOINT,
     CODEX_CHATGPT_ENDPOINT,

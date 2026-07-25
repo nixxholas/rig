@@ -6,6 +6,7 @@ import { describe, expect, it } from "vitest";
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 import { codexCliTools } from "./codexCliTools.js";
 import { codexCliPrompt } from "./codexCliPrompt.js";
+import { withCodexSkills } from "@/vendors/codex/impl/withCodexSkills.js";
 import { codexSkills } from "@/vendors/codex/skills/codexSkills.js";
 
 const cases = [
@@ -46,14 +47,17 @@ describe("Codex SSE goldens", () => {
                 userAgent: golden.http.headers["user-agent"]!,
             });
             const session = await provider.session("<SESSION_ID>", {
-                context: {
-                    instructions: prompt.instructions,
-                    messages: prompt.systemMessages.map((content) => ({
-                        role: "system" as const,
-                        content,
-                    })),
-                },
-                skills: codexSkills,
+                context: withCodexSkills(
+                    {
+                        instructions: prompt.instructions,
+                        messages: prompt.systemMessages.map((content) => ({
+                            role: "system" as const,
+                            content,
+                        })),
+                    },
+                    codexSkills,
+                    model,
+                ),
                 tools: codexCliTools(model),
             });
             const events = [];
@@ -158,8 +162,11 @@ describe("Codex SSE goldens", () => {
                 transport: "sse",
             });
             const session = await provider.session("<SESSION_ID>", {
-                context: { instructions: prompt.instructions, messages: [] },
-                skills: codexSkills,
+                context: withCodexSkills(
+                    { instructions: prompt.instructions, messages: [] },
+                    codexSkills,
+                    "gpt-5.6-sol",
+                ),
                 tools: codexCliTools("gpt-5.6-sol"),
             });
             await drain(
@@ -404,8 +411,11 @@ describe("Codex SSE goldens", () => {
                 model: "gpt-5.6-sol",
                 transport: "sse",
             }).session("<SESSION_ID>", {
-                context: { instructions: prompt.instructions, messages: [] },
-                skills: codexSkills,
+                context: withCodexSkills(
+                    { instructions: prompt.instructions, messages: [] },
+                    codexSkills,
+                    "gpt-5.6-sol",
+                ),
                 tools: codexCliTools("gpt-5.6-sol"),
             });
             const user = { role: "user" as const, content: "first" };

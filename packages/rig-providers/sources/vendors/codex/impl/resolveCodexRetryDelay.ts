@@ -1,4 +1,4 @@
-import { readCodexErrorHeader } from "@/vendors/codex/impl/readCodexErrorHeader.js";
+import { readCodexErrorHeader } from "@/vendors/codex/errors/codexErrors.js";
 
 const MAX_SERVER_RETRY_DELAY_MS = 60_000;
 

@@ -6,9 +6,9 @@ import { describe, expect, it } from "vitest";
 
 import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 import { formatCodexUserAgent } from "@/vendors/codex/impl/codexUserAgent.js";
-import { isRetryableCodexStreamError } from "@/vendors/codex/impl/isRetryableCodexStreamError.js";
-import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/impl/isCodexPreviousResponseNotFoundError.js";
-import { isCodexWebSocketUnavailableError } from "@/vendors/codex/impl/isCodexWebSocketUnavailableError.js";
+import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
+import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
+import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { resolveCodexInstallationId } from "@/vendors/codex/impl/resolveCodexInstallationId.js";
 import { resolveCodexInstallationIdAt } from "@/vendors/codex/impl/resolveCodexInstallationIdAt.js";
 import { resolveCodexRetryDelay } from "@/vendors/codex/impl/resolveCodexRetryDelay.js";

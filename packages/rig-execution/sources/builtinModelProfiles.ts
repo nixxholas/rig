@@ -1,9 +1,7 @@
-import {
-    codex_agent_instructions,
-    type ProviderModelCompatibilityType,
-} from "@slopus/rig-providers";
+import { type ProviderModelCompatibilityType } from "@slopus/rig-providers";
 
 import type { ExecutorModelProfile } from "@/ExecutorModelProfile.js";
+import { codex_agent_instructions } from "@/prompts/codex/codex_agent_instructions.js";
 import { claude_fable_5_system_prompt } from "@/prompts/claude/claude_fable_5_system_prompt.js";
 import { claude_opus_4_8_system_prompt } from "@/prompts/claude/claude_opus_4_8_system_prompt.js";
 import { claude_opus_5_system_prompt } from "@/prompts/claude/claude_opus_5_system_prompt.js";

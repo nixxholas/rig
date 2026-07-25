@@ -21,6 +21,7 @@ import { tool_search } from "@/vendors/codex/tools/tool_search.js";
 import { update_plan } from "@/vendors/codex/tools/update_plan.js";
 import { view_image } from "@/vendors/codex/tools/view_image.js";
 import { write_stdin } from "@/vendors/codex/tools/write_stdin.js";
+import { withCodexSkills } from "@/vendors/codex/impl/withCodexSkills.js";
 import { codexSkills } from "@/vendors/codex/skills/codexSkills.js";
 
 describe("CodexProvider credential behavior", () => {
@@ -152,14 +153,17 @@ describe("CodexProvider credential behavior", () => {
                     userAgent: golden.http.headers["user-agent"]!,
                 });
                 const session = await provider.session("bedrock-session", {
-                    context: {
-                        instructions: codex_coding_agent_instructions,
-                        messages: [
-                            { role: "system", content: read_only_permissions },
-                            { role: "user", content: environmentMessage! },
-                        ],
-                    },
-                    skills: codexSkills,
+                    context: withCodexSkills(
+                        {
+                            instructions: codex_coding_agent_instructions,
+                            messages: [
+                                { role: "system", content: read_only_permissions },
+                                { role: "user", content: environmentMessage! },
+                            ],
+                        },
+                        codexSkills,
+                        model,
+                    ),
                     tools: [
                         exec_command,
                         write_stdin,

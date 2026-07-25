@@ -11,7 +11,6 @@ describe("Codex service tier", () => {
             model: "gpt-5.6-sol",
             promptCacheKey: "session",
             serviceTier: "priority",
-            skills: [],
             tools: [],
         });
 
