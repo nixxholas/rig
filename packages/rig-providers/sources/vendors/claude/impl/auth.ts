@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
-const MACOS_KEYCHAIN_TIMEOUT_MS = 250;
+const MACOS_KEYCHAIN_TIMEOUT_MS = 500;
 
 interface ClaudeCodeCredentials {
     claudeAiOauth?: {
