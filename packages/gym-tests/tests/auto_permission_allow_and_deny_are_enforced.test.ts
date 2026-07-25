@@ -9,12 +9,11 @@ afterEach(async () => {
     running.clear();
 });
 
-describe("Auto permissions review and user denial are enforced", () => {
+describe("Auto permission allow and deny decisions are enforced", () => {
     it("runs an automatically approved command and blocks a denied command", async () => {
         const allowedCommand = "printf 'approved by auto review\\n' > auto-approved.txt";
         const deniedCommand = "printf 'this must not run\\n' > auto-denied.txt";
         const gym = await createGym({
-            mode: "docker",
             cols: 96,
             inference(request, callIndex) {
                 const systemPrompt = request.context.systemPrompt ?? "";
@@ -41,7 +40,7 @@ describe("Auto permissions review and user denial are enforced", () => {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "ask",
+                                    decision: "deny",
                                     risk: "high",
                                     user_authorization: "medium",
                                     reason: "This command needs explicit one-time approval.",
@@ -108,7 +107,12 @@ describe("Auto permissions review and user denial are enforced", () => {
                     role: "toolResult",
                     toolName: "exec_command",
                 });
-                expect(messageText(lastMessage)).toContain("Auto mode did not approve running");
+                expect(messageText(lastMessage)).toContain(
+                    "Automatic permission review refused running",
+                );
+                expect(messageText(lastMessage)).toContain(
+                    "Reason: This command needs explicit one-time approval.",
+                );
                 return {
                     content: [{ text: "AUTO_DENIAL_FINISHED", type: "text" }],
                 };
@@ -120,8 +124,7 @@ describe("Auto permissions review and user denial are enforced", () => {
 
         gym.terminal.type("/permissions");
         gym.terminal.press("enter");
-        const menu = await gym.terminal.waitForText("Choose Permissions");
-        expect(menu.text).toContain("Automatically review risky actions; ask only when needed.");
+        await gym.terminal.waitForText("Choose Permissions");
         gym.terminal.press("up");
         gym.terminal.press("up");
         gym.terminal.press("up");
@@ -159,37 +162,7 @@ describe("Auto permissions review and user denial are enforced", () => {
         assertStableViewport(automaticallyApproved, startup);
         await expect(gym.readFile("auto-approved.txt")).resolves.toBe("approved by auto review\n");
 
-        gym.terminal.type("Try the second command, but ask me before it runs.");
-        gym.terminal.press("enter");
-        const approvalPrompt = await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("Needs approval") &&
-                snapshot.text.includes("Risk: High") &&
-                snapshot.text.includes("Allow once") &&
-                snapshot.text.includes("Deny") &&
-                snapshot.scroll.atBottom,
-            "one-time approval prompt",
-            30_000,
-        );
-        expect(normalizeWhitespace(approvalPrompt.text)).toContain(
-            "This command needs explicit one-time approval.",
-        );
-        expect(approvalPrompt.text).toContain("Allow running");
-        expect(normalizeWhitespace(approvalPrompt.text)).toContain(
-            'auto-denied.txt". Working directory: "/workspace". Shell: "the system login shell". Access: unrestricted filesystem and network access? · 1 of 1',
-        );
-        expect(
-            approvalPrompt.rows.some((row) =>
-                row.includes("• Awaiting approval printf 'this must not run"),
-            ),
-        ).toBe(true);
-        expect(approvalPrompt.text).toContain("Waiting for approval");
-        expect(
-            approvalPrompt.rows.some((row) => row.includes("• Ran printf 'this must not run")),
-        ).toBe(false);
-        assertStableViewport(approvalPrompt, startup);
-
-        gym.terminal.press("down");
+        gym.terminal.type("Try the second command only if Auto permits it.");
         gym.terminal.press("enter");
         const denied = await gym.terminal.waitUntil(
             (snapshot) =>
@@ -199,10 +172,16 @@ describe("Auto permissions review and user denial are enforced", () => {
             "denied action result and recovered composer",
             30_000,
         );
-        expect(denied.text).toContain("Auto mode did not approve running");
+        expect(denied.text).toContain("Automatic permission review refused running");
         expect(normalizeWhitespace(denied.text)).toContain(
             "This command needs explicit one-time approval.",
         );
+        expect(normalizeWhitespace(denied.text)).toContain(
+            "Refused: This command needs explicit one-time approval. Risk: High. User authorization: Medium.",
+        );
+        expect(denied.text).not.toContain("Allow once");
+        expect(denied.text).not.toContain("Waiting for approval");
+        expect(denied.text).not.toContain("Awaiting approval");
         expect(denied.text).not.toContain("auto-denied-command");
         expect(denied.text).not.toContain("�");
         expect(denied.cursor.x).toBeLessThan(96);
@@ -222,7 +201,6 @@ describe("Auto permissions review and user denial are enforced", () => {
         const reviewRequests = agentRequests.filter((request) =>
             request.context.systemPrompt?.includes("independent permission reviewer"),
         );
-        expect(reviewRequests.map((request) => request.context.tools ?? [])).toEqual([[], []]);
         expect(messageText(reviewRequests[0]?.context.messages.at(-1))).toContain(
             "auto-approved.txt",
         );

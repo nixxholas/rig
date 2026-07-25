@@ -217,7 +217,7 @@ export interface DefinedTool<
     autoPermissionInstructions?: string;
     /** Offered to the read-only side agent that reviews Auto permission decisions. */
     availableToPermissionReviewer: boolean;
-    /** Describes the exact reviewed boundary in permission events and approval prompts. */
+    /** Describes the exact reviewed boundary in permission events and refusal results. */
     describeAutoPermissionAction?: AutoPermissionActionDescriber<Static<TArgsSchema>>;
     requiresAutoOrFullAccess: boolean;
     shouldReviewInAutoMode: AutoPermissionPredicate<Static<TArgsSchema>>;

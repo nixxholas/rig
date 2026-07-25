@@ -12,7 +12,7 @@ export function describeFileAutoPermissionAction(
     try {
         resolvedPath = resolveFileSystemPath(path, context.fs.cwd, context.fs.home);
     } catch {
-        // Preserve malformed input so the approval prompt still shows the proposed path.
+        // Preserve malformed input so the reviewed action still shows the proposed path.
     }
     const access = isProtectedGitControlPath(resolvedPath)
         ? "protected Git control path inside the workspace"

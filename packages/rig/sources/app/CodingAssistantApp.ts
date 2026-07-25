@@ -4591,7 +4591,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 {
                     value: "auto",
                     label: "Auto",
-                    description: "Automatically review risky actions; ask only when needed.",
+                    description: "Automatically review risky actions without interrupting you.",
                 },
                 {
                     value: "workspace_write",

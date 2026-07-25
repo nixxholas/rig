@@ -10,7 +10,7 @@ afterEach(async () => {
 });
 
 describe("Auto-reviewed home-relative file paths", () => {
-    it("executes the same home path that the user approved", async () => {
+    it("executes the same home path that the reviewer allowed", async () => {
         const gym = await createGym({
             environment: { ANTHROPIC_API_KEY: "claude-test-key" },
             inference(request, callIndex) {
@@ -21,9 +21,9 @@ describe("Auto-reviewed home-relative file paths", () => {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "ask",
-                                    reason: "Writing to the home directory needs explicit approval.",
-                                    risk: "high",
+                                    decision: "allow",
+                                    reason: "The requested path is the one the user named.",
+                                    risk: "low",
                                     user_authorization: "medium",
                                 }),
                                 type: "text",
@@ -67,24 +67,16 @@ describe("Auto-reviewed home-relative file paths", () => {
         });
         running.add(gym);
 
-        submit(gym, "Try to write to my home directory, and ask me before doing it.");
-        await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("Allow once") &&
-                snapshot.text.includes("Deny") &&
-                snapshot.text.includes("~"),
-            "the approval prompt for the home-relative path",
-            30_000,
-        );
-        gym.terminal.press("enter");
-
-        await gym.terminal.waitUntil(
+        submit(gym, "Try to write to my home directory.");
+        const completed = await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("HOME_PATH_EXECUTION_MATCHED_REVIEW") &&
                 snapshot.text.includes("Ask Rig to do anything"),
             "the failed directory write and recovered composer",
             30_000,
         );
+        expect(completed.text).not.toContain("Allow once");
+        expect(completed.text).not.toContain("Waiting for approval");
         await expect(gym.readFile("~")).rejects.toMatchObject({ code: "ENOENT" });
     }, 90_000);
 });

@@ -9,8 +9,8 @@ afterEach(async () => {
     running.clear();
 });
 
-describe("escalated approval discloses the complete execution boundary", () => {
-    it("shows the exact command, directory, shell, and unrestricted scope before denial", async () => {
+describe("Auto refusal discloses the complete execution boundary", () => {
+    it("reports the exact command, directory, shell, and unrestricted scope", async () => {
         const command =
             "printf 'outside workspace\\n' > /home/rig/disclosure-denied.txt; printf 'ran\\n' > /workspace/disclosure-action-ran.txt";
         const gym = await createGym({
@@ -25,7 +25,7 @@ describe("escalated approval discloses the complete execution boundary", () => {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "ask",
+                                    decision: "deny",
                                     risk: "high",
                                     user_authorization: "low",
                                     reason: "This action requests unrestricted execution outside the workspace.",
@@ -62,6 +62,16 @@ describe("escalated approval discloses the complete execution boundary", () => {
                         role: "toolResult",
                         toolName: "exec_command",
                     });
+                    const refusal = normalizeWhitespace(messageText(lastMessage));
+                    expect(refusal).toContain(visibleExact(command));
+                    expect(refusal).toContain('Working directory: "/home/rig"');
+                    expect(refusal).toContain('Shell: "/bin/sh (login)"');
+                    expect(refusal.toLowerCase()).toMatch(
+                        /unrestricted (?:file system|filesystem) and network access/u,
+                    );
+                    expect(refusal).toContain(
+                        "Reason: This action requests unrestricted execution outside the workspace.",
+                    );
                     return {
                         content: [{ text: "COMPLETE_BOUNDARY_ACTION_DENIED", type: "text" }],
                     };
@@ -88,39 +98,7 @@ describe("escalated approval discloses the complete execution boundary", () => {
         gym.terminal.press("enter");
         await gym.terminal.waitForText("Permissions changed to Auto.");
 
-        submit(
-            gym,
-            "Show every security-relevant detail and ask before running the proposed action.",
-        );
-        const approval = await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("Allow once") &&
-                snapshot.text.includes("Deny") &&
-                snapshot.text.includes("/home/rig") &&
-                snapshot.scroll.atBottom,
-            "the approval panel with the full execution boundary",
-            30_000,
-        );
-        const normalizedApproval = normalizeWhitespace(approval.text);
-        expect(normalizedApproval).toContain(visibleExact(command));
-        expect(normalizedApproval).toContain('Working directory: "/home/rig"');
-        expect(normalizedApproval).toContain('Shell: "/bin/sh (login)"');
-        expect(normalizedApproval.toLowerCase()).toMatch(
-            /unrestricted (?:file system|filesystem) and network access/u,
-        );
-        expect(approval.text).toContain("Awaiting approval");
-        expect(approval.text).toContain("Waiting for approval");
-        expect(approval.text).not.toContain("opaque-escalation-call-7f3c1a");
-        expect(approval.text).not.toContain("exec_command");
-        expect(approval.text).not.toContain("sandbox_permissions");
-        expect(approval.text).not.toContain("require_escalated");
-        await expect(gym.readFile("disclosure-action-ran.txt")).rejects.toMatchObject({
-            code: "ENOENT",
-        });
-        assertTerminalHealth(approval, baseline);
-
-        gym.terminal.press("down");
-        gym.terminal.press("enter");
+        submit(gym, "Review every security-relevant detail before the proposed action.");
         const denied = await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("COMPLETE_BOUNDARY_ACTION_DENIED") &&
@@ -129,8 +107,17 @@ describe("escalated approval discloses the complete execution boundary", () => {
             "the safely denied action and recovered composer",
             30_000,
         );
-        expect(denied.text).toContain("Auto mode did not approve running");
+        const normalizedDenied = normalizeWhitespace(denied.text);
+        expect(normalizedDenied).toContain(
+            "Refused: This action requests unrestricted execution outside the workspace.",
+        );
+        expect(normalizedDenied).toContain("Risk: High. User authorization: Low.");
+        expect(denied.text).toContain("Automatic permission review refused running");
+        expect(denied.text).not.toContain("Allow once");
+        expect(denied.text).not.toContain("Waiting for approval");
         expect(denied.text).not.toContain("opaque-escalation-call-7f3c1a");
+        expect(denied.text).not.toContain("sandbox_permissions");
+        expect(denied.text).not.toContain("require_escalated");
         await expect(gym.readFile("disclosure-action-ran.txt")).rejects.toMatchObject({
             code: "ENOENT",
         });

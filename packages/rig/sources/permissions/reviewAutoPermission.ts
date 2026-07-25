@@ -9,7 +9,7 @@ import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
 
 /**
  * Wall-clock budget for one review, matching Codex. The reviewer may make as many tool calls as
- * it wants inside this window; when the window closes the action falls back to asking the user.
+ * it wants inside this window; when the window closes the action is denied as unproven.
  */
 export const AUTO_PERMISSION_REVIEW_TIMEOUT_MS = 90_000;
 

@@ -11,7 +11,7 @@ export function describeApplyPatchAutoPermissionAction(
     try {
         workdir = resolveFileSystemPath(workdir, context.fs.cwd, context.fs.home);
     } catch {
-        // Preserve the supplied value so a malformed path remains visible in the approval prompt.
+        // Preserve the supplied value so a malformed path remains visible in the reviewed action.
     }
 
     const paths = new Set<string>();

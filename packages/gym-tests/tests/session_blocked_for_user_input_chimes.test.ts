@@ -57,66 +57,6 @@ describe("session blocked for user input chimes", () => {
 
         expect(standaloneBellCount(rawOutput)).toBe(1);
     }, 120_000);
-
-    it("chimes when an Auto permission request waits for approval", async () => {
-        const gym = await createGym({
-            homeFiles: {
-                ".rig/config.toml": "[settings]\ncompletion_chime = true\n",
-            },
-            inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
-                    expect(callIndex).toBe(1);
-                    return {
-                        content: [
-                            {
-                                text: JSON.stringify({
-                                    decision: "ask",
-                                    reason: "This action writes outside the workspace.",
-                                    risk: "high",
-                                    user_authorization: "low",
-                                }),
-                                type: "text",
-                            },
-                        ],
-                    };
-                }
-
-                expect(callIndex).toBe(0);
-                return {
-                    content: [
-                        {
-                            arguments: {
-                                cmd: "printf 'blocked for approval\\n' > /home/rig/chime.txt",
-                                justification: "Write outside the workspace.",
-                                sandbox_permissions: "require_escalated",
-                            },
-                            id: "permission-chime",
-                            name: "exec_command",
-                            type: "toolCall",
-                        },
-                    ],
-                };
-            },
-            permissionMode: "auto",
-        });
-        running.add(gym);
-        let rawOutput = "";
-        gym.terminal.onOutput((data) => {
-            rawOutput += data;
-        });
-
-        submit(gym, "Ask before writing outside the workspace.");
-        await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("Allow once") &&
-                snapshot.text.includes("Deny") &&
-                snapshot.text.includes("Waiting for approval"),
-            "the permission request",
-            30_000,
-        );
-
-        expect(standaloneBellCount(rawOutput)).toBe(1);
-    }, 120_000);
 });
 
 function standaloneBellCount(output: string): number {

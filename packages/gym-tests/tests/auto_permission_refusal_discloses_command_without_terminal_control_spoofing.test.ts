@@ -9,8 +9,8 @@ afterEach(async () => {
     running.clear();
 });
 
-describe("permission prompt reveals commands without terminal-control spoofing", () => {
-    it("keeps the terminal identity and full command visible before enforcing denial", async () => {
+describe("Auto refusal discloses commands without terminal-control spoofing", () => {
+    it("keeps the terminal identity and full command visible while enforcing denial", async () => {
         const titleControl = "\x1b]0;CORRUPTED_PERMISSION_TITLE\x07";
         const safePadding = "x".repeat(150);
         const command = `printf 'must not run\\n' > spoofed-command.txt; # ${titleControl}${safePadding} VISIBLE_COMMAND_SUFFIX`;
@@ -19,7 +19,6 @@ describe("permission prompt reveals commands without terminal-control spoofing",
             .replaceAll("\x1b", "\\u{001b}")
             .replaceAll("\x07", "\\u{0007}");
         const gym = await createGym({
-            mode: "docker",
             cols: 96,
             inference(request, callIndex) {
                 const systemPrompt = request.context.systemPrompt ?? "";
@@ -31,10 +30,10 @@ describe("permission prompt reveals commands without terminal-control spoofing",
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "ask",
+                                    decision: "deny",
                                     risk: "high",
                                     user_authorization: "low",
-                                    reason: "The proposed command needs your explicit consent.",
+                                    reason: "The proposed command is not authorized.",
                                 }),
                                 type: "text",
                             },
@@ -66,6 +65,12 @@ describe("permission prompt reveals commands without terminal-control spoofing",
                         role: "toolResult",
                         toolName: "exec_command",
                     });
+                    const refusal = messageText(lastMessage);
+                    expect(withoutWhitespace(refusal)).toContain(withoutWhitespace(visibleCommand));
+                    expect(refusal).toContain("\\u{001b}]0;CORRUPTED_PERMISSION_TITLE\\u{0007}");
+                    expect(refusal).toContain('Working directory: "/workspace"');
+                    expect(refusal).toContain("Access: unrestricted filesystem and network access");
+                    expect(refusal).toContain("Reason: The proposed command is not authorized.");
                     return {
                         content: [{ text: "SPOOFED_COMMAND_DENIED", type: "text" }],
                     };
@@ -90,29 +95,7 @@ describe("permission prompt reveals commands without terminal-control spoofing",
         gym.terminal.press("enter");
         await gym.terminal.waitForText("Permissions changed to Auto.");
 
-        gym.terminal.type("Show me every detail and ask before doing anything.");
-        gym.terminal.press("enter");
-        const prompt = await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("Allow once") &&
-                snapshot.text.includes("Deny") &&
-                snapshot.scroll.atBottom,
-            "the sensitive command approval prompt",
-            30_000,
-        );
-        const normalizedPrompt = normalizeWhitespace(prompt.text);
-        expect(prompt.title).toContain("Rig");
-        expect(prompt.title).not.toContain("CORRUPTED_PERMISSION_TITLE");
-        expect(withoutWhitespace(prompt.text)).toContain(withoutWhitespace(visibleCommand));
-        expect(normalizedPrompt).toContain("VISIBLE_COMMAND_SUFFIX");
-        expect(normalizedPrompt).not.toContain("…");
-        expect(prompt.text).toContain("\\u{001b}]0;CORRUPTED_PERMISSION_TITLE\\u{0007}");
-        expect(prompt.text).not.toContain("spoofed-permission-command");
-        expect(prompt.text).not.toContain("\x1b");
-        await expect(gym.readFile("spoofed-command.txt")).rejects.toMatchObject({ code: "ENOENT" });
-        assertTerminalHealth(prompt, baseline);
-
-        gym.terminal.press("down");
+        gym.terminal.type("Review this command and refuse it if it is not authorized.");
         gym.terminal.press("enter");
         const denied = await gym.terminal.waitUntil(
             (snapshot) =>
@@ -122,7 +105,13 @@ describe("permission prompt reveals commands without terminal-control spoofing",
             "the denied command and recovered composer",
             30_000,
         );
-        expect(denied.text).toContain("Auto mode did not approve running");
+        const normalizedDenied = normalizeWhitespace(denied.text);
+        expect(normalizedDenied).toContain("Refused: The proposed command is not authorized.");
+        expect(normalizedDenied).toContain("Risk: High. User authorization: Low.");
+        expect(denied.text).not.toContain("Allow once");
+        expect(denied.text).not.toContain("Waiting for approval");
+        expect(denied.text).not.toContain("spoofed-permission-command");
+        expect(denied.text).not.toContain("\x1b");
         expect(denied.title).toContain("Rig");
         expect(denied.title).not.toContain("CORRUPTED_PERMISSION_TITLE");
         await expect(gym.readFile("spoofed-command.txt")).rejects.toMatchObject({ code: "ENOENT" });
@@ -144,6 +133,21 @@ function normalizeWhitespace(value: string): string {
 
 function withoutWhitespace(value: string): string {
     return value.replace(/\s+/gu, "");
+}
+
+function messageText(message: { content: unknown } | undefined): string {
+    if (typeof message?.content === "string") return message.content;
+    if (!Array.isArray(message?.content)) return "";
+    return message.content
+        .filter(
+            (block): block is { text: string } =>
+                typeof block === "object" &&
+                block !== null &&
+                "text" in block &&
+                typeof block.text === "string",
+        )
+        .map((block) => block.text)
+        .join("\n");
 }
 
 function assertTerminalHealth(
