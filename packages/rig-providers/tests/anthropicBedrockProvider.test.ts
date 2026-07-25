@@ -12,7 +12,7 @@ import {
     type AnthropicBedrockProviderOptions,
 } from "@/vendors/bedrock/AnthropicBedrockProvider.js";
 import { resolveAnthropicBedrockRetryDelay } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
-import { classifyAnthropicBedrockError } from "@/vendors/bedrock/impl/classifyAnthropicBedrockError.js";
+import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { createAnthropicBedrockRequest } from "@/vendors/bedrock/impl/createAnthropicBedrockRequest.js";
 import { mapAnthropicBedrockStream } from "@/vendors/bedrock/impl/mapAnthropicBedrockStream.js";
 import {
@@ -516,7 +516,6 @@ describe("AnthropicBedrockProvider", () => {
                 messages: [{ role: "user", content: "hello" }],
             },
             model: "us.anthropic.claude-opus-4-8",
-            skills: [],
             tools: [],
         });
 
@@ -531,7 +530,6 @@ describe("AnthropicBedrockProvider", () => {
             },
             effort: "off",
             model: "us.anthropic.claude-opus-4-8",
-            skills: [],
             tools: [],
         });
 
@@ -1131,12 +1129,10 @@ describe("AnthropicBedrockProvider", () => {
         const model = "anthropic/opus-4-8";
         const instructions =
             "This is a deterministic provider trace. Follow exact reply and tool instructions.";
-        const skill = {
-            name: "provider-golden",
-            description: "The exact provider skill marker is PROVIDER_SKILL_MARKER.",
-            source: "file" as const,
-            location: "/virtual/provider-golden/SKILL.md",
-        };
+        // The caller owns skill text, so the trace's skill catalog is written into the
+        // instructions exactly as the vendor renders it.
+        const skills =
+            '<skills>\n<skill name="provider-golden" source="file" location="/virtual/provider-golden/SKILL.md">The exact provider skill marker is PROVIDER_SKILL_MARKER.</skill>\n</skills>';
         const prompt =
             "Call the Read tool exactly once with file_path /virtual/provider-golden.txt. Do not reply with text before the tool call.";
         const provider = new AnthropicBedrockProvider({
@@ -1146,9 +1142,11 @@ describe("AnthropicBedrockProvider", () => {
             region: "us-east-1",
             transport: "runtime",
         });
-        const configuredInstructions = ["assembled Claude system prompt", instructions].join(
-            "\n\n",
-        );
+        const configuredInstructions = [
+            "assembled Claude system prompt",
+            instructions,
+            skills,
+        ].join("\n\n");
         const session = await provider.session("<SESSION_ID>", {
             context: { instructions: "", messages: [] },
             modelConfigurations: {
@@ -1157,7 +1155,6 @@ describe("AnthropicBedrockProvider", () => {
                     tools: claude_tools,
                 },
             },
-            skills: [skill],
             tools: claude_tools,
         });
 
@@ -1206,10 +1203,7 @@ describe("AnthropicBedrockProvider", () => {
             expect(captured.body.system).toEqual([
                 {
                     type: "text",
-                    text: [
-                        configuredInstructions,
-                        `<skills>\n<skill name="${skill.name}" source="${skill.source}" location="${skill.location}">${skill.description}</skill>\n</skills>`,
-                    ].join("\n\n"),
+                    text: configuredInstructions,
                     cache_control: { type: "ephemeral" },
                 },
             ]);

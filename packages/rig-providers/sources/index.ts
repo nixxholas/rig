@@ -58,11 +58,6 @@ export {
 } from "@/core/ProviderModelCompatibility.js";
 export type { SessionOptions } from "@/core/SessionOptions.js";
 export type {
-    SessionSkill,
-    SessionSkillsOptions,
-    SessionSkillSource,
-} from "@/core/SessionSkill.js";
-export type {
     SessionTool,
     SessionToolLarkGrammar,
     SessionToolType,

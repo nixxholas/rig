@@ -2,7 +2,6 @@ import type { MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/b
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { toAnthropicBedrockMessages } from "@/vendors/bedrock/impl/toAnthropicBedrockMessages.js";
 import { toAnthropicBedrockSystem } from "@/vendors/bedrock/impl/toAnthropicBedrockSystem.js";
@@ -17,7 +16,6 @@ export function createAnthropicBedrockRequest(options: {
     context: SessionContext;
     effort?: SessionReasoningEffort;
     model: string;
-    skills: readonly SessionSkill[];
     tools: readonly SessionTool[];
 }): AnthropicBedrockRequest {
     const effort = resolveEffort(options.effort);

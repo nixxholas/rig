@@ -1,3 +1,9 @@
+/**
+ * A native skill as a vendor describes it in its prompt.
+ *
+ * Callers compose their own skill text, so this type exists to reproduce each vendor's own
+ * catalog in tests rather than to accept skills through the session interface.
+ */
 export type SessionSkillSource =
     | "file"
     | "environment_resource"
@@ -9,8 +15,4 @@ export interface SessionSkill {
     readonly description: string;
     readonly source: SessionSkillSource;
     readonly location: string;
-}
-
-export interface SessionSkillsOptions {
-    readonly skills?: readonly SessionSkill[];
 }

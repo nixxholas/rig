@@ -6,7 +6,6 @@ import type { SessionContext, SessionToolCall } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
-import type { SessionSkill } from "@/core/SessionSkill.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import type { BedrockCredential } from "@/vendors/VendorCredential.js";
@@ -18,7 +17,7 @@ import {
     shouldRetryAnthropicBedrock,
     waitForAnthropicBedrockRetry,
 } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
-import { classifyAnthropicBedrockError } from "@/vendors/bedrock/impl/classifyAnthropicBedrockError.js";
+import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { createAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
 import type { AnthropicBedrockClient as CreatedAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
 import { createAnthropicBedrockRequest } from "@/vendors/bedrock/impl/createAnthropicBedrockRequest.js";
@@ -42,7 +41,6 @@ export interface AnthropicBedrockSessionOptions {
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
     region: string;
-    skills?: readonly SessionSkill[];
     tools?: readonly SessionTool[];
     transport: AnthropicBedrockTransport;
 }
@@ -52,7 +50,6 @@ export class AnthropicBedrockSession extends BaseSession {
     readonly endpoint: string | undefined;
     readonly model: string | undefined;
     readonly region: string;
-    readonly skills: readonly SessionSkill[] | undefined;
     readonly tools: readonly SessionTool[] | undefined;
     readonly transport: AnthropicBedrockTransport;
 
@@ -72,7 +69,6 @@ export class AnthropicBedrockSession extends BaseSession {
         this.model = options.model;
         this.activeModel = options.model;
         this.region = options.region;
-        this.skills = options.skills;
         this.tools = options.tools;
         this.transport = options.transport;
         this.modelConfigurations = options.modelConfigurations;
@@ -378,7 +374,6 @@ export class AnthropicBedrockSession extends BaseSession {
         tools?: readonly SessionTool[];
     }) {
         const modelConfiguration = this.modelConfigurations?.[options.model];
-        const skills = modelConfiguration?.skills ?? this.skills ?? [];
         const tools = this.resolveTools(options.model, options.tools);
         const context =
             modelConfiguration === undefined
@@ -395,7 +390,6 @@ export class AnthropicBedrockSession extends BaseSession {
         return createAnthropicBedrockRequest({
             context,
             model: resolveAnthropicBedrockModelId(options.model, this.region, this.transport),
-            skills,
             tools,
             ...(options.compactionInstructions === undefined
                 ? {}
