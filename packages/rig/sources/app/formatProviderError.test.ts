@@ -9,7 +9,19 @@ describe("formatProviderError", () => {
                 { resetAt: 121_000, type: "out_of_tokens" },
                 { fallbackMessage: "raw billing error", now: 1_000, providerId: "claude" },
             ),
-        ).toBe("Claude Code is out of tokens. Resets in 2m.");
+        ).toBe("Claude Code is out of tokens. Resets in 2m 0s.");
+        expect(
+            formatProviderError(
+                { resetAt: 121_000, type: "out_of_tokens" },
+                { fallbackMessage: "raw billing error", now: 2_500, providerId: "claude" },
+            ),
+        ).toBe("Claude Code is out of tokens. Resets in 1m 59s.");
+        expect(
+            formatProviderError(
+                { resetAt: 121_000, type: "out_of_tokens" },
+                { fallbackMessage: "raw billing error", now: 121_000, providerId: "claude" },
+            ),
+        ).toBe("Claude Code is out of tokens. Resets now.");
         expect(
             formatProviderError(
                 { type: "out_of_tokens" },
@@ -24,7 +36,19 @@ describe("formatProviderError", () => {
                 { resetAt: 61_000, type: "rate_limit" },
                 { fallbackMessage: "raw 429", now: 1_000, providerId: "kirill_claude" },
             ),
-        ).toBe("Kirill Claude is rate limited. Try again in 1m.");
+        ).toBe("Kirill Claude is rate limited. Try again in 1m 0s.");
+        expect(
+            formatProviderError(
+                { resetAt: 61_000, type: "rate_limit" },
+                { fallbackMessage: "raw 429", now: 30_500, providerId: "kirill_claude" },
+            ),
+        ).toBe("Kirill Claude is rate limited. Try again in 31s.");
+        expect(
+            formatProviderError(
+                { resetAt: 61_000, type: "rate_limit" },
+                { fallbackMessage: "raw 429", now: 61_500, providerId: "kirill_claude" },
+            ),
+        ).toBe("Kirill Claude is rate limited. Try again now.");
     });
 
     it("reports overloaded and internal provider failures with useful recovery details", () => {

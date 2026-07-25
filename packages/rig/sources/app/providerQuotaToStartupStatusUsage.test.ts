@@ -68,7 +68,7 @@ describe("providerQuotaToStartupStatusUsage", () => {
                 }),
                 1_000,
             ),
-        ).toEqual({ fiveHour: { capturedAt: 1_000, percentLeft: 0.2, resetsIn: "1m" } });
+        ).toEqual({ fiveHour: { capturedAt: 1_000, percentLeft: 0.2, resetsIn: "1s" } });
     });
 });
 

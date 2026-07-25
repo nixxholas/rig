@@ -24,10 +24,14 @@ export function formatProviderError(
         return `${provider} credentials have expired.${signIn === undefined ? " Sign in again." : ` Run ${signIn} to sign in again.`}`;
     }
     if (error?.type === "out_of_tokens") {
-        return `${provider} is out of tokens.${reset === undefined ? "" : ` Resets in ${reset}.`}`;
+        if (reset === undefined) return `${provider} is out of tokens.`;
+        if (reset === "now") return `${provider} is out of tokens. Resets now.`;
+        return `${provider} is out of tokens. Resets in ${reset}.`;
     }
     if (error?.type === "rate_limit") {
-        return `${provider} is rate limited.${reset === undefined ? "" : ` Try again in ${reset}.`}`;
+        if (reset === undefined) return `${provider} is rate limited.`;
+        if (reset === "now") return `${provider} is rate limited. Try again now.`;
+        return `${provider} is rate limited. Try again in ${reset}.`;
     }
     if (error?.type === "server_overloaded") {
         return `${provider} servers are overloaded. Try again later.`;

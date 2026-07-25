@@ -1,4 +1,4 @@
-import type { Usage } from "@slopus/rig-execution";
+import type { ProviderError, Usage } from "@slopus/rig-execution";
 
 import type {
     BackgroundTerminalInteractionPresentation,
@@ -32,6 +32,10 @@ export interface AppTranscriptEntry {
     mcpToolCall?: CodexMcpToolCall;
     noticeChildren?: readonly NoticeChild[];
     permissionReview?: string;
+    /** Structured provider failure used to keep reset countdowns live. */
+    providerError?: ProviderError;
+    providerErrorFallback?: string;
+    providerErrorProviderId?: string;
     role: AppTranscriptRole;
     text: string;
     detail?: string;

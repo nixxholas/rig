@@ -80,11 +80,13 @@ import { FileMentionAutocomplete } from "./FileMentionAutocomplete.js";
 import type { FileMentionContext } from "./findFileMentionContext.js";
 import { formatFileMention } from "./formatFileMention.js";
 import { formatProviderError } from "./formatProviderError.js";
+import { formatResetDuration } from "./formatResetDuration.js";
 import { formatSessionTokenStatus } from "./formatSessionTokenStatus.js";
 import { formatSessionUsageSummary } from "./formatSessionUsageSummary.js";
 import { formatSubagentToolCall } from "./formatSubagentToolCall.js";
 import { formatToolResultForDisplay } from "./formatToolResultForDisplay.js";
 import { formatTurnUsageSummary } from "./formatTurnUsageSummary.js";
+import { providerErrorResetAt } from "./providerErrorResetAt.js";
 import { humanizeReasoningLevel } from "./humanizeReasoningLevel.js";
 import { humanizePermissionMode } from "./humanizePermissionMode.js";
 import { humanizeProviderId } from "./humanizeProviderId.js";
@@ -385,6 +387,7 @@ export class CodingAssistantApp implements Component, Focusable {
     #activityAnimationFrame = 0;
     #activityStartedAtMs: number | undefined;
     #activityAnimationTimer: ReturnType<typeof setInterval> | undefined;
+    #providerErrorResetTimer: ReturnType<typeof setInterval> | undefined;
     #cursorVisible = true;
     #entries: AppTranscriptEntry[] = [];
     readonly #assistantStreamingRender = new AppendOnlyStreamingRender<AppTranscriptEntry>();
@@ -630,6 +633,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 this.#backgroundShellCommand(direct.commandId, process.sessionId, "");
             }
         }
+        this.#syncProviderErrorResetTimer();
         this.#syncSubagentRefreshTimer();
 
         void this.#refreshSkillCommands();
@@ -673,6 +677,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#abortController?.abort();
         this.#closeBackgroundTerminalViewer();
         this.#stopActivityAnimation();
+        this.#stopProviderErrorResetTimer();
         this.#stopSubagentRefreshTimer();
         this.#setSelectionPanel(undefined);
         this.#stopCursorBlink();
@@ -3418,16 +3423,25 @@ export class CodingAssistantApp implements Component, Focusable {
             }
             this.#deferredTurnSeparator = false;
             this.#statusText = "Error";
+            const providerId = this.#agent.provider.id;
             this.#appendEntry({
                 role: "error",
+                ...(event.error.providerError === undefined
+                    ? {}
+                    : { providerError: event.error.providerError }),
+                ...(event.error.errorMessage === undefined
+                    ? {}
+                    : { providerErrorFallback: event.error.errorMessage }),
+                providerErrorProviderId: providerId,
                 text: formatProviderError(event.error.providerError, {
                     ...(event.error.errorMessage === undefined
                         ? {}
                         : { fallbackMessage: event.error.errorMessage }),
                     now: this.#now(),
-                    providerId: this.#agent.provider.id,
+                    providerId,
                 }),
             });
+            this.#syncProviderErrorResetTimer();
         }
 
         this.#requestRender();
@@ -3804,6 +3818,15 @@ export class CodingAssistantApp implements Component, Focusable {
         if (entry.permissionReview !== undefined) {
             completeEntry.permissionReview = entry.permissionReview;
         }
+        if (entry.providerError !== undefined) {
+            completeEntry.providerError = entry.providerError;
+        }
+        if (entry.providerErrorFallback !== undefined) {
+            completeEntry.providerErrorFallback = entry.providerErrorFallback;
+        }
+        if (entry.providerErrorProviderId !== undefined) {
+            completeEntry.providerErrorProviderId = entry.providerErrorProviderId;
+        }
         if (entry.title !== undefined) {
             completeEntry.title = entry.title;
         }
@@ -3828,6 +3851,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#observedShellProcesses = [];
         this.#yieldedBackgroundTerminals.clear();
         this.#deferredTurnSeparator = false;
+        this.#syncProviderErrorResetTimer();
     }
 
     #discardPendingToolCallEntries(): void {
@@ -3970,7 +3994,25 @@ export class CodingAssistantApp implements Component, Focusable {
         if (entry.role === "thinking") {
             return `thinking:${String(this.#streamingThinkingEntryIds.has(entry.id))}`;
         }
-        if (entry.role !== "tool" && entry.role !== "error") return "";
+        if (entry.role === "error") {
+            const resetAt = providerErrorResetAt(entry.providerError);
+            if (resetAt === undefined) {
+                return [
+                    this.#activeToolCallIds.has(entry.id),
+                    this.#awaitingApprovalToolCallIds.has(entry.id),
+                    this.#stoppedToolCallIds.has(entry.id),
+                    this.#shouldRenderActivityAsLastMessage(),
+                ].join(":");
+            }
+            return [
+                this.#activeToolCallIds.has(entry.id),
+                this.#awaitingApprovalToolCallIds.has(entry.id),
+                this.#stoppedToolCallIds.has(entry.id),
+                this.#shouldRenderActivityAsLastMessage(),
+                formatResetDuration(resetAt - this.#now()),
+            ].join(":");
+        }
+        if (entry.role !== "tool") return "";
         return [
             this.#activeToolCallIds.has(entry.id),
             this.#awaitingApprovalToolCallIds.has(entry.id),
@@ -4028,7 +4070,7 @@ export class CodingAssistantApp implements Component, Focusable {
             return entry.detail === undefined
                 ? this.#renderNoticeEntry(
                       entry.title ?? "Error",
-                      entry.text,
+                      this.#providerErrorEntryText(entry),
                       width,
                       this.#theme.error,
                   )
@@ -6377,6 +6419,54 @@ export class CodingAssistantApp implements Component, Focusable {
         if (this.#subagentRefreshTimer === undefined) return;
         clearInterval(this.#subagentRefreshTimer);
         this.#subagentRefreshTimer = undefined;
+    }
+
+    #providerErrorEntryText(entry: AppTranscriptEntry): string {
+        if (entry.providerError === undefined && entry.providerErrorFallback === undefined) {
+            return entry.text;
+        }
+        return formatProviderError(entry.providerError, {
+            ...(entry.providerErrorFallback === undefined
+                ? {}
+                : { fallbackMessage: entry.providerErrorFallback }),
+            now: this.#now(),
+            providerId: entry.providerErrorProviderId ?? this.#agent.provider.id,
+        });
+    }
+
+    #hasLiveProviderErrorReset(): boolean {
+        const now = this.#now();
+        return this.#entries.some((entry) => {
+            const resetAt = providerErrorResetAt(entry.providerError);
+            return resetAt !== undefined && resetAt > now;
+        });
+    }
+
+    #syncProviderErrorResetTimer(): void {
+        if (this.#stopped || this.#exiting || !this.#hasLiveProviderErrorReset()) {
+            this.#stopProviderErrorResetTimer();
+            return;
+        }
+        if (this.#providerErrorResetTimer !== undefined) return;
+        // Paint first, then stop once the countdown has expired so "1s" becomes "now"
+        // instead of freezing on the last positive remaining duration.
+        this.#providerErrorResetTimer = setInterval(() => {
+            if (this.#stopped || this.#exiting) {
+                this.#stopProviderErrorResetTimer();
+                return;
+            }
+            this.#requestRender();
+            if (!this.#hasLiveProviderErrorReset()) {
+                this.#stopProviderErrorResetTimer();
+            }
+        }, 1_000);
+        this.#providerErrorResetTimer.unref?.();
+    }
+
+    #stopProviderErrorResetTimer(): void {
+        if (this.#providerErrorResetTimer === undefined) return;
+        clearInterval(this.#providerErrorResetTimer);
+        this.#providerErrorResetTimer = undefined;
     }
 
     #requestRender(force = false): void {

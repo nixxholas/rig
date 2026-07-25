@@ -5396,6 +5396,236 @@ describe("CodingAssistantApp", () => {
         expect(stripAnsi(app.render(100).join("\n"))).not.toContain("generated");
     });
 
+    it("keeps out-of-tokens reset countdowns live after the error is rendered", () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "claude",
+            models: [model],
+            stream: () => streamText("unused"),
+        });
+        const harness = createJustBashToolHarness();
+        let now = 1_000;
+        const app = new CodingAssistantApp({
+            agent: new Agent({
+                provider,
+                modelId: model.id,
+                context: harness.context,
+                printToConsole: false,
+            }),
+            cwd: harness.context.fs.cwd,
+            now: () => now,
+            processManager: new NativeProcessManager(),
+            sessionBacked: true,
+            tui: fakeTui(),
+        });
+
+        app.applySessionEvent({
+            createdAt: now,
+            data: {
+                event: {
+                    error: {
+                        api: "test",
+                        content: [],
+                        errorMessage: "Credit balance is too low",
+                        model: model.id,
+                        provider: provider.id,
+                        providerError: { resetAt: 181_000, type: "out_of_tokens" },
+                        role: "assistant",
+                        stopReason: "error",
+                        timestamp: now,
+                        usage: zeroUsage(),
+                    },
+                    reason: "error",
+                    type: "error",
+                },
+                runId: "run-1",
+            },
+            id: "event-out-of-tokens",
+            sessionId: "session-1",
+            type: "agent_event",
+        });
+
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Claude Code is out of tokens. Resets in 3m 0s.",
+        );
+
+        now = 2_500;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Claude Code is out of tokens. Resets in 2m 59s.",
+        );
+
+        now = 121_000;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Claude Code is out of tokens. Resets in 1m 0s.",
+        );
+        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("Resets in 3m 0s.");
+
+        now = 181_000;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Claude Code is out of tokens. Resets now.",
+        );
+        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("Resets in 1s.");
+    });
+
+    it("keeps rate-limit reset countdowns live after session resume", () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "kirill_claude",
+            models: [model],
+            stream: () => streamText("unused"),
+        });
+        const harness = createJustBashToolHarness();
+        let now = 1_000;
+        const app = new CodingAssistantApp({
+            agent: new Agent({
+                provider,
+                modelId: model.id,
+                context: harness.context,
+                printToConsole: false,
+            }),
+            cwd: harness.context.fs.cwd,
+            initialSessionEvents: [
+                {
+                    createdAt: now,
+                    data: {
+                        event: {
+                            error: {
+                                api: "test",
+                                content: [],
+                                errorMessage: "rate limited",
+                                model: model.id,
+                                provider: provider.id,
+                                providerError: { resetAt: 661_000, type: "rate_limit" },
+                                role: "assistant",
+                                stopReason: "error",
+                                timestamp: now,
+                                usage: zeroUsage(),
+                            },
+                            reason: "error",
+                            type: "error",
+                        },
+                        runId: "run-1",
+                    },
+                    id: "event-rate-limit",
+                    sessionId: "session-1",
+                    type: "agent_event",
+                },
+            ],
+            now: () => now,
+            processManager: new NativeProcessManager(),
+            sessionBacked: true,
+            tui: fakeTui(),
+        });
+
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Kirill Claude is rate limited. Try again in 11m 0s.",
+        );
+
+        now = 2_500;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Kirill Claude is rate limited. Try again in 10m 59s.",
+        );
+
+        now = 301_000;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Kirill Claude is rate limited. Try again in 6m 0s.",
+        );
+        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("Try again in 11m 0s.");
+
+        now = 661_000;
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Kirill Claude is rate limited. Try again now.",
+        );
+        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("Try again in 1s.");
+    });
+
+    it("repaints rate-limit countdowns once more after the reset expires", () => {
+        vi.useFakeTimers();
+        try {
+            const model = defineModel({
+                id: "openai/gpt-test",
+                name: "GPT Test",
+                thinkingLevels: ["off"],
+                defaultThinkingLevel: "off",
+            });
+            const provider = defineProvider({
+                id: "kirill_claude",
+                models: [model],
+                stream: () => streamText("unused"),
+            });
+            const harness = createJustBashToolHarness();
+            let now = 1_000;
+            const tui = fakeTui();
+            const app = new CodingAssistantApp({
+                agent: new Agent({
+                    provider,
+                    modelId: model.id,
+                    context: harness.context,
+                    printToConsole: false,
+                }),
+                cwd: harness.context.fs.cwd,
+                now: () => now,
+                processManager: new NativeProcessManager(),
+                sessionBacked: true,
+                tui,
+            });
+
+            app.applySessionEvent({
+                createdAt: now,
+                data: {
+                    event: {
+                        error: {
+                            api: "test",
+                            content: [],
+                            errorMessage: "rate limited",
+                            model: model.id,
+                            provider: provider.id,
+                            providerError: { resetAt: 1_500, type: "rate_limit" },
+                            role: "assistant",
+                            stopReason: "error",
+                            timestamp: now,
+                            usage: zeroUsage(),
+                        },
+                        reason: "error",
+                        type: "error",
+                    },
+                    runId: "run-1",
+                },
+                id: "event-rate-limit-expire",
+                sessionId: "session-1",
+                type: "agent_event",
+            });
+
+            expect(stripAnsi(app.render(100).join("\n"))).toContain(
+                "Kirill Claude is rate limited. Try again in 1s.",
+            );
+
+            vi.mocked(tui.requestRender).mockClear();
+            now = 1_500;
+            vi.advanceTimersByTime(1_000);
+            expect(tui.requestRender).toHaveBeenCalled();
+            expect(stripAnsi(app.render(100).join("\n"))).toContain(
+                "Kirill Claude is rate limited. Try again now.",
+            );
+
+            vi.mocked(tui.requestRender).mockClear();
+            vi.advanceTimersByTime(1_000);
+            expect(tui.requestRender).not.toHaveBeenCalled();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
     it("shows live compaction tokens and elapsed time until the paired finish event", () => {
         const model = defineModel({
             id: "openai/gpt-test",
