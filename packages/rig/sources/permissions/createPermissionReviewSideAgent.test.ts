@@ -26,6 +26,26 @@ describe("createPermissionReviewSideAgent", () => {
         await reviewer.close();
     });
 
+    it("starts over when a review is cut short, so it never stacks two unanswered questions", async () => {
+        const { provider, model, requests } = recordingProvider({ cutShortOnCall: 1 });
+        const reviewer = sideAgent(provider, model);
+
+        await reviewer
+            .review({ action: "first action", messages: [user("u1", "ALPHA")] })
+            .catch(() => undefined);
+
+        await reviewer.review({
+            action: "second action",
+            messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
+        });
+
+        const second = requests[1]?.messages ?? [];
+        expect(second.filter((message) => message.role === "user")).toHaveLength(1);
+        // Starting over means the reviewer has no history, so it needs the conversation again.
+        expect(JSON.stringify(second.at(-1)?.content)).toContain("ALPHA");
+        await reviewer.close();
+    });
+
     it("refuses to review while it is itself in Auto mode", () => {
         const { provider, model } = recordingProvider();
         const harness = createJustBashToolHarness();
@@ -76,7 +96,7 @@ function user(id: string, text: string): Message {
     return { role: "user", id, blocks: [{ type: "text", text }] };
 }
 
-function recordingProvider() {
+function recordingProvider(options: { cutShortOnCall?: number } = {}) {
     const model = defineModel({
         id: "openai/gpt-test",
         name: "GPT Test",
@@ -89,6 +109,7 @@ function recordingProvider() {
         models: [model],
         stream(_model, context) {
             requests.push(context);
+            const call = requests.length;
             const message = {
                 api: "test",
                 content: [
@@ -100,7 +121,9 @@ function recordingProvider() {
                 model: model.id,
                 provider: "codex",
                 role: "assistant" as const,
-                stopReason: "stop" as const,
+                stopReason: (call === options.cutShortOnCall ? "aborted" : "stop") as
+                    | "aborted"
+                    | "stop",
                 timestamp: 1,
                 usage: {
                     cacheRead: 0,
@@ -113,6 +136,14 @@ function recordingProvider() {
             };
             return {
                 async *[Symbol.asyncIterator]() {
+                    if (call === options.cutShortOnCall) {
+                        yield {
+                            error: message,
+                            reason: "aborted" as const,
+                            type: "error" as const,
+                        };
+                        return;
+                    }
                     yield { message, reason: "stop" as const, type: "done" as const };
                 },
                 async result() {

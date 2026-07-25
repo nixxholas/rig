@@ -50,6 +50,13 @@ export function createPermissionReviewSideAgent(options: {
         tools: options.tools,
     });
     let reviewedMessageCount = 0;
+    // A review that never finished leaves a question with no answer at the end of the reviewer's
+    // history, and the next review would stack its own question on top of that. Start the
+    // reviewer over instead, which also means the next review has to resend the conversation.
+    const discardUnfinishedReview = async (): Promise<void> => {
+        reviewedMessageCount = 0;
+        await agent.reset();
+    };
     return {
         async review(request: PermissionReviewRequest): Promise<PermissionReviewResponse> {
             const first = reviewedMessageCount === 0;
@@ -60,7 +67,6 @@ export function createPermissionReviewSideAgent(options: {
             const delta = first
                 ? whole
                 : createAutoPermissionTranscript(request.messages.slice(reviewedMessageCount));
-            reviewedMessageCount = request.messages.length;
             const conversation =
                 delta.text.length === 0
                     ? "No new conversation since your last review."
@@ -75,10 +81,21 @@ export function createPermissionReviewSideAgent(options: {
                 request.action,
                 "</proposed_action>",
             ].join("\n");
-            const result = await agent.send(
-                prompt,
-                request.signal === undefined ? {} : { signal: request.signal },
-            );
+            let result;
+            try {
+                result = await agent.send(
+                    prompt,
+                    request.signal === undefined ? {} : { signal: request.signal },
+                );
+            } catch (error) {
+                await discardUnfinishedReview();
+                throw error;
+            }
+            if (result.stopReason !== "stop") {
+                await discardUnfinishedReview();
+                return { text: "", userEvidenceOmitted: whole.userEvidenceOmitted };
+            }
+            reviewedMessageCount = request.messages.length;
             return {
                 text: finalText(result.messages),
                 userEvidenceOmitted: whole.userEvidenceOmitted,
