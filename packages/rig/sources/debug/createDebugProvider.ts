@@ -5,7 +5,7 @@ import type { DebugLog } from "./DebugLog.js";
 export interface CreateDebugProviderOptions {
     log: DebugLog;
     runId: string;
-    source: "agent" | "title";
+    source: "agent" | "reviewer" | "title";
 }
 
 export function createDebugProvider(

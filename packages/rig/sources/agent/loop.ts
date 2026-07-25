@@ -59,6 +59,9 @@ export interface RunAgentLoopOptions {
     systemPrompt?: string;
     debug?: DebugLog;
     provider: Provider;
+    /** Provider whose session is isolated from the coding agent and has no tools. */
+    permissionReviewerProvider?: Provider;
+    permissionReviewerSessionId?: string;
     modelId: string;
     effort?: string;
     serviceTier?: ServiceTier;
@@ -548,7 +551,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                               ...review,
                                           }),
                                       ),
-                            provider: options.provider,
+                            provider: options.permissionReviewerProvider ?? options.provider,
+                            ...(options.permissionReviewerSessionId === undefined
+                                ? {}
+                                : { sessionId: options.permissionReviewerSessionId }),
                             startDate,
                             ...(options.signal === undefined ? {} : { signal: options.signal }),
                         }),
@@ -1151,6 +1157,7 @@ async function prepareToolPermission(
             userAuthorization: "low" | "medium" | "high";
         }) => void | Promise<void>;
         provider: Provider;
+        sessionId?: string;
         signal?: AbortSignal;
         startDate: string;
     },
@@ -1184,6 +1191,7 @@ async function prepareToolPermission(
             model: options.model,
             now: options.now,
             provider: options.provider,
+            ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
             startDate: options.startDate,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             toolName: tool.name,

@@ -159,7 +159,17 @@ export function createCodingAssistantAgent(
             return executor;
         })();
     if (nativeProvider instanceof Executor) nativeProvider.selectProvider(providerId);
+    // Permission mode can change after runtime creation. Fork the lightweight executor now; its
+    // native provider session remains lazy until Auto actually needs a review.
+    const nativePermissionReviewer =
+        nativeProvider instanceof Executor
+            ? nativeProvider.fork({ sessionId: `${agentId}:auto-reviewer` })
+            : nativeProvider;
     const provider = routeProviderThroughGym(nativeProvider, env);
+    const permissionReviewerProvider =
+        nativePermissionReviewer === nativeProvider
+            ? provider
+            : routeProviderThroughGym(nativePermissionReviewer, env);
     const model = provider.models.find((candidate) => candidate.id === modelId);
     if (model === undefined) {
         throw new Error(`Unknown model '${modelId}' for provider '${provider.id}'`);
@@ -216,6 +226,7 @@ export function createCodingAssistantAgent(
             ? { appendSystemPrompt: options.appendSystemPrompt }
             : {}),
         provider,
+        permissionReviewerProvider,
         modelId,
         context,
         id: agentId,

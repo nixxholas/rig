@@ -27,6 +27,7 @@ export async function reviewAutoPermission(options: {
     model: Model;
     now: () => number;
     provider: Provider;
+    sessionId?: string;
     signal?: AbortSignal;
     startDate?: string;
     toolName: string;
@@ -54,6 +55,7 @@ export async function reviewAutoPermission(options: {
             },
             {
                 ...(options.signal === undefined ? {} : { signal: options.signal }),
+                ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
                 ...(options.startDate === undefined ? {} : { startDate: options.startDate }),
             },
         );

@@ -55,6 +55,8 @@ export interface AgentSnapshot {
 export interface AgentOptions {
     appendSystemPrompt?: string;
     provider: Provider;
+    /** Tool-free inference provider reserved for Auto permission review. */
+    permissionReviewerProvider?: Provider;
     modelId: string;
     context: AgentContext;
     id?: string;
@@ -105,6 +107,7 @@ export class Agent {
     readonly provider: Provider;
     readonly context: AgentContext;
 
+    readonly #permissionReviewerProvider: Provider;
     #appendSystemPrompt: string | undefined;
     #model: Model;
     #effort: string | undefined;
@@ -137,6 +140,7 @@ export class Agent {
         this.#idFactory = options.idFactory ?? createId;
         this.id = options.id ?? this.#idFactory();
         this.provider = options.provider;
+        this.#permissionReviewerProvider = options.permissionReviewerProvider ?? options.provider;
         this.#model = this.#findModel(options.modelId);
         this.context = options.context;
         this.#effort = options.effort ?? this.#model.defaultThinkingLevel;
@@ -269,7 +273,12 @@ export class Agent {
     }
 
     async close(): Promise<void> {
-        await this.provider.close?.();
+        await Promise.all([
+            this.provider.close?.(),
+            ...(this.#permissionReviewerProvider === this.provider
+                ? []
+                : [this.#permissionReviewerProvider.close?.()]),
+        ]);
     }
 
     addSteering(text: string): SystemMessage {
@@ -386,6 +395,16 @@ export class Agent {
                       runId,
                       source: "agent",
                   });
+        const permissionReviewerProvider =
+            this.#permissionReviewerProvider === this.provider
+                ? provider
+                : options.debug === undefined
+                  ? this.#permissionReviewerProvider
+                  : createDebugProvider(this.#permissionReviewerProvider, {
+                        log: options.debug,
+                        runId,
+                        source: "reviewer",
+                    });
 
         try {
             try {
@@ -420,6 +439,8 @@ export class Agent {
             let contextCompactedDuringRun = false;
             const loopOptions: Parameters<typeof runAgentLoop>[0] = {
                 provider,
+                permissionReviewerProvider,
+                permissionReviewerSessionId: `${this.id}:auto-reviewer`,
                 modelId: this.#model.id,
                 tools: this.#tools,
                 messages: this.#messages,

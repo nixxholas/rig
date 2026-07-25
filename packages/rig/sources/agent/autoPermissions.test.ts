@@ -141,6 +141,33 @@ describe("Auto permissions", () => {
         expect(harness.context.permissions.mode).toBe("auto");
     });
 
+    it("routes the permission decision through a provider isolated from the agent", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const observedModes: string[] = [];
+        const tool = permissionProbeTool(observedModes);
+        const main = autoReviewProvider("allow");
+        const reviewerCalls: string[] = [];
+        const reviewerClose = vi.fn();
+        const reviewer = reviewerOnlyProvider("allow", reviewerCalls, reviewerClose);
+        const agent = new Agent({
+            context: harness.context,
+            modelId: main.models[0]?.id ?? "",
+            permissionReviewerProvider: reviewer,
+            printToConsole: false,
+            provider: main,
+            tools: [tool],
+        });
+
+        const result = await agent.send("Run the deployment check.");
+
+        expect(result.stopReason).toBe("stop");
+        expect(observedModes).toEqual(["full_access"]);
+        expect(reviewerCalls).toEqual(["independent permission reviewer"]);
+        await agent.close();
+        expect(reviewerClose).toHaveBeenCalledOnce();
+    });
+
     it("does not elevate a prepared Auto review after the permission mode is reduced", async () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");
@@ -545,6 +572,42 @@ function autoReviewProvider(
                           stopReason: "stop",
                       }),
                   );
+        },
+    });
+}
+
+function reviewerOnlyProvider(decision: "allow" | "ask", calls: string[], close: () => void) {
+    const model = defineModel({
+        id: "openai/gpt-test",
+        name: "GPT Test",
+        thinkingLevels: ["off"],
+        defaultThinkingLevel: "off",
+    });
+    return defineProvider({
+        close,
+        id: "codex",
+        models: [model],
+        stream(_model, context) {
+            if (!context.systemPrompt?.includes("independent permission reviewer")) {
+                throw new Error("The reviewer provider received agent inference.");
+            }
+            calls.push("independent permission reviewer");
+            return streamFor(
+                assistantMessage({
+                    content: [
+                        {
+                            type: "text",
+                            text: JSON.stringify({
+                                decision,
+                                risk: "low",
+                                user_authorization: "high",
+                                reason: "This is a low-risk development check.",
+                            }),
+                        },
+                    ],
+                    stopReason: "stop",
+                }),
+            );
         },
     });
 }

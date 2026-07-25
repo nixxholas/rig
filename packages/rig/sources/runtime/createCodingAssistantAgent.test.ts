@@ -1,7 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { NativeProcessManager } from "../processes/index.js";
 import {
+    Executor,
     modelAnthropicFable5,
     modelAnthropicOpus5,
     modelOpenaiGpt56Luna,
@@ -48,6 +49,25 @@ describe("createCodingAssistantAgent", () => {
                 "gemini_analyze_media",
             ]),
         );
+    });
+
+    it("allocates a dedicated executor session for Auto permission review", async () => {
+        const fork = vi.spyOn(Executor.prototype, "fork");
+        try {
+            const runtime = createCodingAssistantAgent({
+                agentId: "agent-session",
+                cwd: "/tmp/rig-app-test",
+                env: {},
+            });
+
+            expect(fork).toHaveBeenCalledWith({
+                sessionId: "agent-session:auto-reviewer",
+            });
+
+            await runtime.agent.close();
+        } finally {
+            fork.mockRestore();
+        }
     });
 
     it("creates a Claude SDK agent for Anthropic models", () => {
