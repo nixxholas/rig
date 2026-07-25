@@ -119,9 +119,6 @@ Callers almost always need slightly different definitions, so these are for comp
 Skills in particular are not a provider concept: a skill is just tool definitions plus system
 prompt text, composed into `instructions` and `tools` like any other content.
 
-> Some vendor prompts, tools, and skills are still re-exported, and a `skills` session option still
-> exists. All of these are **pending removal**. Treat them as unsupported and do not add callers.
-
 ## Running inference
 
 `run` takes the complete rebuilt conversation for the turn and returns an async iterable of

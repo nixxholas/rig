@@ -129,14 +129,14 @@ the resulting value, including every newline, must equal the captured prompt.
 
 ## Skills
 
-Skills are supplied when the session is created through `SessionSkill[]`. The provider renders
-the catalog into Codex's skill-instruction format and inserts it into developer context. It does
-not discover skills itself and does not read their contents during inference.
+Skills are not a session concept. A caller that wants them composes the catalog into its own
+developer context like any other prompt content; the provider neither discovers skills nor reads
+them during inference.
 
-Each skill carries a name, description, source kind, and location. Descriptions are capped at
-1,024 characters in the rendered catalog, matching vanilla's bounded metadata presentation.
-The trailing skill instructions differ between 5.5 and the 5.6 Responses Lite family and are
-stored as literal prompt fragments.
+Codex's own rendering is kept in `impl/withCodexSkills.ts` and `impl/createCodexSkillsPrompt.ts`
+so reproduction tests can rebuild a captured request exactly. Descriptions are capped there at
+1,024 characters, matching vanilla's bounded metadata presentation, and the trailing skill
+instructions differ between 5.5 and the 5.6 Responses Lite family.
 
 ## Tools
 
@@ -431,7 +431,22 @@ response-item identity, mid-stream retry, captured-asset export, and dynamic use
 are covered by deterministic tests.
 
 The Bedrock/Mantle fixtures remain request-only evidence. A successful response capture is not
-available, so successful inference and local compaction are not claimed as live-verified.
+available, so successful inference and local compaction are not claimed as live-verified. This
+is the largest unverified surface in the vendor: whether Mantle accepts replayed encrypted
+reasoning items across turns decides every multi-turn Bedrock conversation, and nothing in the
+suite can currently catch it. A real multi-turn capture is the highest-value trace to collect.
+
+A July 24, 2026 review of that path found and fixed three defects, each now covered by a test:
+
+- a non-default `service_tier` reached Mantle, which serves GPT models on the implicit default
+  tier only, so vanilla clears the tier for Bedrock models entirely;
+- every Mantle rejection surfaced as `401 status code (no body)`, because AWS reports failures
+  as a top-level `message` while the OpenAI SDK reads only a nested `error`;
+- an expired AWS signature gave no indication that a credential had gone stale.
+
+The same review found no cache-prefix instability on the Bedrock path: the prompt cache key is
+the session id on every transport, the Bedrock request transform is pure, tool serialization is
+ordered and deterministic, and forced SSE replay means turns only append.
 
 Additional lower-risk observations:
 

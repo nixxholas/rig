@@ -55,8 +55,10 @@ are test assets, not runtime prompt sources.
 `impl/toClaudeSdkOptions.ts` assembles the supplied prompt in this order:
 
 1. session instructions assembled by the executor;
-2. system messages from the session context;
-3. Rig skill metadata.
+2. system messages from the session context.
+
+Skill metadata is ordinary caller-supplied prompt content and arrives through one of those two,
+so the provider composes nothing of its own.
 
 The SDK adds its own small SDK identity and billing blocks on the final Anthropic request.
 The Rig prompt remains a distinct complete system block; the provider golden fixture

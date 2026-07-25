@@ -75,8 +75,10 @@ user agent and client identification headers it sends, in the form it sends them
 
 Identification should nonetheless remain **overridable**. Rig is not trying to disguise itself, and
 a vendor may reasonably prefer that traffic from Rig be identifiable as Rig. Each provider should
-therefore accept a user-agent override, defaulting to the native value. Codex already does this via
-`CodexProviderOptions.userAgent`; the other vendors do not yet and should.
+therefore accept a `userAgent` provider option, defaulting to the native value. Every vendor
+supports this. How it reaches the wire differs: Codex and Grok set the header directly, Bedrock
+sets a default header on the SDK client, and Claude uses `ANTHROPIC_CUSTOM_HEADERS`, which Claude
+Code applies over its own defaults.
 
 Treat headers that carry protocol meaning — content type and encoding, session and turn identity,
 protocol version, feature flags such as the Responses Lite header — as part of the request that
@@ -220,15 +222,13 @@ representation of the result. Keep the whole network path — connecting, framin
 handling — together in that file, and export only the internal representation.
 
 Do not scatter this across the session's files. A session that absorbs its transport turns into a
-huge object very quickly, which is what has already happened here: `CodexSession.ts` is 897 lines.
-The session should drive a connection, not contain one.
+huge object very quickly. The session should drive a connection, not contain one.
 
 ### Prefer fewer, larger files
 
-This package **overrides** the repository's one-function-per-file convention. That convention has
-been applied here past the point of usefulness: `sources/vendors/codex/impl/` currently holds 61
-files, many of them three to sixteen lines. The result is harder to read than the thing it was
-meant to clarify.
+This package **overrides** the repository's one-function-per-file convention. That convention was
+applied here past the point of usefulness, leaving directories full of three- to sixteen-line
+files that were harder to read than the thing they were meant to clarify.
 
 Keep related network code together in one file rather than splitting every helper into its own.
 A file should hold a coherent piece of behavior with its small helpers alongside it. Split when a
@@ -236,12 +236,7 @@ file genuinely covers separate concerns, not because a function could technicall
 The reproduced surface — prompts, tools, skills, errors — is the exception: those stay granular,
 because each entry is a distinct piece of vendor behavior a reader may want to find on its own.
 
-Error parsers currently live in `impl/` and need to move to `errors/`. The affected files are
-`classifyCodexError`, `isCodexContextWindowError`, `isCodexUnauthorizedError`,
-`isCodexPreviousResponseNotFoundError`, `isCodexWebSocketUnavailableError`,
-`isRetryableCodexStreamError`, `readCodexErrorHeader`, `classifyClaudeError`,
-`claudeResultErrorMessage`, `classifyGrokError`, `isGrokAuthError`, `isGrokImageStripError`,
-`isRetryableGrokCompactionError`, and `classifyAnthropicBedrockError`.
+Error parsing belongs in `errors/`, one file per vendor, never among the request builders.
 
 ## Transports
 
