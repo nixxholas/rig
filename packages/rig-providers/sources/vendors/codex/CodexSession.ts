@@ -1,11 +1,6 @@
 import { randomUUID } from "node:crypto";
 
 import type OpenAI from "openai";
-import type {
-    ResponseOutputItem,
-    ResponseStreamEvent,
-} from "openai/resources/responses/responses.js";
-import { ResponsesWS } from "openai/resources/responses/ws";
 
 import { BaseSession } from "@/core/BaseSession.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
@@ -19,37 +14,28 @@ import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import { classifyCodexError, codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";
 import { collectCodexCompaction } from "@/vendors/codex/impl/collectCodexCompaction.js";
-import { createCodexBedrockRequest } from "@/vendors/codex/impl/createCodexBedrockRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import { createCodexClient } from "@/vendors/codex/impl/createCodexClient.js";
 import { createCodexClientMetadata } from "@/vendors/codex/impl/createCodexClientMetadata.js";
 import { createCodexCompactionRequest } from "@/vendors/codex/impl/createCodexCompactionRequest.js";
-import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
-import { createCodexCliWebSocketInferenceRequest } from "@/vendors/codex/impl/createCodexCliWebSocketInferenceRequest.js";
-import {
-    createCodexCliRequest,
-    createCodexCliWarmupRequest,
-} from "@/vendors/codex/impl/createCodexCliRequest.js";
+import { CodexSseConnection } from "@/vendors/codex/impl/CodexSseConnection.js";
+import { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
+import { CodexWebSocketConnection } from "@/vendors/codex/impl/CodexWebSocketConnection.js";
+import { createCodexCliRequest } from "@/vendors/codex/impl/createCodexCliRequest.js";
 import { createCodexModelSwitchMessage } from "@/vendors/codex/impl/createCodexModelSwitchMessage.js";
-import { createCodexRequestHeaders } from "@/vendors/codex/impl/createCodexRequestHeaders.js";
-import { createCodexWebSocketStream } from "@/vendors/codex/impl/createCodexWebSocketStream.js";
 import type { CodexCompactionMetadata } from "@/vendors/codex/impl/CodexCompactionMetadata.js";
 import { fitCodexCompactionRequest } from "@/vendors/codex/impl/fitCodexCompactionRequest.js";
 import { getCodexContextSuffix } from "@/vendors/codex/impl/getCodexContextSuffix.js";
-import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
 import { getCodexModelProperties } from "@/vendors/codex/impl/getCodexModelProperties.js";
 import { getCodexTurnKey } from "@/vendors/codex/impl/getCodexTurnKey.js";
 import { isCodexContextWindowError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
-import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
 import { preserveCodexCompactionMessages } from "@/vendors/codex/impl/preserveCodexCompactionMessages.js";
 import { preserveCodexLocalCompactionMessages } from "@/vendors/codex/impl/preserveCodexLocalCompactionMessages.js";
 import { recoverCodexUnauthorizedCredential } from "@/vendors/codex/impl/recoverCodexUnauthorizedCredential.js";
-import { readCodexTurnState } from "@/vendors/codex/impl/readCodexTurnState.js";
-import { readCodexTurnStateHeader } from "@/vendors/codex/impl/readCodexTurnStateHeader.js";
 import { resolveCodexReasoningEffort } from "@/vendors/codex/impl/resolveCodexReasoningEffort.js";
 import { resolveCodexSessionModelId } from "@/vendors/codex/impl/resolveCodexSessionModelId.js";
 import { resolveCodexStreamIdleTimeout } from "@/vendors/codex/impl/resolveCodexStreamIdleTimeout.js";
@@ -58,7 +44,6 @@ import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js
 import { stripCodexInitialMessages } from "@/vendors/codex/impl/stripCodexInitialMessages.js";
 import { waitForCodexCompactionRetry } from "@/vendors/codex/impl/waitForCodexCompactionRetry.js";
 import { waitForCodexRetry } from "@/vendors/codex/impl/waitForCodexRetry.js";
-import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/withCodexStreamIdleTimeout.js";
 import {
     context_checkpoint_compaction_instructions,
     context_checkpoint_summary_prefix,
@@ -102,17 +87,12 @@ export class CodexSession extends BaseSession {
     private forceSse = false;
     private readonly installationId: string;
     private readonly modelConfigurations = new Map<string, SessionModelConfiguration>();
-    private previousRequest: CodexResponseRequest | undefined;
-    private previousResponseId: string | undefined;
-    private previousResponseItems: readonly ResponseOutputItem[] = [];
-    private socket: ResponsesWS | undefined;
     private turnId = randomUUID();
     private turnKey: string | undefined;
-    private turnState: string | undefined;
+    private readonly turnState = new CodexTurnState();
     private windowId = randomUUID();
-    private websocketInferenceStarted = false;
-    private websocketNeedsFullRequest = false;
-    private websocketStarted = false;
+    private readonly sseConnection: CodexSseConnection;
+    private readonly websocketConnection: CodexWebSocketConnection;
 
     constructor(id: string, options: CodexSessionOptions) {
         super(id);
@@ -143,6 +123,20 @@ export class CodexSession extends BaseSession {
                 ? undefined
                 : this.modelConfigurations.get(options.model)) ?? baseConfiguration;
         this.context = cloneContext(this.activeConfiguration.context);
+
+        this.sseConnection = new CodexSseConnection({
+            bedrock: () => this.credential.name === "bedrock-bearer-token",
+            client: () => this.resolveClient(),
+            idleTimeoutMs: this.streamIdleTimeoutMs,
+            turnState: this.turnState,
+            windowId: () => this.windowId,
+        });
+        this.websocketConnection = new CodexWebSocketConnection({
+            client: () => this.resolveClient(),
+            headers: () => this.websocketHeaders(),
+            idleTimeoutMs: this.streamIdleTimeoutMs,
+            turnState: this.turnState,
+        });
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -173,7 +167,7 @@ export class CodexSession extends BaseSession {
     }
 
     destroy(): void {
-        this.closeSocket("session destroyed");
+        this.websocketConnection.close("session destroyed");
         this.client = undefined;
     }
 
@@ -217,8 +211,17 @@ export class CodexSession extends BaseSession {
         for (;;) {
             try {
                 const stream = useSse
-                    ? await this.sse(payload, configuration.tools ?? [], model, signal)
-                    : this.websocket(payload, configuration.tools ?? [], signal);
+                    ? await this.sseConnection.stream({
+                          model,
+                          request: payload,
+                          tools: configuration.tools ?? [],
+                          ...(signal === undefined ? {} : { signal }),
+                      })
+                    : this.websocketConnection.stream({
+                          request: payload,
+                          tools: configuration.tools ?? [],
+                          ...(signal === undefined ? {} : { signal }),
+                      });
                 const collected = await collectCodexCompaction(
                     stream,
                     signal === undefined ? {} : { signal },
@@ -234,7 +237,7 @@ export class CodexSession extends BaseSession {
                     messages: [...preservedMessages, compaction],
                 };
                 this.windowId = randomUUID();
-                this.clearWebsocketResponseChain();
+                this.websocketConnection.clearResponseChain();
                 return {
                     status: "completed",
                     compaction,
@@ -243,7 +246,7 @@ export class CodexSession extends BaseSession {
                     context: this.context,
                 };
             } catch (error) {
-                if (!useSse) this.resetWebsocketConnection("compaction did not complete");
+                if (!useSse) this.websocketConnection.reset("compaction did not complete");
                 if (signal?.aborted) return { status: "cancelled", context };
                 if (isCodexUnauthorizedError(error)) {
                     const recovered = await recoverCodexUnauthorizedCredential(
@@ -341,7 +344,12 @@ export class CodexSession extends BaseSession {
         const maxRetries = Math.min(this.streamMaxRetries, CODEX_COMPACTION_MAX_RETRIES);
         for (;;) {
             try {
-                const stream = await this.sse(payload, [], model, signal);
+                const stream = await this.sseConnection.stream({
+                    model,
+                    request: payload,
+                    tools: [],
+                    ...(signal === undefined ? {} : { signal }),
+                });
                 const mapped = mapOpenAIResponseStream(stream, {
                     failureMessage: `${model} failed to compact the conversation.`,
                     requireTerminalEvent: true,
@@ -375,7 +383,7 @@ export class CodexSession extends BaseSession {
                     ],
                 };
                 this.windowId = randomUUID();
-                this.clearWebsocketResponseChain();
+                this.websocketConnection.clearResponseChain();
                 return {
                     status: "completed",
                     summary,
@@ -467,8 +475,17 @@ export class CodexSession extends BaseSession {
             yield { type: "block_start" };
             try {
                 const responseStream = useSse
-                    ? await this.sse(payload, configuration.tools ?? [], model, request.abort)
-                    : this.websocket(payload, configuration.tools ?? [], request.abort);
+                    ? await this.sseConnection.stream({
+                          model,
+                          request: payload,
+                          tools: configuration.tools ?? [],
+                          ...(request.abort === undefined ? {} : { signal: request.abort }),
+                      })
+                    : this.websocketConnection.stream({
+                          request: payload,
+                          tools: configuration.tools ?? [],
+                          ...(request.abort === undefined ? {} : { signal: request.abort }),
+                      });
                 const mapped = mapOpenAIResponseStream(responseStream, {
                     failureMessage: `${model} failed to generate a response.`,
                     requireTerminalEvent: true,
@@ -492,13 +509,13 @@ export class CodexSession extends BaseSession {
                 }
 
                 if (request.abort?.aborted) {
-                    if (!useSse) this.resetWebsocketConnection("request aborted");
+                    if (!useSse) this.websocketConnection.reset("request aborted");
                     yield { type: "block_reset" };
                     yield { type: "done", state: "cancelled" };
                     return;
                 }
                 if (terminal?.state === "error") {
-                    if (!useSse) this.resetWebsocketConnection("response failed");
+                    if (!useSse) this.websocketConnection.reset("response failed");
                     yield { type: "block_reset" };
                     yield terminal;
                     return;
@@ -538,7 +555,7 @@ export class CodexSession extends BaseSession {
                 if (terminal !== undefined) yield terminal;
                 return;
             } catch (error) {
-                if (!useSse) this.resetWebsocketConnection("stream did not complete");
+                if (!useSse) this.websocketConnection.reset("stream did not complete");
                 yield { type: "block_reset" };
                 if (request.abort?.aborted) {
                     yield { type: "done", state: "cancelled" };
@@ -623,7 +640,7 @@ export class CodexSession extends BaseSession {
     private beginTurn(turnKey: string): void {
         this.turnId = randomUUID();
         this.turnKey = turnKey;
-        this.turnState = undefined;
+        this.turnState.clear();
     }
 
     private createRequest(
@@ -676,150 +693,7 @@ export class CodexSession extends BaseSession {
     private replaceCredential(credential: CodexProviderCredential): void {
         this.credential = credential;
         this.client = undefined;
-        this.closeSocket("credentials changed");
-        this.clearWebsocketResponseChain();
-        this.websocketInferenceStarted = false;
-        this.websocketStarted = false;
-        this.websocketNeedsFullRequest = false;
-    }
-
-    private resolveConfiguration(model: string): SessionModelConfiguration {
-        const explicit = this.modelConfigurations.get(model);
-        if (explicit !== undefined) return explicit;
-        if (this.activeModel === undefined) {
-            this.modelConfigurations.set(model, this.activeConfiguration);
-            return this.activeConfiguration;
-        }
-        if (codexModelsShareConfiguration(this.activeModel, model)) {
-            this.modelConfigurations.set(model, this.activeConfiguration);
-            return this.activeConfiguration;
-        }
-        throw new Error(
-            `Codex model '${model}' requires a model configuration supplied when the session is created.`,
-        );
-    }
-
-    private async sse(
-        request: CodexResponseRequest,
-        tools: readonly SessionTool[],
-        model: string,
-        signal?: AbortSignal,
-    ) {
-        const sseRequest = createCodexCliSseRequest(request, tools);
-        const clientMetadata = sseRequest.client_metadata;
-        const turnMetadata = clientMetadata?.["x-codex-turn-metadata"];
-        const { data: stream, response } = await this.resolveClient()
-            .responses.create(
-                this.credential.name === "bedrock-bearer-token"
-                    ? createCodexBedrockRequest(sseRequest)
-                    : sseRequest,
-                {
-                    headers: createCodexRequestHeaders(
-                        model,
-                        this.turnState,
-                        this.windowId,
-                        typeof turnMetadata === "string" ? turnMetadata : undefined,
-                        isCodexV2Model(model) && sseRequest.tools === undefined,
-                    ),
-                    ...(signal === undefined ? {} : { signal }),
-                },
-            )
-            .withResponse();
-        this.turnState ??= readCodexTurnStateHeader(response.headers);
-        return this.observeTurnStateStream(
-            withCodexStreamIdleTimeout({
-                stream,
-                timeoutMs: this.streamIdleTimeoutMs,
-                ...(signal === undefined ? {} : { signal }),
-            }),
-        );
-    }
-
-    private async *observeTurnStateStream(
-        stream: AsyncIterable<ResponseStreamEvent>,
-    ): AsyncGenerator<ResponseStreamEvent> {
-        for await (const event of stream) {
-            this.observeTurnState(event);
-            yield event;
-        }
-    }
-
-    private async *websocket(
-        request: CodexResponseRequest,
-        tools: readonly SessionTool[],
-        signal?: AbortSignal,
-    ): AsyncGenerator<ResponseStreamEvent> {
-        const client = this.resolveClient();
-        this.socket ??= new ResponsesWS(client, {
-            headers: this.websocketHeaders(),
-        });
-        if (!this.websocketStarted) {
-            for await (const event of withCodexStreamIdleTimeout({
-                stream: createCodexWebSocketStream({
-                    client,
-                    request: createCodexCliWarmupRequest(request, tools),
-                    socket: this.socket,
-                    ...(signal === undefined ? {} : { signal }),
-                    ...(this.turnState === undefined ? {} : { turnState: this.turnState }),
-                }),
-                timeoutMs: this.streamIdleTimeoutMs,
-                ...(signal === undefined ? {} : { signal }),
-                onTimeout: () => this.closeSocket("stream idle timeout"),
-            })) {
-                this.observeTurnState(event);
-                if (event.type === "response.completed")
-                    this.previousResponseId = event.response.id;
-            }
-            this.websocketStarted = true;
-        }
-        const fullRequest = request;
-        const incrementalInput =
-            this.previousRequest === undefined
-                ? undefined
-                : getCodexIncrementalInput(
-                      this.previousRequest,
-                      this.previousResponseItems,
-                      fullRequest,
-                  );
-        const canContinue =
-            !this.websocketNeedsFullRequest &&
-            (!this.websocketInferenceStarted || incrementalInput !== undefined);
-        // Codex builds a separate ResponseCreateWsRequest from its durable request. Keep the same
-        // ownership boundary even when a request-shaping helper has no transformations to apply.
-        const inferenceRequest = structuredClone(
-            canContinue
-                ? createCodexCliWebSocketInferenceRequest(request)
-                : createCodexCliSseRequest(request, tools),
-        );
-        if (incrementalInput !== undefined) inferenceRequest.input = incrementalInput;
-        if (canContinue && this.previousResponseId !== undefined) {
-            inferenceRequest.previous_response_id = this.previousResponseId;
-        }
-        // Match Codex's LastResponse::take() behavior: a response chain is single-use once an
-        // incremental request is constructed. Any retry must rebuild complete durable context.
-        this.clearWebsocketResponseChain();
-        this.websocketInferenceStarted = true;
-        this.websocketNeedsFullRequest = false;
-        for await (const event of withCodexStreamIdleTimeout({
-            stream: createCodexWebSocketStream({
-                client,
-                request: inferenceRequest,
-                socket: this.socket,
-                ...(signal === undefined ? {} : { signal }),
-                ...(this.turnState === undefined ? {} : { turnState: this.turnState }),
-            }),
-            timeoutMs: this.streamIdleTimeoutMs,
-            ...(signal === undefined ? {} : { signal }),
-            onTimeout: () => this.closeSocket("stream idle timeout"),
-        })) {
-            this.observeTurnState(event);
-            if (event.type === "response.completed") {
-                this.previousResponseId = event.response.id;
-                this.previousRequest = structuredClone(fullRequest);
-                this.previousResponseItems = structuredClone(event.response.output ?? []);
-            }
-            yield event;
-        }
+        this.websocketConnection.discard("credentials changed");
     }
 
     private websocketHeaders(): Record<string, string> {
@@ -847,27 +721,20 @@ export class CodexSession extends BaseSession {
         };
     }
 
-    private observeTurnState(event: ResponseStreamEvent): void {
-        this.turnState ??= readCodexTurnState(event);
-    }
-
-    private closeSocket(reason: string): void {
-        if (this.socket?.socket.readyState !== undefined && this.socket.socket.readyState < 2)
-            this.socket.close({ code: 1000, reason });
-        this.socket = undefined;
-    }
-
-    private clearWebsocketResponseChain(): void {
-        this.previousRequest = undefined;
-        this.previousResponseId = undefined;
-        this.previousResponseItems = [];
-    }
-
-    private resetWebsocketConnection(reason: string): void {
-        this.websocketNeedsFullRequest = this.websocketStarted;
-        this.closeSocket(reason);
-        this.clearWebsocketResponseChain();
-        this.websocketInferenceStarted = false;
+    private resolveConfiguration(model: string): SessionModelConfiguration {
+        const explicit = this.modelConfigurations.get(model);
+        if (explicit !== undefined) return explicit;
+        if (this.activeModel === undefined) {
+            this.modelConfigurations.set(model, this.activeConfiguration);
+            return this.activeConfiguration;
+        }
+        if (codexModelsShareConfiguration(this.activeModel, model)) {
+            this.modelConfigurations.set(model, this.activeConfiguration);
+            return this.activeConfiguration;
+        }
+        throw new Error(
+            `Codex model '${model}' requires a model configuration supplied when the session is created.`,
+        );
     }
 }
 

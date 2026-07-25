@@ -13,7 +13,7 @@ import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 class MantleOpenAI extends BedrockOpenAI {
     protected override makeStatusError(
         status: number,
-        body: Object,
+        body: object,
         message: string | undefined,
         headers: Headers,
     ): APIError {
