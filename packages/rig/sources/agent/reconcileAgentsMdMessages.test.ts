@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { AGENTS_MD_PROJECT_DOC_MAX_BYTES } from "./agentsMdProjectDocMaxBytes.js";
 import { AGENTS_MD_REMOVAL_NOTICE, AGENTS_MD_REPLACEMENT_NOTICE } from "./agentsMdNotices.js";
+import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
 import { createNodeFileSystemContext } from "./context/createNodeFileSystemContext.js";
 import { createSystemPrompt } from "./createSystemPrompt.js";
 import { findLatestAgentsMdRecord } from "./findLatestAgentsMdRecord.js";
@@ -87,6 +88,23 @@ describe("reconcileAgentsMdMessages", () => {
 
         expect(prompt).not.toContain("Always run the linter.");
         expect(prompt).not.toContain("# AGENTS.md instructions");
+    });
+
+    it("tells every provider how to read the delivered project instructions", async () => {
+        const workspace = await createWorkspace();
+        const fs = createFileSystem(workspace);
+
+        for (const type of ["claude", "codex", "grok"] as const) {
+            const prompt = await createSystemPrompt({
+                context: { fs } as never,
+                instructions: "You are rig.",
+                messages: [],
+                model: { id: "test-model" } as never,
+                provider: { id: type, type } as never,
+            });
+
+            expect(prompt).toContain(AGENTS_MD_SPEC);
+        }
     });
 
     it("marks the record as internal so it is never shown as user-authored content", async () => {

@@ -134,30 +134,6 @@ export const codex_agent_instructions =
     "instructions, or information already clear in a short paragraph or list. Compact " +
     "notation and small examples do not count as visualizations.\n" +
     "\n" +
-    "# AGENTS.md spec\n" +
-    "\n" +
-    "- Repos often contain AGENTS.md files. These files can appear anywhere within the " +
-    "repository.\n" +
-    "- These files are a way for humans to give you (the agent) instructions or tips for " +
-    "working within the container.\n" +
-    "- Some examples might be: coding conventions, info about how code is organized, or " +
-    "instructions for how to run or test code.\n" +
-    "- Instructions in AGENTS.md files:\n" +
-    "    - The scope of an AGENTS.md file is the entire directory tree rooted at the folder " +
-    "that contains it.\n" +
-    "    - For every file you touch in the final patch, you must obey instructions in any " +
-    "AGENTS.md file whose scope includes that file.\n" +
-    "    - Instructions about code style, structure, naming, etc. apply only to code within " +
-    "the AGENTS.md file's scope, unless the file states otherwise.\n" +
-    "    - More-deeply-nested AGENTS.md files take precedence in the case of conflicting " +
-    "instructions.\n" +
-    "    - Direct system/developer/user instructions (as part of a prompt) take precedence " +
-    "over AGENTS.md instructions.\n" +
-    "- The contents of the AGENTS.md file at the root of the repo and any directories from " +
-    "the CWD up to the root are included at the start of the conversation and don't need to " +
-    "be re-read. When working in a subdirectory of CWD, or a directory outside the CWD, " +
-    "check for any AGENTS.md files that may be applicable.\n" +
-    "\n" +
     "# Rules for getting work done\n" +
     "\n" +
     "- When you search for text or files, you reach first for `rg` or `rg --files`; they are " +

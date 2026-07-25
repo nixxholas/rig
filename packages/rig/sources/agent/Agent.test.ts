@@ -7,6 +7,7 @@ import { validPng32Base64 } from "../tools/testing/validImageFixtures.js";
 import { getImageProcessor } from "../images/getImageProcessor.js";
 import { selectToolsForModel } from "../runtime/selectToolsForModel.js";
 import { Agent } from "./Agent.js";
+import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
 import type { AgentLoopEvent } from "./loop.js";
 import { defineTool, type Message } from "./types.js";
 import {
@@ -347,10 +348,10 @@ describe("Agent", () => {
         await agent.run();
 
         expect(contexts[0]?.systemPrompt).toBe(
-            "Base instructions.\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.\n\nInitial API instructions.",
+            `Base instructions.\n\n${AGENTS_MD_SPEC}\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.\n\nInitial API instructions.`,
         );
         expect(contexts[1]?.systemPrompt).toBe(
-            "Base instructions.\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.\n\nUpdated API instructions.",
+            `Base instructions.\n\n${AGENTS_MD_SPEC}\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.\n\nUpdated API instructions.`,
         );
     });
 
@@ -427,7 +428,7 @@ describe("Agent", () => {
         // Steering is a positional notice, so it reaches the model in the conversation rather
         // than being folded into the prompt ahead of the turn it belongs to.
         expect(contexts[0]?.systemPrompt).toBe(
-            "Base instructions.\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.",
+            `Base instructions.\n\n${AGENTS_MD_SPEC}\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.`,
         );
         expect(contexts[0]?.messages[0]).toMatchObject({
             role: "system",

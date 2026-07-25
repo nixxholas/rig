@@ -1,3 +1,4 @@
+import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
 import type { AgentContext } from "./context/AgentContext.js";
 import { createAvailableModelsInstructions } from "./createAvailableModelsInstructions.js";
 import { createPermissionInstructions } from "./createPermissionInstructions.js";
@@ -36,6 +37,11 @@ export async function createSystemPrompt(
     // System messages are positional notices delivered in the conversation, so they are
     // deliberately absent here. Folding one into the prompt would move it away from the turn it
     // belongs to and rewrite the cached prefix on every notice.
+
+    // Every provider receives the project instructions the same way, so every provider is told
+    // how to read them. Stating it unconditionally keeps the cached prefix stable when a project
+    // gains or loses an AGENTS.md file mid-session.
+    parts.push(AGENTS_MD_SPEC);
 
     const skillInstructions = await loadSkillInstructions(
         options.context.fs,
