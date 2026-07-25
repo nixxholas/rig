@@ -6,6 +6,10 @@ import { promisify } from "node:util";
 import { build } from "esbuild";
 
 const execFileAsync = promisify(execFile);
+// `@mongodb-js/zstd` and `node-liblzma` are just-bash's optional xz and zstd codecs. They stay
+// external so esbuild leaves just-bash's dynamic imports alone, and they are deliberately not
+// installed: just-bash refuses both codecs unless a caller passes `allowNativeCodecs`, which Rig
+// never does, so shipping the native addons would only add install-time downloads.
 const externalPackages = [
     "@anthropic-ai/claude-agent-sdk",
     "@anthropic-ai/sandbox-runtime",
