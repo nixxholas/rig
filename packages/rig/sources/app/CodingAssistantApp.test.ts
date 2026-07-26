@@ -239,7 +239,7 @@ describe("CodingAssistantApp", () => {
         expect(app.render(80)).toEqual(baseline);
     });
 
-    it("replaces a drained session-backed queued row with one user history row before its echo", async () => {
+    it("keeps one user history row for a session-backed submission through its echo", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -278,9 +278,11 @@ describe("CodingAssistantApp", () => {
         });
 
         submit(app, "Keep the composer steady");
-        expect(stripAnsi(app.render(100).join("\n"))).toContain(
-            "↳ queued Keep the composer steady",
-        );
+        // Nothing was running, so the prompt takes its history row immediately rather than
+        // waiting as queued work while the run starts.
+        const submitted = stripAnsi(app.render(100).join("\n"));
+        expect(submitted).not.toContain("↳ queued Keep the composer steady");
+        expect(submitted.match(/› Keep the composer steady/gu)).toHaveLength(1);
 
         await vi.waitFor(() => expect(send).toHaveBeenCalledOnce());
         expect(send).toHaveBeenCalledWith(
@@ -1039,7 +1041,7 @@ describe("CodingAssistantApp", () => {
         expect(steer).not.toHaveBeenCalled();
     });
 
-    it("keeps an immediate post-Escape submit queued when the local run settles before the session event", async () => {
+    it("retains an immediate post-Escape submit when the local run settles before the session event", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -1109,9 +1111,10 @@ describe("CodingAssistantApp", () => {
         await new Promise<void>((resolve) => setImmediate(resolve));
 
         expect(send).toHaveBeenCalledOnce();
-        expect(stripAnsi(app.render(100).join("\n"))).toContain(
-            "↳ queued Retain this immediate follow-up",
-        );
+        // The follow-up owns its history row while it waits for the interrupted run to settle,
+        // so the text stays put instead of moving out of the queued list later.
+        const waiting = stripAnsi(app.render(100).join("\n"));
+        expect(waiting.match(/› Retain this immediate follow-up/gu)).toHaveLength(1);
 
         app.applySessionEvent({
             createdAt: 2,

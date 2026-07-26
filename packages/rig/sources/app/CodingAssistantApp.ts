@@ -1811,10 +1811,9 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#requestRender();
             return;
         }
-        if (!this.#sessionBacked) {
-            this.#appendEntry({ role: "user", text: prompt });
-            submission.transcriptAppended = true;
-        }
+        // Nothing is running, so this prompt starts its own turn. Claim its transcript row now
+        // instead of letting it render as queued work for however long startup happens to take.
+        this.#claimTranscriptRowForPrompt(submission);
         this.#pendingPrompts.push(submission);
         this.#startDrainQueue();
         this.#requestRender();
@@ -2832,17 +2831,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 return;
             }
             this.#pendingPrompts.shift();
-            if (prompt.transcriptAppended !== true) {
-                const entry = this.#appendEntry({ role: "user", text: prompt.displayText });
-                prompt.transcriptAppended = true;
-                prompt.transcriptEntryId = entry.id;
-                if (this.#sessionBacked) {
-                    this.#pendingSubmittedUserEntries.push(entry);
-                    if (this.#pendingSubmittedUserEntries.length > 100) {
-                        this.#pendingSubmittedUserEntries.shift();
-                    }
-                }
-            }
+            this.#claimTranscriptRowForPrompt(prompt);
             this.#activeTurnEntryStart = this.#entries.length;
 
             const result = await this.#agent.send(prompt.content, {
@@ -3235,6 +3224,35 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#requestRender();
     }
 
+    // A prompt owns its transcript row from the moment it is shown as submitted work. Claiming
+    // the row up front lets the queued list skip it, so the text is never drawn in both places
+    // and never moves between them.
+    #claimTranscriptRowForPrompt(prompt: PendingPrompt): void {
+        if (prompt.transcriptAppended === true) return;
+        const entry = this.#appendEntry({ role: "user", text: prompt.displayText });
+        prompt.transcriptAppended = true;
+        prompt.transcriptEntryId = entry.id;
+        if (!this.#sessionBacked) return;
+        this.#pendingSubmittedUserEntries.push(entry);
+        if (this.#pendingSubmittedUserEntries.length > 100) {
+            this.#pendingSubmittedUserEntries.shift();
+        }
+    }
+
+    // Escape pulls unstarted prompts back into the composer. A prompt that claimed a transcript
+    // row never ran, so its row is released with it rather than left behind as phantom history.
+    #releaseTranscriptRowForPrompt(prompt: PendingPrompt): void {
+        const entryId = prompt.transcriptEntryId;
+        if (prompt.transcriptAppended !== true || entryId === undefined) return;
+        const index = this.#entries.findIndex((entry) => entry.id === entryId);
+        if (index >= 0) this.#entries.splice(index, 1);
+        this.#pendingSubmittedUserEntries = this.#pendingSubmittedUserEntries.filter(
+            (entry) => entry.id !== entryId,
+        );
+        prompt.transcriptAppended = false;
+        delete prompt.transcriptEntryId;
+    }
+
     #restoreQueuedPromptsToComposer(): void {
         if (this.#pendingPrompts.length === 0) return;
         const draft = this.#editor.getText().trim();
@@ -3244,6 +3262,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 : undefined;
         const restored = this.#pendingPrompts.map((prompt) => prompt.displayText);
         if (draft.length > 0) restored.push(draft);
+        for (const prompt of this.#pendingPrompts) this.#releaseTranscriptRowForPrompt(prompt);
         this.#pendingPrompts = [];
         this.#shellMode = shellCommand !== undefined;
         this.#editor.setText(shellCommand ?? restored.join("\n"));
@@ -4499,8 +4518,9 @@ export class CodingAssistantApp implements Component, Focusable {
         if (this.#activeAgentLabel !== undefined) {
             parts.push(`${this.#theme.secondary}${this.#activeAgentLabel}${RESET}`);
         }
-        if (this.#pendingPrompts.length > 0) {
-            parts.push(`${this.#theme.secondary}queued ${this.#pendingPrompts.length}${RESET}`);
+        const queuedCount = this.#promptsShownAsQueued().length;
+        if (queuedCount > 0) {
+            parts.push(`${this.#theme.secondary}queued ${queuedCount}${RESET}`);
         }
         // Online is the quiet default, so the footer only speaks up when the user is elsewhere.
         const presence = this.#presenceState?.presence;
@@ -4664,8 +4684,14 @@ export class CodingAssistantApp implements Component, Focusable {
         return `${formatActivityElapsedTime(subagentElapsedMs(subagent, this.#now()))} · ${formatTokens(subagent.totalTokens ?? 0)} context tokens`;
     }
 
+    // A prompt that already owns a transcript row is shown there, so it is not also counted or
+    // drawn as queued work waiting its turn.
+    #promptsShownAsQueued(): PendingPrompt[] {
+        return this.#pendingPrompts.filter((prompt) => prompt.transcriptAppended !== true);
+    }
+
     #renderQueuedPrompts(width: number): string[] {
-        return this.#pendingPrompts.flatMap((prompt) => {
+        return this.#promptsShownAsQueued().flatMap((prompt) => {
             const prefix = `${DIM}↳ queued${RESET} `;
             const prefixWidth = visibleWidth(prefix);
             const wrapped = wrapTextWithAnsi(
