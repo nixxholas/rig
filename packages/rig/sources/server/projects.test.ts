@@ -417,6 +417,70 @@ describe("projects", () => {
         expect(repeated?.archivedAt).toBe(archived?.archivedAt);
         expect(repeated?.version).toBe(archived?.version);
     });
+    it("records presence and worktree capability for every project at startup", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "tracked");
+        const plain = join(fixture.root, "plain");
+        await mkdir(plain);
+
+        const repositoryProject = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const plainProject = fixture.store.create({ cwd: plain }).snapshot().projectId;
+
+        const tracked = await waitForProject(
+            fixture.store,
+            repositoryProject,
+            (project) => project.worktreeSupport !== "unknown",
+        );
+        expect(tracked).toMatchObject({ presence: "present", worktreeSupport: "supported" });
+        expect(tracked.git?.branch).toBe("main");
+
+        const unsupported = await waitForProject(
+            fixture.store,
+            plainProject,
+            (project) => project.worktreeSupport !== "unknown",
+        );
+        expect(unsupported).toMatchObject({
+            presence: "present",
+            worktreeSupport: "unsupported",
+            worktreeSupportReason: "This folder is not a Git repository.",
+        });
+    });
+
+    it("reports a project whose directory disappeared as missing after a restart", async () => {
+        const fixture = await createFixture();
+        const directory = join(fixture.root, "vanishing");
+        await mkdir(directory);
+        const projectId = fixture.store.create({ cwd: directory }).snapshot().projectId;
+        await waitForProject(fixture.store, projectId, (p) => p.worktreeSupport !== "unknown");
+        fixture.store.close();
+        await rm(directory, { force: true, recursive: true });
+
+        const restarted = await fixture.restart();
+
+        const project = await waitForProject(
+            restarted,
+            projectId,
+            (value) => value.presence === "missing",
+        );
+        expect(project.worktreeSupportReason).toBe("This folder no longer exists.");
+    });
+
+    it("persists the resolved base commit so a moving base ref cannot rewrite history", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "based");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const expected = await git(repository, ["rev-parse", "HEAD"]);
+
+        const workspace = await fixture.store.createWorkspace(projectId, {
+            baseRef: "main",
+            clientRequestId: "base-commit",
+            name: "Based",
+        });
+
+        expect(workspace?.baseRef).toBe("main");
+        expect(workspace?.baseCommit).toBe(expected.toLowerCase());
+    });
+
 });
 
 async function createFixture(
@@ -427,6 +491,7 @@ async function createFixture(
 ): Promise<{
     home: string;
     databasePath: string;
+    restart: () => Promise<PersistentSessionStore>;
     root: string;
     state: string;
     store: PersistentSessionStore;
@@ -436,23 +501,42 @@ async function createFixture(
     const state = join(root, "state");
     await Promise.all([mkdir(home), mkdir(state)]);
     const databasePath = join(state, "sessions.sqlite");
-    const store = new PersistentSessionStore({
-        databasePath,
-        ...(options.durableGlobalEventQueue === undefined
-            ? {}
-            : { durableGlobalEventQueue: options.durableGlobalEventQueue }),
-        homeDirectory: home,
-        ...(options.projectGit === undefined ? {} : { projectGit: options.projectGit }),
-        stateDirectory: state,
-    });
+    const open = () =>
+        new PersistentSessionStore({
+            databasePath,
+            ...(options.durableGlobalEventQueue === undefined
+                ? {}
+                : { durableGlobalEventQueue: options.durableGlobalEventQueue }),
+            homeDirectory: home,
+            ...(options.projectGit === undefined ? {} : { projectGit: options.projectGit }),
+            stateDirectory: state,
+        });
+    const stores = [open()];
     cleanups.push(async () => {
         try {
-            store.close();
+            for (const store of stores) store.close();
         } finally {
             await rm(root, { force: true, recursive: true });
         }
     });
-    return { databasePath, home, root, state, store };
+    const restart = async () => {
+        const next = open();
+        stores.push(next);
+        return next;
+    };
+    return { databasePath, home, restart, root, state, store: stores[0]! };
+}
+
+async function createRepository(root: string, name: string): Promise<string> {
+    const repository = join(root, name);
+    await mkdir(repository, { recursive: true });
+    await git(repository, ["init", "--initial-branch=main"]);
+    await git(repository, ["config", "user.email", "rig@example.test"]);
+    await git(repository, ["config", "user.name", "Rig Test"]);
+    await writeFile(join(repository, "README.md"), "fixture\n");
+    await git(repository, ["add", "README.md"]);
+    await git(repository, ["commit", "-m", "Initial"]);
+    return repository;
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {

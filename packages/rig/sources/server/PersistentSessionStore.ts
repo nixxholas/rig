@@ -729,6 +729,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#projects.listProjects();
     }
 
+
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
         return this.#projects.getWorkspace(projectId, workspaceId);
     }
@@ -2075,6 +2076,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             if (workspace.status !== "archiving") continue;
             await this.#archiveWorkspace(workspace.projectId, workspace.id);
         }
+        // Presence and Git facts are enrichment, so they run only after archival recovery, which is
+        // user-visible correctness.
+        await this.#projects.reconcileGitFacts();
     }
 
     #repairInterruptedTitleGenerations(): void {

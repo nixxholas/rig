@@ -9,7 +9,7 @@ import { folderProjectName, projectNameKey, projectStorageKey } from "./projectI
 import { initializePersistentGlobalEventQueueSchema } from "./PersistentGlobalEventQueue.js";
 import { generateKeyBetween, generateNKeysBetween } from "../utils/fractionalIndexing.js";
 
-const CURRENT_SCHEMA_VERSION = 9;
+const CURRENT_SCHEMA_VERSION = 10;
 
 const sessionColumnMigrations = [
     ["project_id", "TEXT"],
@@ -63,6 +63,17 @@ const queuedRunColumnMigrations = [
     ["debug_directory", "TEXT"],
     ["integration_config_json", "TEXT"],
 ] as const;
+
+const gitFactColumnMigrations = [
+    ["presence", "TEXT NOT NULL DEFAULT 'present'"],
+    ["git_branch", "TEXT"],
+    ["git_head", "TEXT"],
+    ["git_upstream", "TEXT"],
+    ["git_ahead", "INTEGER NOT NULL DEFAULT 0"],
+    ["git_behind", "INTEGER NOT NULL DEFAULT 0"],
+    ["git_detached", "INTEGER NOT NULL DEFAULT 0"],
+] as const;
+
 
 export function initializeSessionDatabase(database: DatabaseSync): void {
     database.exec(`
@@ -163,6 +174,15 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 initialization_status TEXT NOT NULL,
                 initialization_error TEXT,
                 initialization_attempt INTEGER NOT NULL DEFAULT 0,
+                presence TEXT NOT NULL DEFAULT 'present',
+                worktree_support TEXT NOT NULL DEFAULT 'unknown',
+                worktree_support_reason TEXT,
+                git_branch TEXT,
+                git_head TEXT,
+                git_upstream TEXT,
+                git_ahead INTEGER NOT NULL DEFAULT 0,
+                git_behind INTEGER NOT NULL DEFAULT 0,
+                git_detached INTEGER NOT NULL DEFAULT 0,
                 version INTEGER NOT NULL DEFAULT 1,
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL,
@@ -180,10 +200,17 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,
                 base_ref TEXT,
-                branch TEXT,
+                base_commit TEXT,
                 git_common_dir TEXT NOT NULL,
                 error TEXT,
                 client_request_id TEXT,
+                presence TEXT NOT NULL DEFAULT 'present',
+                git_branch TEXT,
+                git_head TEXT,
+                git_upstream TEXT,
+                git_ahead INTEGER NOT NULL DEFAULT 0,
+                git_behind INTEGER NOT NULL DEFAULT 0,
+                git_detached INTEGER NOT NULL DEFAULT 0,
                 version INTEGER NOT NULL DEFAULT 1,
                 created_at_ms INTEGER NOT NULL,
                 updated_at_ms INTEGER NOT NULL,
@@ -478,6 +505,19 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             backfillSessionOrderKeys(database);
         }
 
+        for (const [name, definition] of gitFactColumnMigrations) {
+            ensureColumn(database, "projects", name, definition);
+            ensureColumn(database, "project_workspaces", name, definition);
+        }
+        ensureColumn(database, "projects", "worktree_support", "TEXT NOT NULL DEFAULT 'unknown'");
+        ensureColumn(database, "projects", "worktree_support_reason", "TEXT");
+        ensureColumn(database, "project_workspaces", "base_commit", "TEXT");
+        // Managed worktrees are always created detached, so the superseded `branch` column was
+        // never populated. Git tracking reports the branch through `git_branch` instead.
+        if (hasColumn(database, "project_workspaces", "branch")) {
+            database.exec("ALTER TABLE project_workspaces DROP COLUMN branch");
+        }
+
         const queuedRunColumns = new Set(
             database
                 .prepare("PRAGMA table_info(queued_runs)")
@@ -559,8 +599,8 @@ function ensureProject(database: DatabaseSync, path: string, canonicalHome: stri
             INSERT INTO projects (
                 id, path, storage_key, kind, name, name_key, name_source,
                 order_key, initialization_status, initialization_error,
-                initialization_attempt, version, created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, 'folder', ?, ?, ?, 0, 1, ?, ?)
+                initialization_attempt, presence, version, created_at_ms, updated_at_ms
+            ) VALUES (?, ?, ?, ?, ?, ?, 'folder', ?, ?, ?, 0, ?, 1, ?, ?)
             `,
         )
         .run(
@@ -573,10 +613,18 @@ function ensureProject(database: DatabaseSync, path: string, canonicalHome: stri
             newFirstProjectOrderKey(database),
             available && kind === "regular" ? "initializing" : available ? "ready" : "failed",
             available ? null : "Project directory is unavailable.",
+            available ? "present" : "missing",
             now,
             now,
         );
     return id;
+}
+
+function hasColumn(database: DatabaseSync, table: string, name: string): boolean {
+    return database
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .some((column) => String(column.name) === name);
 }
 
 function ensureColumn(

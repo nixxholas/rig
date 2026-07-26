@@ -29,7 +29,7 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived"),
             ).toMatchObject({ dflt_value: "0", notnull: 1, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
         } finally {
             database.close();
         }
@@ -52,7 +52,7 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived_at_ms"),
             ).toMatchObject({ notnull: 0, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
         } finally {
             database.close();
         }
@@ -90,10 +90,10 @@ describe("initializeSessionDatabase", () => {
     it("refuses to open a database from a newer Rig schema", () => {
         const database = new DatabaseSync(":memory:");
         try {
-            database.exec("PRAGMA user_version = 10");
+            database.exec("PRAGMA user_version = 11");
 
             expect(() => initializeSessionDatabase(database)).toThrow(
-                "The session database uses schema version 10, but this Rig version supports up to 9.",
+                "The session database uses schema version 11, but this Rig version supports up to 10.",
             );
             expect(
                 database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),
@@ -304,4 +304,77 @@ describe("initializeSessionDatabase", () => {
             database.close();
         }
     });
+    it("adds Git tracking state to older project databases", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            // Rebuild the version 7 shape: no Git tracking columns, and the superseded `branch`
+            // column that managed worktrees never populated.
+            for (const [table, columns] of [
+                [
+                    "projects",
+                    [
+                        "presence",
+                        "worktree_support",
+                        "worktree_support_reason",
+                        "git_branch",
+                        "git_head",
+                        "git_upstream",
+                        "git_ahead",
+                        "git_behind",
+                        "git_detached",
+                    ],
+                ],
+                [
+                    "project_workspaces",
+                    [
+                        "base_commit",
+                        "presence",
+                        "git_branch",
+                        "git_head",
+                        "git_upstream",
+                        "git_ahead",
+                        "git_behind",
+                        "git_detached",
+                    ],
+                ],
+            ] as const) {
+                for (const column of columns) {
+                    database.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+                }
+            }
+            database.exec("ALTER TABLE project_workspaces ADD COLUMN branch TEXT");
+            database.exec("PRAGMA user_version = 9");
+
+            initializeSessionDatabase(database);
+
+            expect(columnInfo(database, "projects", "presence")).toMatchObject({
+                dflt_value: "'present'",
+                notnull: 1,
+                type: "TEXT",
+            });
+            expect(columnInfo(database, "projects", "worktree_support")).toMatchObject({
+                dflt_value: "'unknown'",
+                notnull: 1,
+            });
+            expect(columnInfo(database, "project_workspaces", "base_commit")).toBeDefined();
+            expect(columnInfo(database, "project_workspaces", "git_branch")).toBeDefined();
+            expect(columnInfo(database, "project_workspaces", "branch")).toBeUndefined();
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+        } finally {
+            database.close();
+        }
+    });
+
 });
+
+function columnInfo(
+    database: DatabaseSync,
+    table: string,
+    column: string,
+): Record<string, unknown> | undefined {
+    return database
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .find((row) => row.name === column);
+}

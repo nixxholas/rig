@@ -13,6 +13,7 @@ import sharp from "sharp";
 import {
     createEventIdFactory,
     type CreateProjectWorkspaceRequest,
+    type GitRepositoryFacts,
     type Project,
     type ProjectAvatar,
     type ProjectAvatarSource,
@@ -25,6 +26,7 @@ import { errorToMessage } from "../errorToMessage.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
+import { type GitRepositoryProbe, probeGitRepository } from "./probeGitRepository.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import {
     folderProjectName,
@@ -37,6 +39,7 @@ import {
 
 const execFile = promisify(execFileCallback);
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
+const GIT_PROBE_CONCURRENCY = 4;
 const MAX_AVATAR_BYTES = 8 * 1024 * 1024;
 const PROJECT_ERROR_LENGTH = 500;
 const IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
@@ -268,6 +271,104 @@ export class ProjectRepository {
                 this.#reconcileInitializingWorkspace(workspace),
             );
         }
+    }
+
+    /**
+     * Re-derives directory presence, worktree capability, and Git facts for every live project and
+     * workspace. Enrichment only: it publishes when something actually changed, never blocks
+     * startup, and stops as soon as the repository closes.
+     */
+    async reconcileGitFacts(): Promise<void> {
+        const targets: (
+            | { kind: "project"; value: Project }
+            | { kind: "workspace"; value: ProjectWorkspace }
+        )[] = [
+            ...this.listProjects()
+                // An archived project is hidden, so re-deriving its Git facts is wasted work.
+                .filter((project) => project.archivedAt === undefined)
+                .map((value) => ({ kind: "project" as const, value })),
+            ...this.listWorkspaces()
+                .filter((workspace) => workspace.status !== "archived")
+                .map((value) => ({ kind: "workspace" as const, value })),
+        ];
+        let next = 0;
+        const worker = async (): Promise<void> => {
+            for (;;) {
+                if (this.#closed) return;
+                const target = targets[next++];
+                if (target === undefined) return;
+                if (target.kind === "project") {
+                    await this.#reconcileProjectGitFacts(target.value);
+                } else {
+                    await this.#reconcileWorkspaceGitFacts(target.value);
+                }
+            }
+        };
+        await Promise.all(
+            Array.from({ length: Math.min(GIT_PROBE_CONCURRENCY, targets.length) }, worker),
+        );
+    }
+
+    async #reconcileProjectGitFacts(project: Project): Promise<void> {
+        const probe = await probeGitRepository({
+            git: (cwd, args) => this.#git(cwd, args),
+            isHome: project.kind === "home",
+            path: project.path,
+        });
+        if (this.#closed) return;
+        this.#transaction(() => {
+            const result = this.#database
+                .prepare(
+                    `
+                    UPDATE projects
+                    SET presence = ?, worktree_support = ?, worktree_support_reason = ?,
+                        git_branch = ?, git_head = ?, git_upstream = ?,
+                        git_ahead = ?, git_behind = ?, git_detached = ?,
+                        version = version + 1, updated_at_ms = ?
+                    WHERE id = ? AND archived_at_ms IS NULL AND (
+                        presence IS NOT ? OR worktree_support IS NOT ?
+                        OR worktree_support_reason IS NOT ? OR git_branch IS NOT ?
+                        OR git_head IS NOT ? OR git_upstream IS NOT ?
+                        OR git_ahead IS NOT ? OR git_behind IS NOT ? OR git_detached IS NOT ?
+                    )
+                    `,
+                )
+                .run(...gitFactBindings(probe), this.#now(), project.id, ...gitFactBindings(probe));
+            if (result.changes > 0) this.#publishedProject(project.id);
+        });
+    }
+
+    async #reconcileWorkspaceGitFacts(workspace: ProjectWorkspace): Promise<void> {
+        const probe = await probeGitRepository({
+            git: (cwd, args) => this.#git(cwd, args),
+            path: workspace.path,
+        });
+        if (this.#closed) return;
+        this.#transaction(() => {
+            const result = this.#database
+                .prepare(
+                    `
+                    UPDATE project_workspaces
+                    SET presence = ?, git_branch = ?, git_head = ?, git_upstream = ?,
+                        git_ahead = ?, git_behind = ?, git_detached = ?,
+                        version = version + 1, updated_at_ms = ?
+                    WHERE id = ? AND (
+                        presence IS NOT ? OR git_branch IS NOT ? OR git_head IS NOT ?
+                        OR git_upstream IS NOT ? OR git_ahead IS NOT ?
+                        OR git_behind IS NOT ? OR git_detached IS NOT ?
+                    )
+                    `,
+                )
+                .run(
+                    ...workspaceGitFactBindings(probe),
+                    this.#now(),
+                    workspace.id,
+                    ...workspaceGitFactBindings(probe),
+                );
+            if (result.changes > 0) {
+                this.#publishedWorkspace(workspace.projectId, workspace.id);
+            }
+        });
     }
 
     renameProject(projectId: string, requestedName: string): Project | undefined {
@@ -590,9 +691,9 @@ export class ProjectRepository {
                     `
                     INSERT INTO project_workspaces (
                         id, project_id, path, storage_key, name, name_key, order_key, kind, status,
-                        base_ref, git_common_dir, client_request_id, version,
+                        base_ref, base_commit, git_common_dir, client_request_id, version,
                         created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'git_worktree', 'initializing', ?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'git_worktree', 'initializing', ?, ?, ?, ?, 1, ?, ?)
                     `,
                 )
                 .run(
@@ -604,6 +705,9 @@ export class ProjectRepository {
                     projectNameKey(visibleName),
                     this.#newFirstWorkspaceOrderKey(projectId),
                     baseRef,
+                    // The ref text can move or disappear later, so the immutable OID it resolved to
+                    // is what anchors this workspace's comparison base.
+                    commit.toLocaleLowerCase(),
                     gitCommonDir,
                     clientRequestId,
                     now,
@@ -874,6 +978,11 @@ export class ProjectRepository {
             return;
         }
         try {
+            // A new project learns its presence and worktree capability here rather than waiting
+            // for the next daemon start, because the desktop offers "Create worktree" immediately.
+            await this.#reconcileProjectGitFacts(project);
+            if (this.#closed) return;
+
             let remote: string | undefined;
             let repositoryTopLevel = false;
             try {
@@ -1681,13 +1790,41 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string> {
     return result.stdout.trim();
 }
 
+/**
+ * Column bindings for a project probe, in the order used by both the SET clause and the
+ * change-detection WHERE clause so an unchanged probe updates no row and publishes no event.
+ */
+function gitFactBindings(probe: GitRepositoryProbe): (string | number | null)[] {
+    return [
+        probe.presence,
+        probe.worktreeSupport,
+        probe.worktreeSupportReason ?? null,
+        ...workspaceGitFactBindings(probe).slice(1),
+    ];
+}
+
+function workspaceGitFactBindings(probe: GitRepositoryProbe): (string | number | null)[] {
+    return [
+        probe.presence,
+        probe.facts?.branch ?? null,
+        probe.facts?.head ?? null,
+        probe.facts?.upstream ?? null,
+        probe.facts?.ahead ?? 0,
+        probe.facts?.behind ?? 0,
+        probe.facts?.detached === true ? 1 : 0,
+    ];
+}
+
 function readProject(row: Record<string, unknown>): Project {
     const archivedAt = readOptionalNumber(row, "archived_at_ms");
     const avatarHash = readOptionalString(row, "avatar_hash");
     const initializationError = readOptionalString(row, "initialization_error");
+    const worktreeSupportReason = readOptionalString(row, "worktree_support_reason");
+    const git = readGitFacts(row);
     const project: Project = {
         ...(archivedAt === undefined ? {} : { archivedAt }),
         createdAt: readNumber(row, "created_at_ms"),
+        ...(git === undefined ? {} : { git }),
         id: readString(row, "id"),
         initializationAttempt: readNumber(row, "initialization_attempt"),
         initializationStatus: readString(
@@ -1699,32 +1836,58 @@ function readProject(row: Record<string, unknown>): Project {
         nameSource: readString(row, "name_source") as Project["nameSource"],
         orderKey: readString(row, "order_key"),
         path: readString(row, "path"),
+        presence: readString(row, "presence") as Project["presence"],
         storageKey: readString(row, "storage_key"),
         updatedAt: readNumber(row, "updated_at_ms"),
         version: readNumber(row, "version"),
+        worktreeSupport: readString(row, "worktree_support") as Project["worktreeSupport"],
+        ...(worktreeSupportReason === undefined ? {} : { worktreeSupportReason }),
     };
     if (project.kind === "home" && avatarHash === undefined) project.avatarBuiltin = "home";
     if (initializationError !== undefined) project.initializationError = initializationError;
     return project;
 }
 
+/**
+ * Git facts are absent until a probe has observed the repository. A row that has never resolved a
+ * HEAD and is not on a branch reports no facts at all rather than a misleading detached zero state.
+ */
+function readGitFacts(row: Record<string, unknown>): GitRepositoryFacts | undefined {
+    const branch = readOptionalString(row, "git_branch");
+    const head = readOptionalString(row, "git_head");
+    const upstream = readOptionalString(row, "git_upstream");
+    const detached = readNumber(row, "git_detached") !== 0;
+    if (branch === undefined && head === undefined && !detached) return undefined;
+    return {
+        ahead: readNumber(row, "git_ahead"),
+        behind: readNumber(row, "git_behind"),
+        ...(branch === undefined ? {} : { branch }),
+        detached,
+        ...(head === undefined ? {} : { head }),
+        ...(upstream === undefined ? {} : { upstream }),
+    };
+}
+
 function readWorkspace(row: Record<string, unknown>): ProjectWorkspace {
     const archivedAt = readOptionalNumber(row, "archived_at_ms");
+    const baseCommit = readOptionalString(row, "base_commit");
     const baseRef = readOptionalString(row, "base_ref");
-    const branch = readOptionalString(row, "branch");
     const error = readOptionalString(row, "error");
+    const git = readGitFacts(row);
     return {
         ...(archivedAt === undefined ? {} : { archivedAt }),
+        ...(baseCommit === undefined ? {} : { baseCommit }),
         ...(baseRef === undefined ? {} : { baseRef }),
-        ...(branch === undefined ? {} : { branch }),
         createdAt: readNumber(row, "created_at_ms"),
         ...(error === undefined ? {} : { error }),
+        ...(git === undefined ? {} : { git }),
         gitCommonDir: readString(row, "git_common_dir"),
         id: readString(row, "id"),
         kind: readString(row, "kind") as ProjectWorkspace["kind"],
         name: readString(row, "name"),
         orderKey: readString(row, "order_key"),
         path: readString(row, "path"),
+        presence: readString(row, "presence") as ProjectWorkspace["presence"],
         projectId: readString(row, "project_id"),
         status: readString(row, "status") as ProjectWorkspace["status"],
         storageKey: readString(row, "storage_key"),
