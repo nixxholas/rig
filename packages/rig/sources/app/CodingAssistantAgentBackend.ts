@@ -40,6 +40,8 @@ export interface CodingAssistantAgentBackend {
     readonly model: Model;
     readonly modelChoices?: readonly CodingAssistantModelChoice[];
     readonly permissionMode: PermissionMode;
+    /** Unsent composer text shared with the other clients on this session. */
+    readonly draft?: string;
     readonly goal?: SessionGoal | undefined;
     readonly projectSecretIds?: readonly string[];
     readonly secretIds?: readonly string[];
@@ -82,6 +84,7 @@ export interface CodingAssistantAgentBackend {
     ): void | Promise<void>;
     setServiceTier(serviceTier: ServiceTier | undefined): void | Promise<void>;
     setPermissionMode(mode: PermissionMode): void | Promise<void>;
+    setDraft?(draft: string, options?: { origin?: string }): Promise<void>;
     setGoal?(objective: string): Promise<void>;
     snapshot(): AgentSnapshot;
 }

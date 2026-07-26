@@ -551,6 +551,64 @@ describe("InMemorySession", () => {
         });
     });
 
+    it("broadcasts a composer draft to attached clients and clears it", () => {
+        const store = new InMemorySessionStore();
+        const session = store.create({ cwd: "/tmp/rig-session-test" });
+        const delivered: unknown[] = [];
+        session.events.subscribe((event) => {
+            if (event.type === "session_draft_changed") delivered.push(event.data);
+        });
+
+        expect(session.snapshot().draft).toBeUndefined();
+
+        session.setDraft({ draft: "Fix the flaky test", origin: "terminal-a" });
+        expect(session.snapshot().draft).toBe("Fix the flaky test");
+        expect(session.summary().draft).toBe("Fix the flaky test");
+        expect(delivered).toEqual([{ draft: "Fix the flaky test", origin: "terminal-a" }]);
+
+        // Rewriting the same draft is not a change worth broadcasting.
+        session.setDraft({ draft: "Fix the flaky test" });
+        expect(delivered).toHaveLength(1);
+
+        session.setDraft({ draft: null });
+        expect(session.snapshot().draft).toBeUndefined();
+        expect(delivered).toEqual([{ draft: "Fix the flaky test", origin: "terminal-a" }, {}]);
+    });
+
+    it("keeps drafts out of the durable event log", () => {
+        const store = new InMemorySessionStore();
+        const session = store.create({ cwd: "/tmp/rig-session-test" });
+
+        session.setDraft({ draft: "Typed but never sent" });
+
+        // The latest draft lives on the session itself, so a reconnecting client
+        // reads it from the snapshot instead of replaying every keystroke burst.
+        expect(
+            session.events
+                .since(undefined)
+                ?.some((event) => event.type === "session_draft_changed"),
+        ).toBe(false);
+    });
+
+    it("treats an empty draft as no draft", () => {
+        const store = new InMemorySessionStore();
+        const session = store.create({ cwd: "/tmp/rig-session-test" });
+
+        session.setDraft({ draft: "" });
+
+        expect(session.snapshot().draft).toBeUndefined();
+    });
+
+    it("refuses a draft that is too long to sync", () => {
+        const store = new InMemorySessionStore();
+        const session = store.create({ cwd: "/tmp/rig-session-test" });
+
+        expect(() => session.setDraft({ draft: "x".repeat(100_001) })).toThrow(
+            "The draft is too long to sync.",
+        );
+        expect(session.snapshot().draft).toBeUndefined();
+    });
+
     it("holds a structured question until the user answers it", async () => {
         const store = new InMemorySessionStore();
         const session = store.create({ cwd: "/tmp/rig-session-test" });

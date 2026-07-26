@@ -158,6 +158,7 @@ export interface ProtocolSession {
     unread?: SessionUnreadState;
     appendSystemPrompt?: string;
     cwd: string;
+    draft?: string;
     providerId: string;
     permissionMode: PermissionMode;
     modelId: string;
@@ -226,6 +227,7 @@ export interface SessionSummary {
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     cwd: string;
+    draft?: string;
     providerId: string;
     modelId: string;
     orderKey: string;
@@ -272,6 +274,19 @@ export interface UpdateSessionRequest {
 
 export interface ChangePermissionModeRequest {
     permissionMode: PermissionMode;
+}
+
+/**
+ * Longest composer draft the daemon stores and mirrors. Drafts are held in one
+ * session row and broadcast on every change, so they need an explicit bound.
+ */
+export const SESSION_DRAFT_MAX_LENGTH = 100_000;
+
+export interface SetSessionDraftRequest {
+    /** Draft text, or `null` to clear the draft. */
+    draft: string | null;
+    /** Identifies the writing client so it can ignore its own echo. */
+    origin?: string;
 }
 
 export interface AttachSecretRequest {
@@ -566,6 +581,7 @@ export type SessionEvent =
     | EffortChangedEvent
     | ServiceTierChangedEvent
     | PermissionModeChangedEvent
+    | SessionDraftChangedEvent
     | SecretsChangedEvent
     | UserInputRequestedEvent
     | UserInputResolvedEvent
@@ -751,6 +767,15 @@ export type ServiceTierChangedEvent = BaseSessionEvent<
 export type PermissionModeChangedEvent = BaseSessionEvent<
     "permission_mode_changed",
     { permissionMode: PermissionMode }
+>;
+
+/**
+ * A composer draft change. The `origin` identifies the client that wrote the
+ * draft so that client can ignore the echo of its own keystrokes.
+ */
+export type SessionDraftChangedEvent = BaseSessionEvent<
+    "session_draft_changed",
+    { draft?: string; origin?: string }
 >;
 
 export type SecretsChangedEvent = BaseSessionEvent<

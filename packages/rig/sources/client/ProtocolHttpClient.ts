@@ -66,6 +66,7 @@ import type {
     ShutdownServerResponse,
     StartInspectorResponse,
     SetGoalRequest,
+    SetSessionDraftRequest,
     SteerMessageRequest,
     SteerMessageResponse,
     StopWorkflowResponse,
@@ -231,6 +232,17 @@ export class ProtocolHttpClient {
         return this.#requestJson(
             "PATCH",
             `/sessions/${encodeURIComponent(sessionId)}/permissions`,
+            request,
+        );
+    }
+
+    setSessionDraft(
+        sessionId: string,
+        request: SetSessionDraftRequest,
+    ): Promise<{ session: ProtocolSession }> {
+        return this.#requestJson(
+            "PUT",
+            `/sessions/${encodeURIComponent(sessionId)}/draft`,
             request,
         );
     }

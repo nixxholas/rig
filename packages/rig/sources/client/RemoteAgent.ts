@@ -168,6 +168,21 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return this.#session.permissionMode;
     }
 
+    get draft(): string {
+        return this.#session.draft ?? "";
+    }
+
+    /**
+     * Store the composer draft on the daemon so the other terminals and clients
+     * attached to this session show the same unsent message.
+     */
+    async setDraft(draft: string, options: { origin?: string } = {}): Promise<void> {
+        await this.#client.setSessionDraft(this.#session.id, {
+            draft: draft.length === 0 ? null : draft,
+            ...(options.origin === undefined ? {} : { origin: options.origin }),
+        });
+    }
+
     get goal(): SessionGoal | undefined {
         return this.#session.goal === undefined ? undefined : { ...this.#session.goal };
     }
@@ -537,6 +552,13 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             return;
         }
 
+        if (event.type === "session_draft_changed") {
+            const { draft } = event.data;
+            this.#session =
+                draft === undefined ? omitDraft(this.#session) : { ...this.#session, draft };
+            return;
+        }
+
         if (event.type === "session_workspace_archived") {
             this.#pendingSteeringMessages.clear();
             this.#session = {
@@ -860,6 +882,11 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             },
         };
     }
+}
+
+function omitDraft(session: ProtocolSession): ProtocolSession {
+    const { draft: _draft, ...rest } = session;
+    return rest;
 }
 
 function sessionServiceTier(session: ProtocolSession): ServiceTier | undefined {

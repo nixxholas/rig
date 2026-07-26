@@ -53,6 +53,7 @@ const sessionColumnMigrations = [
     ["workflows_enabled", "INTEGER NOT NULL DEFAULT 1"],
     ["goal_json", "TEXT"],
     ["next_task_id", "INTEGER NOT NULL DEFAULT 1"],
+    ["draft", "TEXT"],
 ] as const;
 
 const queuedRunColumnMigrations = [
@@ -210,6 +211,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 unread_reason TEXT,
                 unread_since_ms INTEGER,
                 cwd TEXT NOT NULL,
+                draft TEXT,
                 docker_json TEXT,
                 secret_ids_json TEXT NOT NULL DEFAULT '[]',
                 provider_id TEXT NOT NULL,

@@ -117,6 +117,7 @@ export type {
     SecretSummary,
     SecretsChangedEvent,
     SetGoalRequest,
+    SetSessionDraftRequest,
     SessionCreatedEvent,
     SessionContextUsage,
     SessionProviderQuota,
@@ -126,6 +127,7 @@ export type {
     SessionAgentType,
     SessionArchiveChangedEvent,
     SessionArchiveResponse,
+    SessionDraftChangedEvent,
     SessionEvent,
     SessionInterruption,
     SessionInterruptionReason,
@@ -166,3 +168,4 @@ export type {
     UserInputResolvedEvent,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
+export { SESSION_DRAFT_MAX_LENGTH } from "./SessionProtocol.js";

@@ -63,8 +63,10 @@ import type {
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
+    SetSessionDraftRequest,
     UpdateSessionRequest,
 } from "../protocol/index.js";
+import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { InMemorySessionStore } from "./InMemorySessionStore.js";
@@ -72,7 +74,7 @@ import { latestObservedProviderQuotas } from "./latestObservedProviderQuotas.js"
 import { createModelCatalog } from "./createModelCatalog.js";
 import { FileSearchService, type FileSearchServiceContract } from "./FileSearchService.js";
 import type { SessionEventLog } from "./SessionEventLog.js";
-import { isTransientInferenceSessionEvent } from "./isTransientInferenceSessionEvent.js";
+import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import { isSubmitMessageRequest } from "./isSubmitMessageRequest.js";
 import { limitProtocolSessionMessages } from "./limitProtocolSessionMessages.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
@@ -1353,6 +1355,26 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "PUT" && route.name === "draft") {
+        const body = await readJson<SetSessionDraftRequest | null>(request);
+        if (
+            body === null ||
+            typeof body !== "object" ||
+            (body.draft !== null && typeof body.draft !== "string")
+        ) {
+            sendJson(response, 400, { error: "A draft must be text." });
+            return;
+        }
+        if (typeof body.draft === "string" && body.draft.length > SESSION_DRAFT_MAX_LENGTH) {
+            sendJson(response, 400, {
+                error: "This draft is too long to sync. It stays on this terminal only.",
+            });
+            return;
+        }
+        sendJson(response, 200, { session: session.setDraft(body) });
+        return;
+    }
+
     if (request.method === "POST" && route.name === "secrets") {
         const body = await readJson<AttachSecretRequest | null>(request);
         if (
@@ -1479,7 +1501,7 @@ async function handleRequest(
         sendJson(response, 200, {
             events: selectRecentSessionEvents(
                 after === undefined
-                    ? events.filter((event) => !isTransientInferenceSessionEvent(event))
+                    ? events.filter((event) => !isLiveOnlySessionEvent(event))
                     : events,
                 after === undefined ? messageLimit : undefined,
             ),
@@ -1594,6 +1616,7 @@ function matchRoute(pathname: string):
               | "background-processes-stop"
               | "compact"
               | "current-provider-quota"
+              | "draft"
               | "effort"
               | "events"
               | "external-tool-calls"
@@ -1773,6 +1796,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "current-provider-quota") {
         return { name: "current-provider-quota", sessionId };
     }
+    if (parts[2] === "draft") return { name: "draft", sessionId };
     if (parts[2] === "effort") return { name: "effort", sessionId };
     if (parts[2] === "events") return { name: "events", sessionId };
     if (parts[2] === "external-tool-calls") {
@@ -1827,6 +1851,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
         (method === "POST" && routeName === "user-input") ||
         (method === "DELETE" && routeName === "secret") ||
         (["DELETE", "PATCH"].includes(method ?? "") && routeName === "terminal") ||
+        (method === "PUT" && routeName === "draft") ||
         (method === "PATCH" &&
             ["effort", "model", "permissions", "service-tier"].includes(routeName))
     );

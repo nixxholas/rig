@@ -77,6 +77,7 @@ import { formatActivityElapsedTime } from "./formatActivityElapsedTime.js";
 import { formatCompactTokens as formatTokens } from "./formatCompactTokens.js";
 import { formatCodexMcpToolResult } from "./formatCodexMcpToolResult.js";
 import { FileMentionAutocomplete } from "./FileMentionAutocomplete.js";
+import { SessionDraftSync } from "./SessionDraftSync.js";
 import type { FileMentionContext } from "./findFileMentionContext.js";
 import { formatFileMention } from "./formatFileMention.js";
 import { formatProviderError } from "./formatProviderError.js";
@@ -157,6 +158,8 @@ const FILE_MENTION_SEGMENTER = new Intl.Segmenter(undefined, { granularity: "gra
 const FAST_MODE_ON_MESSAGE = "Fast mode is on. Fast inference uses 2× plan usage.";
 const FAST_MODE_OFF_MESSAGE = "Fast mode is off.";
 const FOREGROUND_SHELL_YIELD_MS = 10_000;
+/** How long shutdown waits for the last composer draft to reach the daemon. */
+const DRAFT_FLUSH_TIMEOUT_MS = 500;
 
 function entryBoundary(entry: AppTranscriptEntry | undefined): boolean {
     return entry?.completedTurn !== undefined || entry?.turnElapsedMs !== undefined;
@@ -351,6 +354,7 @@ export class CodingAssistantApp implements Component, Focusable {
     readonly #agent: CodingAssistantAgentBackend;
     readonly #cwd: string;
     readonly #idFactory: () => string;
+    #draftSync: SessionDraftSync | undefined;
     readonly #now: () => number;
     readonly #editor: Editor;
     readonly #fileMentionAutocomplete: FileMentionAutocomplete | undefined;
@@ -585,6 +589,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#editor.onSubmit = (value) => {
             this.#submit(value);
         };
+        this.#startDraftSync();
 
         for (const notice of options.initialNotices ?? []) {
             this.#appendEntry({ role: "event", text: notice.text, title: notice.title });
@@ -689,6 +694,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#runningToolCallIds.clear();
         this.#toolStatusByCallId.clear();
         this.#fileMentionAutocomplete?.clear();
+        await this.#stopDraftSync();
         this.#editor.setText("");
         this.#shellMode = false;
         this.#discardLocalSteeringSubmissionsForBoundary();
@@ -1172,6 +1178,11 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#requestRender();
             return;
         }
+
+        if (event.type === "session_draft_changed") {
+            this.#applyRemoteDraft(event.data.draft ?? "", event.data.origin);
+            return;
+        }
     }
 
     async waitForIdle(): Promise<void> {
@@ -1266,7 +1277,7 @@ export class CodingAssistantApp implements Component, Focusable {
                 if (this.#editor.getText().length > 0) {
                     this.#editor.setText("");
                 } else {
-                    this.#freeformUserInput = undefined;
+                    this.#leaveFreeformUserInput();
                     this.#openUserInputQuestion();
                 }
                 this.#requestRender();
@@ -2823,6 +2834,82 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         this.#restoreQueuedPromptsToComposer();
+    }
+
+    /**
+     * Shares the composer with the other clients on this session: the unsent
+     * message is restored here after a restart and follows the user to another
+     * terminal or an external client.
+     */
+    #startDraftSync(): void {
+        const setDraft = this.#agent.setDraft?.bind(this.#agent);
+        if (setDraft === undefined) return;
+        const origin = this.#idFactory();
+        this.#draftSync = new SessionDraftSync({
+            draft: this.#agent.draft ?? "",
+            origin,
+            push: (draft) => setDraft(draft, { origin }),
+            // A draft that fails to sync stays in this composer. It is never
+            // worth interrupting the session over.
+            onError: () => {},
+        });
+        const restored = this.#agent.draft ?? "";
+        if (restored.length > 0) this.#editor.setText(restored);
+        this.#editor.onChange = (text) => {
+            // While the composer is answering a question it is not the draft.
+            if (this.#freeformUserInput !== undefined) return;
+            this.#draftSync?.recordLocalText(text);
+        };
+    }
+
+    #applyRemoteDraft(draft: string, origin: string | undefined): void {
+        const text = this.#draftSync?.applyRemoteDraft(draft, origin);
+        if (text === undefined) return;
+        if (this.#freeformUserInput !== undefined) return;
+        if (this.#editor.getText() === text) return;
+        this.#editor.setText(text);
+        this.#fileMentionAutocomplete?.clear();
+        this.#requestRender();
+    }
+
+    /**
+     * Leaves the question composer and returns it to the shared draft.
+     *
+     * The editor is cleared while `#freeformUserInput` still suppresses draft
+     * writes, so borrowing the composer to answer a question never clears the
+     * draft that the other clients on this session are showing.
+     */
+    #leaveFreeformUserInput(): void {
+        if (this.#freeformUserInput === undefined) return;
+        this.#editor.setText("");
+        this.#freeformUserInput = undefined;
+        this.#restoreComposerDraft();
+    }
+
+    /** Returns the composer to the shared draft after a question releases it. */
+    #restoreComposerDraft(): void {
+        const draft = this.#draftSync?.remote ?? "";
+        if (draft.length === 0) return;
+        this.#editor.setText(draft);
+    }
+
+    async #stopDraftSync(): Promise<void> {
+        const sync = this.#draftSync;
+        if (sync === undefined) return;
+        let timer: NodeJS.Timeout | undefined;
+        try {
+            await Promise.race([
+                sync.flush(),
+                new Promise<void>((resolve) => {
+                    timer = setTimeout(resolve, DRAFT_FLUSH_TIMEOUT_MS);
+                }),
+            ]);
+        } finally {
+            if (timer !== undefined) clearTimeout(timer);
+            // Disposing before teardown clears the editor keeps the stored
+            // draft intact for the next terminal that opens this session.
+            sync.dispose();
+        }
     }
 
     #clearComposerDraftToHistory(): void {
@@ -4812,8 +4899,7 @@ export class CodingAssistantApp implements Component, Focusable {
         if (active.request.requestId !== freeform.requestId) return;
         if (active.request.questions[active.questionIndex]?.id !== freeform.questionId) return;
 
-        this.#freeformUserInput = undefined;
-        this.#editor.setText("");
+        this.#leaveFreeformUserInput();
         this.#commitUserInputAnswer([...freeform.existingAnswers, answer]);
         this.#requestRender();
     }
@@ -4860,10 +4946,7 @@ export class CodingAssistantApp implements Component, Focusable {
             (request) => request.requestId !== requestId,
         );
         if (wasActive) this.#activeUserInput = undefined;
-        if (wasFreeform) {
-            this.#freeformUserInput = undefined;
-            this.#editor.setText("");
-        }
+        if (wasFreeform) this.#leaveFreeformUserInput();
         if (this.#answeringUserInputRequestId === requestId) {
             this.#answeringUserInputRequestId = undefined;
         }
@@ -4878,8 +4961,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#userInputRequests = [];
         this.#activeUserInput = undefined;
         this.#answeringUserInputRequestId = undefined;
-        if (this.#freeformUserInput !== undefined) this.#editor.setText("");
-        this.#freeformUserInput = undefined;
+        this.#leaveFreeformUserInput();
         if (hadVisibleRequest) this.#closeSelectionPanel();
     }
 

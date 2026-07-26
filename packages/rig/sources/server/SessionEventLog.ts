@@ -1,5 +1,5 @@
 import { eventIdsShareScope, type EventId, type SessionEvent } from "../protocol/index.js";
-import { isTransientInferenceSessionEvent } from "./isTransientInferenceSessionEvent.js";
+import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 
 export type SessionEventListener = (event: SessionEvent) => void;
 export type SessionEventAppendHook = (event: SessionEvent) => void;
@@ -20,7 +20,7 @@ export class SessionEventLog {
         } = {},
     ) {
         this.#events = [...(options.events ?? [])].filter(
-            (event) => !isTransientInferenceSessionEvent(event),
+            (event) => !isLiveOnlySessionEvent(event),
         );
         for (const event of this.#events) {
             if (event.type === "message_submitted") {
@@ -34,7 +34,7 @@ export class SessionEventLog {
 
     append(event: SessionEvent): SessionEvent {
         this.#onAppend?.(event);
-        if (!isTransientInferenceSessionEvent(event)) {
+        if (!isLiveOnlySessionEvent(event)) {
             this.#events.push(event);
             this.#firstEventId ??= event.id;
             if (event.type === "message_submitted") {

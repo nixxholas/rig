@@ -57,6 +57,7 @@ event queue. Durable events remain available after a server restart.
 | `effort_changed`               | The reasoning effort changes for the selected model.                                                  | `modelId`, optional `effort`, `snapshot`                                                     | Yes    |
 | `service_tier_changed`         | The selected inference service tier changes.                                                          | `serviceTier`: selected tier or `null`; `snapshot`                                           | Yes    |
 | `permission_mode_changed`      | The session permission mode is applied.                                                               | `permissionMode`                                                                             | Yes    |
+| `session_draft_changed`        | A client stores or clears the session's unsent composer text.                                         | Optional `draft` and `origin`                                                                | **No** |
 | `secrets_changed`              | A secret bundle's session or project attachment changes.                                              | `secretIds`: effective union; `sessionSecretIds`, `projectSecretIds`: source lists           | Yes    |
 | `user_input_requested`         | The agent opens a structured question for the user.                                                   | Complete `UserInputRequest`, including `requestId` and `questions`                           | Yes    |
 | `user_input_resolved`          | A structured question is answered or cancelled.                                                       | `requestId`, `status`, optional `answers`                                                    | Yes    |
@@ -70,6 +71,16 @@ event queue. Durable events remain available after a server restart.
 
 `stopReason` is one of `stop`, `length`, `toolUse`, `error`, or `aborted`.
 `SessionTitleStatus` is one of `idle`, `generating`, `ready`, or `error`.
+
+`session_draft_changed` carries the session's unsent composer text so every
+attached terminal and external client shows the same draft. Write it with
+`PUT /sessions/{sessionId}/draft`, sending `draft: null` to clear it and an
+optional `origin` that identifies the writing client, which lets that client
+ignore the echo of its own keystrokes. Drafts change as the user types, so the
+event is delivered live but never written to the durable event log: the current
+draft is a field on `ProtocolSession` and `SessionSummary`, and a client that
+connects or reconnects reads it from the session instead of replaying edits.
+Drafts are limited to 100,000 characters and survive a daemon restart.
 
 ## `agent_event` subtypes
 

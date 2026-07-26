@@ -58,12 +58,14 @@ import type {
     StopBackgroundProcessResponse,
     SubagentSummary,
     SessionTitleStatus,
+    SetSessionDraftRequest,
     SubmitMessageRequest,
     SubmitMessageResponse,
     SteerMessageRequest,
     SteerMessageResponse,
     UpdateSessionRequest,
 } from "../protocol/index.js";
+import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { sessionUnreadStateAfterEvent } from "./sessionUnreadStateAfterEvent.js";
 import { aggregateSessionTokenCount } from "../sessionTokenCount/aggregateSessionTokenCount.js";
@@ -203,6 +205,7 @@ export interface PersistedSessionState {
     appendSystemPrompt?: string;
     cwd: string;
     docker?: DockerExecutionConfig;
+    draft?: string;
     elapsedMs?: number;
     contextMessages?: readonly Message[];
     effort?: string;
@@ -381,6 +384,7 @@ export class InMemorySession {
     #closing = false;
     #compactionActive = false;
     #debugLogs = new Map<string, DebugLog>();
+    #draft: string | undefined;
     #draining: Promise<void> | undefined;
     #elapsedMs = 0;
     #effort: string | undefined;
@@ -529,6 +533,7 @@ export class InMemorySession {
         this.#workspaceId = options.restore?.workspaceId ?? options.workspaceId;
         this.#orderKey =
             options.restore?.orderKey ?? options.orderKey ?? generateKeyBetween(null, null);
+        this.#draft = options.restore?.draft;
         this.#appendSystemPrompt =
             options.restore?.appendSystemPrompt ?? options.request.appendSystemPrompt;
         this.#systemPrompt = options.restore?.systemPrompt;
@@ -1285,6 +1290,27 @@ export class InMemorySession {
         if (this.#orderKey === orderKey) return this.snapshot();
         this.#orderKey = orderKey;
         this.#append("session_updated", { session: this.snapshot() });
+        return this.snapshot();
+    }
+
+    /**
+     * Store the composer draft and mirror it to every other attached client.
+     * The draft belongs to the clients: Rig keeps the latest text so a restarted
+     * terminal or a newly attached client can pick the message back up, and does
+     * not otherwise interpret it.
+     */
+    setDraft(request: SetSessionDraftRequest): ProtocolSession {
+        const draft =
+            request.draft === null || request.draft.length === 0 ? undefined : request.draft;
+        if (draft !== undefined && draft.length > SESSION_DRAFT_MAX_LENGTH) {
+            throw new Error("The draft is too long to sync.");
+        }
+        if (this.#draft === draft) return this.snapshot();
+        this.#draft = draft;
+        this.#append("session_draft_changed", {
+            ...(draft === undefined ? {} : { draft }),
+            ...(request.origin === undefined ? {} : { origin: request.origin }),
+        });
         return this.snapshot();
     }
 
@@ -2214,6 +2240,7 @@ export class InMemorySession {
                 ? { appendSystemPrompt: this.#appendSystemPrompt }
                 : {}),
             cwd: this.#request.cwd,
+            ...(this.#draft === undefined ? {} : { draft: this.#draft }),
             environment: summarizeDockerExecution(this.#request.docker),
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
@@ -2276,6 +2303,7 @@ export class InMemorySession {
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             cwd: this.#request.cwd,
+            ...(this.#draft === undefined ? {} : { draft: this.#draft }),
             environment: summarizeDockerExecution(this.#request.docker),
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
@@ -2322,6 +2350,7 @@ export class InMemorySession {
                 ? { appendSystemPrompt: this.#appendSystemPrompt }
                 : {}),
             cwd: this.#request.cwd,
+            ...(this.#draft === undefined ? {} : { draft: this.#draft }),
             elapsedMs: this.#elapsedMs,
             ...(this.#request.docker === undefined ? {} : { docker: this.#request.docker }),
             ...(contextMessages !== undefined ? { contextMessages: [...contextMessages] } : {}),

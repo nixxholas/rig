@@ -8981,7 +8981,183 @@ describe("CodingAssistantApp", () => {
             "Could not register the secret. Check the ID and environment names.",
         );
     });
+
+    it("keeps the shared draft while a freeform question borrows the composer", async () => {
+        const setDraft = vi.fn(async () => {});
+        const respondUserInput = vi.fn(async () => undefined);
+        const app = createDraftApp({ draft: "Keep this draft", respondUserInput, setDraft });
+
+        app.applySessionEvent(freeformQuestionEvent());
+
+        // "Type another answer" is the last option, so the composer becomes the
+        // answer field for the question.
+        app.handleInput("\x1b[B");
+        app.handleInput("\x1b[B");
+        app.handleInput("\r");
+        expect(stripAnsi(app.render(100).join("\n"))).not.toContain("Keep this draft");
+
+        app.handleInput("MongoDB");
+        app.handleInput("\r");
+
+        await vi.waitFor(() =>
+            expect(respondUserInput).toHaveBeenCalledWith("question-1", {
+                answers: { database: ["MongoDB"] },
+            }),
+        );
+        await delay(400);
+
+        // Answering the question must not clear the draft the other clients show.
+        expect(setDraft).not.toHaveBeenCalledWith("", expect.anything());
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("Keep this draft");
+    });
+
+    it("returns the shared draft when a freeform answer is abandoned", async () => {
+        const setDraft = vi.fn(async () => {});
+        const respondUserInput = vi.fn(async () => undefined);
+        const app = createDraftApp({ draft: "Keep this draft", respondUserInput, setDraft });
+
+        app.applySessionEvent(freeformQuestionEvent());
+        app.handleInput("\x1b[B");
+        app.handleInput("\x1b[B");
+        app.handleInput("\r");
+
+        // Escaping an empty answer goes back to the listed options.
+        app.handleInput("\x1b");
+        app.handleInput("\r");
+
+        await vi.waitFor(() =>
+            expect(respondUserInput).toHaveBeenCalledWith("question-1", {
+                answers: { database: ["PostgreSQL"] },
+            }),
+        );
+        await delay(400);
+
+        expect(setDraft).not.toHaveBeenCalledWith("", expect.anything());
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("Keep this draft");
+    });
+
+    it("restores the session draft into the composer and shares later edits", async () => {
+        const setDraft = vi.fn(async () => {});
+        const harness = createJustBashToolHarness();
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamText("unused");
+            },
+        });
+        const app = new CodingAssistantApp({
+            agent: Object.assign(
+                new Agent({
+                    provider,
+                    modelId: model.id,
+                    context: harness.context,
+                    printToConsole: false,
+                }),
+                { draft: "Unsent from the last terminal", setDraft },
+            ),
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            sessionBacked: true,
+            tui: fakeTui(),
+        });
+
+        // The message typed before the last terminal closed is waiting here.
+        expect(stripAnsi(app.render(100).join("\n"))).toContain("Unsent from the last terminal");
+
+        app.handleInput(" and still unsent");
+        await vi.waitFor(() =>
+            expect(setDraft).toHaveBeenCalledWith(
+                "Unsent from the last terminal and still unsent",
+                {
+                    origin: expect.any(String),
+                },
+            ),
+        );
+
+        // A draft written by another client replaces the composer.
+        app.applySessionEvent({
+            createdAt: 1,
+            data: { draft: "Sent from another terminal", origin: "other-terminal" },
+            id: "draft-event",
+            sessionId: "session-1",
+            type: "session_draft_changed",
+        } as SessionEvent);
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("Sent from another terminal");
+        expect(rendered).not.toContain("Unsent from the last terminal");
+    });
 });
+
+function createDraftApp(options: {
+    draft: string;
+    respondUserInput?: (requestId: string, response: unknown) => Promise<void>;
+    setDraft: (draft: string, options?: { origin?: string }) => Promise<void>;
+}): CodingAssistantApp {
+    const model = defineModel({
+        id: "openai/gpt-test",
+        name: "GPT Test",
+        thinkingLevels: ["off"],
+        defaultThinkingLevel: "off",
+    });
+    const provider = defineProvider({
+        id: "codex",
+        models: [model],
+        stream() {
+            return streamText("unused");
+        },
+    });
+    const harness = createJustBashToolHarness();
+    return new CodingAssistantApp({
+        agent: Object.assign(
+            new Agent({
+                provider,
+                modelId: model.id,
+                context: harness.context,
+                printToConsole: false,
+            }),
+            { draft: options.draft, setDraft: options.setDraft },
+        ),
+        cwd: harness.context.fs.cwd,
+        processManager: new NativeProcessManager(),
+        ...(options.respondUserInput === undefined
+            ? {}
+            : { respondUserInput: options.respondUserInput }),
+        sessionBacked: true,
+        tui: fakeTui(),
+    });
+}
+
+function freeformQuestionEvent(): SessionEvent {
+    return {
+        createdAt: 1,
+        data: {
+            requestId: "question-1",
+            questions: [
+                {
+                    header: "Database",
+                    id: "database",
+                    multiSelect: false,
+                    options: [
+                        { label: "PostgreSQL", description: "Use the relational stack." },
+                        { label: "SQLite", description: "Keep it lightweight." },
+                    ],
+                    question: "Which database should this use?",
+                },
+            ],
+        },
+        id: "question-event",
+        sessionId: "session-1",
+        type: "user_input_requested",
+    } as SessionEvent;
+}
 
 function createDeterministicIds(): () => string {
     let next = 0;

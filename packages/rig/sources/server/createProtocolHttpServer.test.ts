@@ -1732,6 +1732,99 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("streams a composer draft to the other clients watching the session", async () => {
+        const { client, close } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
+            const controller = new AbortController();
+            const streamed: SessionEvent[] = [];
+            const watching = client.watchSessionEvents({
+                ...(created.session.lastEventId === undefined
+                    ? {}
+                    : { after: created.session.lastEventId }),
+                sessionId: created.session.id,
+                signal: controller.signal,
+                onEvent(event) {
+                    if (event.type !== "session_draft_changed") return;
+                    streamed.push(event);
+                    if (streamed.length === 2) controller.abort();
+                },
+            });
+
+            const written = await client.setSessionDraft(created.session.id, {
+                draft: "Ship the draft feature",
+                origin: "terminal-a",
+            });
+            expect(written.session.draft).toBe("Ship the draft feature");
+
+            await client.setSessionDraft(created.session.id, { draft: null });
+            await watching;
+
+            expect(streamed.map((event) => event.data)).toEqual([
+                { draft: "Ship the draft feature", origin: "terminal-a" },
+                {},
+            ]);
+            const reloaded = await client.getSession(created.session.id);
+            expect(reloaded.session.draft).toBeUndefined();
+        } finally {
+            await close();
+        }
+    });
+
+    it("refuses a draft that is not text or is too long to sync", async () => {
+        const { client, close } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
+
+            await expect(
+                client.setSessionDraft(created.session.id, {
+                    draft: 42 as unknown as string,
+                }),
+            ).rejects.toThrow("A draft must be text.");
+            await expect(
+                client.setSessionDraft(created.session.id, { draft: "x".repeat(100_001) }),
+            ).rejects.toThrow("too long to sync");
+
+            const reloaded = await client.getSession(created.session.id);
+            expect(reloaded.session.draft).toBeUndefined();
+        } finally {
+            await close();
+        }
+    });
+
+    it("restores a composer draft after the daemon restarts", async () => {
+        const databaseDirectory = await mkdtemp(join(tmpdir(), "rig-protocol-draft-test-"));
+        const databasePath = join(databaseDirectory, "sessions.sqlite");
+        let originalStore: PersistentSessionStore | undefined;
+        let restoredStore: PersistentSessionStore | undefined;
+        let server: Awaited<ReturnType<typeof startServer>> | undefined;
+        try {
+            originalStore = new PersistentSessionStore({ databasePath });
+            server = await startServer({ store: originalStore });
+            const created = await server.client.createSession({ cwd: "/tmp/rig-protocol-test" });
+            await server.client.setSessionDraft(created.session.id, {
+                draft: "Unsent when the terminal closed",
+            });
+            await server.close();
+            server = undefined;
+            originalStore.close();
+            originalStore = undefined;
+
+            restoredStore = new PersistentSessionStore({ databasePath });
+            server = await startServer({ store: restoredStore });
+
+            const restored = await server.client.getSession(created.session.id);
+            expect(restored.session.draft).toBe("Unsent when the terminal closed");
+            const listed = await server.client.listSessions(10);
+            expect(listed.sessions[0]?.draft).toBe("Unsent when the terminal closed");
+        } finally {
+            await server?.close();
+            restoredStore?.close();
+            originalStore?.close();
+            await rm(databaseDirectory, { recursive: true, force: true });
+        }
+    });
+
     it("recovers REST and SSE catch-up from a live-only cursor after restart", async () => {
         const databaseDirectory = await mkdtemp(join(tmpdir(), "rig-protocol-cursor-test-"));
         const databasePath = join(databaseDirectory, "sessions.sqlite");
