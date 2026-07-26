@@ -72,6 +72,22 @@ describe("createPermissionReviewSideAgent", () => {
         await reviewer.close();
     });
 
+    it("forgets pre-reset authorization and sends a new prohibition as fresh evidence", async () => {
+        const { provider, model, requests } = recordingProvider();
+        const reviewer = sideAgent(provider, model);
+
+        await reviewer.review({ action: "first action", messages: [user("u1", "AUTHORIZED")] });
+        await reviewer.reset();
+        const result = await reviewer.review({
+            action: "second action",
+            messages: [user("u2", "PROHIBITED")],
+        });
+
+        expect(JSON.stringify(requests[1]?.messages)).toContain("PROHIBITED");
+        expect(JSON.parse(result.text)).toMatchObject({ decision: "deny" });
+        await reviewer.close();
+    });
+
     it("starts over when a review is cut short, so it never stacks two unanswered questions", async () => {
         const { provider, model, requests } = recordingProvider({ cutShortOnCall: 1 });
         const reviewer = sideAgent(provider, model);
@@ -156,12 +172,18 @@ function recordingProvider(options: { cutShortOnCall?: number } = {}) {
         stream(_model, context) {
             requests.push(context);
             const call = requests.length;
+            const denied = JSON.stringify(context.messages).includes("PROHIBITED");
             const message = {
                 api: "test",
                 content: [
                     {
                         type: "text" as const,
-                        text: '```json\n{"decision":"allow","risk":"low","user_authorization":"high","reason":"Routine."}\n```',
+                        text: JSON.stringify({
+                            decision: denied ? "deny" : "allow",
+                            risk: denied ? "high" : "low",
+                            user_authorization: denied ? "low" : "high",
+                            reason: denied ? "The user prohibited this action." : "Routine.",
+                        }),
                     },
                 ],
                 model: model.id,

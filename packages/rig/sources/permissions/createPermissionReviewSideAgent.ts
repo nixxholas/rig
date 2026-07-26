@@ -59,6 +59,7 @@ export function createPermissionReviewSideAgent(options: {
         await agent.reset();
     };
     return {
+        reset: discardUnfinishedReview,
         async review(request: PermissionReviewRequest): Promise<PermissionReviewResponse> {
             const first = reviewedMessageCount === 0;
             // Older turns are already in the reviewer's own history, so only the new ones are

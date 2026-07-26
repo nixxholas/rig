@@ -272,6 +272,7 @@ export class Agent {
     }
 
     async reset(): Promise<void> {
+        await this.#permissionReviewAgent?.reset();
         this.#messages = [];
         this.#contextMessages = undefined;
         this.#queue = [];

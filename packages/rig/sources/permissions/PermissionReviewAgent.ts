@@ -26,5 +26,7 @@ export interface PermissionReviewResponse {
  */
 export interface PermissionReviewAgent {
     review(request: PermissionReviewRequest): Promise<PermissionReviewResponse>;
+    /** Clears reviewer conversation state when the owning transcript is reset. */
+    reset(): Promise<void>;
     close(): Promise<void>;
 }

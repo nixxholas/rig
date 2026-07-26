@@ -223,6 +223,28 @@ describe("Auto permissions", () => {
         await agent.close();
     });
 
+    it("resets the cached permission reviewer with the owning transcript", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const provider = autoReviewProvider("allow");
+        const reviewer = reviewAgentFor(provider);
+        const reset = vi.spyOn(reviewer, "reset");
+        const agent = new Agent({
+            context: harness.context,
+            createPermissionReviewAgent: () => reviewer,
+            modelId: provider.models[0]?.id ?? "",
+            printToConsole: false,
+            provider,
+            tools: [permissionProbeTool([])],
+        });
+
+        await agent.send("Run the deployment check.");
+        await agent.reset();
+
+        expect(reset).toHaveBeenCalledOnce();
+        await agent.close();
+    });
+
     it("refuses the action when Auto has no review side agent at all", async () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");

@@ -124,6 +124,7 @@ describe("reviewAutoPermission", () => {
     it("asks the user when the reviewer runs out of time", async () => {
         const reviewer: PermissionReviewAgent = {
             close: vi.fn(async () => {}),
+            reset: vi.fn(async () => {}),
             review: ({ signal }) =>
                 new Promise<never>((_resolve, reject) => {
                     signal?.addEventListener("abort", () => {
@@ -153,6 +154,7 @@ describe("reviewAutoPermission", () => {
     it("asks the user when the reviewer is unavailable", async () => {
         const reviewer: PermissionReviewAgent = {
             close: vi.fn(async () => {}),
+            reset: vi.fn(async () => {}),
             review: () => Promise.reject(new Error("The reviewer could not start.")),
         };
 
@@ -176,6 +178,7 @@ describe("reviewAutoPermission", () => {
     it("waits for a permission reviewer until the caller aborts", async () => {
         const reviewer: PermissionReviewAgent = {
             close: vi.fn(async () => {}),
+            reset: vi.fn(async () => {}),
             review: () => new Promise(() => {}),
         };
         const controller = new AbortController();
@@ -217,5 +220,9 @@ function stubReviewer(
             userEvidenceOmitted,
         };
     });
-    return { actions, review, reviewer: { close: vi.fn(async () => {}), review } };
+    return {
+        actions,
+        review,
+        reviewer: { close: vi.fn(async () => {}), reset: vi.fn(async () => {}), review },
+    };
 }
