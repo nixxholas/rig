@@ -719,15 +719,6 @@ export class ProjectRepository {
                 ]),
             ),
         );
-        let hasOrigin = true;
-        try {
-            await this.#git(project.path, ["remote", "get-url", "origin"]);
-        } catch {
-            hasOrigin = false;
-        }
-        if (hasOrigin) {
-            await this.#git(project.path, ["fetch", "origin"]);
-        }
         const commit = await this.#git(project.path, [
             "rev-parse",
             "--verify",
@@ -1569,6 +1560,15 @@ export class ProjectRepository {
             }
             if (commonDirectory !== workspace.gitCommonDir) {
                 throw new Error("Git created the worktree from an unexpected repository.");
+            }
+            let hasOrigin = true;
+            try {
+                await this.#git(workspace.path, ["remote", "get-url", "origin"]);
+            } catch {
+                hasOrigin = false;
+            }
+            if (hasOrigin) {
+                await this.#git(workspace.path, ["fetch", "origin"]);
             }
             if (this.#closed) return;
             this.#transaction(() => {

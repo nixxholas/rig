@@ -481,10 +481,17 @@ describe("projects", () => {
         expect(workspace?.baseCommit).toBe(expected.toLowerCase());
     });
 
-    it("fetches origin before resolving a workspace base reference", async () => {
-        const fixture = await createFixture();
+    it("fetches origin from the created workspace", async () => {
+        const gitCalls: { args: readonly string[]; cwd: string }[] = [];
+        const fixture = await createFixture({
+            projectGit: async (cwd, args) => {
+                gitCalls.push({ args, cwd });
+                return git(cwd, args);
+            },
+        });
         const remote = join(fixture.root, "remote.git");
         const upstream = await createRepository(fixture.root, "upstream");
+        await mkdir(remote);
         await git(remote, ["init", "--bare"]);
         await git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
         await git(upstream, ["remote", "add", "origin", remote]);
@@ -500,12 +507,28 @@ describe("projects", () => {
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
 
         const workspace = await fixture.store.createWorkspace(projectId, {
-            baseRef: "origin/main",
+            baseRef: "HEAD",
             clientRequestId: "fresh-origin",
             name: "Fresh Origin",
         });
+        if (workspace === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            workspace.id,
+            (value) => value.status === "ready" || value.status === "failed",
+        );
 
-        expect(workspace?.baseCommit).toBe(expected.toLowerCase());
+        expect(ready.status).toBe("ready");
+        expect(await git(ready.path, ["rev-parse", "origin/main"])).toBe(expected);
+        expect(
+            gitCalls.some(
+                (call) =>
+                    call.cwd === ready.path &&
+                    call.args[0] === "fetch" &&
+                    call.args[1] === "origin",
+            ),
+        ).toBe(true);
     });
 });
 

@@ -36,15 +36,6 @@ async function release(): Promise<void> {
         throw new Error(USAGE);
     }
 
-    const branch = runCommand("git", ["branch", "--show-current"], {
-        captureOutput: true,
-    }).stdout;
-    if (branch !== "main") {
-        throw new Error(
-            `Releases must run from the main branch. The current branch is ${branch || "detached"}.`,
-        );
-    }
-
     const worktreeStatus = runCommand("git", ["status", "--porcelain"], {
         captureOutput: true,
     }).stdout;
@@ -85,7 +76,7 @@ async function release(): Promise<void> {
         );
         if (!retryingRelease || !originIsAncestor || commitsAhead !== 1) {
             throw new Error(
-                "Local main must match origin/main. Update the branch before creating a release.",
+                "HEAD must match origin/main. Update the worktree before creating a release.",
             );
         }
         console.log(`Resuming the local v${initialManifest.version} release commit.`);
@@ -114,7 +105,7 @@ async function release(): Promise<void> {
     });
 
     console.log("Pushing the release commit and tag...");
-    runCommand("git", ["push", "origin", "main", `v${releaseManifest.version}`, "--atomic"]);
+    runCommand("git", ["push", "origin", "HEAD:main", `v${releaseManifest.version}`, "--atomic"]);
     console.log(
         `Pushed v${releaseManifest.version}. GitHub Actions will publish ${releaseManifest.name}@${releaseManifest.version}.`,
     );
