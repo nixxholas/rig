@@ -480,6 +480,33 @@ describe("projects", () => {
         expect(workspace?.baseRef).toBe("main");
         expect(workspace?.baseCommit).toBe(expected.toLowerCase());
     });
+
+    it("fetches origin before resolving a workspace base reference", async () => {
+        const fixture = await createFixture();
+        const remote = join(fixture.root, "remote.git");
+        const upstream = await createRepository(fixture.root, "upstream");
+        await git(remote, ["init", "--bare"]);
+        await git(remote, ["symbolic-ref", "HEAD", "refs/heads/main"]);
+        await git(upstream, ["remote", "add", "origin", remote]);
+        await git(upstream, ["push", "-u", "origin", "main"]);
+        const repository = join(fixture.root, "clone");
+        await git(fixture.root, ["clone", remote, repository]);
+
+        await writeFile(join(upstream, "REMOTE.md"), "new upstream commit\n");
+        await git(upstream, ["add", "REMOTE.md"]);
+        await git(upstream, ["commit", "-m", "Advance origin"]);
+        await git(upstream, ["push", "origin", "main"]);
+        const expected = await git(upstream, ["rev-parse", "HEAD"]);
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+
+        const workspace = await fixture.store.createWorkspace(projectId, {
+            baseRef: "origin/main",
+            clientRequestId: "fresh-origin",
+            name: "Fresh Origin",
+        });
+
+        expect(workspace?.baseCommit).toBe(expected.toLowerCase());
+    });
 });
 
 async function createFixture(

@@ -719,6 +719,15 @@ export class ProjectRepository {
                 ]),
             ),
         );
+        let hasOrigin = true;
+        try {
+            await this.#git(project.path, ["remote", "get-url", "origin"]);
+        } catch {
+            hasOrigin = false;
+        }
+        if (hasOrigin) {
+            await this.#git(project.path, ["fetch", "origin"]);
+        }
         const commit = await this.#git(project.path, [
             "rev-parse",
             "--verify",
