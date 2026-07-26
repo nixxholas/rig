@@ -13,6 +13,8 @@ import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId
 import { resolveClaudeTools } from "@/vendors/claude/impl/resolveClaudeTools.js";
 import { createClaudeTestInstructions } from "./createClaudeTestInstructions.js";
 
+const SDK_DEFAULT_WORKSPACE_SLUG = process.cwd().replaceAll(/[^A-Za-z0-9-]/gu, "-");
+
 describe("Claude provider golden", () => {
     it("anchors the provider scenario to the real Claude CLI capture", async () => {
         const cli = await fixture("claude-multiturn.json");
@@ -304,14 +306,13 @@ function toSse(events: readonly unknown[]): string {
 function normalize(value: unknown, cwd: string): unknown {
     const home = homedir();
     const homeRelativeCwd = cwd.replace(home, "<HOME>");
-    const sdkDefaultWorkspaceSlug = process.cwd().replaceAll("/", "-");
     const visit = (item: unknown): unknown => {
         if (typeof item === "string") {
             return item
                 .replaceAll(cwd, "<WORKSPACE>")
                 .replaceAll(home, "<HOME>")
                 .replaceAll(homeRelativeCwd, "<WORKSPACE>")
-                .replaceAll(sdkDefaultWorkspaceSlug, "<WORKSPACE_SLUG>")
+                .replaceAll(SDK_DEFAULT_WORKSPACE_SLUG, "<WORKSPACE_SLUG>")
                 .replace(
                     /(?:\/tmp|\/var\/folders\/[^/\s"]+\/[^/\s"]+\/T)(?=\/claude-resume-)/gu,
                     "<TMP>",
