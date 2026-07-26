@@ -35,10 +35,7 @@ describe("managed project worktrees", () => {
         gym.terminal.type("Exercise the managed project worktree lifecycle.");
         gym.terminal.press("enter");
 
-        const screen = await gym.terminal.waitForText(
-            "The managed worktree was archived.",
-            30_000,
-        );
+        const screen = await gym.terminal.waitForText("The managed worktree was archived.", 30_000);
         expect(screen.text).toContain("The managed worktree was archived.");
 
         const result = JSON.parse(await gym.readFile("managed-worktree-result.json")) as {

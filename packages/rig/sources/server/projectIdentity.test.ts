@@ -28,8 +28,6 @@ describe("project identity", () => {
             repository: "rig",
         });
         expect(parseHostingRepository("git@evil.test:slopus/rig.git")).toBeUndefined();
-        expect(
-            parseHostingRepository("git@github.com:unexpected/nested/rig.git"),
-        ).toBeUndefined();
+        expect(parseHostingRepository("git@github.com:unexpected/nested/rig.git")).toBeUndefined();
     });
 });

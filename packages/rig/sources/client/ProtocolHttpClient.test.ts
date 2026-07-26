@@ -70,12 +70,7 @@ describe("ProtocolHttpClient", () => {
             await new Promise<void>((resolve) => server.listen(socketPath, resolve));
             const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
 
-            await client.renameProjectWorkspace(
-                "project-1",
-                "workspace-1",
-                { name: "Renamed" },
-                3,
-            );
+            await client.renameProjectWorkspace("project-1", "workspace-1", { name: "Renamed" }, 3);
             await client.archiveProjectWorkspace("project-1", "workspace-1", 4);
 
             expect(versions).toEqual(['"3"', '"4"']);

@@ -61,10 +61,7 @@ describe("enabled global event queue syncs and trims daemon events", () => {
             trim: { through: string; trimmed: number };
             home: { avatarBuiltin?: string; initializationStatus: string; kind: string };
         };
-        expect(result.queuedTypes.slice(0, 2)).toEqual([
-            "project_created",
-            "session_created",
-        ]);
+        expect(result.queuedTypes.slice(0, 2)).toEqual(["project_created", "session_created"]);
         expect(result.queuedTypes).toContain("session_created");
         expect(result.queuedTypes).toContain("agent_message");
         expect(result.queuedTypes).not.toContain("agent_event");

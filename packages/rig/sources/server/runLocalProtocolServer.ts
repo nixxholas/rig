@@ -364,9 +364,7 @@ export async function runLocalProtocolServer(
                                                         );
                                               return {
                                                   project,
-                                                  ...(workspace === undefined
-                                                      ? {}
-                                                      : { workspace }),
+                                                  ...(workspace === undefined ? {} : { workspace }),
                                               };
                                           },
                                           modelCatalog,

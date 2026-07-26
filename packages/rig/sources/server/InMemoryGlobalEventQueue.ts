@@ -50,14 +50,8 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
 
     list(options: ListGlobalEventQueueOptions = {}): readonly GlobalEventQueueEntry[] | undefined {
         const after =
-            options.after === undefined
-                ? this.#trimmedThrough
-                : this.#position(options.after);
-        if (
-            after === undefined ||
-            after < this.#trimmedThrough ||
-            after > this.#lastPosition
-        ) {
+            options.after === undefined ? this.#trimmedThrough : this.#position(options.after);
+        if (after === undefined || after < this.#trimmedThrough || after > this.#lastPosition) {
             return undefined;
         }
         const entries = this.#entries.filter(

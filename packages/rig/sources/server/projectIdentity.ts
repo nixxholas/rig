@@ -101,7 +101,9 @@ export function remoteProjectName(remote: string): string | undefined {
         }
         const encoded = path.split("/").filter(Boolean).at(-1);
         if (encoded === undefined) return undefined;
-        const decoded = decodeURIComponent(encoded).replace(/\.git$/iu, "").trim();
+        const decoded = decodeURIComponent(encoded)
+            .replace(/\.git$/iu, "")
+            .trim();
         return decoded.length === 0 ? undefined : decoded;
     } catch {
         return undefined;
@@ -142,7 +144,9 @@ export function parseHostingRepository(remote: string): HostingRepository | unde
         const repository = parts.at(-1) ?? "";
         const validSegment = /^[A-Za-z0-9_.-]{1,100}$/u;
         if (
-            owner.split("/").some((part) => !validSegment.test(part) || part === "." || part === "..") ||
+            owner
+                .split("/")
+                .some((part) => !validSegment.test(part) || part === "." || part === "..") ||
             !validSegment.test(repository) ||
             repository === "." ||
             repository === ".."

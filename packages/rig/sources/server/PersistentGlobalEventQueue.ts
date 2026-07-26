@@ -59,9 +59,8 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
                 "SELECT stream_id FROM durable_global_event_streams ORDER BY created_at_ms DESC LIMIT 1",
             )
             .get();
-        this.#streamId = latest === undefined
-            ? this.#createStream()
-            : readString(latest, "stream_id");
+        this.#streamId =
+            latest === undefined ? this.#createStream() : readString(latest, "stream_id");
     }
 
     append(event: GlobalEvent): GlobalEventQueueEntry | undefined {
@@ -120,14 +119,8 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     list(options: ListGlobalEventQueueOptions = {}): readonly GlobalEventQueueEntry[] | undefined {
         const state = this.#state();
         const after =
-            options.after === undefined
-                ? state.trimmedThrough
-                : this.#position(options.after);
-        if (
-            after === undefined ||
-            after < state.trimmedThrough ||
-            after > state.lastPosition
-        ) {
+            options.after === undefined ? state.trimmedThrough : this.#position(options.after);
+        if (after === undefined || after < state.trimmedThrough || after > state.lastPosition) {
             return undefined;
         }
         const limitClause = options.limit === undefined ? "" : "LIMIT ?";
@@ -170,9 +163,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         this.#database.exec("BEGIN IMMEDIATE");
         try {
             const result = this.#database
-                .prepare(
-                    "DELETE FROM durable_global_events WHERE stream_id = ? AND position <= ?",
-                )
+                .prepare("DELETE FROM durable_global_events WHERE stream_id = ? AND position <= ?")
                 .run(this.#streamId, position);
             this.#database
                 .prepare(
@@ -215,7 +206,8 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
                 `,
             )
             .get(this.#streamId);
-        if (row === undefined) throw new Error("The durable global event queue is not initialized.");
+        if (row === undefined)
+            throw new Error("The durable global event queue is not initialized.");
         return {
             lastPosition: readNumber(row, "last_position"),
             trimmedThrough: readNumber(row, "trimmed_through"),

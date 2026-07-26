@@ -1009,25 +1009,25 @@ addition to focused unit tests.
 
 - [ ] Add `Project`, avatar, initialization, and project event types under `protocol`.
 - [ ] Add project/avatar tables, Unicode name keys, entity versions, dereference timestamps, and
-  the project foreign key on a rebuilt sessions table.
+      the project foreign key on a rebuilt sessions table.
 - [ ] Implement project repositories for persistent and in-memory stores.
 - [ ] Replace cwd-keyed project secrets with project IDs.
 - [ ] Add unit tests for canonical-path identity, Home identity, concurrent ensure, unique names,
-  unique storage keys, and project-scoped secrets.
+      unique storage keys, and project-scoped secrets.
 - [ ] Add migration tests for historical cwd convergence, missing paths, subagent inheritance,
-  rollback on failure, and no null project IDs.
+      rollback on failure, and no null project IDs.
 - [ ] Run focused protocol/server tests and typecheck before Task 2.
 
 ### Task 2: Make session creation project-atomic
 
 - [ ] Resolve project/workspace ownership before runtime construction and recheck workspace status
-  in the session insert transaction.
+      in the session insert transaction.
 - [ ] Commit a new project, session, and ordered created events atomically.
 - [ ] Add `projectId` and optional `workspaceId` to session state, summaries, forks, and subagents;
-  make inherited inserts reject terminal parents/workspaces transactionally.
+      make inherited inserts reject terminal parents/workspaces transactionally.
 - [ ] Ensure failed runtime creation cannot leave an orphan session.
 - [ ] Add deterministic tests for new/existing projects, same-path races, symlink aliases, nested
-  directories, forks, subagents, and transaction rollback.
+      directories, forks, subagents, and transaction rollback.
 - [ ] Add a gym test proving two CLI sessions in one directory share one immediately visible project.
 - [ ] Run focused server/client/gym tests before Task 3.
 
@@ -1039,8 +1039,8 @@ addition to focused unit tests.
 - [ ] Add `GlobalStateCoordinator`, per-entity version guards, and atomic bounded `GET /state`.
 - [ ] Update protocol clients to snapshot, replay, and recover from `409`.
 - [ ] Add tests for commit-before-publish, project-before-session ordering, queue mode switches,
-  fresh migration stream IDs, trim-state accounting, reconnect races, bounded session snapshots,
-  and duplicate/reordered version application.
+      fresh migration stream IDs, trim-state accounting, reconnect races, bounded session snapshots,
+      and duplicate/reordered version application.
 - [ ] Update the existing durable-queue gym scenario to cover projects and add an in-memory scenario.
 - [ ] Run focused server/client/gym tests before Task 4.
 
@@ -1051,7 +1051,7 @@ addition to focused unit tests.
 - [ ] Implement case-insensitive collision suffixing with manual-update compare-and-set behavior.
 - [ ] Add explicit refresh/retry and ensure Home never enters the initialization queue.
 - [ ] Add tests for HTTPS/SSH/SCP remotes, malformed/local remotes, nested directories, duplicates,
-  timeouts, startup recovery, and a manual rename racing initialization.
+      timeouts, startup recovery, and a manual rename racing initialization.
 - [ ] Add a gym test proving session startup is not blocked by delayed initialization.
 - [ ] Run focused server/gym tests before Task 5.
 
@@ -1059,13 +1059,13 @@ addition to focused unit tests.
 
 - [ ] Implement bounded repository candidate collection and deterministic scoring.
 - [ ] Implement allowlisted unauthenticated hosting adapters for GitHub.com, GitLab.com, and
-  Bitbucket Cloud with strict provider path-component validation.
+      Bitbucket Cloud with strict provider path-component validation.
 - [ ] Implement the 256-pixel WebP normalizer, atomic content-addressed storage, and delayed orphan
-  collection with dereference timestamps and per-hash serialization.
+      collection with dereference timestamps and per-hash serialization.
 - [ ] Add asset serving, upload, delete/reset, conditional update, and project avatar events.
 - [ ] Add image fixtures and tests for scoring, formats, orientation, alpha, oversize bytes, pixel
-  bombs, corrupt images, symlink escapes, redirects, SSRF targets, timeouts, dedupe, replacement,
-  cache headers, and garbage collection.
+      bombs, corrupt images, symlink escapes, redirects, SSRF targets, timeouts, dedupe, replacement,
+      cache headers, and garbage collection.
 - [ ] Add HTTP tests proving a manual avatar cannot be overwritten by a late initializer.
 - [ ] Run focused images/server tests before Task 6.
 
@@ -1075,7 +1075,7 @@ addition to focused unit tests.
 - [ ] Add Home built-in avatar projection and mutation semantics.
 - [ ] Add project/workspace IDs and names to Happy session metadata.
 - [ ] Add tests for validation, suffixing, immutable fields, Home behavior, event publication, and
-  Happy serialization.
+      Happy serialization.
 - [ ] Add a gym scenario that starts Rig in the fixture home and observes a `home` project.
 - [ ] Run focused protocol/server/Happy/gym tests before Task 7.
 
@@ -1084,13 +1084,13 @@ addition to focused unit tests.
 - [ ] Add workspace protocol, table, versioned events, APIs, and parameter-stable idempotency.
 - [ ] Derive and reserve safe human-readable workspace paths under `$RIG_HOME/workspaces`.
 - [ ] Resolve refs before the write transaction, reject option-shaped inputs, create a detached
-  worktree from the verified OID, and perform post-create ownership verification.
+      worktree from the verified OID, and perform post-create ownership verification.
 - [ ] Reconcile interrupted `initializing` workspaces on daemon restart.
 - [ ] Add tests for duplicate names, retry IDs, invalid refs, non-Git projects, path boundaries,
-  option injection, parameter drift, archive-during-create, partial creation, stale Git registry
-  entries, unrelated preexisting paths, and restart reconciliation.
+      option injection, parameter drift, archive-during-create, partial creation, stale Git registry
+      entries, unrelated preexisting paths, and restart reconciliation.
 - [ ] Add a Docker gym test that creates a real Git worktree, waits for `ready`, and starts a session
-  with the original `projectId` plus the new `workspaceId`.
+      with the original `projectId` plus the new `workspaceId`.
 - [ ] Run focused server/process/gym tests before Task 8.
 
 ### Task 8: Archive managed workspaces safely
@@ -1098,15 +1098,15 @@ addition to focused unit tests.
 - [ ] Add explicit persisted session archival plus cached-session submission/event fencing.
 - [ ] Atomically mark the workspace/sessions and append all archive events.
 - [ ] Abort runs, descendants, background processes, and terminal attachments after commit while
-  proving late provider output cannot append after the terminal event.
+      proving late provider output cannot append after the terminal event.
 - [ ] Remove/unlock/prune the Git worktree with exact ownership and boundary validation, including
-  the missing-source and submodule cases.
+      the missing-source and submodule cases.
 - [ ] Implement `archive_failed`, retry, and daemon restart reconciliation.
 - [ ] Add tests for idempotency, active sessions, concurrent subagent insertion, late completion,
-  archive-during-create, delayed processes, source deletion, locked/submodule worktrees, deletion
-  failure, symlinks, path swaps, malicious stored/request paths, and event ordering.
+      archive-during-create, delayed processes, source deletion, locked/submodule worktrees, deletion
+      failure, symlinks, path swaps, malicious stored/request paths, and event ordering.
 - [ ] Add a Docker gym test proving all chats close, the worktree disappears, and both global and
-  session streams observe the terminal state.
+      session streams observe the terminal state.
 - [ ] Run focused server/process/gym tests before Task 9.
 
 ### Task 9: Verify the end-to-end contract
@@ -1115,9 +1115,9 @@ addition to focused unit tests.
 - [ ] Run `pnpm test:gym`.
 - [ ] Run `pnpm check`, `pnpm lint`, and `pnpm format:check`.
 - [ ] Verify project/session/workspace identity across delayed, duplicated, reordered, rejected, and
-  already-applied outcomes.
+      already-applied outcomes.
 - [ ] Verify initialization and avatar work stay within documented time, byte, candidate, and
-  retention bounds.
+      retention bounds.
 - [ ] Verify every user-facing string is human-readable English.
 - [ ] Update protocol documentation and README examples.
 
