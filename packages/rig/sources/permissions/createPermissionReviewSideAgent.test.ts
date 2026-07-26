@@ -72,6 +72,31 @@ describe("createPermissionReviewSideAgent", () => {
         await reviewer.close();
     });
 
+    it("serializes parallel reviews through its stateful model conversation", async () => {
+        const firstStarted = deferred<void>();
+        const releaseFirst = deferred<void>();
+        const recorded = recordingProvider({
+            waitOnCall: { call: 1, release: releaseFirst.promise, started: firstStarted.resolve },
+        });
+        const reviewer = sideAgent(recorded.provider, recorded.model);
+
+        const first = reviewer.review({
+            action: "first parallel action",
+            messages: [user("u1", "Run the requested release checks.")],
+        });
+        await firstStarted.promise;
+        const second = reviewer.review({
+            action: "second parallel action",
+            messages: [user("u1", "Run the requested release checks.")],
+        });
+        await Promise.resolve();
+        releaseFirst.resolve();
+
+        await Promise.all([first, second]);
+        expect(recorded.maxActiveStreams()).toBe(1);
+        await reviewer.close();
+    });
+
     it("forgets pre-reset authorization and sends a new prohibition as fresh evidence", async () => {
         const { provider, model, requests } = recordingProvider();
         const reviewer = sideAgent(provider, model);
@@ -158,7 +183,12 @@ function user(id: string, text: string): Message {
     return { role: "user", id, blocks: [{ type: "text", text }] };
 }
 
-function recordingProvider(options: { cutShortOnCall?: number } = {}) {
+function recordingProvider(
+    options: {
+        cutShortOnCall?: number;
+        waitOnCall?: { call: number; release: Promise<void>; started: () => void };
+    } = {},
+) {
     const model = defineModel({
         id: "openai/gpt-test",
         name: "GPT Test",
@@ -166,6 +196,8 @@ function recordingProvider(options: { cutShortOnCall?: number } = {}) {
         defaultThinkingLevel: "off",
     });
     const requests: Context[] = [];
+    let activeStreams = 0;
+    let maxActiveStreams = 0;
     const provider = defineProvider({
         id: "codex",
         models: [model],
@@ -204,15 +236,25 @@ function recordingProvider(options: { cutShortOnCall?: number } = {}) {
             };
             return {
                 async *[Symbol.asyncIterator]() {
-                    if (call === options.cutShortOnCall) {
-                        yield {
-                            error: message,
-                            reason: "aborted" as const,
-                            type: "error" as const,
-                        };
-                        return;
+                    activeStreams += 1;
+                    maxActiveStreams = Math.max(maxActiveStreams, activeStreams);
+                    try {
+                        if (call === options.waitOnCall?.call) {
+                            options.waitOnCall.started();
+                            await options.waitOnCall.release;
+                        }
+                        if (call === options.cutShortOnCall) {
+                            yield {
+                                error: message,
+                                reason: "aborted" as const,
+                                type: "error" as const,
+                            };
+                            return;
+                        }
+                        yield { message, reason: "stop" as const, type: "done" as const };
+                    } finally {
+                        activeStreams -= 1;
                     }
-                    yield { message, reason: "stop" as const, type: "done" as const };
                 },
                 async result() {
                     return message;
@@ -220,5 +262,13 @@ function recordingProvider(options: { cutShortOnCall?: number } = {}) {
             };
         },
     });
-    return { model: model as never, provider, requests };
+    return { maxActiveStreams: () => maxActiveStreams, model: model as never, provider, requests };
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
+    let resolvePromise: (value: T | PromiseLike<T>) => void = () => {};
+    const promise = new Promise<T>((resolve) => {
+        resolvePromise = resolve;
+    });
+    return { promise, resolve: (value) => resolvePromise(value as T) };
 }

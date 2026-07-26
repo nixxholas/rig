@@ -51,6 +51,15 @@ export function createPermissionReviewSideAgent(options: {
         tools: options.tools,
     });
     let reviewedMessageCount = 0;
+    let reviewQueue = Promise.resolve();
+    const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
+        const result = reviewQueue.then(operation);
+        reviewQueue = result.then(
+            () => undefined,
+            () => undefined,
+        );
+        return result;
+    };
     // A review that never finished leaves a question with no answer at the end of the reviewer's
     // history, and the next review would stack its own question on top of that. Start the
     // reviewer over instead, which also means the next review has to resend the conversation.
@@ -59,53 +68,52 @@ export function createPermissionReviewSideAgent(options: {
         await agent.reset();
     };
     return {
-        reset: discardUnfinishedReview,
-        async review(request: PermissionReviewRequest): Promise<PermissionReviewResponse> {
-            const first = reviewedMessageCount === 0;
-            // Older turns are already in the reviewer's own history, so only the new ones are
-            // sent. Budgeting still runs over the whole conversation, because whether user
-            // authorization survived the budget is a property of all of it, not of the delta.
-            const whole = createAutoPermissionTranscript(request.messages);
-            const delta = first
-                ? whole
-                : createAutoPermissionTranscript(request.messages.slice(reviewedMessageCount));
-            const conversation =
-                delta.text.length === 0
-                    ? "No new conversation since your last review."
-                    : delta.text;
-            const prompt = [
-                ...(first ? [] : [PERMISSION_REVIEW_FOLLOWUP_REMINDER, ""]),
-                `<conversation${first ? "" : ' continued="true"'}>`,
-                conversation,
-                "</conversation>",
-                "",
-                "<proposed_action>",
-                request.action,
-                "</proposed_action>",
-            ].join("\n");
-            let result;
-            try {
-                result = await agent.send(
-                    prompt,
-                    request.signal === undefined ? {} : { signal: request.signal },
-                );
-            } catch (error) {
-                await discardUnfinishedReview();
-                throw error;
-            }
-            if (result.stopReason !== "stop") {
-                await discardUnfinishedReview();
-                return { text: "", userEvidenceOmitted: whole.userEvidenceOmitted };
-            }
-            reviewedMessageCount = request.messages.length;
-            return {
-                text: finalText(result.messages),
-                userEvidenceOmitted: whole.userEvidenceOmitted,
-            };
-        },
-        async close() {
-            await agent.close();
-        },
+        reset: () => serialize(discardUnfinishedReview),
+        review: (request: PermissionReviewRequest): Promise<PermissionReviewResponse> =>
+            serialize(async () => {
+                const first = reviewedMessageCount === 0;
+                // Older turns are already in the reviewer's own history, so only the new ones are
+                // sent. Budgeting still runs over the whole conversation, because whether user
+                // authorization survived the budget is a property of all of it, not of the delta.
+                const whole = createAutoPermissionTranscript(request.messages);
+                const delta = first
+                    ? whole
+                    : createAutoPermissionTranscript(request.messages.slice(reviewedMessageCount));
+                const conversation =
+                    delta.text.length === 0
+                        ? "No new conversation since your last review."
+                        : delta.text;
+                const prompt = [
+                    ...(first ? [] : [PERMISSION_REVIEW_FOLLOWUP_REMINDER, ""]),
+                    `<conversation${first ? "" : ' continued="true"'}>`,
+                    conversation,
+                    "</conversation>",
+                    "",
+                    "<proposed_action>",
+                    request.action,
+                    "</proposed_action>",
+                ].join("\n");
+                let result;
+                try {
+                    result = await agent.send(
+                        prompt,
+                        request.signal === undefined ? {} : { signal: request.signal },
+                    );
+                } catch (error) {
+                    await discardUnfinishedReview();
+                    throw error;
+                }
+                if (result.stopReason !== "stop") {
+                    await discardUnfinishedReview();
+                    return { text: "", userEvidenceOmitted: whole.userEvidenceOmitted };
+                }
+                reviewedMessageCount = request.messages.length;
+                return {
+                    text: finalText(result.messages),
+                    userEvidenceOmitted: whole.userEvidenceOmitted,
+                };
+            }),
+        close: () => serialize(() => agent.close()),
     };
 }
 
