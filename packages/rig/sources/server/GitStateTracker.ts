@@ -73,7 +73,10 @@ interface RepositoryTracker {
     reconcileTimer: NodeJS.Timeout | undefined;
     scanning: boolean;
     scanController: AbortController | undefined;
+    /** Latest scan result, whether or not its live delivery succeeded. */
     snapshot: GitChangeSnapshot | undefined;
+    /** Latest snapshot clients actually received; drives republish, not reads. */
+    delivered: GitChangeSnapshot | undefined;
     unwatch: (() => void) | undefined;
 }
 
@@ -160,6 +163,7 @@ export class GitStateTracker {
             scanController: undefined,
             scanning: false,
             snapshot: undefined,
+            delivered: undefined,
             unwatch: undefined,
         };
         this.#trackers.set(key, tracker);
@@ -414,13 +418,15 @@ export class GitStateTracker {
         try {
             const state = await this.#runScan(tracker.entity, controller.signal);
             if (this.#disposed || tracker.generation !== generation) return;
-            if (!sameState(tracker.snapshot, state)) {
+            // Republication is decided against what clients actually received. Comparing against
+            // the last scan instead would let a throwing observer — a busy SQLite write, a bad
+            // subscriber — silence an idle repository forever, because the next identical scan
+            // would look like "no change" even though the change was never delivered.
+            if (!sameState(tracker.delivered, state)) {
                 const snapshot = this.#stamp(tracker.key, state);
-                // The snapshot counts as published only once it has actually been delivered. A
-                // throwing observer — a busy SQLite write, a bad subscriber — would otherwise leave
-                // the tracker believing clients hold a state they never received, and the equality
-                // check below would suppress every republish until the repository changed again.
-                if (this.#deliver(tracker.entity, snapshot)) tracker.snapshot = snapshot;
+                // Reads report the latest scan either way; only delivery decides republication.
+                tracker.snapshot = snapshot;
+                if (this.#deliver(tracker.entity, snapshot)) tracker.delivered = snapshot;
             }
             tracker.backoffMs = BACKOFF_START_MS;
             tracker.backoffUntil = 0;

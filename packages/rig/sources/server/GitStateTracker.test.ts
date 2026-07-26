@@ -250,6 +250,20 @@ describe("GitStateTracker", () => {
         expect(published.at(-1)).toMatchObject({ insertions: 1 });
     });
 
+    it("serves the latest scan from a read even when its delivery failed", async () => {
+        const tracker = createTracker({
+            onLiveEvent: () => {
+                throw new Error("subscriber exploded");
+            },
+            scan: countingScan(() => ({ insertions: 9 })),
+        });
+
+        const snapshot = await tracker.refresh(entity());
+
+        // Reads report what was scanned; only republication is decided by what was delivered.
+        expect(snapshot).toMatchObject({ insertions: 9 });
+    });
+
     it("keeps scanning after a failing observer rather than treating it as a Git failure", async () => {
         const scan = countingScan();
         const tracker = createTracker({
