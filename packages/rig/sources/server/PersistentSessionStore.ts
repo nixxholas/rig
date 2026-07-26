@@ -1423,6 +1423,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     run_id,
                     batch_id,
                     tool_call_id,
+                    provider_tool_call_id,
                     tool_call_index,
                     tool_name,
                     tool_arguments_json,
@@ -1435,7 +1436,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     consumed,
                     created_at_ms,
                     resolved_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(session_id, request_id) DO UPDATE SET
                     response_json = excluded.response_json,
                     result_json = excluded.result_json,
@@ -1450,6 +1451,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 call.runId,
                 call.batchId,
                 call.toolCallId,
+                call.providerToolCallId ?? null,
                 call.toolCallIndex,
                 call.toolName,
                 JSON.stringify(call.toolArguments),
@@ -1749,6 +1751,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             .all(sessionId)
             .map((row) => {
                 const permissionJson = readOptionalString(row, "permission_json");
+                const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
                 const responseJson = readOptionalString(row, "response_json");
                 const resultJson = readOptionalString(row, "result_json");
                 const resolvedAt = readOptionalNumber(row, "resolved_at_ms");
@@ -1760,6 +1763,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     ...(permissionJson === undefined
                         ? {}
                         : { permission: JSON.parse(permissionJson) }),
+                    ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
                     request: JSON.parse(readString(row, "request_json")),
                     ...(responseJson === undefined ? {} : { response: JSON.parse(responseJson) }),
                     ...(resolvedAt === undefined ? {} : { resolvedAt }),

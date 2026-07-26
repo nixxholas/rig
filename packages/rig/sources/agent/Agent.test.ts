@@ -196,7 +196,8 @@ describe("Agent", () => {
                 blocks: [
                     expect.objectContaining({
                         type: "tool_result",
-                        toolCallId: "observer-failure-tool",
+                        toolCallId: expect.any(String),
+                        providerToolCallId: "observer-failure-tool",
                         display: "State changed.",
                     }),
                 ],
@@ -789,6 +790,16 @@ describe("Agent", () => {
             expect(contexts[1]?.systemPrompt).toBe(contexts[0]?.systemPrompt);
             expect(contexts[1]?.tools).toEqual(contexts[0]?.tools);
             expect(contexts[1]?.messages.slice(0, -1)).toEqual(contexts[0]?.messages.slice(0, 2));
+            const replayedToolCall = contexts[2]?.messages[2];
+            if (replayedToolCall?.role !== "assistant") {
+                throw new Error("Expected the compacted tool call.");
+            }
+            const replayedToolCallId = replayedToolCall.content.find(
+                (content) => content.type === "toolCall",
+            )?.id;
+            if (replayedToolCallId === undefined) {
+                throw new Error("Expected the compacted tool call identifier.");
+            }
             expect(contexts[2]?.messages).toMatchObject([
                 {
                     role: "user",
@@ -805,11 +816,19 @@ describe("Agent", () => {
                 },
                 {
                     role: "assistant",
-                    content: [{ type: "toolCall", id: "call-echo", name: "echo" }],
+                    content: [
+                        {
+                            type: "toolCall",
+                            id: replayedToolCallId,
+                            providerToolCallId: "call-echo",
+                            name: "echo",
+                        },
+                    ],
                 },
                 {
                     role: "toolResult",
-                    toolCallId: "call-echo",
+                    toolCallId: replayedToolCallId,
+                    providerToolCallId: "call-echo",
                     content: [{ type: "text", text: toolResult }],
                 },
             ]);
@@ -1533,7 +1552,8 @@ describe("Agent", () => {
             blocks: [
                 {
                     type: "tool_result",
-                    toolCallId: "call-wait",
+                    toolCallId: expect.any(String),
+                    providerToolCallId: "call-wait",
                     toolName: "wait",
                     rendered: [{ type: "text", text: "Interrupted by user." }],
                     isError: true,
@@ -1555,14 +1575,16 @@ describe("Agent", () => {
                 content: [
                     {
                         type: "toolCall",
-                        id: "call-wait",
+                        id: expect.any(String),
+                        providerToolCallId: "call-wait",
                         name: "wait",
                     },
                 ],
             },
             {
                 role: "toolResult",
-                toolCallId: "call-wait",
+                toolCallId: expect.any(String),
+                providerToolCallId: "call-wait",
                 toolName: "wait",
                 content: [{ type: "text", text: "Interrupted by user." }],
                 isError: true,
@@ -1641,7 +1663,8 @@ describe("Agent", () => {
             blocks: [
                 {
                     type: "tool_result",
-                    toolCallId: "call-complete",
+                    toolCallId: expect.any(String),
+                    providerToolCallId: "call-complete",
                     rendered: [{ type: "text", text: "real result" }],
                     display: "finished real result",
                 },
@@ -1819,7 +1842,7 @@ describe("Agent", () => {
                 display: "Tool 'failing' failed: test cause",
                 failure: { kind: "execution_failed", message: "test cause" },
                 isError: true,
-                toolCallId: "call-failing",
+                toolCallId: expect.any(String),
             }),
         ]);
     });

@@ -91,10 +91,22 @@ describe("durable tool execution barriers", () => {
         expect(order).toEqual(["local", "durable"]);
         expect(result.messages.slice(2, 4).map((entry) => entry.role)).toEqual(["agent", "agent"]);
         expect(result.messages[2]).toMatchObject({
-            blocks: [{ toolCallId: "immediate-second", type: "tool_result" }],
+            blocks: [
+                {
+                    providerToolCallId: "immediate-second",
+                    toolCallId: expect.any(String),
+                    type: "tool_result",
+                },
+            ],
         });
         expect(result.messages[3]).toMatchObject({
-            blocks: [{ toolCallId: "durable-first", type: "tool_result" }],
+            blocks: [
+                {
+                    providerToolCallId: "durable-first",
+                    toolCallId: expect.any(String),
+                    type: "tool_result",
+                },
+            ],
         });
     });
 });

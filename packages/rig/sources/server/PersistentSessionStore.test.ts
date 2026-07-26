@@ -252,18 +252,25 @@ describe("PersistentSessionStore", () => {
             store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
             const restored = store.get(session.id);
             if (restored === undefined) throw new Error("Expected restored session.");
+            const pendingUserInputs = restored.snapshot().pendingUserInputs;
+            const databaseRequestId = pendingUserInputs[0]?.requestId;
+            const cacheRequestId = pendingUserInputs[1]?.requestId;
+            if (databaseRequestId === undefined || cacheRequestId === undefined) {
+                throw new Error("Expected both restored user questions.");
+            }
+            expect(databaseRequestId).not.toBe(cacheRequestId);
             expect(restored.snapshot()).toMatchObject({
                 pendingUserInputs: [
-                    { requestId: "durable-question-one" },
-                    { requestId: "durable-question-two" },
+                    { requestId: databaseRequestId },
+                    { requestId: cacheRequestId },
                 ],
                 status: "running",
             });
 
             const databaseAnswer = { answers: { database: ["PostgreSQL"] } };
             const cacheAnswer = { answers: { cache: ["Redis"] } };
-            expect(restored.answerUserInput("durable-question-two", cacheAnswer)).toBeDefined();
-            expect(restored.answerUserInput("durable-question-one", databaseAnswer)).toBeDefined();
+            expect(restored.answerUserInput(cacheRequestId, cacheAnswer)).toBeDefined();
+            expect(restored.answerUserInput(databaseRequestId, databaseAnswer)).toBeDefined();
             await expect(restored.waitForRun(submitted.runId)).resolves.toEqual({
                 status: "completed",
             });
@@ -277,7 +284,8 @@ describe("PersistentSessionStore", () => {
                         },
                     ],
                     role: "toolResult",
-                    toolCallId: "durable-question-one",
+                    providerToolCallId: "durable-question-one",
+                    toolCallId: databaseRequestId,
                 },
                 {
                     content: [
@@ -287,12 +295,13 @@ describe("PersistentSessionStore", () => {
                         },
                     ],
                     role: "toolResult",
-                    toolCallId: "durable-question-two",
+                    providerToolCallId: "durable-question-two",
+                    toolCallId: cacheRequestId,
                 },
             ]);
-            expect(restored.answerUserInput("durable-question-one", databaseAnswer)).toBeDefined();
+            expect(restored.answerUserInput(databaseRequestId, databaseAnswer)).toBeDefined();
             expect(() =>
-                restored.answerUserInput("durable-question-one", {
+                restored.answerUserInput(databaseRequestId, {
                     answers: { database: ["SQLite"] },
                 }),
             ).toThrow("already has a different answer");

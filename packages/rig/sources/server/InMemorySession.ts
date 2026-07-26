@@ -1523,6 +1523,9 @@ export class InMemorySession {
                     ...(options.durable.permission === undefined
                         ? {}
                         : { permission: { ...options.durable.permission } }),
+                    ...(options.durable.providerToolCallId === undefined
+                        ? {}
+                        : { providerToolCallId: options.durable.providerToolCallId }),
                     request: structuredClone(request),
                     runId,
                     sessionId: this.id,
@@ -3124,13 +3127,26 @@ export class InMemorySession {
         const tool = runtime.agent.tools.find((candidate) => candidate.name === call.toolName);
         if (tool?.resolveUserInput === undefined) {
             call.result = createErrorToolResultBlock(
-                { id: call.toolCallId, name: call.toolName },
+                {
+                    id: call.toolCallId,
+                    name: call.toolName,
+                    ...(call.providerToolCallId === undefined
+                        ? {}
+                        : { providerToolCallId: call.providerToolCallId }),
+                },
                 `Tool '${call.toolName}' cannot restore its durable user answer.`,
                 { kind: "execution_failed" },
             );
         } else {
             const result = tool.resolveUserInput(response, call.toolArguments as never);
-            call.result = createToolResultBlock(tool, call.toolArguments, result, call.toolCallId);
+            call.result = createToolResultBlock(
+                tool,
+                call.toolArguments,
+                result,
+                call.toolCallId,
+                undefined,
+                call.providerToolCallId,
+            );
         }
         call.status = "completed";
         this.#persistence?.upsertDurableUserInput?.(call);

@@ -155,6 +155,8 @@ export interface ToolExecutionOptions {
     signal?: AbortSignal;
     /** Exact provider selected for the active agent turn. */
     provider?: Provider;
+    /** Original identifier emitted by the provider for this tool call. */
+    providerToolCallId?: string;
     toolBatchId?: string;
     toolCallId?: string;
     toolCallIndex?: number;

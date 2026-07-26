@@ -6239,7 +6239,8 @@ describe("CodingAssistantApp", () => {
         expect(resultLines).toHaveLength(1);
         expect(contexts[1]?.messages[2]).toMatchObject({
             role: "toolResult",
-            toolCallId: "tool-call-1",
+            providerToolCallId: "tool-call-1",
+            toolCallId: expect.any(String),
             toolName: "exec_command",
             content: [
                 {

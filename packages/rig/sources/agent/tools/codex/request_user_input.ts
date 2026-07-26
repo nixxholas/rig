@@ -158,6 +158,9 @@ export const codexRequestUserInputTool = defineTool({
                 durable: {
                     batchId: execution.toolBatchId,
                     kind: "question",
+                    ...(execution.providerToolCallId === undefined
+                        ? {}
+                        : { providerToolCallId: execution.providerToolCallId }),
                     toolArguments: {
                         ...(autoResolutionMs === undefined ? {} : { autoResolutionMs }),
                         questions,

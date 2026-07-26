@@ -339,6 +339,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 run_id TEXT NOT NULL,
                 batch_id TEXT NOT NULL,
                 tool_call_id TEXT NOT NULL,
+                provider_tool_call_id TEXT,
                 tool_call_index INTEGER NOT NULL,
                 tool_name TEXT NOT NULL,
                 tool_arguments_json TEXT NOT NULL,

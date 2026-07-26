@@ -297,11 +297,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     if (options.signal?.aborted) {
                         throw new Error("Provider stream was aborted.");
                     }
-                    const event = assignRigToolCallEventIds(
-                        next.value,
-                        rigToolCallIds,
-                        idFactory,
-                    );
+                    const event = assignRigToolCallEventIds(next.value, rigToolCallIds, idFactory);
                     if (event.type === "start") {
                         pendingStartEvent = event;
                         continue;
@@ -316,11 +312,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     }
                     await options.onEvent?.(event);
                 }
-                return assignRigToolCallIds(
-                    await stream.result(),
-                    rigToolCallIds,
-                    idFactory,
-                );
+                return assignRigToolCallIds(await stream.result(), rigToolCallIds, idFactory);
             };
             const outcome = await raceWithAbort(consume(), options.signal);
             if (outcome === ABORTED_BY_SIGNAL) {
@@ -1285,6 +1277,7 @@ async function executeToolCall(
                 onProgress?: (display: string) => void;
                 onStatus?: (status: string) => void;
                 provider?: Provider;
+                providerToolCallId?: string;
                 signal?: AbortSignal;
                 toolBatchId?: string;
                 toolCallId?: string;
@@ -1297,6 +1290,7 @@ async function executeToolCall(
             onProgress?: (display: string) => void;
             onStatus?: (status: string) => void;
             provider?: Provider;
+            providerToolCallId?: string;
             signal?: AbortSignal;
             toolBatchId?: string;
             toolCallId?: string;
@@ -1305,6 +1299,9 @@ async function executeToolCall(
             messages: options.messages,
             model: options.model,
             provider: options.provider,
+            ...(toolCall.providerToolCallId === undefined
+                ? {}
+                : { providerToolCallId: toolCall.providerToolCallId }),
             toolCallId: toolCall.id,
         };
         if (tool.execution === "durable") {

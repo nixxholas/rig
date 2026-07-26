@@ -85,6 +85,9 @@ export const claudeAskUserQuestionTool = defineTool({
                 durable: {
                     batchId: execution.toolBatchId,
                     kind: "question",
+                    ...(execution.providerToolCallId === undefined
+                        ? {}
+                        : { providerToolCallId: execution.providerToolCallId }),
                     toolArguments: { questions },
                     toolCallId: execution.toolCallId,
                     toolCallIndex: execution.toolCallIndex,

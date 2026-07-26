@@ -13,6 +13,7 @@ export interface DurableUserInputCall {
     createdAt: number;
     kind: "permission" | "question";
     permission?: DurableUserInputPermission;
+    providerToolCallId?: string;
     request: UserInputRequest;
     response?: UserInputResponse;
     resolvedAt?: number;
@@ -30,6 +31,7 @@ export interface DurableUserInputOptions {
     batchId: string;
     kind: DurableUserInputCall["kind"];
     permission?: DurableUserInputPermission;
+    providerToolCallId?: string;
     toolArguments: unknown;
     toolCallId: string;
     toolCallIndex: number;
