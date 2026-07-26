@@ -13,6 +13,7 @@ import { GitStateTracker } from "./GitStateTracker.js";
 import { getEnvironmentLocalServerPaths } from "./getEnvironmentLocalServerPaths.js";
 import { installDaemonProcessFailureLogging } from "./installDaemonProcessFailureLogging.js";
 import { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyIntegration.js";
+import { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
 import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
@@ -269,10 +270,13 @@ export async function runLocalProtocolServer(
             modelCatalog,
             ...(happyModule === undefined
                 ? {}
-                : {
-                      onSessionAccess: (session) => happySyncService?.attach(session),
-                      onSessionEvent: (event, session) => happySyncService?.observe(event, session),
-                  }),
+                : { onSessionAccess: (session) => happySyncService?.attach(session) }),
+            onSessionEvent: (event, session) => {
+                if (happyModule !== undefined) happySyncService?.observe(event, session);
+                if (store !== undefined && gitStateTracker !== undefined) {
+                    markGitStateFromSessionEvent(event, store, gitStateTracker);
+                }
+            },
             taskDrain,
         });
         if (happyModule !== undefined && happyConfiguration !== undefined) {
