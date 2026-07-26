@@ -58,7 +58,9 @@ describe("GitStateTracker watching", () => {
         const published: GitChangeSnapshot[] = [];
         const tracker = new GitStateTracker({
             onSnapshot: (_entity, snapshot) => published.push(snapshot),
-            tuning: { debounceMs: 20, maximumDebounceMs: 50, reconcileIntervalMs: 600_000 },
+            // External Git changes must eventually arrive even when the platform drops a watch
+            // event. Production uses a 30-second reconciliation poll; shorten it for this test.
+            tuning: { debounceMs: 20, maximumDebounceMs: 50, reconcileIntervalMs: 100 },
         });
         cleanups.push(async () => tracker.dispose());
         const entity = resolveGitTrackedEntity(projectFor(repository));
