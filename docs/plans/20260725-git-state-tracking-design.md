@@ -20,7 +20,7 @@ The observable result is:
   removed by the user through the API; Rig never removes it silently.
 - Directory presence, Git capability, branch, and HEAD are re-derived once at daemon startup and
   published as ordinary durable entity updates.
-- For every *watched* project and workspace, Rig maintains a live change snapshot: branch, upstream
+- For every _watched_ project and workspace, Rig maintains a live change snapshot: branch, upstream
   divergence, HEAD, total insertions and deletions, and the per-file change list with per-file
   insertion and deletion counts.
 - Commits, checkouts, branch switches, and rebases are observed at kernel latency on every platform.
@@ -38,7 +38,7 @@ The observable result is:
 
 The repository on disk is the only source of truth. Rig caches a snapshot of it and publishes
 changes. Nothing in Rig's behavior may depend on the cache being current, and a lost or stale cache
-is always repairable by rescanning. This is why the detailed change state is deliberately *not*
+is always repairable by rescanning. This is why the detailed change state is deliberately _not_
 durable: recomputing it costs one bounded `git diff`, while persisting it would grow the durable
 event log without adding recoverable information.
 
@@ -50,7 +50,7 @@ watching and expect a sensible answer without forcing a scan.
 
 Rig watches an entity when a client has explicitly asked it to, or when the entity has a live
 session. Nothing else. In particular, appearing in a `/state` response does not make an entity
-active: `/state` returns *every* project, so that rule would mean "watch everything" and turn the
+active: `/state` returns _every_ project, so that rule would mean "watch everything" and turn the
 LRU cap into permanent churn.
 
 Clients declare interest with `POST /git/watch` (below). Interest expires after five minutes unless
@@ -64,7 +64,7 @@ untracked. There is no separate "staged" total, no separate "uncommitted" total,
 Per-file `staged` and `unstaged` flags are still reported, so a client that wants to distinguish
 them can, but the headline totals never make the user choose.
 
-One honest caveat that must be stated in the API docs: `git diff <base>` reports the *net* state of
+One honest caveat that must be stated in the API docs: `git diff <base>` reports the _net_ state of
 the working tree against the base. If a change is staged and then reverted in the working tree, the
 net is zero and the file does not appear in the totals. It still appears in the file list with
 `staged: true`, sourced from status rather than diff.
@@ -72,7 +72,7 @@ net is zero and the file does not appear in the totals. It still appears in the 
 ### The comparison base is an immutable commit, never a moving ref
 
 A managed workspace's base is derived from the commit OID that existed when the workspace was
-created, not from the *text* of `baseRef`. `ProjectRepository` already resolves that OID at creation
+created, not from the _text_ of `baseRef`. `ProjectRepository` already resolves that OID at creation
 time but throws it away, persisting only the ref text. This design persists it as `base_commit`.
 
 ```text
@@ -122,11 +122,11 @@ Reading a diff does not, by itself, run anything. That intuition is correct and 
 rather than assumed. Against a scratch repository with a `core.fsmonitor` hook, a `diff.external`
 driver, and `.gitattributes` textconv drivers installed:
 
-| Command | Helper executions |
-| --- | --- |
-| `git diff -z --raw --numstat --find-renames <base>` — the scan diff | **0** |
-| `git status --porcelain=v2 -z --branch --untracked-files=all` | **1** (`core.fsmonitor`) |
-| `git diff <base> -- <path>` — the patch endpoint | **3** (textconv, then `diff.external`) |
+| Command                                                             | Helper executions                      |
+| ------------------------------------------------------------------- | -------------------------------------- |
+| `git diff -z --raw --numstat --find-renames <base>` — the scan diff | **0**                                  |
+| `git status --porcelain=v2 -z --branch --untracked-files=all`       | **1** (`core.fsmonitor`)               |
+| `git diff <base> -- <path>` — the patch endpoint                    | **3** (textconv, then `diff.external`) |
 
 So the scan's diff is clean, and exactly two invocations are exposed. `--numstat`/`--raw` never
 invoke textconv or an external diff driver even for binary files — they emit `-`/`-` instead.
@@ -141,7 +141,7 @@ Rig cannot reuse that answer, because Rig has no trust prompt and the threat mod
 Rig's exposure is a **sandbox escape**, not an untrusted-repository problem:
 `createSandboxFilesystemConfig` deliberately makes `.git` writable in `workspace_write` and `auto`
 so the agent can commit. An agent can therefore run `git config core.fsmonitor ./payload` with no
-permission prompt at all, and the daemon — which is *not* sandboxed — executes it on the next
+permission prompt at all, and the daemon — which is _not_ sandboxed — executes it on the next
 automatic scan. Sandboxed code gets itself run unsandboxed, with no user action.
 
 ### Scans run inside Rig's own read-only sandbox
@@ -159,10 +159,10 @@ network rule at all, so a helper Git spawns inherits a sandbox in which it can r
 Measured, on a repository carrying a `core.fsmonitor` payload that appends to a log, writes a file,
 and curls a URL:
 
-| | helper ran to effect | file written | network |
-| --- | --- | --- | --- |
-| unsandboxed, no flags | yes | yes | yes |
-| sandboxed `read_only`, no flags | no observable effect | no | no |
+|                                 | helper ran to effect | file written | network |
+| ------------------------------- | -------------------- | ------------ | ------- |
+| unsandboxed, no flags           | yes                  | yes          | yes     |
+| sandboxed `read_only`, no flags | no observable effect | no           | no      |
 
 The flags stay as well, because they are free and they stop the helper from being spawned at all
 rather than spawning it into a cage:
@@ -177,15 +177,15 @@ Two implementation requirements come out of measuring the cost, and both are loa
 
 **Resolve the real Git binary once, at tracker construction.** On macOS `/usr/bin/git` is the
 `xcrun` shim, which writes a cache file into `TMPDIR` on every invocation. Inside a sandbox with no
-writable temp that write fails and the shim falls back to an expensive path resolution *every single
-time*:
+writable temp that write fails and the shim falls back to an expensive path resolution _every single
+time_:
 
-| Invocation | Per run |
-| --- | --- |
-| `git status`, unsandboxed | 11 ms |
+| Invocation                                       | Per run    |
+| ------------------------------------------------ | ---------- |
+| `git status`, unsandboxed                        | 11 ms      |
 | sandboxed, `/usr/bin/git` shim, no writable temp | **409 ms** |
-| sandboxed, resolved real Git binary | 11 ms |
-| sandboxed, shim, temp writable | 14 ms |
+| sandboxed, resolved real Git binary              | 11 ms      |
+| sandboxed, shim, temp writable                   | 14 ms      |
 
 So the sandbox itself costs ~3 ms; the shim costs 400. The tracker resolves the Git executable once
 (`xcrun --find git` on macOS, `PATH` lookup elsewhere), caches it, and invokes it directly.
@@ -255,9 +255,9 @@ interface ProjectWorkspace {
 interface GitRepositoryFacts {
     ahead: number;
     behind: number;
-    branch?: string;   // absent when detached or unborn
+    branch?: string; // absent when detached or unborn
     detached: boolean;
-    head?: string;     // commit OID, absent on an unborn HEAD
+    head?: string; // commit OID, absent on an unborn HEAD
     upstream?: string; // e.g. "origin/main"
 }
 ```
@@ -274,12 +274,19 @@ carried forward, and nothing reads it.
 
 ```ts
 type GitFileChangeStatus =
-    | "added" | "modified" | "deleted" | "renamed" | "copied"
-    | "type_changed" | "untracked" | "conflicted" | "submodule";
+    | "added"
+    | "modified"
+    | "deleted"
+    | "renamed"
+    | "copied"
+    | "type_changed"
+    | "untracked"
+    | "conflicted"
+    | "submodule";
 
 interface GitFileChange {
     binary: boolean;
-    deletions?: number;    // absent for binary, submodule, and uncounted files
+    deletions?: number; // absent for binary, submodule, and uncounted files
     insertions?: number;
     path: string;
     previousPath?: string; // renames and copies
@@ -292,23 +299,23 @@ type GitComparisonState = "ready" | "unavailable";
 
 interface GitChangeSnapshot {
     base?: string;
-    changedFiles: number;   // total, even when `files` is truncated
+    changedFiles: number; // total, even when `files` is truncated
     comparison: GitComparisonState;
     countsExact: boolean;
     deletions: number;
-    error?: string;         // human-readable, set for scan failure or unavailable comparison
+    error?: string; // human-readable, set for scan failure or unavailable comparison
     facts: GitRepositoryFacts;
     files: readonly GitFileChange[];
     filesTruncated: boolean;
-    generation: string;     // daemon run identity
+    generation: string; // daemon run identity
     insertions: number;
     scannedAt: number;
-    version: number;        // monotonic per entity within one generation
+    version: number; // monotonic per entity within one generation
 }
 ```
 
 `insertions` and `deletions` are totals across every changed file, including files omitted from
-`files` by the truncation cap — *provided* `countsExact` is true. Any cap that suppresses counting,
+`files` by the truncation cap — _provided_ `countsExact` is true. Any cap that suppresses counting,
 any truncated command output, and any failed count sets `countsExact: false`. The earlier claim that
 a 16 MiB output cap still yields exact totals was simply false and is withdrawn.
 
@@ -317,7 +324,7 @@ counter held by `GitStateTracker` in a `Map<entityId, number>` that survives LRU
 re-tracked entity never restarts at 1 and freezes a client. A client replaces its stored snapshot
 when the generation differs, and otherwise only when the version is greater. Bootstrap and prelude
 snapshots are unconditional replacements. This matters because `PersistentGlobalEventQueue`
-deliberately reuses its stream ID across restarts, so a durable-mode client does *not* get a `409`
+deliberately reuses its stream ID across restarts, so a durable-mode client does _not_ get a `409`
 to force a reload.
 
 ### Schema
@@ -400,7 +407,7 @@ If-Match: "<project version>"
 - Publishes `project_updated` with `removedAt` set. Clients hide removed projects.
 
 Revival: resolving a session cwd that matches a removed project's path clears `removed_at_ms`,
-re-reserves a name and storage key, and bumps the version — inside the *existing* session-creation
+re-reserves a name and storage key, and bumps the version — inside the _existing_ session-creation
 transaction, publishing `project_updated` before `session_created`, preserving the current ordering
 contract.
 
@@ -436,20 +443,20 @@ completes after eviction is discarded rather than publishing against closed watc
 
 ### Triggers
 
-| Source | Latency | Cost |
-| --- | --- | --- |
-| Rig tool execution that may write | immediate | none |
-| Control-directory watches (below) | kernel | ~4 directory watches per repo |
-| `fs.watch(root, { recursive: true })` on macOS and Windows | kernel | 1 handle per repo |
-| Reconciliation poll, always on | 30 s, jittered | 1 timer per repo |
-| Degraded working-tree poll where no kernel backend exists | see below | capped, jittered |
-| Client `GET .../git?refresh=1` | immediate | none |
+| Source                                                     | Latency        | Cost                          |
+| ---------------------------------------------------------- | -------------- | ----------------------------- |
+| Rig tool execution that may write                          | immediate      | none                          |
+| Control-directory watches (below)                          | kernel         | ~4 directory watches per repo |
+| `fs.watch(root, { recursive: true })` on macOS and Windows | kernel         | 1 handle per repo             |
+| Reconciliation poll, always on                             | 30 s, jittered | 1 timer per repo              |
+| Degraded working-tree poll where no kernel backend exists  | see below      | capped, jittered              |
+| Client `GET .../git?refresh=1`                             | immediate      | none                          |
 
 **Control-directory watches must watch directories, not files.** Git replaces `HEAD`, `index`, and
 `packed-refs` by writing a lockfile and renaming it over the target. `fs.watch` on a file follows the
 inode, so after the first commit the watch is attached to a dead inode and every later commit is
 invisible. The first draft's four file watches would have failed its own acceptance scenario. Rig
-instead watches the *containing directories* and filters by entry name:
+instead watches the _containing directories_ and filters by entry name:
 
 ```text
 <gitdir>                     -> HEAD, index, MERGE_HEAD, REBASE_HEAD  (per-worktree state)
@@ -489,7 +496,7 @@ Linux-specific tests. Both reviewers independently landed on 2–4 engineer-week
 
 **Decision: the Linux inotify backend is deferred out of v1.** Not because it is impossible, but
 because its cost/benefit is poor once the other triggers are correct. With directory-based control
-watches, commits, checkouts, branch switches, rebases, and fetches are at kernel latency on *every*
+watches, commits, checkouts, branch switches, rebases, and fetches are at kernel latency on _every_
 platform. Rig's own writes cover agent activity everywhere. The Linux backend would improve exactly
 one case: a user hand-editing files in their own terminal on Linux, in a repository Rig is already
 watching. That case is served by the poll, and the honest latency is stated below rather than hidden.
@@ -571,16 +578,16 @@ An unchanged scan publishes nothing. Equality is structural over the snapshot ex
 
 ### Bounds
 
-| Bound | Value | Behavior at the limit |
-| --- | --- | --- |
-| Files in `files` | 1000 | `filesTruncated: true`; totals stay exact |
-| Diff output | 16 MiB | scan aborts, `countsExact: false`, totals are best-effort |
-| Untracked files line-counted | 200 | remainder counts as changed files only; `countsExact: false` |
-| Untracked file size counted | 1 MiB | larger files reported without line counts |
-| Watched entities | 32 | LRU eviction, logged through `DaemonLog` |
-| Concurrent scans | 4 | FIFO queue |
-| Degraded pollers | 4 | others fall back to the 30 s reconciliation |
-| Per-subscriber SSE backlog | 1 MiB | subscriber disconnected with a readable reason |
+| Bound                        | Value  | Behavior at the limit                                        |
+| ---------------------------- | ------ | ------------------------------------------------------------ |
+| Files in `files`             | 1000   | `filesTruncated: true`; totals stay exact                    |
+| Diff output                  | 16 MiB | scan aborts, `countsExact: false`, totals are best-effort    |
+| Untracked files line-counted | 200    | remainder counts as changed files only; `countsExact: false` |
+| Untracked file size counted  | 1 MiB  | larger files reported without line counts                    |
+| Watched entities             | 32     | LRU eviction, logged through `DaemonLog`                     |
+| Concurrent scans             | 4      | FIFO queue                                                   |
+| Degraded pollers             | 4      | others fall back to the 30 s reconciliation                  |
+| Per-subscriber SSE backlog   | 1 MiB  | subscriber disconnected with a readable reason               |
 
 Worst-case retained snapshot memory is ~1000 files × ~120 bytes × 32 entities ≈ 4 MB. Patch text is
 never retained.
@@ -596,8 +603,10 @@ never retained.
 
 ```ts
 type ProjectGitEvent = BaseProjectEvent<"project_git_changed", { git: GitChangeSnapshot }>;
-type ProjectWorkspaceGitEvent =
-    BaseProjectWorkspaceEvent<"workspace_git_changed", { git: GitChangeSnapshot }>;
+type ProjectWorkspaceGitEvent = BaseProjectWorkspaceEvent<
+    "workspace_git_changed",
+    { git: GitChangeSnapshot }
+>;
 ```
 
 Both are published only after any durable fact change from the same scan has committed, so a client
@@ -610,7 +619,7 @@ cursor-advancing. Against the real code that has no legal representation:
 
 - `GlobalEventQueueEntry` requires a `cursor`, and `writeGlobalSseEvent` emits it as the SSE `id:`,
   which clients echo back as `Last-Event-Id`. A fabricated or reused cursor corrupts reconnect.
-- `PersistentSessionStore.#publishGlobalEvent` treats `append() === undefined` as *do not publish*,
+- `PersistentSessionStore.#publishGlobalEvent` treats `append() === undefined` as _do not publish_,
   so implementing the classification inside `append` would silently swallow every snapshot in both
   modes.
 - `streamGlobalEvents` receives only the queue, so a "prelude of current snapshots" has nowhere to
@@ -761,9 +770,9 @@ disposal during an active scan; merge conflict; and project deletion racing sess
    does the patch endpoint with a `diff.external` or textconv driver installed. With the flags
    removed in a test, the payload still cannot write a file or reach the network, because the scan
    itself ran in the read-only sandbox.
-9. A scan of a warm repository completes in roughly the same time sandboxed as unsandboxed, because
+8. A scan of a warm repository completes in roughly the same time sandboxed as unsandboxed, because
    the tracker invokes the resolved Git binary rather than the macOS `xcrun` shim.
-8. The daemon runs an hour with the durable queue and heavy editing; the durable event table grows
+9. The daemon runs an hour with the durable queue and heavy editing; the durable event table grows
    only by branch and HEAD updates.
 
 ## Deliberate Non-goals
@@ -822,7 +831,7 @@ accepted and the backend is deferred.
   with null termination option '-z'". Verified.
 - Node's `fs.watch` on a file follows the inode; Git's lockfile-plus-rename update pattern therefore
   breaks single-file watches after the first update.
-- libuv keeps one inotify fd per event loop, so per-directory watches cost inotify *watches*, not
+- libuv keeps one inotify fd per event loop, so per-directory watches cost inotify _watches_, not
   file descriptors. The scarce resource is `fs.inotify.max_user_watches` (8192 on older kernels).
 - `4b825dc642cb6eb9a060e54bf8d69288fbee4904` is Git's SHA-1 empty tree and is wrong under SHA-256;
   `git hash-object -t tree /dev/null` yields the correct one for the repository.
@@ -831,7 +840,7 @@ accepted and the backend is deferred.
 - Helper execution was measured, not assumed, against a repository carrying a `core.fsmonitor` hook,
   a `diff.external` driver, and `.gitattributes` textconv drivers. `diff --raw --numstat`: zero
   executions, including for binary files. `status --porcelain=v2`: one, from fsmonitor, and
-  `--no-optional-locks` does *not* suppress it. Plain `diff <base> -- <path>`: three, from textconv
+  `--no-optional-locks` does _not_ suppress it. Plain `diff <base> -- <path>`: three, from textconv
   and then `diff.external`. `-c core.fsmonitor=false` plus `--no-ext-diff --no-textconv` brings all
   three to zero.
 - CVE-2021-43891 (VS Code < 1.63.1) and CVE-2022-24346 (JetBrains < 2021.3.1) are the same
@@ -850,7 +859,7 @@ grants no writable temp at all, while `createSandboxFilesystemConfig` — used b
 fallback — always includes `temporaryDirectory` even in `read_only`. The two sandbox backends
 therefore disagree about temp.
 
-The consequence is not limited to this design: on macOS in Read-only mode, *any* agent command that
+The consequence is not limited to this design: on macOS in Read-only mode, _any_ agent command that
 goes through an `xcrun` shim — `git`, `clang`, `swift` — pays the same ~400 ms penalty per
 invocation today. This is worth fixing independently of Git tracking, by granting `read_only` a
 writable temporary directory in the seatbelt policy so both backends agree.
