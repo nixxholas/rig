@@ -1,9 +1,18 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const writeSync = vi.hoisted(() => vi.fn());
 vi.mock("node:fs", () => ({ writeSync }));
 
-const { writeStderrSync } = await import("./writeStderrSync.js");
+let writeStderrSync: (text: string) => void;
+
+/*
+ * Tests share one module registry, so another suite may have already imported the real module and
+ * bound it to the real `node:fs`. Reset the registry to import the mocked module here.
+ */
+beforeEach(async () => {
+    vi.resetModules();
+    ({ writeStderrSync } = await import("./writeStderrSync.js"));
+});
 
 afterEach(() => {
     vi.restoreAllMocks();
