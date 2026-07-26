@@ -195,6 +195,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 storage_key TEXT NOT NULL COLLATE NOCASE,
                 name TEXT NOT NULL,
                 name_key TEXT NOT NULL,
+                title TEXT,
                 order_key TEXT NOT NULL COLLATE BINARY DEFAULT '',
                 kind TEXT NOT NULL,
                 status TEXT NOT NULL,

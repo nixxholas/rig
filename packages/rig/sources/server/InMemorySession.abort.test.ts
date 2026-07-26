@@ -368,6 +368,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream(_model, context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
                     return abortableStream(options?.signal, started.resolve);
@@ -436,6 +437,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream(_model, context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
                     return gatedToolCallStream(
@@ -526,6 +528,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream(_model, context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
                     return gatedToolCallStream(
@@ -586,6 +589,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream(_model, context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 if (contexts.length === 1) {
                     return abortableStream(options?.signal, started.resolve);
@@ -667,6 +671,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream(_model, context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 contexts.push(context);
                 return abortableStream(options?.signal, started.resolve);
             },
@@ -724,6 +729,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream(_model, _context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 streams += 1;
                 return streams === 1
                     ? responseStream("First run finished.")
@@ -850,6 +856,7 @@ describe("InMemorySession abort", () => {
             id: "test",
             models: [model],
             stream: (_model, _context, options) => {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
                 streamCount += 1;
                 if (streamCount === 1) return responseStream("Earlier answer");
                 compactStartedResolve?.();
@@ -1039,6 +1046,15 @@ function responseStream(text: string): InferenceStream {
             return message;
         },
     };
+}
+
+function metadataResponseStream(): InferenceStream {
+    return responseStream(
+        JSON.stringify({
+            recap: "The session metadata reflects the visible conversation.",
+            title: "Generated Session Title",
+        }),
+    );
 }
 
 function assistantMessage(text: string, model: string): AssistantMessage {

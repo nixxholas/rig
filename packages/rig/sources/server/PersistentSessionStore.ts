@@ -304,6 +304,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : { createRuntime: this.#createRuntime }),
                 emitCreatedEvent: false,
                 modelCatalog: this.#modelCatalog,
+                onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
                     : {}),
@@ -381,6 +382,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : { createRuntime: this.#createRuntime }),
                 emitCreatedEvent: false,
                 modelCatalog: this.#modelCatalog,
+                onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
                     : {}),
@@ -1779,6 +1781,28 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             });
     }
 
+    #inheritWorkspaceTitle(
+        metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
+    ): void {
+        const first = this.#database
+            .prepare(
+                `
+                SELECT id
+                FROM sessions
+                WHERE project_id = ? AND workspace_id = ? AND parent_session_id IS NULL
+                ORDER BY created_at_ms ASC, id ASC
+                LIMIT 1
+                `,
+            )
+            .get(metadata.projectId, metadata.workspaceId);
+        if (first === undefined || readString(first, "id") !== metadata.sessionId) return;
+        this.#projects.inheritWorkspaceTitle(
+            metadata.projectId,
+            metadata.workspaceId,
+            metadata.title,
+        );
+    }
+
     #loadSession(sessionId: string): InMemorySession | undefined {
         const row = this.#database
             .prepare(
@@ -1941,6 +1965,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             events: this.#loadEvents(sessionId),
             ...(lastEventId !== undefined ? { lastEventId } : {}),
             modelCatalog: this.#modelCatalog,
+            onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),

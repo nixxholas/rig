@@ -9,7 +9,7 @@ import sharp from "sharp";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { PersistentSessionStore } from "./PersistentSessionStore.js";
-import type { ProjectGitRunner } from "./ProjectRepository.js";
+import { ProjectRepository, type ProjectGitRunner } from "./ProjectRepository.js";
 
 const execFile = promisify(execFileCallback);
 const cleanups: (() => Promise<void>)[] = [];
@@ -529,6 +529,47 @@ describe("projects", () => {
                     call.args[1] === "origin",
             ),
         ).toBe(true);
+    });
+
+    it("inherits a workspace title once and publishes the updated workspace", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "workspace-title");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const created = await fixture.store.createWorkspace(projectId, {
+            baseRef: "main",
+            clientRequestId: "workspace-title",
+            name: "Workspace Branch",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            created.id,
+            (workspace) => workspace.status === "ready",
+        );
+
+        const database = new DatabaseSync(fixture.databasePath, {
+            enableForeignKeyConstraints: true,
+        });
+        const events: string[] = [];
+        const projects = new ProjectRepository({
+            database,
+            homeDirectory: fixture.home,
+            onEvent: (event) => events.push(event.type),
+            stateDirectory: fixture.state,
+        });
+        try {
+            expect(
+                projects.inheritWorkspaceTitle(projectId, ready.id, "First Chat Workspace Title"),
+            ).toMatchObject({ title: "First Chat Workspace Title" });
+            expect(
+                projects.inheritWorkspaceTitle(projectId, ready.id, "Later Chat Title"),
+            ).toMatchObject({ title: "First Chat Workspace Title" });
+            expect(events).toEqual(["workspace_updated"]);
+        } finally {
+            projects.close();
+            database.close();
+        }
     });
 });
 

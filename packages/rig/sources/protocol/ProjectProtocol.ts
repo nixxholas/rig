@@ -129,6 +129,8 @@ export interface ProjectWorkspace {
     projectId: string;
     status: ProjectWorkspaceStatus;
     storageKey: string;
+    /** Stable display title inherited once from the workspace's first chat. */
+    title?: string;
     updatedAt: number;
     version: number;
 }

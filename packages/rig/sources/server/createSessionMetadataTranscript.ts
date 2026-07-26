@@ -8,6 +8,7 @@ const MAX_TRANSCRIPT_CHARS = 12_000;
 export function createSessionMetadataTranscript(
     messages: readonly PersistedSessionMessage[],
     events: readonly SessionEvent[],
+    options: { initial?: boolean } = {},
 ): string | undefined {
     const notificationIds = new Set<string>();
     for (const event of events) {
@@ -22,7 +23,8 @@ export function createSessionMetadataTranscript(
             !notificationIds.has(entry.message.id) &&
             visibleText(entry.message.blocks) !== undefined,
     );
-    const selectedUsers = realUsers.slice(-MAX_TURNS);
+    const selectedUsers =
+        options.initial === true ? realUsers.slice(0, 1) : realUsers.slice(-MAX_TURNS);
     if (selectedUsers.length === 0) return undefined;
 
     const lines: string[] = [];
@@ -30,6 +32,7 @@ export function createSessionMetadataTranscript(
         const userText = visibleText(user.message.blocks);
         if (userText === undefined) continue;
         lines.push(`User: ${truncate(userText)}`);
+        if (options.initial === true) continue;
         if (user.runId === undefined) continue;
 
         const runMessages = messages.filter(

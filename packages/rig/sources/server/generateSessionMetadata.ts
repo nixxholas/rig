@@ -1,7 +1,7 @@
 import type { Model, Provider, StreamOptions } from "@slopus/rig-execution";
 import { toLocalDate } from "../executor/toLocalDate.js";
 
-const METADATA_PROMPT = `Create settled session metadata from the visible conversation.
+const METADATA_PROMPT = `Create concise session metadata from the visible conversation.
 
 Return exactly one JSON object with exactly these string fields:
 {"title":"...","recap":"..."}

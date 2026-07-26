@@ -186,6 +186,7 @@ export class InMemorySessionStore implements SessionStore {
             createEventId: createEventIdFactory(),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             modelCatalog: this.#modelCatalog,
+            onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),
@@ -250,6 +251,7 @@ export class InMemorySessionStore implements SessionStore {
             createEventId: createEventIdFactory(),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             modelCatalog: this.#modelCatalog,
+            onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
             ...(this.#mcpToolProvider !== undefined
                 ? { mcpToolProvider: this.#mcpToolProvider }
                 : {}),
@@ -268,6 +270,31 @@ export class InMemorySessionStore implements SessionStore {
         });
         this.#sessions.set(session.id, session);
         return session;
+    }
+
+    #inheritWorkspaceTitle(
+        metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
+    ): void {
+        const first = [...this.#sessions.values()]
+            .filter((session) => {
+                const identity = session.projectIdentity();
+                return (
+                    !session.isSubagent() &&
+                    identity.projectId === metadata.projectId &&
+                    identity.workspaceId === metadata.workspaceId
+                );
+            })
+            .sort(
+                (left, right) =>
+                    left.summary().createdAt - right.summary().createdAt ||
+                    left.id.localeCompare(right.id),
+            )[0];
+        if (first?.id !== metadata.sessionId) return;
+        this.#projects.inheritWorkspaceTitle(
+            metadata.projectId,
+            metadata.workspaceId,
+            metadata.title,
+        );
     }
 
     get(sessionId: string): InMemorySession | undefined {

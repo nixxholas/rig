@@ -56,7 +56,10 @@ describe("PersistentSessionStore", () => {
             process.env.RIG_GYM_INFERENCE_URL = "http://gym.test/inference";
             globalThis.fetch = async (_input, init) => {
                 if (typeof init?.body !== "string") throw new Error("Expected request JSON.");
-                requests.push(JSON.parse(init.body) as GymInferenceRequest);
+                const request = JSON.parse(init.body) as GymInferenceRequest;
+                const metadataResponse = sessionMetadataResponse(request);
+                if (metadataResponse !== undefined) return metadataResponse;
+                requests.push(request);
                 return new Response(
                     JSON.stringify(
                         requests.length === 1
@@ -173,7 +176,10 @@ describe("PersistentSessionStore", () => {
             process.env.RIG_GYM_INFERENCE_URL = "http://gym.test/inference";
             globalThis.fetch = async (_input, init) => {
                 if (typeof init?.body !== "string") throw new Error("Expected request JSON.");
-                requests.push(JSON.parse(init.body) as GymInferenceRequest);
+                const request = JSON.parse(init.body) as GymInferenceRequest;
+                const metadataResponse = sessionMetadataResponse(request);
+                if (metadataResponse !== undefined) return metadataResponse;
+                requests.push(request);
                 return new Response(
                     JSON.stringify(
                         requests.length === 1
@@ -336,7 +342,10 @@ describe("PersistentSessionStore", () => {
             process.env.RIG_GYM_INFERENCE_URL = "http://gym.test/inference";
             globalThis.fetch = async (_input, init) => {
                 if (typeof init?.body !== "string") throw new Error("Expected request JSON.");
-                requests.push(JSON.parse(init.body) as GymInferenceRequest);
+                const request = JSON.parse(init.body) as GymInferenceRequest;
+                const metadataResponse = sessionMetadataResponse(request);
+                if (metadataResponse !== undefined) return metadataResponse;
+                requests.push(request);
                 return new Response(
                     JSON.stringify(
                         requests.length === 1
@@ -1680,7 +1689,10 @@ describe("PersistentSessionStore", () => {
             process.env.RIG_GYM_PROVIDER_OVERRIDES = "claude";
             globalThis.fetch = async (_input, init) => {
                 if (typeof init?.body !== "string") throw new Error("Expected request JSON.");
-                requests.push(JSON.parse(init.body) as GymInferenceRequest);
+                const request = JSON.parse(init.body) as GymInferenceRequest;
+                const metadataResponse = sessionMetadataResponse(request);
+                if (metadataResponse !== undefined) return metadataResponse;
+                requests.push(request);
                 if (requests.length === 1) {
                     return new Response(
                         JSON.stringify({
@@ -1846,7 +1858,10 @@ describe("PersistentSessionStore", () => {
                 if (typeof init?.body !== "string") {
                     throw new Error("Expected a serialized gym inference request.");
                 }
-                inferenceRequests.push(JSON.parse(init.body) as GymInferenceRequest);
+                const request = JSON.parse(init.body) as GymInferenceRequest;
+                const metadataResponse = sessionMetadataResponse(request);
+                if (metadataResponse !== undefined) return metadataResponse;
+                inferenceRequests.push(request);
                 return new Response(
                     JSON.stringify({
                         content: [{ text: "Done.", type: "text" }],
@@ -2341,6 +2356,8 @@ describe("PersistentSessionStore", () => {
             globalThis.fetch = async (_input, init) => {
                 if (typeof init?.body !== "string") throw new Error("Expected request JSON.");
                 const request = JSON.parse(init.body) as GymInferenceRequest;
+                const metadataResponse = sessionMetadataResponse(request);
+                if (metadataResponse !== undefined) return metadataResponse;
                 requests.push(request);
                 const userTexts = request.context.messages.flatMap((message) =>
                     message.role === "user" ? [providerMessageText(message.content)] : [],
@@ -2853,6 +2870,25 @@ async function waitForPendingUserInputs(session: InMemorySession, count: number)
         await new Promise((resolve) => setImmediate(resolve));
     }
     throw new Error("Timed out waiting for the durable user question.");
+}
+
+function sessionMetadataResponse(request: GymInferenceRequest): Response | undefined {
+    if (!request.options.sessionId?.endsWith(":title")) return undefined;
+    return new Response(
+        JSON.stringify({
+            content: [
+                {
+                    text: JSON.stringify({
+                        recap: "The session metadata reflects the visible conversation.",
+                        title: "Generated Session Title",
+                    }),
+                    type: "text",
+                },
+            ],
+            stopReason: "stop",
+        }),
+        { headers: { "content-type": "application/json" }, status: 200 },
+    );
 }
 
 async function createDatabasePath(): Promise<{

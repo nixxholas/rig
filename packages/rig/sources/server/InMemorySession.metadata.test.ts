@@ -4,11 +4,7 @@ import { Agent, createNodeAgentContext } from "../agent/index.js";
 import type { CodingAssistantRuntime } from "../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../runtime/createCodingAssistantAgent.js";
 import { NativeProcessManager } from "../processes/index.js";
-import {
-    createEventIdFactory,
-    type ModelCatalog,
-    type SubagentSummary,
-} from "../protocol/index.js";
+import { createEventIdFactory, type ModelCatalog } from "../protocol/index.js";
 import { createInferenceStream } from "@slopus/rig-execution";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import {
@@ -18,7 +14,6 @@ import {
     type Context,
     type StreamOptions,
 } from "@slopus/rig-execution";
-import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession } from "./InMemorySession.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
@@ -27,58 +22,73 @@ afterEach(() => {
 });
 
 describe("InMemorySession metadata settlement", () => {
-    it("waits for sixty idle seconds and restarts on new user work", async () => {
-        vi.useFakeTimers();
+    it("titles from the first message immediately, then refines after the first agent response", async () => {
         const harness = createHarness();
 
-        const first = harness.session.submit({ text: "Implement delayed session metadata." });
+        const first = harness.session.submit({ text: "Implement immediate session metadata." });
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(1));
+        expect(JSON.stringify(harness.metadataContexts[0])).toContain(
+            "Implement immediate session metadata.",
+        );
+        expect(JSON.stringify(harness.metadataContexts[0])).not.toContain(
+            "Final visible response 1.",
+        );
+
         await harness.session.waitForRun(first.runId);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
         const firstMessageEvent = harness.session.events
             .since(undefined)
             ?.find((event) => event.type === "message_submitted");
         if (firstMessageEvent === undefined) throw new Error("First message event was not stored.");
         expect(harness.runtimeStartDates).toEqual([toLocalDate(firstMessageEvent.createdAt)]);
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(harness.metadataContexts).toHaveLength(0);
-
-        const second = harness.session.submit({
-            text: "Also keep the existing title conservatively.",
-        });
-        await harness.session.waitForRun(second.runId);
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(harness.metadataContexts).toHaveLength(0);
-        await vi.advanceTimersByTimeAsync(1);
-
-        expect(harness.metadataContexts).toHaveLength(1);
-        expect(JSON.stringify(harness.metadataContexts[0])).toContain(
-            "Implement delayed session metadata.",
+        expect(JSON.stringify(harness.metadataContexts[1])).toContain("Final visible response 1.");
+        await vi.waitFor(() =>
+            expect(harness.session.snapshot()).toMatchObject({
+                metadataRunId: first.runId,
+                recap: "The user implemented delayed session metadata.",
+                title: "Delayed session metadata",
+                titleStatus: "ready",
+            }),
         );
-        expect(JSON.stringify(harness.metadataContexts[0])).toContain("Final visible response 2.");
-        expect(harness.session.snapshot()).toMatchObject({
-            metadataRunId: second.runId,
-            recap: "The user implemented delayed session metadata.",
-            title: "Delayed session metadata",
-            titleStatus: "ready",
+    });
+
+    it("uses the second user message as the one refinement trigger when it arrives first", async () => {
+        let releaseAgent: (() => void) | undefined;
+        const agentGate = new Promise<void>((resolve) => {
+            releaseAgent = resolve;
         });
+        const harness = createHarness({ agentGate });
+
+        const first = harness.session.submit({ text: "Start from this message." });
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(1));
+        const second = harness.session.submit({ text: "Use this clarification too." });
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
+        expect(JSON.stringify(harness.metadataContexts[1])).toContain("Start from this message.");
+        expect(JSON.stringify(harness.metadataContexts[1])).toContain(
+            "Use this clarification too.",
+        );
+        expect(JSON.stringify(harness.metadataContexts[1])).not.toContain("Final visible response");
+
+        releaseAgent?.();
+        await harness.session.waitForRun(first.runId);
+        await harness.session.waitForRun(second.runId);
+        await Promise.resolve();
+        expect(harness.metadataContexts).toHaveLength(2);
+        expect(harness.session.snapshot().metadataRunId).toBe(second.runId);
     });
 
-    it("restarts the idle window for unsent user activity", async () => {
-        vi.useFakeTimers();
-        const harness = createHarness();
-        const run = harness.session.submit({ text: "Wait for an unsent draft." });
-        await harness.session.waitForRun(run.runId);
+    it("offers the initial chat title to its workspace exactly once", async () => {
+        const inheritedTitles: string[] = [];
+        const harness = createHarness({ inheritedTitles, workspaceId: "workspace-1" });
 
-        await vi.advanceTimersByTimeAsync(59_999);
-        harness.session.recordUserActivity();
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(harness.metadataContexts).toHaveLength(0);
+        const first = harness.session.submit({ text: "Name this workspace from the chat." });
+        await harness.session.waitForRun(first.runId);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
 
-        await vi.advanceTimersByTimeAsync(1);
-        expect(harness.metadataContexts).toHaveLength(1);
+        expect(inheritedTitles).toEqual(["Delayed session metadata"]);
     });
 
-    it("discards an aborted stale generation when new work arrives", async () => {
-        vi.useFakeTimers();
+    it("serializes refinement behind an in-flight initial title", async () => {
         let releaseStale: (() => void) | undefined;
         const staleReleased = new Promise<void>((resolve) => {
             releaseStale = resolve;
@@ -86,15 +96,15 @@ describe("InMemorySession metadata settlement", () => {
         const harness = createHarness({ staleMetadata: staleReleased });
 
         const first = harness.session.submit({ text: "Initial request." });
-        await harness.session.waitForRun(first.runId);
-        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(1));
         expect(harness.metadataSignals[0]?.aborted).toBe(false);
 
         const second = harness.session.submit({ text: "A newer request supersedes it." });
-        expect(harness.metadataSignals[0]?.aborted).toBe(true);
+        expect(harness.metadataSignals[0]?.aborted).toBe(false);
         releaseStale?.();
+        await harness.session.waitForRun(first.runId);
         await harness.session.waitForRun(second.runId);
-        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
 
         expect(harness.session.snapshot()).toMatchObject({
             metadataRunId: second.runId,
@@ -103,35 +113,13 @@ describe("InMemorySession metadata settlement", () => {
         expect(harness.session.snapshot().title).not.toBe("Stale generated title");
     });
 
-    it("settles metadata for the run_error boundary repaired after interruption", async () => {
-        vi.useFakeTimers();
-        const harness = createHarness();
-        const foreground = harness.session.submit({ text: "Finish before the restart." });
-        await harness.session.waitForRun(foreground.runId);
-        await vi.advanceTimersByTimeAsync(60_000);
-
-        harness.session.markInterrupted({
-            interruptedAt: Date.now(),
-            message: "The restored run was interrupted.",
-            reason: "crash",
-            runId: "restored-run",
-        });
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(harness.metadataContexts).toHaveLength(1);
-
-        await vi.advanceTimersByTimeAsync(1);
-        expect(harness.metadataContexts).toHaveLength(2);
-        expect(harness.session.snapshot().metadataRunId).toBe("restored-run");
-    });
-
     it("invalidates stale metadata on rewind and reset", async () => {
-        vi.useFakeTimers();
         const harness = createHarness();
         const first = harness.session.submit({ text: "Keep this turn." });
         await harness.session.waitForRun(first.runId);
         const second = harness.session.submit({ text: "Remove this turn." });
         await harness.session.waitForRun(second.runId);
-        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
 
         const secondMessage = harness.session
             .snapshot()
@@ -143,83 +131,20 @@ describe("InMemorySession metadata settlement", () => {
             );
         if (secondMessage === undefined) throw new Error("Second user message was not persisted.");
         harness.session.rewind(secondMessage.id);
-        expect(harness.session.snapshot()).toMatchObject({ titleStatus: "idle" });
-        expect(harness.session.snapshot()).not.toHaveProperty("metadataRunId");
-        expect(harness.session.snapshot()).not.toHaveProperty("metadataUpdatedAt");
-        expect(harness.session.snapshot()).not.toHaveProperty("recap");
-
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.session.snapshot().metadataRunId).toBe(first.runId);
+        await vi.waitFor(() =>
+            expect(harness.session.snapshot()).toMatchObject({
+                metadataRunId: first.runId,
+                titleStatus: "ready",
+            }),
+        );
 
         await harness.session.reset();
         expect(harness.session.snapshot()).toMatchObject({ titleStatus: "idle" });
         expect(harness.session.snapshot()).not.toHaveProperty("metadataRunId");
         expect(harness.session.snapshot()).not.toHaveProperty("metadataUpdatedAt");
         expect(harness.session.snapshot()).not.toHaveProperty("recap");
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.metadataContexts).toHaveLength(2);
-    });
-
-    it("restarts the root idle window for descendant-local activity transitions", async () => {
-        vi.useFakeTimers();
-        const harness = createHarness();
-        const foreground = harness.session.submit({ text: "Wait for descendant work." });
-        await harness.session.waitForRun(foreground.runId);
-
-        await vi.advanceTimersByTimeAsync(59_999);
-        harness.setSubagentActive(true);
-        harness.recordDescendantActivity();
-        await vi.advanceTimersByTimeAsync(10_000);
-        harness.setSubagentActive(false);
-        harness.recordDescendantActivity();
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(harness.metadataContexts).toHaveLength(0);
-
-        await vi.advanceTimersByTimeAsync(1);
-        expect(harness.metadataContexts).toHaveLength(1);
-    });
-
-    it("blocks settlement while manual compaction is active", async () => {
-        vi.useFakeTimers();
-        let finishCompaction: (() => void) | undefined;
-        const compaction = new Promise<void>((resolve) => {
-            finishCompaction = resolve;
-        });
-        const harness = createHarness({ compaction });
-        const foreground = harness.session.submit({ text: "Compact before settling." });
-        await harness.session.waitForRun(foreground.runId);
-
-        await vi.advanceTimersByTimeAsync(59_999);
-        const compacting = harness.session.compact();
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.metadataContexts).toHaveLength(0);
-
-        finishCompaction?.();
-        await compacting;
-        await vi.advanceTimersByTimeAsync(59_999);
-        expect(harness.metadataContexts).toHaveLength(0);
-        await vi.advanceTimersByTimeAsync(1);
-        expect(harness.metadataContexts).toHaveLength(1);
-    });
-
-    it("tracks the delayed settlement until shutdown cancels it", async () => {
-        vi.useFakeTimers();
-        const taskDrain = new TrackedTaskDrain();
-        const harness = createHarness({ taskDrain });
-        const foreground = harness.session.submit({ text: "Cancel delayed metadata on shutdown." });
-        await harness.session.waitForRun(foreground.runId);
-        await vi.advanceTimersByTimeAsync(0);
-
-        let drained = false;
-        const draining = taskDrain.drain().then(() => {
-            drained = true;
-        });
         await Promise.resolve();
-        expect(drained).toBe(false);
-
-        await harness.session.beginShutdown();
-        await draining;
-        expect(harness.metadataContexts).toHaveLength(0);
+        expect(harness.metadataContexts).toHaveLength(4);
     });
 
     it("awaits an aborted metadata generation continuation during shutdown", async () => {
@@ -239,7 +164,6 @@ describe("InMemorySession metadata settlement", () => {
         });
         const foreground = harness.session.submit({ text: "Abort in-flight metadata safely." });
         await harness.session.waitForRun(foreground.runId);
-        await vi.advanceTimersByTimeAsync(60_000);
         expect(harness.metadataContexts).toHaveLength(1);
 
         taskDrain.beginClose();
@@ -258,62 +182,17 @@ describe("InMemorySession metadata settlement", () => {
         await draining;
         expect(harness.session.snapshot().titleStatus).toBe("idle");
     });
-
-    it("requires subagents, workflows, and managed background terminals to become idle", async () => {
-        vi.useFakeTimers();
-        const harness = createHarness({ activeSubagent: true });
-        const foreground = harness.session.submit({ text: "Wait for all background work." });
-        await harness.session.waitForRun(foreground.runId);
-
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.metadataContexts).toHaveLength(0);
-        harness.setSubagentActive(false);
-        harness.session.recordSubagentChanged(harness.subagentSummary());
-
-        harness.setBackgroundCount(1);
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.metadataContexts).toHaveLength(0);
-        harness.setBackgroundCount(0);
-
-        let finishWorkflow: ((value: { agentCalls: []; output: string }) => void) | undefined;
-        const workflow = harness.session.launchWorkflow({
-            code: "wait()",
-            description: "Wait for test completion",
-            execute: () =>
-                new Promise((resolve) => {
-                    finishWorkflow = resolve;
-                }),
-            name: "metadata-wait",
-        });
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.metadataContexts).toHaveLength(0);
-
-        finishWorkflow?.({ agentCalls: [], output: "done" });
-        await harness.session.waitForWorkflow(workflow.runId);
-        await vi.advanceTimersByTimeAsync(0);
-        const notification = harness.session.events
-            .since(undefined)
-            ?.findLast(
-                (event) =>
-                    event.type === "message_submitted" && event.data.source === "notification",
-            );
-        if (notification?.type !== "message_submitted") {
-            throw new Error("Workflow completion notification did not start a foreground run.");
-        }
-        await harness.session.waitForRun(notification.data.runId);
-        await vi.advanceTimersByTimeAsync(60_000);
-        expect(harness.metadataContexts).toHaveLength(1);
-    });
 });
 
 function createHarness(
     options: {
-        activeSubagent?: boolean;
+        agentGate?: Promise<void>;
         afterMetadataAbort?: Promise<void>;
-        compaction?: Promise<void>;
         onMetadataAbort?: () => void;
         staleMetadata?: Promise<void>;
         taskDrain?: TrackedTaskDrain;
+        inheritedTitles?: string[];
+        workspaceId?: string;
     } = {},
 ) {
     const model = defineModel({
@@ -372,6 +251,7 @@ function createHarness(
             agentResponses += 1;
             const message = assistantMessage(`Final visible response ${agentResponses}.`);
             return createInferenceStream(async function* () {
+                await options.agentGate;
                 yield { type: "start", partial: message };
                 yield { type: "done", reason: "stop", message };
                 return message;
@@ -384,70 +264,31 @@ function createHarness(
         models: [model],
         providers: [{ providerId: provider.id, models: [model] }],
     };
-    let activeSubagent = options.activeSubagent === true;
     const runtimeStartDates: (string | undefined)[] = [];
-    let root: InMemorySession | undefined;
-    const child = {
-        agentMetadata: () => ({ depth: 1, rootSessionId: "root", type: "subagent" }),
-        hasLocalSettlementWork: () => activeSubagent,
-        id: "child-session",
-        subagentSummary: () => subagentSummary(activeSubagent),
-    } as InMemorySession;
-    const manager = new AgentSessionManager({
-        repository: {
-            createSubagent: () => child,
-            get: (sessionId) => (sessionId === child.id ? child : root),
-            listByRoot: () => [child],
-        },
-        ...(options.taskDrain === undefined ? {} : { taskDrain: options.taskDrain }),
-    });
-    let backgroundCount = 0;
-    let backgroundListener: ((count: number) => void) | undefined;
-    root = new InMemorySession({
-        agentManager: manager,
+    const root = new InMemorySession({
         createEventId: createEventIdFactory(),
         createRuntime: (runtimeOptions) => {
             runtimeStartDates.push(runtimeOptions.startDate);
-            const runtime = createRuntime(runtimeOptions, provider);
-            if (options.compaction !== undefined) {
-                runtime.agent.compact = async () => {
-                    await options.compaction;
-                    return {
-                        compacted: true,
-                        compactedMessageCount: 2,
-                        estimatedTokensAfter: 1,
-                        estimatedTokensBefore: 2,
-                        retainedMessageCount: 0,
-                    };
-                };
-            }
-            runtime.context.bash.activeSessionCount = () => backgroundCount;
-            runtime.context.bash.setActiveSessionCountListener = (listener) => {
-                backgroundListener = listener;
-                listener?.(backgroundCount);
-            };
-            return runtime;
+            return createRuntime(runtimeOptions, provider);
         },
         modelCatalog: catalog,
+        ...(options.inheritedTitles === undefined
+            ? {}
+            : {
+                  onInitialTitle: ({ title }) => {
+                      options.inheritedTitles?.push(title);
+                  },
+              }),
+        projectId: "project-1",
         request: { cwd: "/tmp/rig-metadata-test", modelId: model.id, providerId: provider.id },
         ...(options.taskDrain === undefined ? {} : { taskDrain: options.taskDrain }),
+        ...(options.workspaceId === undefined ? {} : { workspaceId: options.workspaceId }),
     });
     return {
         metadataContexts,
         metadataSignals,
-        recordDescendantActivity() {
-            manager.recordDescendantSettlementActivity("root");
-        },
         runtimeStartDates,
         session: root,
-        setBackgroundCount(count: number) {
-            backgroundCount = count;
-            backgroundListener?.(count);
-        },
-        setSubagentActive(active: boolean) {
-            activeSubagent = active;
-        },
-        subagentSummary: () => subagentSummary(activeSubagent),
     };
 }
 
@@ -490,19 +331,5 @@ function assistantMessage(text: string): AssistantMessage {
             output: 0,
             totalTokens: 0,
         },
-    };
-}
-
-function subagentSummary(active: boolean): SubagentSummary {
-    return {
-        agentId: "child-agent",
-        createdAt: 1,
-        depth: 1,
-        description: "Background check",
-        id: "child-session",
-        modelId: "test/session-metadata",
-        parentSessionId: "root",
-        status: active ? "running" : "completed",
-        updatedAt: 1,
     };
 }

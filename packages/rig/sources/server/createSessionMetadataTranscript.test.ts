@@ -5,6 +5,18 @@ import type { PersistedSessionMessage } from "./InMemorySession.js";
 import { createSessionMetadataTranscript } from "./createSessionMetadataTranscript.js";
 
 describe("createSessionMetadataTranscript", () => {
+    it("limits the initial title transcript to the first real user message", () => {
+        const messages = [
+            entry(0, "run-1", false, "user", [{ type: "text", text: "First request." }]),
+            entry(1, "run-1", false, "agent", [{ type: "text", text: "First response." }]),
+            entry(2, "run-2", false, "user", [{ type: "text", text: "Second request." }]),
+        ];
+
+        expect(createSessionMetadataTranscript(messages, [], { initial: true })).toBe(
+            "User: First request.",
+        );
+    });
+
     it("keeps real user text and only the final visible assistant block per turn", () => {
         const messages: PersistedSessionMessage[] = [
             entry(0, "run-1", false, "user", [{ type: "text", text: "Implement metadata." }]),

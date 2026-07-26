@@ -829,6 +829,29 @@ export class ProjectRepository {
         });
     }
 
+    inheritWorkspaceTitle(
+        projectId: string,
+        workspaceId: string,
+        title: string,
+    ): ProjectWorkspace | undefined {
+        const current = this.getWorkspace(projectId, workspaceId);
+        if (current === undefined || current.title !== undefined) return current;
+        return this.#transaction(() => {
+            const result = this.#database
+                .prepare(
+                    `
+                    UPDATE project_workspaces
+                    SET title = ?, version = version + 1, updated_at_ms = ?
+                    WHERE id = ? AND project_id = ? AND title IS NULL
+                    `,
+                )
+                .run(title, this.#now(), workspaceId, projectId);
+            return result.changes === 0
+                ? this.getWorkspace(projectId, workspaceId)
+                : this.#publishedWorkspace(projectId, workspaceId);
+        });
+    }
+
     reorderWorkspace(
         projectId: string,
         workspaceId: string,
@@ -1962,6 +1985,7 @@ function readWorkspace(row: Record<string, unknown>): ProjectWorkspace {
     const baseRef = readOptionalString(row, "base_ref");
     const error = readOptionalString(row, "error");
     const git = readGitFacts(row);
+    const title = readOptionalString(row, "title");
     return {
         ...(archivedAt === undefined ? {} : { archivedAt }),
         ...(baseCommit === undefined ? {} : { baseCommit }),
@@ -1979,6 +2003,7 @@ function readWorkspace(row: Record<string, unknown>): ProjectWorkspace {
         projectId: readString(row, "project_id"),
         status: readString(row, "status") as ProjectWorkspace["status"],
         storageKey: readString(row, "storage_key"),
+        ...(title === undefined ? {} : { title }),
         updatedAt: readNumber(row, "updated_at_ms"),
         version: readNumber(row, "version"),
     };
