@@ -10,6 +10,11 @@ const MACOS_SEATBELT_EXECUTABLE = "/usr/bin/sandbox-exec";
 const PROTECTED_WORKSPACE_NAMES = [".git", ".agents", ".codex"] as const;
 
 export async function createMacOsSeatbeltCommand(options: {
+    /**
+     * Run this exact argument vector instead of a shell command. Background readers use it so they
+     * never build a shell string and never source the user's login profile.
+     */
+    argv?: readonly string[];
     command: string;
     cwd: string;
     environment?: NodeJS.ProcessEnv;
@@ -72,7 +77,13 @@ export async function createMacOsSeatbeltCommand(options: {
             : `export PATH=${quoteShellArgument(options.path)}\n${options.command}`;
 
     return {
-        args: ["-p", policy, ...definitions, "--", options.shell, "-lc", userCommand],
+        args: [
+            "-p",
+            policy,
+            ...definitions,
+            "--",
+            ...(options.argv ?? [options.shell, "-lc", userCommand]),
+        ],
         command: MACOS_SEATBELT_EXECUTABLE,
     };
 }

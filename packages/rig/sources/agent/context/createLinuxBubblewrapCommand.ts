@@ -9,6 +9,11 @@ import { resolvePotentialPath } from "./resolvePotentialPath.js";
 const PROTECTED_WORKSPACE_NAMES = [".git", ".agents", ".codex"] as const;
 
 export async function createLinuxBubblewrapCommand(options: {
+    /**
+     * Run this exact argument vector instead of a shell command. Background readers use it so they
+     * never build a shell string and never source the user's login profile.
+     */
+    argv?: readonly string[];
     bwrapPath?: string;
     command: string;
     commandCwd: string;
@@ -73,7 +78,12 @@ export async function createLinuxBubblewrapCommand(options: {
     args.push("--unshare-user", "--unshare-pid", "--unshare-net");
     args.push(options.mountProc === false ? "--bind" : "--proc", "/proc");
     if (options.mountProc === false) args.push("/proc");
-    args.push("--chdir", commandCwd, "--", options.shell, "-lc", userCommand);
+    args.push("--chdir", commandCwd, "--");
+    if (options.argv === undefined) {
+        args.push(options.shell, "-lc", userCommand);
+    } else {
+        args.push(...options.argv);
+    }
 
     return {
         args,

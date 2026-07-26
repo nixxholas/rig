@@ -24,6 +24,11 @@ export interface SandboxedCommand {
 }
 
 export async function createSandboxedCommand(options: {
+    /**
+     * Run this exact argument vector instead of a shell command. Background readers use it so they
+     * never build a shell string and never source the user's login profile.
+     */
+    argv?: readonly string[];
     command: string;
     commandCwd?: string;
     cwd: string;
@@ -31,7 +36,11 @@ export async function createSandboxedCommand(options: {
     path?: string;
     shell: string;
 }): Promise<SandboxedCommand> {
-    if (options.mode === "full_access") return { command: options.command };
+    if (options.mode === "full_access") {
+        return options.argv === undefined
+            ? { command: options.command }
+            : { args: options.argv.slice(1), command: options.argv[0]! };
+    }
     if (process.platform === "darwin") return createMacOsSeatbeltCommand(options);
     if (process.platform === "linux") {
         return createLinuxBubblewrapCommand({
@@ -59,13 +68,19 @@ export async function createSandboxedCommand(options: {
 
     const packageEntry = require.resolve("@anthropic-ai/sandbox-runtime");
     const cliPath = join(dirname(packageEntry), "cli.js");
+    // The sandbox-runtime CLI only accepts a command string, so an argument vector is rebuilt into
+    // one with each element quoted individually rather than concatenated by a caller.
+    const requestedCommand =
+        options.argv === undefined
+            ? options.command
+            : options.argv.map((argument) => quoteShellArgument(argument)).join(" ");
     const userCommand =
         options.path === undefined
-            ? options.command
-            : `export PATH=${quoteShellArgument(options.path)}\n${options.command}`;
+            ? requestedCommand
+            : `export PATH=${quoteShellArgument(options.path)}\n${requestedCommand}`;
     const command =
         process.platform === "win32"
-            ? options.command
+            ? requestedCommand
             : `${quoteShellArgument(options.shell)} -lc ${quoteShellArgument(userCommand)}`;
     return {
         args: [cliPath, "--settings", configPath, "-c", command],
