@@ -117,8 +117,15 @@ export function streamGlobalEvents(
     // Subscribing before capturing the current snapshots is what makes this gapless: capturing
     // first would drop any snapshot published in between.
     for (const event of liveSnapshots?.() ?? []) {
-        if (!writeGlobalSseEvent(response, { event, live: true })) backedUp = true;
+        if (backedUp) {
+            // Held rather than written, so a slow reconnecting subscriber cannot be handed every
+            // snapshot at once and buffer past the limit the streaming path already respects.
+            pendingLive.set(liveEventKey(event), event);
+            continue;
+        }
+        backedUp = !writeGlobalSseEvent(response, { event, live: true });
     }
+    if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) close();
     request.on("close", close);
 }
 

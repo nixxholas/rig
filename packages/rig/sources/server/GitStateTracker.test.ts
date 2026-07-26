@@ -105,10 +105,10 @@ describe("GitStateTracker", () => {
         tracker.watch(entity("a"));
         await waitFor(() => published.length === 3);
 
-        const revived = published.at(-1)!;
-        // A re-tracked entity must not restart at 1, or a client that stored version 1 would
-        // ignore every later snapshot forever.
-        expect(revived.version).toBe(2);
+        const evictedVersion = published[0]!.version;
+        // A re-tracked entity must never reissue or regress a version, or a client holding the
+        // earlier one would ignore every later snapshot forever.
+        expect(published.at(-1)!.version).toBeGreaterThan(evictedVersion);
     });
 
     it("drops an in-flight scan when its entity is evicted", async () => {
@@ -437,6 +437,60 @@ describe("GitStateTracker", () => {
         // subscriber showing the intermediate until some unrelated third state appeared.
         expect(delivered).toEqual([1, 1]);
     });
+
+    it("retries a corrective delivery that only reached some subscribers", async () => {
+        let insertions = 1;
+        let deliver = true;
+        const attempts: number[] = [];
+        const tracker = createTracker({
+            onLiveEvent: (event) => {
+                attempts.push(event.data.git.insertions);
+                return deliver;
+            },
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => attempts.length === 1);
+        insertions = 2;
+        await tracker.refresh(entity());
+        // The correction back to the delivered content fails for at least one subscriber.
+        deliver = false;
+        insertions = 1;
+        await tracker.refresh(entity());
+        const beforeRetry = attempts.length;
+        deliver = true;
+        await tracker.refresh(entity());
+
+        // Judging by content alone cannot tell a failed correction from a successful one, so the
+        // subscriber that missed it would stay stale until an unrelated third state appeared.
+        expect(attempts.length).toBeGreaterThan(beforeRetry);
+        expect(attempts.at(-1)).toBe(1);
+    });
+
+    it("never reissues a version after the entity is retired and watched again", async () => {
+        let insertions = 1;
+        const published: GitChangeSnapshot[] = [];
+        const tracker = createTracker({
+            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity("cycled"));
+        await waitFor(() => published.length === 1);
+        const handedOut = published.at(-1)!.version;
+        tracker.unwatch(entity("cycled"));
+        for (let index = 0; index < 600; index += 1) {
+            await tracker.refresh(entity(`churn-${String(index)}`));
+        }
+        insertions = 2;
+        tracker.watch(entity("cycled"));
+        await waitFor(() => published.at(-1)!.insertions === 2);
+
+        // Retirement destroys the tracker, so any version memory kept only on it is lost; the
+        // client still holds the earlier number.
+        expect(published.at(-1)!.version).toBeGreaterThan(handedOut);
+    }, 20_000);
 
     it("answers a refresh for an entity it is not watching without retaining it", async () => {
         const tracker = createTracker({ scan: countingScan(() => ({ insertions: 5 })) });

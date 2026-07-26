@@ -23,12 +23,6 @@ const MAXIMUM_DEBOUNCE_MS = 750;
 const RECONCILE_INTERVAL_MS = 30_000;
 const BACKOFF_START_MS = 1_000;
 const BACKOFF_LIMIT_MS = 30_000;
-/**
- * Version counters retained for entities that are not currently tracked. Far above the tracked-entity
- * cap so eviction never loses one, and bounded so a daemon that churns managed workspaces does not
- * accumulate a counter per workspace forever.
- */
-const VERSION_HISTORY_LIMIT = 512;
 
 export interface GitTrackedEntity {
     /** Immutable commit a managed workspace was created from. */
@@ -75,8 +69,6 @@ interface RepositoryTracker {
     firstDirtyAt: number | undefined;
     /** Incremented on eviction and disposal so in-flight work can detect it is obsolete. */
     generation: number;
-    /** Highest version ever stamped here; never reset, so a version is never reissued. */
-    highestVersion: number;
     /** Resolves when the current scan finishes, so a forced refresh can wait it out. */
     inFlight: Promise<void> | undefined;
     key: string;
@@ -86,8 +78,8 @@ interface RepositoryTracker {
     scanController: AbortController | undefined;
     /** Latest scan result, whether or not its live delivery succeeded. */
     snapshot: GitChangeSnapshot | undefined;
-    /** Latest snapshot clients actually received; drives republish, not reads. */
-    delivered: GitChangeSnapshot | undefined;
+    /** Whether that exact snapshot reached every subscriber; drives republish, not reads. */
+    snapshotDelivered: boolean;
     unwatch: (() => void) | undefined;
 }
 
@@ -113,8 +105,12 @@ export class GitStateTracker {
     readonly #taskDrain: TaskDrain | undefined;
     readonly #trackers = new Map<string, RepositoryTracker>();
     readonly #tuning: Required<NonNullable<GitStateTrackerOptions["tuning"]>>;
-    /** Version counters outlive their tracker so a re-tracked entity never restarts at 1. */
-    readonly #versions = new Map<string, number>();
+    /**
+     * One counter for the whole daemon. Versions only have to be monotonic within a generation, and
+     * a shared counter is that by construction — per-entity counters had to be remembered somewhere,
+     * and every bound on that memory turned into a version being reissued after eviction.
+     */
+    #nextVersion = 0;
     readonly #watch: typeof watchGitRepositoryChanges;
     #activeScans = 0;
     #disposed = false;
@@ -169,7 +165,6 @@ export class GitStateTracker {
             expiresAt: this.#now() + this.#tuning.watchTtlMs,
             firstDirtyAt: undefined,
             generation: 0,
-            highestVersion: 0,
             inFlight: undefined,
             key,
             lastActiveAt: this.#now(),
@@ -177,7 +172,7 @@ export class GitStateTracker {
             scanController: undefined,
             scanning: false,
             snapshot: undefined,
-            delivered: undefined,
+            snapshotDelivered: false,
             unwatch: undefined,
         };
         this.#trackers.set(key, tracker);
@@ -257,7 +252,7 @@ export class GitStateTracker {
         const tracker = this.#trackers.get(key);
         if (tracker === undefined) {
             // A refresh for an unwatched entity is still answered, without retaining it.
-            return this.#stamp(key, await this.#runScan(entity), 0);
+            return this.#stamp(await this.#runScan(entity));
         }
         tracker.lastActiveAt = this.#now();
         // A scan already running observed the repository before this call, so it is waited out and
@@ -435,26 +430,26 @@ export class GitStateTracker {
             // the last scan instead would let a throwing observer — a busy SQLite write, a bad
             // subscriber — silence an idle repository forever, because the next identical scan
             // would look like "no change" even though the change was never delivered.
-            // Two questions decide what happens: does the scan match what clients were last
-            // given, and does it match what reads currently report. Anything else republishes.
-            const clientsAgree = sameState(tracker.delivered, state);
-            const readsAgree = tracker.snapshot !== undefined && sameState(tracker.snapshot, state);
-            if (!clientsAgree || !readsAgree) {
-                // Retrying an undelivered but identical state reuses its version, so a subscriber
-                // that keeps failing cannot inflate the counter once per scan. Every other case
-                // takes a fresh version — including a repository reverting to the delivered state,
-                // because subscribers handed the undelivered intermediate must be corrected and a
-                // repeat of an old version would be ignored by anyone comparing versions.
+            // One question decides everything: is the newest scan already in clients' hands?
+            // Comparing content against the last delivered state instead cannot tell a failed
+            // corrective delivery from a successful one, so a subscriber that missed a revert
+            // stayed stale until some unrelated third state appeared.
+            const unchanged = tracker.snapshot !== undefined && sameState(tracker.snapshot, state);
+            if (!unchanged || !tracker.snapshotDelivered) {
+                // Redelivering an identical state reuses its version, so a subscriber that keeps
+                // failing cannot inflate the counter once per scan.
                 const snapshot =
-                    readsAgree && !clientsAgree && tracker.snapshot !== undefined
+                    unchanged && tracker.snapshot !== undefined
                         ? tracker.snapshot
                         : this.#stampFor(tracker, state);
-                // Reads report the latest scan either way; only delivery decides republication.
                 tracker.snapshot = snapshot;
-                if (this.#deliver(tracker.entity, snapshot)) tracker.delivered = snapshot;
+                tracker.snapshotDelivered = this.#deliver(tracker.entity, snapshot);
             }
             tracker.backoffMs = BACKOFF_START_MS;
             tracker.backoffUntil = 0;
+            // A success cancels any retry the previous failure armed.
+            if (tracker.backoffTimer !== undefined) clearTimeout(tracker.backoffTimer);
+            tracker.backoffTimer = undefined;
         } catch {
             if (this.#disposed || tracker.generation !== generation) return;
             // A repository that keeps failing backs off instead of spinning on every dirty signal.
@@ -463,6 +458,9 @@ export class GitStateTracker {
             // Held until the backoff elapses so the dirty-again re-enqueue below cannot turn a
             // repository whose scans keep failing into a spin.
             tracker.backoffUntil = this.#now() + delay;
+            // A forced refresh can fail while an earlier retry is still armed; leaving that timer
+            // live lets it fire inside the new, longer window and defeat the throttle.
+            if (tracker.backoffTimer !== undefined) clearTimeout(tracker.backoffTimer);
             const timer = setTimeout(() => {
                 tracker.backoffTimer = undefined;
                 this.#enqueue(tracker.key);
@@ -526,29 +524,13 @@ export class GitStateTracker {
         });
     }
 
-    /** Stamps for a tracked entity, remembering the version so a reset can never reissue it. */
-    #stampFor(tracker: RepositoryTracker, state: GitChangeState): GitChangeSnapshot {
-        const snapshot = this.#stamp(tracker.key, state, tracker.highestVersion);
-        tracker.highestVersion = snapshot.version;
-        return snapshot;
+    #stampFor(_tracker: RepositoryTracker, state: GitChangeState): GitChangeSnapshot {
+        return this.#stamp(state);
     }
 
-    #stamp(key: string, state: GitChangeState, floor: number): GitChangeSnapshot {
-        // The retained counter can have been evicted while this entity sat idle, so the versions it
-        // has already published are the real floor. Without this an entity that outlived its map
-        // entry restarts at 1 inside the same generation and every client ignores it.
-        const version = Math.max(this.#versions.get(key) ?? 0, floor) + 1;
-        // Re-inserted so the map stays in least-recently-stamped order, then trimmed. Counters must
-        // outlive eviction so a re-tracked entity never restarts at 1, but an archived workspace
-        // can never be re-tracked and its counter would otherwise live until the daemon exits.
-        this.#versions.delete(key);
-        this.#versions.set(key, version);
-        while (this.#versions.size > VERSION_HISTORY_LIMIT) {
-            const oldest = this.#versions.keys().next().value;
-            if (oldest === undefined) break;
-            this.#versions.delete(oldest);
-        }
-        return { ...state, generation: this.#generation, version };
+    #stamp(state: GitChangeState): GitChangeSnapshot {
+        this.#nextVersion += 1;
+        return { ...state, generation: this.#generation, version: this.#nextVersion };
     }
 }
 

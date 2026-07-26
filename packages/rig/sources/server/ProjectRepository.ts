@@ -301,7 +301,10 @@ export class ProjectRepository {
         let next = 0;
         const worker = async (): Promise<void> => {
             for (;;) {
-                if (this.#closed) return;
+                // The repository is closed only after the drain finishes, so checking that alone
+                // would let this optional sweep keep claiming targets during shutdown and hold it
+                // open for a Git timeout per remaining project.
+                if (this.#closed || this.#taskDrain?.closing === true) return;
                 const target = targets[next++];
                 if (target === undefined) return;
                 if (target.kind === "project") {
