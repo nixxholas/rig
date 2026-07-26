@@ -500,7 +500,7 @@ describe("AgentSessionManager", () => {
         expect(createSubagent).not.toHaveBeenCalled();
     });
 
-    it("infers a provider for model-only requests and reports ambiguous providers", async () => {
+    it("infers a provider for model-only requests and reuses the last successful provider", async () => {
         const providerModels = new Map([
             ["codex", new Set(["shared/current"])],
             ["claude", new Set(["shared/current", "claude/unique", "shared/ambiguous"])],
@@ -527,6 +527,9 @@ describe("AgentSessionManager", () => {
                     : (providerModels.get(providerId)?.has(modelId) ?? false),
             id: "root-1",
             isSubagent: () => false,
+            modelIdsForProvider: (providerId: string) => [
+                ...(providerModels.get(providerId) ?? []),
+            ],
             providerIdsForModel: (modelId: string) =>
                 [...providerModels.entries()]
                     .filter(([, models]) => models.has(modelId))
@@ -570,16 +573,40 @@ describe("AgentSessionManager", () => {
             expect.anything(),
         );
 
-        await expect(
-            manager.spawn(parent.id, {
-                description: "Require provider",
-                modelId: "shared/ambiguous",
-                prompt: "Do not guess between providers.",
-            }),
-        ).rejects.toThrow(
-            "Provider is required for model 'shared/ambiguous' because it is available from multiple providers: 'claude', 'grok'.",
+        await manager.spawn(parent.id, {
+            background: true,
+            description: "Use first available provider",
+            modelId: "shared/ambiguous",
+            prompt: "Use the best available provider.",
+        });
+        expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.objectContaining({ modelId: "shared/ambiguous", providerId: "claude" }),
+            expect.anything(),
         );
-        expect(createSubagent).toHaveBeenCalledTimes(2);
+
+        manager.recordSuccessfulProvider("shared/ambiguous", "grok");
+        await manager.spawn(parent.id, {
+            background: true,
+            description: "Reuse successful provider",
+            modelId: "shared/ambiguous",
+            prompt: "Use the provider that most recently served this model successfully.",
+        });
+        expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.objectContaining({ modelId: "shared/ambiguous", providerId: "grok" }),
+            expect.anything(),
+        );
+
+        await manager.spawn(parent.id, {
+            background: true,
+            description: "Reuse successful model",
+            prompt: "Use the best model for this provider.",
+            providerId: "grok",
+        });
+        expect(createSubagent).toHaveBeenLastCalledWith(
+            expect.objectContaining({ modelId: "shared/ambiguous", providerId: "grok" }),
+            expect.anything(),
+        );
+        expect(createSubagent).toHaveBeenCalledTimes(5);
     });
 
     it("does not propagate session-scoped attachments to spawned subagents", async () => {

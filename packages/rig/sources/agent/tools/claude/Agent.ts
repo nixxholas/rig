@@ -46,11 +46,14 @@ export const claudeAgentTool = defineTool({
         model: Type.Optional(
             Type.String({
                 description:
-                    "Child model ID. The provider is inferred from the current provider or a unique match when omitted.",
+                    "Child model ID. The provider is inferred from recent successful use, the current provider, or the first available match.",
             }),
         ),
         provider: Type.Optional(
-            Type.String({ description: "Child provider ID. Requires an explicit model." }),
+            Type.String({
+                description:
+                    "Child provider ID. The model is inferred from recent successful use, the current model, or the first available model.",
+            }),
         ),
         run_in_background: Type.Optional(
             Type.Boolean({
@@ -76,9 +79,6 @@ export const claudeAgentTool = defineTool({
     ) => {
         if (context.subagents === undefined || !context.subagents.canSpawn) {
             throw new Error("This agent has reached the maximum subagent depth.");
-        }
-        if (provider !== undefined && model === undefined) {
-            throw new Error("The provider argument requires an explicit model.");
         }
         const result = await context.subagents.spawn(
             {

@@ -77,9 +77,15 @@ describe("Agent tool", () => {
         ).rejects.toThrow("maximum subagent depth");
     });
 
-    it("rejects a provider without an explicit model", async () => {
+    it("allows the session manager to infer a model from the provider", async () => {
         const harness = createJustBashToolHarness();
-        const spawn = vi.fn();
+        const spawn = vi.fn(async () => ({
+            output: "The subagent is running in the background.",
+            path: "/root/inspect_tests",
+            sessionId: "subagent-1",
+            status: "running" as const,
+            taskName: "inspect_tests",
+        }));
         harness.context.subagents = {
             canSpawn: true,
             depth: 0,
@@ -91,19 +97,20 @@ describe("Agent tool", () => {
             wait: async () => ({ agents: [], timedOut: false }),
         };
 
-        await expect(
-            claudeAgentTool.execute(
-                {
-                    context: "task",
-                    description: "Inspect the tests",
-                    prompt: "Review the test suite.",
-                    provider: "claude",
-                },
-                harness.context,
-                {},
-            ),
-        ).rejects.toThrow("provider argument requires an explicit model");
-        expect(spawn).not.toHaveBeenCalled();
+        await claudeAgentTool.execute(
+            {
+                context: "task",
+                description: "Inspect the tests",
+                prompt: "Review the test suite.",
+                provider: "claude",
+            },
+            harness.context,
+            {},
+        );
+        expect(spawn).toHaveBeenCalledWith(
+            expect.objectContaining({ providerId: "claude" }),
+            undefined,
+        );
     });
 
     it("launches an Agent in the background by default", async () => {

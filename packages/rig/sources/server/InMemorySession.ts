@@ -1074,6 +1074,10 @@ export class InMemorySession {
         return getProviderIdsForModel(this.#modelCatalog, modelId);
     }
 
+    modelIdsForProvider(providerId: string): readonly string[] {
+        return this.#modelsForProvider(providerId).map((model) => model.id);
+    }
+
     hasLocalSettlementWork(): boolean {
         return (
             this.#activeRun !== undefined ||
@@ -3621,6 +3625,9 @@ export class InMemorySession {
             runId,
             stopReason,
         });
+        if (stopReason !== "aborted" && stopReason !== "error") {
+            this.#agentManager?.recordSuccessfulProvider?.(this.#modelId, this.#providerId);
+        }
         this.#latestMetadataBoundaryRunId = runId;
         this.#restartMetadataSettlement();
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);

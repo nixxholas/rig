@@ -43,6 +43,8 @@ export class AgentSessionManager {
     readonly maxDepth: number;
 
     readonly #repository: AgentSessionRepository;
+    readonly #lastSuccessfulModelByProvider = new Map<string, string>();
+    readonly #lastSuccessfulProviderByModel = new Map<string, string>();
     readonly #latestBackgroundRunBySession = new Map<string, string>();
     readonly #pendingBackgroundRuns = new Map<string, string>();
     readonly #slotReservations = new Map<string, number>();
@@ -75,6 +77,11 @@ export class AgentSessionManager {
             parent.recordSubagentChanged(child.subagentSummary());
             parent = this.#parentFor(parent);
         }
+    }
+
+    recordSuccessfulProvider(modelId: string, providerId: string): void {
+        this.#lastSuccessfulModelByProvider.set(providerId, modelId);
+        this.#lastSuccessfulProviderByModel.set(modelId, providerId);
     }
 
     async changeSubagentPermissionModes(
@@ -351,45 +358,59 @@ export class AgentSessionManager {
                 "Native encrypted collaboration only works within the current compatible provider and region. Use `rig.spawn_agent` and provide the task normally when selecting or crossing a model, provider, or region.",
             );
         }
-        if (request.providerId !== undefined && request.modelId === undefined) {
-            throw new Error("A subagent provider requires an explicit model.");
-        }
         let parentRequest: CreateSessionRequest | undefined;
+        let childModelId = request.modelId;
         let childProviderId = request.providerId;
-        if (request.modelId !== undefined) {
+        if (childModelId !== undefined) {
             parentRequest = parent.requestForSubagent();
-            if (
-                childProviderId !== undefined &&
-                !parent.hasModel(request.modelId, childProviderId)
-            ) {
+            if (childProviderId !== undefined && !parent.hasModel(childModelId, childProviderId)) {
                 throw new Error(
-                    `Model '${request.modelId}' is not available for provider '${childProviderId}'.`,
+                    `Model '${childModelId}' is not available for provider '${childProviderId}'.`,
                 );
             }
             if (childProviderId === undefined) {
                 const currentProviderId = parentRequest.providerId;
+                const lastSuccessfulProviderId =
+                    this.#lastSuccessfulProviderByModel.get(childModelId);
                 if (
+                    lastSuccessfulProviderId !== undefined &&
+                    parent.hasModel(childModelId, lastSuccessfulProviderId)
+                ) {
+                    childProviderId = lastSuccessfulProviderId;
+                } else if (
                     currentProviderId !== undefined &&
-                    parent.hasModel(request.modelId, currentProviderId)
+                    parent.hasModel(childModelId, currentProviderId)
                 ) {
                     childProviderId = currentProviderId;
                 } else {
-                    const matchingProviderIds = parent.providerIdsForModel(request.modelId);
+                    const matchingProviderIds = parent.providerIdsForModel(childModelId);
                     if (matchingProviderIds.length === 0) {
-                        throw new Error(`Model '${request.modelId}' is not available.`);
-                    }
-                    if (matchingProviderIds.length > 1) {
-                        throw new Error(
-                            `Provider is required for model '${request.modelId}' because it is available from multiple providers: ${matchingProviderIds.map((providerId) => `'${providerId}'`).join(", ")}.`,
-                        );
+                        throw new Error(`Model '${childModelId}' is not available.`);
                     }
                     childProviderId = matchingProviderIds[0];
                 }
             }
+        } else if (childProviderId !== undefined) {
+            parentRequest = parent.requestForSubagent();
+            const providerModelIds = parent.modelIdsForProvider(childProviderId);
+            if (providerModelIds.length === 0) {
+                throw new Error(`Provider '${childProviderId}' is not available.`);
+            }
+            const lastSuccessfulModelId = this.#lastSuccessfulModelByProvider.get(childProviderId);
+            childModelId =
+                (lastSuccessfulModelId !== undefined &&
+                providerModelIds.includes(lastSuccessfulModelId)
+                    ? lastSuccessfulModelId
+                    : undefined) ??
+                (parentRequest.modelId !== undefined &&
+                providerModelIds.includes(parentRequest.modelId)
+                    ? parentRequest.modelId
+                    : undefined) ??
+                providerModelIds[0];
         }
         if (request.effort !== undefined) {
             parentRequest ??= parent.requestForSubagent();
-            const childModelId = request.modelId ?? parentRequest.modelId;
+            childModelId ??= parentRequest.modelId;
             const effectiveChildProviderId = childProviderId ?? parentRequest.providerId;
             if (childModelId === undefined || effectiveChildProviderId === undefined) {
                 throw new Error("A subagent effort requires a resolved model and provider.");
@@ -441,7 +462,7 @@ export class AgentSessionManager {
                     this.maxDepth,
                 ),
                 ...(request.effort === undefined ? {} : { effort: request.effort }),
-                ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+                ...(childModelId === undefined ? {} : { modelId: childModelId }),
                 ...(childProviderId === undefined ? {} : { providerId: childProviderId }),
                 ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
             };

@@ -37,7 +37,7 @@ Spawn a background subagent for a concrete, bounded task. The new agent shares t
             model: Type.Optional(
                 Type.String({
                     description:
-                        "Child model ID. The provider is inferred from the current provider or a unique match when omitted.",
+                        "Child model ID. The provider is inferred from recent successful use, the current provider, or the first available match.",
                 }),
             ),
             reasoning_effort: Type.Optional(
