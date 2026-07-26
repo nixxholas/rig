@@ -373,7 +373,7 @@ describe("InMemorySession", () => {
                 modelId: sharedModel.id,
                 snapshot: { providerId: "codex" },
             },
-            type: "model_changed",
+            type: "session_configuration_changed",
         });
 
         const inferredSession = store.create({
@@ -445,8 +445,8 @@ describe("InMemorySession", () => {
         session.changeServiceTier({});
         expect(session.snapshot().serviceTier).toBeUndefined();
         expect(session.events.since(undefined)?.at(-1)).toMatchObject({
-            data: { serviceTier: null },
-            type: "service_tier_changed",
+            data: { changed: ["serviceTier"], serviceTier: null },
+            type: "session_configuration_changed",
         });
 
         session.changeModel({ modelId: claudeModel.id, providerId: "claude" });
@@ -462,6 +462,108 @@ describe("InMemorySession", () => {
             serviceTier: "fast",
         });
         expect(unsupportedDefault.snapshot().serviceTier).toBeUndefined();
+    });
+
+    it("carries a model, reasoning, and fast mode change on a message and reports them as one event", () => {
+        const { store, fastModel, slowModel } = configurableCatalog();
+        const session = store.create({
+            cwd: "/tmp/rig-session-test",
+            modelId: slowModel.id,
+            providerId: "codex",
+        });
+
+        session.submit({
+            effort: "high",
+            modelId: fastModel.id,
+            serviceTier: "fast",
+            text: "Use the other model.",
+        });
+
+        expect(session.snapshot()).toMatchObject({
+            effort: "high",
+            modelId: fastModel.id,
+            serviceTier: "fast",
+        });
+        // Three settings moved together, so they are reported once rather than as three events a
+        // reader would have to reassemble.
+        const configurationEvents = session.events
+            .since(undefined)
+            ?.filter((event) => event.type === "session_configuration_changed");
+        expect(configurationEvents).toHaveLength(1);
+        expect(configurationEvents?.[0]).toMatchObject({
+            data: {
+                changed: ["model", "effort", "serviceTier"],
+                effort: "high",
+                modelId: fastModel.id,
+                serviceTier: "fast",
+            },
+        });
+    });
+
+    it("does not report a configuration field a message left where it already was", () => {
+        const { store, fastModel } = configurableCatalog();
+        const session = store.create({
+            cwd: "/tmp/rig-session-test",
+            modelId: fastModel.id,
+            providerId: "codex",
+        });
+
+        session.submit({ effort: "high", modelId: fastModel.id, text: "Same model." });
+
+        const configurationEvents = session.events
+            .since(undefined)
+            ?.filter((event) => event.type === "session_configuration_changed");
+        expect(configurationEvents).toHaveLength(1);
+        // The model was already selected, so only the reasoning level actually moved.
+        expect(configurationEvents?.[0]).toMatchObject({ data: { changed: ["effort"] } });
+    });
+
+    it("rejects a message whose reasoning the model it also selects cannot do", () => {
+        const { store, fastModel, slowModel } = configurableCatalog();
+        const session = store.create({
+            cwd: "/tmp/rig-session-test",
+            modelId: fastModel.id,
+            providerId: "codex",
+        });
+
+        // "high" is valid for the currently selected model, so a check against the current model
+        // rather than the requested one would let this through.
+        expect(() =>
+            session.submit({ effort: "high", modelId: slowModel.id, text: "Think hard." }),
+        ).toThrow("does not support 'high' reasoning");
+        expect(() => session.submit({ effort: "nonsense", text: "Think hard." })).toThrow(
+            "does not support 'nonsense' reasoning",
+        );
+    });
+
+    it("validates reasoning against the model an earlier message switched to", () => {
+        const { store, fastModel, slowModel } = configurableCatalog();
+        const session = store.create({
+            cwd: "/tmp/rig-session-test",
+            modelId: fastModel.id,
+            providerId: "codex",
+        });
+
+        session.submit({ modelId: slowModel.id, text: "Switch models." });
+        // By the time this runs the session is on the model the queued message selected.
+        expect(() => session.submit({ effort: "high", text: "Think hard." })).toThrow(
+            "does not support 'high' reasoning",
+        );
+    });
+
+    it("lets a steer with nothing to interrupt carry configuration, because it is queued", () => {
+        const { store, fastModel, slowModel } = configurableCatalog();
+        const session = store.create({
+            cwd: "/tmp/rig-session-test",
+            modelId: slowModel.id,
+            providerId: "codex",
+        });
+
+        // With no run in flight a steer becomes an ordinary queued message, which is the only
+        // delivery that may carry configuration.
+        const queued = session.steer({ modelId: fastModel.id, text: "Change it." });
+        expect(queued.delivery).toBe("run");
+        expect(session.snapshot().modelId).toBe(fastModel.id);
     });
 
     it("falls back when the configured model is no longer available", () => {
@@ -785,3 +887,33 @@ describe("InMemorySession", () => {
         });
     });
 });
+
+/** Two models on one provider that differ in the reasoning levels they accept. */
+function configurableCatalog() {
+    const slowModel = defineModel({
+        defaultThinkingLevel: "off",
+        id: "openai/slow",
+        name: "Slow model",
+        thinkingLevels: ["off"],
+    });
+    const fastModel = defineModel({
+        defaultThinkingLevel: "off",
+        id: "openai/fast",
+        name: "Fast model",
+        thinkingLevels: ["off", "high"],
+    });
+    const catalog: ModelCatalog = {
+        defaultModelId: slowModel.id,
+        defaultProviderId: "codex",
+        models: [slowModel, fastModel],
+        providers: [
+            {
+                providerId: "codex",
+                providerType: "codex",
+                models: [slowModel, fastModel],
+                serviceTiers: ["fast"],
+            },
+        ],
+    };
+    return { fastModel, slowModel, store: new InMemorySessionStore({ modelCatalog: catalog }) };
+}

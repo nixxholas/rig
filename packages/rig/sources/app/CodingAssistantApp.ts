@@ -1137,35 +1137,35 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
 
-        if (event.type === "model_changed") {
-            this.#usageRequestVersion += 1;
-            this.#latestContextTokens = 0;
-            this.#appendEntry({
-                role: "event",
-                title: "Model",
-                text: `Model changed to ${this.#modelDisplayName()}.`,
-            });
-            return;
-        }
-
-        if (event.type === "effort_changed") {
-            this.#appendEntry({
-                role: "event",
-                title: "Reasoning",
-                text: `Reasoning changed to ${humanizeReasoningLevel(event.data.effort ?? "off")}.`,
-            });
-            return;
-        }
-
-        if (event.type === "service_tier_changed") {
-            this.#appendEntry({
-                role: "event",
-                title: "Fast mode",
-                text:
-                    event.data.serviceTier === "fast"
-                        ? FAST_MODE_ON_MESSAGE
-                        : FAST_MODE_OFF_MESSAGE,
-            });
+        if (event.type === "session_configuration_changed") {
+            // One change can move several settings at once, so each one that actually moved gets
+            // its own row and the transcript reads the same as when they change separately.
+            if (event.data.changed.includes("model")) {
+                this.#usageRequestVersion += 1;
+                this.#latestContextTokens = 0;
+                this.#appendEntry({
+                    role: "event",
+                    title: "Model",
+                    text: `Model changed to ${this.#modelDisplayName()}.`,
+                });
+            }
+            if (event.data.changed.includes("effort")) {
+                this.#appendEntry({
+                    role: "event",
+                    title: "Reasoning",
+                    text: `Reasoning changed to ${humanizeReasoningLevel(event.data.effort ?? "off")}.`,
+                });
+            }
+            if (event.data.changed.includes("serviceTier")) {
+                this.#appendEntry({
+                    role: "event",
+                    title: "Fast mode",
+                    text:
+                        event.data.serviceTier === "fast"
+                            ? FAST_MODE_ON_MESSAGE
+                            : FAST_MODE_OFF_MESSAGE,
+                });
+            }
             return;
         }
 

@@ -2494,6 +2494,39 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("stores the model, provider, and fast mode a queued run carries", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            const queuedRun: PersistedQueuedRun = {
+                displayText: "queued prompt",
+                effort: "high",
+                kind: "user",
+                modelId: "openai/queued",
+                providerId: "codex",
+                runId: "run-1",
+                serviceTier: "fast",
+                text: "queued prompt",
+                userMessage: textUserMessage("message-1", "queued prompt"),
+            };
+            store.saveSession(sessionState({ queuedRuns: [queuedRun], status: "queued" }));
+            store.insertQueuedRun("session-1", queuedRun);
+
+            // Reading the session back parses the stored row. Dropping any of these would run the
+            // message on a different model than the one it asked for, wherever a stored queue is
+            // resumed rather than discarded.
+            expect(store.get("session-1")?.state().queuedRuns[0]).toMatchObject({
+                effort: "high",
+                modelId: "openai/queued",
+                providerId: "codex",
+                serviceTier: "fast",
+            });
+            store.close();
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("emits terminal events for accepted queued runs that are aborted before start", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
@@ -2656,7 +2689,7 @@ describe("PersistentSessionStore", () => {
                         effort: "high",
                         modelId: "anthropic/test",
                     },
-                    type: "model_changed",
+                    type: "session_configuration_changed",
                 });
             } finally {
                 restoredStore.close();

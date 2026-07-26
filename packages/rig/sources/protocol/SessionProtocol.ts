@@ -467,6 +467,20 @@ export interface SubmitMessageRequest {
     skills?: readonly DurableSkillDefinition[];
     /** Replaces Rig's assembled system prompt. Null restores Rig's normal prompt. */
     systemPrompt?: string | null;
+    /**
+     * Reasoning effort for this and subsequent runs. Applied when this message's run starts, so
+     * it never disturbs a run already in progress.
+     */
+    effort?: string;
+    /** Model for this and subsequent runs. Applied when this message's run starts. */
+    modelId?: string;
+    /** Provider for `modelId`. Inferred from the model when omitted. */
+    providerId?: string;
+    /**
+     * Fast mode for this and subsequent runs. Null turns it off; omitting it changes nothing.
+     * Applied when this message's run starts.
+     */
+    serviceTier?: ServiceTier | null;
     text: string;
 }
 
@@ -593,9 +607,7 @@ export type SessionEvent =
     | SessionResetEvent
     | SessionRewoundEvent
     | SessionTitleChangedEvent
-    | ModelChangedEvent
-    | EffortChangedEvent
-    | ServiceTierChangedEvent
+    | SessionConfigurationChangedEvent
     | PermissionModeChangedEvent
     | SessionDraftChangedEvent
     | SecretsChangedEvent
@@ -754,27 +766,23 @@ export type SessionTitleChangedEvent = BaseSessionEvent<
     }
 >;
 
-export type ModelChangedEvent = BaseSessionEvent<
-    "model_changed",
+/** Which parts of the agent configuration one change actually altered. */
+export type SessionConfigurationField = "model" | "effort" | "serviceTier";
+
+/**
+ * A change to the model, reasoning effort, or fast mode.
+ *
+ * Several of these can move together, most often when a message carries them, so one event
+ * reports everything that changed at once. `changed` names the fields the change actually
+ * altered; the remaining fields describe the resulting configuration and are always present so
+ * a reader never has to reconstruct them from earlier events.
+ */
+export type SessionConfigurationChangedEvent = BaseSessionEvent<
+    "session_configuration_changed",
     {
+        changed: readonly SessionConfigurationField[];
         effort?: string;
         modelId: string;
-        snapshot: AgentSnapshot;
-    }
->;
-
-export type EffortChangedEvent = BaseSessionEvent<
-    "effort_changed",
-    {
-        effort?: string;
-        modelId: string;
-        snapshot: AgentSnapshot;
-    }
->;
-
-export type ServiceTierChangedEvent = BaseSessionEvent<
-    "service_tier_changed",
-    {
         serviceTier: ServiceTier | null;
         snapshot: AgentSnapshot;
     }

@@ -27,7 +27,7 @@ import type {
     SessionTitleStatus,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
-import type { Model, Usage } from "@slopus/rig-execution";
+import type { Model, ServiceTier, Usage } from "@slopus/rig-execution";
 import type { SessionGoal } from "../goals/index.js";
 import { parsePermissionMode } from "../permissions/index.js";
 import {
@@ -489,6 +489,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 JSON.stringify(run.userMessage),
                 run.effort === undefined &&
                     run.externalTools === undefined &&
+                    run.modelId === undefined &&
+                    run.providerId === undefined &&
+                    run.serviceTier === undefined &&
                     run.skills === undefined &&
                     run.systemPrompt === undefined
                     ? null
@@ -498,6 +501,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                               : { externalTools: run.externalTools }),
                           ...(run.skills === undefined ? {} : { skills: run.skills }),
                           ...(run.effort === undefined ? {} : { effort: run.effort }),
+                          ...(run.modelId === undefined ? {} : { modelId: run.modelId }),
+                          ...(run.providerId === undefined ? {} : { providerId: run.providerId }),
+                          ...(run.serviceTier === undefined
+                              ? {}
+                              : { serviceTier: run.serviceTier }),
                           ...(run.systemPrompt === undefined
                               ? {}
                               : { systemPrompt: run.systemPrompt }),
@@ -1710,6 +1718,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         : (JSON.parse(integrationConfigJson) as {
                               effort?: string;
                               externalTools?: readonly ExternalToolDefinition[];
+                              modelId?: string;
+                              providerId?: string;
+                              serviceTier?: ServiceTier | null;
                               skills?: readonly DurableSkillDefinition[];
                               systemPrompt?: string | null;
                           });

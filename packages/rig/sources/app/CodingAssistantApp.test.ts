@@ -2955,12 +2955,14 @@ describe("CodingAssistantApp", () => {
         app.applySessionEvent({
             createdAt: 1,
             data: {
+                changed: ["serviceTier"],
+                modelId: "gpt-test",
                 serviceTier: "fast",
                 snapshot: agent.snapshot(),
             },
             id: "event-fast",
             sessionId: "session-1",
-            type: "service_tier_changed",
+            type: "session_configuration_changed",
         });
 
         const rendered = stripAnsi(app.render(100).join("\n"));
@@ -5257,10 +5259,15 @@ describe("CodingAssistantApp", () => {
 
         app.applySessionEvent({
             createdAt: 2,
-            data: { modelId: model.id, snapshot: agent.snapshot() },
+            data: {
+                changed: ["model"],
+                modelId: model.id,
+                serviceTier: null,
+                snapshot: agent.snapshot(),
+            },
             id: "model-changed",
             sessionId: "session-1",
-            type: "model_changed",
+            type: "session_configuration_changed",
         });
         expect(stripAnsi(app.render(100).join("\n"))).toContain(
             "1.6k tokens · 8% cache hit · 100% ctx left",

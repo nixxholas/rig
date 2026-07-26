@@ -38,6 +38,7 @@ import type {
     ChangeModelRequest,
     ChangePermissionModeRequest,
     ChangeServiceTierRequest,
+    SessionConfigurationField,
     CreateSessionRequest,
     EventId,
     ModelCatalog,
@@ -166,6 +167,9 @@ export interface PersistedQueuedRun {
     debugDirectory?: string;
     displayText: string;
     effort?: string;
+    modelId?: string;
+    providerId?: string;
+    serviceTier?: ServiceTier | null;
     interactive?: boolean;
     kind: "goal" | "user";
     runId: string;
@@ -184,7 +188,6 @@ interface SessionSubmitMessageRequest extends SubmitMessageRequest {
         header: string;
         encryptedContent: string;
     };
-    effort?: string;
     provenance?: "agent";
 }
 
@@ -1099,32 +1102,138 @@ export class InMemorySession {
     }
 
     changeModel(request: ChangeModelRequest): ProtocolSession {
-        const providerId =
-            (request.providerId !== undefined
-                ? getProviderIdForModel(this.#modelCatalog, request.modelId, request.providerId)
-                : getProviderIdForModel(this.#modelCatalog, request.modelId, this.#providerId)) ??
-            (request.providerId === undefined
-                ? getProviderIdForModel(this.#modelCatalog, request.modelId)
-                : undefined);
-        if (providerId === undefined) {
-            const providerDescription =
-                request.providerId !== undefined ? ` for provider '${request.providerId}'` : "";
-            throw new Error(`Unknown model '${request.modelId}'${providerDescription}.`);
-        }
-
+        // Resolving the provider before the idle guard keeps an unknown model reported as an
+        // unknown model rather than as a busy session.
+        this.#resolveProviderForModel(request.modelId, request.providerId);
         if (this.#activeRun !== undefined || this.#queue.length > 0) {
             throw new Error("Wait for the active response to finish before changing models.");
         }
+        return this.#applyConfiguration({
+            ...(request.effort === undefined ? {} : { effort: request.effort }),
+            modelId: request.modelId,
+            ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
+        });
+    }
 
-        const previousModel = this.#selectedModel();
-        const model = this.#ensureKnownModel(request.modelId, providerId);
+    changeEffort(request: ChangeEffortRequest): ProtocolSession {
+        return this.#applyConfiguration({
+            effort: request.effort ?? this.#selectedModel().defaultThinkingLevel,
+        });
+    }
 
-        if (request.modelId === this.#modelId && providerId === this.#providerId) {
-            return this.changeEffort(
-                request.effort !== undefined ? { effort: request.effort } : {},
-            );
+    changeServiceTier(request: ChangeServiceTierRequest): ProtocolSession {
+        return this.#applyConfiguration({ serviceTier: request.serviceTier ?? null });
+    }
+
+    /**
+     * Applies a model, reasoning effort, or fast mode change and reports it as one event.
+     *
+     * Every path that changes the agent's configuration goes through here, so a change that moves
+     * several fields at once is a single event rather than a burst that readers would have to
+     * reassemble. `changed` names only the fields whose values actually moved.
+     *
+     * `excludeRunId` omits one run's already-stored message from the summarized history an
+     * incompatible model switch builds. A message that is about to be sent to the new model must
+     * not also be folded into the summary of what the old model saw.
+     */
+    #applyConfiguration(
+        change: {
+            effort?: string;
+            modelId?: string;
+            providerId?: string;
+            serviceTier?: ServiceTier | null;
+        },
+        options: { excludeRunId?: string } = {},
+    ): ProtocolSession {
+        const changed: SessionConfigurationField[] = [];
+        const previousEffort = this.#effort;
+        const previousServiceTier = this.#serviceTier;
+
+        // Everything this change asks for is checked against the configuration it would produce
+        // before any of it is applied, so a rejected change leaves the session as it was rather
+        // than half switched.
+        const targetProviderId =
+            change.modelId === undefined
+                ? this.#providerId
+                : this.#resolveProviderForModel(change.modelId, change.providerId);
+        const targetModel =
+            change.modelId === undefined
+                ? this.#selectedModel()
+                : this.#ensureKnownModel(change.modelId, targetProviderId);
+        if (change.effort !== undefined) {
+            this.#assertSupportedEffortForModel(change.effort, targetModel);
+        }
+        if (
+            change.serviceTier !== undefined &&
+            change.serviceTier !== null &&
+            !this.#providerSupportsServiceTier(targetProviderId, change.serviceTier)
+        ) {
+            throw new Error(`Provider '${targetProviderId}' does not support fast inference.`);
         }
 
+        if (
+            change.modelId !== undefined &&
+            (targetModel.id !== this.#modelId || targetProviderId !== this.#providerId)
+        ) {
+            this.#switchModel(targetModel, targetProviderId, options);
+            changed.push("model");
+        }
+
+        // An explicit effort always applies. A model switch otherwise resets effort to whatever
+        // the new model considers normal, because the old level may not exist on it.
+        const effort =
+            change.effort ??
+            (changed.includes("model") ? this.#selectedModel().defaultThinkingLevel : undefined);
+        if (effort !== undefined) {
+            this.#assertSupportedEffort(effort);
+            this.#effort = effort;
+            this.#runtime?.agent.setEffort(effort);
+        }
+
+        if (change.serviceTier !== undefined) {
+            this.#serviceTier = change.serviceTier ?? undefined;
+        } else if (
+            this.#serviceTier !== undefined &&
+            !this.#providerSupportsServiceTier(this.#providerId, this.#serviceTier)
+        ) {
+            // Switching to a provider without fast inference silently turns it off, which readers
+            // still have to be told about so their view of the session stays true.
+            this.#serviceTier = undefined;
+        }
+        this.#runtime?.agent.setServiceTier(this.#serviceTier);
+
+        if (this.#effort !== previousEffort) changed.push("effort");
+        if (this.#serviceTier !== previousServiceTier) changed.push("serviceTier");
+
+        this.#interruption = undefined;
+        this.#append("session_configuration_changed", {
+            changed,
+            ...(this.#effort === undefined ? {} : { effort: this.#effort }),
+            modelId: this.#modelId,
+            serviceTier: this.#serviceTier ?? null,
+            snapshot: this.#agentSnapshot(),
+        });
+        return this.snapshot();
+    }
+
+    #resolveProviderForModel(modelId: string, providerId?: string): string {
+        const resolved =
+            (providerId !== undefined
+                ? getProviderIdForModel(this.#modelCatalog, modelId, providerId)
+                : getProviderIdForModel(this.#modelCatalog, modelId, this.#providerId)) ??
+            (providerId === undefined
+                ? getProviderIdForModel(this.#modelCatalog, modelId)
+                : undefined);
+        if (resolved === undefined) {
+            const providerDescription =
+                providerId !== undefined ? ` for provider '${providerId}'` : "";
+            throw new Error(`Unknown model '${modelId}'${providerDescription}.`);
+        }
+        return resolved;
+    }
+
+    #switchModel(model: Model, providerId: string, options: { excludeRunId?: string }): void {
+        const previousModel = this.#selectedModel();
         const compatible = areProviderModelsCompatible(
             {
                 modelId: previousModel.id,
@@ -1146,10 +1255,17 @@ export class InMemorySession {
         if (compatible) {
             this.#syncContextMessages();
         } else {
-            const visibleMessages = this.#committedMessages();
+            // A message already stored for a run that has not reached the model yet belongs to
+            // the new model, not to the summary of what the old one saw.
+            const visibleMessages = this.#committedMessagesExcludingRun(options.excludeRunId);
             this.#contextMessages =
                 visibleMessages.length === 0
-                    ? undefined
+                    ? // Undefined means "the context is the visible transcript", which would put
+                      // the excluded message back and send it to the model twice. When a message
+                      // was excluded, an empty context is what is actually true.
+                      options.excludeRunId === undefined
+                        ? undefined
+                        : []
                     : [
                           createModelSwitchHistoryMessage({
                               canReadAgentHistory: this.#agentManager !== undefined,
@@ -1168,7 +1284,9 @@ export class InMemorySession {
             runtime?.executor instanceof Executor ? runtime.executor : undefined;
         if (compatible && reusableExecutor !== undefined) {
             reusableExecutor.selectProvider(providerId);
-            runtime!.agent.setModel(model.id, request.effort);
+            // Effort is settled by the caller once the new model is known, so it is not guessed
+            // here; the agent falls back to the new model's default until then.
+            runtime!.agent.setModel(model.id, undefined);
         } else {
             void this.#killRuntimeProcesses();
             this.#releaseMcpToolLease();
@@ -1187,22 +1305,7 @@ export class InMemorySession {
         }
         this.#modelId = model.id;
         this.#providerId = providerId;
-        this.#effort = request.effort ?? model.defaultThinkingLevel;
-        if (
-            this.#serviceTier !== undefined &&
-            !this.#providerSupportsServiceTier(providerId, this.#serviceTier)
-        ) {
-            this.#serviceTier = undefined;
-        }
-        this.#runtime?.agent.setServiceTier(this.#serviceTier);
         this.#models = this.#modelsForProvider(providerId);
-        this.#interruption = undefined;
-        this.#append("model_changed", {
-            ...(this.#effort !== undefined ? { effort: this.#effort } : {}),
-            modelId: this.#modelId,
-            snapshot: this.#agentSnapshot(),
-        });
-        return this.snapshot();
     }
 
     createForkState(): PersistedSessionState {
@@ -1249,41 +1352,6 @@ export class InMemorySession {
             workflows: [],
             ...(title !== undefined ? { title } : {}),
         };
-    }
-
-    changeEffort(request: ChangeEffortRequest): ProtocolSession {
-        const model = this.#selectedModel();
-        const effort = request.effort ?? model.defaultThinkingLevel;
-        this.#assertSupportedEffort(effort);
-
-        this.#effort = effort;
-        this.#runtime?.agent.setEffort(effort);
-        this.#interruption = undefined;
-        this.#append("effort_changed", {
-            effort,
-            modelId: this.#modelId,
-            snapshot: this.#agentSnapshot(),
-        });
-        return this.snapshot();
-    }
-
-    changeServiceTier(request: ChangeServiceTierRequest): ProtocolSession {
-        const serviceTier = request.serviceTier;
-        if (
-            serviceTier !== undefined &&
-            !this.#providerSupportsServiceTier(this.#providerId, serviceTier)
-        ) {
-            throw new Error(`Provider '${this.#providerId}' does not support fast inference.`);
-        }
-
-        this.#serviceTier = serviceTier;
-        this.#runtime?.agent.setServiceTier(serviceTier);
-        this.#interruption = undefined;
-        this.#append("service_tier_changed", {
-            serviceTier: serviceTier ?? null,
-            snapshot: this.#agentSnapshot(),
-        });
-        return this.snapshot();
     }
 
     update(request: UpdateSessionRequest): ProtocolSession {
@@ -2437,7 +2505,7 @@ export class InMemorySession {
         options: { source?: "notification" } = {},
     ): SubmitMessageResponse {
         this.#assertAcceptingWork();
-        if (request.effort !== undefined) this.#assertSupportedEffort(request.effort);
+        this.#assertConfigurationCanApply(request);
         if (request.clientSubmissionId !== undefined) {
             const existingEvent = this.events.messageSubmission(request.clientSubmissionId);
             if (existingEvent !== undefined) {
@@ -2511,6 +2579,9 @@ export class InMemorySession {
                 : {}),
             displayText,
             ...(request.effort === undefined ? {} : { effort: request.effort }),
+            ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
+            ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
+            ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
             ...(request.interactive === undefined ? {} : { interactive: request.interactive }),
             kind: "user",
             runId,
@@ -2587,13 +2658,19 @@ export class InMemorySession {
         ) {
             return { ...this.submit(request), delivery: "run" };
         }
+        // Presence alone decides this, not whether the value differs from the current one, so the
+        // rule does not quietly depend on what the session happens to be set to right now.
         if (
             request.externalTools !== undefined ||
             request.skills !== undefined ||
-            request.systemPrompt !== undefined
+            request.systemPrompt !== undefined ||
+            request.effort !== undefined ||
+            request.modelId !== undefined ||
+            request.providerId !== undefined ||
+            request.serviceTier !== undefined
         ) {
             throw new Error(
-                "External functions, durable skills, and the system prompt can only be changed by submitting a message.",
+                "The model, reasoning effort, fast mode, external functions, durable skills, and the system prompt can only be changed by submitting a message, which runs once the current response finishes.",
             );
         }
         this.setArchived(false);
@@ -4171,12 +4248,35 @@ export class InMemorySession {
         let runtime: CodingAssistantRuntime | undefined;
         const quotaObservationId = createId();
         try {
+            // The configuration applies before anything can await, so a run leaves the queue and
+            // takes effect in one step. Nothing else can observe a started run still describing
+            // itself with the configuration it is replacing.
+            if (
+                queued.effort !== undefined ||
+                queued.modelId !== undefined ||
+                queued.serviceTier !== undefined
+            ) {
+                // The message and the configuration it carried arrive together, so the run this
+                // starts is the first one the new configuration applies to.
+                this.#applyConfiguration(
+                    {
+                        ...(queued.effort === undefined ? {} : { effort: queued.effort }),
+                        ...(queued.modelId === undefined ? {} : { modelId: queued.modelId }),
+                        ...(queued.providerId === undefined
+                            ? {}
+                            : { providerId: queued.providerId }),
+                        ...(queued.serviceTier === undefined
+                            ? {}
+                            : { serviceTier: queued.serviceTier }),
+                    },
+                    { excludeRunId: queued.runId },
+                );
+            }
+            this.#applyIntegrationConfiguration(queued);
             await debugLog?.record("run-started", {
                 runId: queued.runId,
                 sessionId: this.id,
             });
-            this.#applyIntegrationConfiguration(queued);
-            if (queued.effort !== undefined) this.changeEffort({ effort: queued.effort });
             runtime = this.#ensureRuntime();
             await this.#ensureMcpTools(runtime, controller.signal, queued.interactive !== false);
             await this.#observeProviderQuota(
@@ -4345,10 +4445,67 @@ export class InMemorySession {
     }
 
     #assertSupportedEffort(effort: string): void {
-        const model = this.#selectedModel();
+        this.#assertSupportedEffortForModel(effort, this.#selectedModel());
+    }
+
+    /**
+     * Rejects a message whose configuration could never apply, so the caller learns immediately
+     * rather than discovering it when the run finally starts.
+     *
+     * Effort is checked against the model this message will actually run on, which is the one it
+     * carries, or the one an earlier queued message already selected, not necessarily the model
+     * selected right now. This cannot be perfectly airtight, because a queued run can outlive a
+     * restart that changes the catalog, so applying it later stays fallible too.
+     */
+    #assertConfigurationCanApply(request: SessionSubmitMessageRequest): void {
+        const pendingModel = [...this.#queue]
+            .reverse()
+            .find((queued) => queued.modelId !== undefined);
+        const modelId = request.modelId ?? pendingModel?.modelId;
+        const providerId =
+            request.modelId === undefined ? pendingModel?.providerId : request.providerId;
+        const model =
+            modelId === undefined
+                ? this.#selectedModel()
+                : this.#ensureKnownModel(
+                      modelId,
+                      this.#resolveProviderForModel(modelId, providerId),
+                  );
+        if (request.effort !== undefined) {
+            this.#assertSupportedEffortForModel(request.effort, model);
+        }
+        if (
+            request.serviceTier !== undefined &&
+            request.serviceTier !== null &&
+            !this.#providerSupportsServiceTier(
+                modelId === undefined
+                    ? this.#providerId
+                    : this.#resolveProviderForModel(modelId, providerId),
+                request.serviceTier,
+            )
+        ) {
+            throw new Error("That provider does not support fast inference.");
+        }
+    }
+
+    #assertSupportedEffortForModel(effort: string, model: Model): void {
         if (!model.thinkingLevels.includes(effort)) {
             throw new Error(`Model '${model.id}' does not support '${effort}' reasoning.`);
         }
+    }
+
+    /**
+     * The committed transcript, optionally without one run's messages. A run that has been queued
+     * but not yet sent has already stored its message, and that message belongs to whatever model
+     * is about to receive it rather than to the history of the model being replaced.
+     */
+    #committedMessagesExcludingRun(runId: string | undefined): Message[] {
+        return this.#messages
+            .filter(
+                (message) => !message.isPartial && (runId === undefined || message.runId !== runId),
+            )
+            .sort((left, right) => left.position - right.position)
+            .map((message) => message.message);
     }
 
     #continueGoalIfIdle(): void {

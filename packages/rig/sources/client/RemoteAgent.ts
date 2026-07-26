@@ -685,7 +685,7 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             return;
         }
 
-        if (event.type === "model_changed" || event.type === "effort_changed") {
+        if (event.type === "session_configuration_changed") {
             this.#modelId = event.data.modelId;
             this.#providerId = event.data.snapshot.providerId;
             this.#models =
@@ -695,27 +695,18 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
             this.#session = {
                 ...this.#session,
                 ...(event.data.effort !== undefined ? { effort: event.data.effort } : {}),
-                modelLocked: event.type === "model_changed" ? false : this.#session.modelLocked,
+                // Only an actual model change releases the lock; a reasoning or fast mode change
+                // leaves whatever the user pinned in place.
+                modelLocked: event.data.changed.includes("model")
+                    ? false
+                    : this.#session.modelLocked,
                 modelId: event.data.modelId,
                 models: this.#models,
                 providerId: event.data.snapshot.providerId,
             };
+            // The snapshot carries the authoritative fast mode, so applying it settles that field
+            // and reapplies whatever local intent the user is still waiting on.
             this.#applyAuthoritativeSnapshot(event.data.snapshot);
-            return;
-        }
-
-        if (event.type === "service_tier_changed") {
-            const { serviceTier: _serviceTier, ...session } = this.#session;
-            this.#session = {
-                ...session,
-                ...(event.data.serviceTier === null ? {} : { serviceTier: event.data.serviceTier }),
-                snapshot: event.data.snapshot,
-            };
-            this.#confirmedServiceTier =
-                event.data.serviceTier === null ? undefined : event.data.serviceTier;
-            if (this.#serviceTierChangeCount > 0) {
-                this.#setLocalServiceTier(this.#serviceTierIntent);
-            }
             return;
         }
 

@@ -380,12 +380,12 @@ function rewind(id: string, providerId: string, modelId: string): SessionEvent {
 }
 
 function modelChanged(id: string, providerId: string, modelId: string): SessionEvent {
-    return snapshotEvent(id, "model_changed", providerId, modelId);
+    return snapshotEvent(id, "session_configuration_changed", providerId, modelId);
 }
 
 function snapshotEvent(
     id: string,
-    type: "model_changed" | "session_reset" | "session_rewound",
+    type: "session_configuration_changed" | "session_reset" | "session_rewound",
     providerId: string,
     modelId: string,
 ): SessionEvent {
@@ -393,7 +393,9 @@ function snapshotEvent(
         createdAt: 1,
         data: {
             ...(type === "session_rewound" ? { messageId: "message-1" } : {}),
-            ...(type === "model_changed" ? { modelId } : {}),
+            ...(type === "session_configuration_changed"
+                ? { changed: ["model"], modelId, serviceTier: null }
+                : {}),
             snapshot: { modelId, providerId },
         },
         id,

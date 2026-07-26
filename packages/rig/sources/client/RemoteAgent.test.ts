@@ -395,13 +395,15 @@ describe("RemoteAgent", () => {
         agent.applySessionEvent({
             createdAt: 2,
             data: {
+                changed: ["effort"],
                 effort: "high",
                 modelId: model.id,
+                serviceTier: null,
                 snapshot: { ...session.snapshot, effort: "high" },
             },
             id: "event-effort",
             sessionId: session.id,
-            type: "effort_changed",
+            type: "session_configuration_changed",
         });
         expect(agent.canChangeModel).toBe(false);
 
@@ -516,10 +518,15 @@ describe("RemoteAgent", () => {
         });
         agent.applySessionEvent({
             createdAt: 1,
-            data: { serviceTier: "fast", snapshot: fastSession.snapshot },
+            data: {
+                changed: ["serviceTier"],
+                modelId: model.id,
+                serviceTier: "fast",
+                snapshot: fastSession.snapshot,
+            },
             id: "event-fast",
             sessionId: session.id,
-            type: "service_tier_changed",
+            type: "session_configuration_changed",
         });
         expect(agent.snapshot().serviceTier).toBeUndefined();
         expect(agent.confirmedServiceTier).toBe("fast");
@@ -607,10 +614,16 @@ describe("RemoteAgent", () => {
         const authoritativeSnapshot = { ...session.snapshot, effort: "high" };
         agent.applySessionEvent({
             createdAt: 1,
-            data: { effort: "high", modelId: model.id, snapshot: authoritativeSnapshot },
+            data: {
+                changed: ["effort"],
+                effort: "high",
+                modelId: model.id,
+                serviceTier: null,
+                snapshot: authoritativeSnapshot,
+            },
             id: "event-effort",
             sessionId: session.id,
-            type: "effort_changed",
+            type: "session_configuration_changed",
         });
         expect(agent.snapshot().serviceTier).toBe("fast");
         expect(agent.confirmedServiceTier).toBeUndefined();

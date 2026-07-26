@@ -54,7 +54,13 @@ export function aggregateSessionUsage(
             continue;
         }
 
-        if (event.type === "model_changed" || event.type === "session_rewound") {
+        if (
+            event.type === "session_rewound" ||
+            (event.type === "session_configuration_changed" &&
+                // Reasoning and fast mode changes keep the same model and the same context, so
+                // only an actual model change restarts attribution.
+                event.data.changed.includes("model"))
+        ) {
             activeModel = {
                 modelId: event.data.snapshot.modelId,
                 providerId: event.data.snapshot.providerId,

@@ -26,6 +26,19 @@ export function isSubmitMessageRequest(value: unknown): value is SubmitMessageRe
     if (typeof request.systemPrompt === "string" && request.systemPrompt.length > 262_144) {
         return false;
     }
+    for (const field of ["effort", "modelId", "providerId"]) {
+        const value = request[field];
+        if (value !== undefined && (typeof value !== "string" || value.length === 0)) return false;
+    }
+    // A provider is only meaningful next to the model it disambiguates.
+    if (request.providerId !== undefined && request.modelId === undefined) return false;
+    if (
+        request.serviceTier !== undefined &&
+        request.serviceTier !== null &&
+        request.serviceTier !== "fast"
+    ) {
+        return false;
+    }
     const names = new Set<string>();
     if (request.externalTools !== undefined) {
         if (!Array.isArray(request.externalTools) || request.externalTools.length > 128)

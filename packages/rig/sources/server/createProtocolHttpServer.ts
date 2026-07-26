@@ -792,6 +792,19 @@ async function handleRequest(
             sendJson(response, 409, { error: "Subagent sessions cannot receive broadcasts." });
             return;
         }
+        // Each session has its own model and provider, so one configuration cannot be meaningfully
+        // applied to all of them at once.
+        if (
+            broadcast.effort !== undefined ||
+            broadcast.modelId !== undefined ||
+            broadcast.providerId !== undefined ||
+            broadcast.serviceTier !== undefined
+        ) {
+            sendJson(response, 400, {
+                error: "A broadcast cannot change the model, reasoning effort, or fast mode. Send those to one session at a time.",
+            });
+            return;
+        }
         const { all: _all, sessionIds: _sessionIds, ...message } = broadcast;
         sendJson<BroadcastMessageResponse>(response, 202, {
             submissions: sessions.map((candidate) => candidate!.submit(message)),

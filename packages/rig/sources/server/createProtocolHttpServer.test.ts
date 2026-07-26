@@ -1051,7 +1051,7 @@ describe("createProtocolHttpServer", () => {
             await client.changeEffort(first.session.id, { effort: "high" });
             await expect(streamed).resolves.toMatchObject({
                 sessionId: first.session.id,
-                type: "effort_changed",
+                type: "session_configuration_changed",
             });
 
             await expect(client.trimGlobalEvents(firstCursor)).resolves.toEqual({
@@ -1144,10 +1144,11 @@ describe("createProtocolHttpServer", () => {
             expect(changed.session.effort).toBe("high");
             expect(events.events.at(-1)).toMatchObject({
                 data: {
+                    changed: ["effort"],
                     effort: "high",
                     modelId: modelOpenaiGpt56Sol.id,
                 },
-                type: "effort_changed",
+                type: "session_configuration_changed",
             });
         } finally {
             await close();
@@ -1286,8 +1287,8 @@ describe("createProtocolHttpServer", () => {
             expect(changed.session.serviceTier).toBe("fast");
             expect(changed.session.snapshot.serviceTier).toBe("fast");
             expect(events.events.at(-1)).toMatchObject({
-                data: { serviceTier: "fast" },
-                type: "service_tier_changed",
+                data: { changed: ["serviceTier"], serviceTier: "fast" },
+                type: "session_configuration_changed",
             });
         } finally {
             await close();
