@@ -1560,7 +1560,8 @@ export class ProjectRepository {
             await this.#git(projectPath, [
                 "worktree",
                 "add",
-                "--detach",
+                "-b",
+                `worktree/${workspace.storageKey}`,
                 "--",
                 workspace.path,
                 commit,
