@@ -170,9 +170,11 @@ async function scanOnce(
     }
 
     // Conflicted paths are absent from the diff against a base that predates the merge, so they are
-    // added from status to keep the file list complete.
+    // added from status to keep the file list complete. The set keeps this linear at the file cap.
+    const presentPaths = new Set(changes.map((change) => change.path));
     for (const entry of status.entries) {
-        if (!entry.unmerged || changes.some((change) => change.path === entry.path)) continue;
+        if (!entry.unmerged || presentPaths.has(entry.path)) continue;
+        presentPaths.add(entry.path);
         changes.push({
             binary: false,
             path: entry.path,

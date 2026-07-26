@@ -360,23 +360,39 @@ export class GitStateTracker {
     }
 
     #drain(): void {
+        // A scan finishing after shutdown began must not start the next one; only `#enqueue`
+        // checked this before, so a key queued before the close still reached the drain.
+        if (this.#disposed || this.#taskDrain?.closing === true) {
+            this.#pendingScans.length = 0;
+            return;
+        }
         while (this.#activeScans < SCAN_CONCURRENCY) {
             const key = this.#pendingScans.shift();
             if (key === undefined) return;
             const tracker = this.#trackers.get(key);
             if (tracker === undefined) continue;
             this.#activeScans += 1;
+            let started = false;
             const run = async () => {
+                started = true;
                 try {
                     await this.#scanTracker(tracker);
                 } finally {
-                    this.#activeScans -= 1;
-                    this.#drain();
+                    this.#releaseScanSlot();
                 }
             };
             const task = this.#taskDrain?.run(run) ?? run();
-            void task.catch(() => undefined);
+            void task.catch(() => {
+                // The drain rejects without ever invoking the task once it is closing, so the slot
+                // has to be released here or every scan slot leaks and scanning deadlocks.
+                if (!started) this.#releaseScanSlot();
+            });
         }
+    }
+
+    #releaseScanSlot(): void {
+        this.#activeScans -= 1;
+        this.#drain();
     }
 
     async #scanTracker(tracker: RepositoryTracker): Promise<void> {
@@ -400,9 +416,11 @@ export class GitStateTracker {
             if (this.#disposed || tracker.generation !== generation) return;
             if (!sameState(tracker.snapshot, state)) {
                 const snapshot = this.#stamp(tracker.key, state);
-                tracker.snapshot = snapshot;
-                this.#onSnapshot?.(tracker.entity, snapshot);
-                this.#onLiveEvent?.(this.#createLiveEvent(tracker.entity, snapshot));
+                // The snapshot counts as published only once it has actually been delivered. A
+                // throwing observer — a busy SQLite write, a bad subscriber — would otherwise leave
+                // the tracker believing clients hold a state they never received, and the equality
+                // check below would suppress every republish until the repository changed again.
+                if (this.#deliver(tracker.entity, snapshot)) tracker.snapshot = snapshot;
             }
             tracker.backoffMs = BACKOFF_START_MS;
             tracker.backoffUntil = 0;
@@ -427,6 +445,32 @@ export class GitStateTracker {
                 tracker.dirtyAgain = false;
                 this.#enqueue(tracker.key);
             }
+        }
+    }
+
+    /**
+     * Hands one snapshot to the observers and reports whether clients actually received it.
+     *
+     * Each observer is isolated: persisting Git facts and publishing the live event are independent,
+     * and a failure in either is a local problem rather than evidence that the repository could not
+     * be scanned — letting it reach the scan's failure path would back off scanning for a reason
+     * that has nothing to do with Git.
+     *
+     * Only the live delivery decides the return value. Persistence is enrichment that the next scan
+     * repeats anyway, while a lost live event is what leaves a client showing stale counts.
+     */
+    #deliver(entity: GitTrackedEntity, snapshot: GitChangeSnapshot): boolean {
+        try {
+            this.#onSnapshot?.(entity, snapshot);
+        } catch {
+            // Slow-moving facts are re-derived by the next scan.
+        }
+        try {
+            this.#onLiveEvent?.(this.#createLiveEvent(entity, snapshot));
+            return true;
+        } catch {
+            // Reporting the failure makes the next scan republish instead of going quiet.
+            return false;
         }
     }
 

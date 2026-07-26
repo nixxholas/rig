@@ -226,6 +226,48 @@ describe("GitStateTracker", () => {
         expect(scan.calls).toBe(1);
     });
 
+    it("republishes after an observer throws instead of going quiet forever", async () => {
+        let insertions = 1;
+        let failNext = true;
+        const published: GitChangeSnapshot[] = [];
+        const tracker = createTracker({
+            onLiveEvent: () => {
+                if (!failNext) return;
+                failNext = false;
+                throw new Error("subscriber exploded");
+            },
+            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => published.length === 1);
+        // The failed delivery must not be recorded as published: an unchanged repository would
+        // then be suppressed by the equality check and the client would stay stale forever.
+        await tracker.refresh(entity());
+
+        expect(published.length).toBeGreaterThanOrEqual(2);
+        expect(published.at(-1)).toMatchObject({ insertions: 1 });
+    });
+
+    it("keeps scanning after a failing observer rather than treating it as a Git failure", async () => {
+        const scan = countingScan();
+        const tracker = createTracker({
+            onSnapshot: () => {
+                throw new Error("persistence exploded");
+            },
+            scan,
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => scan.calls === 1);
+        await tracker.refresh(entity());
+
+        // A local observer failure is not evidence the repository could not be read, so it must
+        // not put the tracker into failure backoff.
+        expect(scan.calls).toBeGreaterThanOrEqual(2);
+    });
+
     it("answers a refresh for an entity it is not watching without retaining it", async () => {
         const tracker = createTracker({ scan: countingScan(() => ({ insertions: 5 })) });
 
