@@ -124,7 +124,12 @@ async function scanOnce(
             cwd: options.path,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        diff = parseGitRawNumstat(result.stdout);
+        // A truncated stream ends mid-record, so its trailing partial field is not a real path.
+        diff = parseGitRawNumstat(
+            result.truncated
+                ? result.stdout.slice(0, result.stdout.lastIndexOf("\0") + 1)
+                : result.stdout,
+        );
         // A truncated diff cannot be completed after the fact, so the totals stop claiming to be
         // exact rather than silently under-reporting.
         if (result.truncated) countsExact = false;

@@ -111,16 +111,20 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         for (const listener of this.#listeners) listener(entry);
     }
 
-    publishLive(event: GlobalLiveEvent): void {
+    publishLive(event: GlobalLiveEvent): boolean {
         // Identical to the in-memory queue: a live event is delivered and forgotten, so durable
         // retention never grows with Git activity.
+        let delivered = true;
         for (const listener of this.#listeners) {
             try {
                 listener({ event, live: true });
             } catch {
-                // One failing subscriber must not stop the others from being told.
+                // One failing subscriber must not stop the others from being told, but the caller
+                // still has to learn that this event did not reach everyone.
+                delivered = false;
             }
         }
+        return delivered;
     }
 
     deactivate(): void {

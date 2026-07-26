@@ -23,6 +23,12 @@ const MAXIMUM_DEBOUNCE_MS = 750;
 const RECONCILE_INTERVAL_MS = 30_000;
 const BACKOFF_START_MS = 1_000;
 const BACKOFF_LIMIT_MS = 30_000;
+/**
+ * Version counters retained for entities that are not currently tracked. Far above the tracked-entity
+ * cap so eviction never loses one, and bounded so a daemon that churns managed workspaces does not
+ * accumulate a counter per workspace forever.
+ */
+const VERSION_HISTORY_LIMIT = 512;
 
 export interface GitTrackedEntity {
     /** Immutable commit a managed workspace was created from. */
@@ -37,7 +43,10 @@ export type { GitChangeSnapshot };
 export interface GitStateTrackerOptions {
     now?: () => number;
     /** Receives each published snapshot as a ready-to-deliver live event. */
-    onLiveEvent?: (event: GlobalLiveEvent) => void;
+    /** Returns false when the event did not reach every subscriber. */
+    onLiveEvent?: (event: GlobalLiveEvent) => boolean;
+    /** Reports an observer failure so it can be logged instead of vanishing. */
+    onObserverError?: (error: unknown, entity: GitTrackedEntity) => void;
     onSnapshot?: (entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void;
     /** Test seam for raw Git reads used to locate a repository's control directories. */
     runGit?: typeof runScanGit;
@@ -91,7 +100,8 @@ export class GitStateTracker {
     readonly #createEventId = createEventIdFactory();
     readonly #generation = createId();
     readonly #now: () => number;
-    readonly #onLiveEvent: ((event: GlobalLiveEvent) => void) | undefined;
+    readonly #onLiveEvent: ((event: GlobalLiveEvent) => boolean) | undefined;
+    readonly #onObserverError: ((error: unknown, entity: GitTrackedEntity) => void) | undefined;
     readonly #onSnapshot:
         | ((entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void)
         | undefined;
@@ -110,6 +120,7 @@ export class GitStateTracker {
     constructor(options: GitStateTrackerOptions = {}) {
         this.#now = options.now ?? Date.now;
         this.#onLiveEvent = options.onLiveEvent;
+        this.#onObserverError = options.onObserverError;
         this.#onSnapshot = options.onSnapshot;
         this.#runGit = options.runGit ?? runScanGit;
         this.#scan = options.scan ?? scanGitRepository;
@@ -365,11 +376,10 @@ export class GitStateTracker {
 
     #drain(): void {
         // A scan finishing after shutdown began must not start the next one; only `#enqueue`
-        // checked this before, so a key queued before the close still reached the drain.
-        if (this.#disposed || this.#taskDrain?.closing === true) {
-            this.#pendingScans.length = 0;
-            return;
-        }
+        // checked this before, so a key queued before the close still reached the drain. The queue
+        // is left intact so this cannot permanently discard work if a drain ever closes for a
+        // reason other than the daemon exiting; `dispose` clears it.
+        if (this.#disposed || this.#taskDrain?.closing === true) return;
         while (this.#activeScans < SCAN_CONCURRENCY) {
             const key = this.#pendingScans.shift();
             if (key === undefined) return;
@@ -423,7 +433,12 @@ export class GitStateTracker {
             // subscriber — silence an idle repository forever, because the next identical scan
             // would look like "no change" even though the change was never delivered.
             if (!sameState(tracker.delivered, state)) {
-                const snapshot = this.#stamp(tracker.key, state);
+                // Retrying an undelivered but otherwise identical state reuses its version, so a
+                // subscriber that keeps failing cannot inflate the counter once per scan.
+                const snapshot =
+                    tracker.snapshot !== undefined && sameState(tracker.snapshot, state)
+                        ? tracker.snapshot
+                        : this.#stamp(tracker.key, state);
                 // Reads report the latest scan either way; only delivery decides republication.
                 tracker.snapshot = snapshot;
                 if (this.#deliver(tracker.entity, snapshot)) tracker.delivered = snapshot;
@@ -468,15 +483,27 @@ export class GitStateTracker {
     #deliver(entity: GitTrackedEntity, snapshot: GitChangeSnapshot): boolean {
         try {
             this.#onSnapshot?.(entity, snapshot);
-        } catch {
-            // Slow-moving facts are re-derived by the next scan.
+        } catch (error) {
+            // Persisting slow-moving facts is enrichment the next scan repeats, but a write that
+            // keeps failing would otherwise be invisible.
+            this.#report(error, entity);
         }
+        if (this.#onLiveEvent === undefined) return true;
         try {
-            this.#onLiveEvent?.(this.#createLiveEvent(entity, snapshot));
-            return true;
-        } catch {
-            // Reporting the failure makes the next scan republish instead of going quiet.
+            // The queue isolates subscribers from each other and reports whether they all accepted
+            // the event, so a swallowed subscriber failure cannot be mistaken for delivery.
+            return this.#onLiveEvent(this.#createLiveEvent(entity, snapshot));
+        } catch (error) {
+            this.#report(error, entity);
             return false;
+        }
+    }
+
+    #report(error: unknown, entity: GitTrackedEntity): void {
+        try {
+            this.#onObserverError?.(error, entity);
+        } catch {
+            // Reporting a failure must not itself fail the scan.
         }
     }
 
@@ -491,7 +518,16 @@ export class GitStateTracker {
 
     #stamp(key: string, state: GitChangeState): GitChangeSnapshot {
         const version = (this.#versions.get(key) ?? 0) + 1;
+        // Re-inserted so the map stays in least-recently-stamped order, then trimmed. Counters must
+        // outlive eviction so a re-tracked entity never restarts at 1, but an archived workspace
+        // can never be re-tracked and its counter would otherwise live until the daemon exits.
+        this.#versions.delete(key);
         this.#versions.set(key, version);
+        while (this.#versions.size > VERSION_HISTORY_LIMIT) {
+            const oldest = this.#versions.keys().next().value;
+            if (oldest === undefined) break;
+            this.#versions.delete(oldest);
+        }
         return { ...state, generation: this.#generation, version };
     }
 }

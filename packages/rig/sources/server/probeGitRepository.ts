@@ -54,10 +54,15 @@ export async function probeGitRepository(options: {
 
     const topLevel = await run(["rev-parse", "--show-toplevel"]);
     if (topLevel === undefined) {
+        // `--show-toplevel` fails in a bare repository because there is no work tree, so the bare
+        // check has to happen here rather than after it.
+        const bare = (await run(["rev-parse", "--is-bare-repository"])) === "true";
         return {
             presence: "present",
             worktreeSupport: "unsupported",
-            worktreeSupportReason: "This folder is not a Git repository.",
+            worktreeSupportReason: bare
+                ? "This is a bare Git repository."
+                : "This folder is not a Git repository.",
         };
     }
     if (normalizeProjectCwd(topLevel) !== normalizeProjectCwd(options.path)) {
@@ -69,12 +74,8 @@ export async function probeGitRepository(options: {
     }
 
     const facts = await readFacts(run);
-    const bare = (await run(["rev-parse", "--is-bare-repository"])) === "true";
-    const unsupportedReason = bare
-        ? "This is a bare Git repository."
-        : facts.head === undefined
-          ? "This repository has no commits yet."
-          : undefined;
+    const unsupportedReason =
+        facts.head === undefined ? "This repository has no commits yet." : undefined;
     return {
         facts,
         presence: "present",

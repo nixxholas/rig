@@ -21,7 +21,14 @@ export function parseGlobalSseEvent(raw: string): GlobalEventDelivery | undefine
         .map((line) => line.slice("data:".length).trimStart());
     if (dataLines.length === 0) return undefined;
 
-    const event = JSON.parse(dataLines.join("\n")) as GlobalEvent;
+    let event: GlobalEvent;
+    try {
+        event = JSON.parse(dataLines.join("\n")) as GlobalEvent;
+    } catch {
+        // This runs inside a stream data handler, so throwing here would escape the watch promise
+        // and surface as an uncaught exception rather than a reconnect.
+        return undefined;
+    }
     if (cursor === undefined) {
         return isLiveGlobalEvent(event)
             ? { event, live: true }

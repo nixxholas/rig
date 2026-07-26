@@ -108,6 +108,23 @@ describe("probeGitRepository", () => {
         expect(probe.facts?.behind).toBe(1);
     });
 
+    it("explains that a bare repository cannot host a worktree", async () => {
+        const root = await createRoot();
+        const bare = join(root, "bare.git");
+        await mkdir(bare);
+        await git(bare, ["init", "--quiet", "--bare"]);
+
+        const probe = await probeGitRepository({ git, path: bare });
+
+        // `rev-parse --show-toplevel` fails in a bare repository, so a probe that checked for bare
+        // only afterwards reported "not a Git repository" instead.
+        expect(probe).toMatchObject({
+            presence: "present",
+            worktreeSupport: "unsupported",
+            worktreeSupportReason: "This is a bare Git repository.",
+        });
+    });
+
     it("reports a directory that no longer exists as missing", async () => {
         const root = await createRoot();
         const removed = join(root, "gone");

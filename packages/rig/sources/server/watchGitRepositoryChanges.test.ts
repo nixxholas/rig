@@ -45,17 +45,19 @@ describe("gitWatchTargets", () => {
         expect(targets.map((target) => target.directory)).toContain(gitDirectory);
     });
 
-    it("watches ref directories recursively so slashed branch names are covered", async () => {
+    it("watches the whole ref root recursively so slashed and remote refs are covered", async () => {
         const targets = gitWatchTargets({
             commonDirectory: "/repo/.git",
             gitDirectory: "/repo/.git",
             path: "/repo",
         });
 
-        const heads = targets.find((target) => target.directory === "/repo/.git/refs/heads");
-        const remotes = targets.find((target) => target.directory === "/repo/.git/refs/remotes");
-        expect(heads?.recursive).toBe(true);
-        expect(remotes?.recursive).toBe(true);
+        // Watching refs/heads and refs/remotes separately fails to arm on a repository that has
+        // never fetched, because Git does not create refs/remotes until then and the watch is
+        // never retried. The ref root always exists.
+        const refs = targets.find((target) => target.directory === "/repo/.git/refs");
+        expect(refs?.recursive).toBe(true);
+        expect(targets.map((target) => target.directory)).not.toContain("/repo/.git/refs/remotes");
     });
 
     it("watches the worktree Git directory and the common directory separately", () => {
@@ -118,6 +120,30 @@ describe("watchGitRepositoryChanges", () => {
 
         await waitFor(() => dirty.count >= 1);
         expect(dirty.count).toBeGreaterThan(0);
+    });
+
+    it("arms every target in a repository that has never fetched", async () => {
+        const repository = await createRepository();
+        await commit(repository, "a.txt", "one\n");
+        const reasons: string[] = [];
+        const gitDirectory = await git(repository, [
+            "rev-parse",
+            "--path-format=absolute",
+            "--git-dir",
+        ]);
+
+        const dispose = watchGitRepositoryChanges({
+            commonDirectory: gitDirectory,
+            gitDirectory,
+            onDegraded: (reason) => reasons.push(reason),
+            onDirty: () => {},
+            path: repository,
+        });
+        disposers.push(dispose);
+
+        // `git init` never creates refs/remotes, so watching it directly failed to arm here and
+        // was never retried once a remote appeared.
+        expect(reasons).toEqual([]);
     });
 
     it("reports degradation instead of throwing when a directory cannot be watched", async () => {

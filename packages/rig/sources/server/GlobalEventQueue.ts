@@ -21,13 +21,18 @@ export interface GlobalEventQueue {
     list(options?: ListGlobalEventQueueOptions): readonly GlobalEventQueueEntry[] | undefined;
     publish(entry: GlobalEventQueueEntry): void;
     /**
-     * Delivers an event to current subscribers without storing it or advancing a cursor.
+     * Delivers an event to current subscribers without storing it or advancing a cursor, and
+     * reports whether every subscriber accepted it.
      *
      * This is a separate method rather than a flag inside `append` because the publish path treats
      * an `append` that returns nothing as "do not publish", so a classification hidden there would
      * silently swallow every live event in both implementations.
+     *
+     * Subscribers are isolated from each other so one failure cannot starve the rest, but the
+     * failure is still reported: a caller that cannot tell delivery apart from silence would record
+     * a snapshot as published that nobody received. No subscribers counts as delivered.
      */
-    publishLive(event: GlobalLiveEvent): void;
+    publishLive(event: GlobalLiveEvent): boolean;
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void;
     trim(through: string): TrimGlobalEventsResponse | undefined;
 }

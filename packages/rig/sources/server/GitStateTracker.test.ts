@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitChangeState } from "../protocol/index.js";
+import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
 import {
     GitStateTracker,
     type GitChangeSnapshot,
@@ -226,13 +227,62 @@ describe("GitStateTracker", () => {
         expect(scan.calls).toBe(1);
     });
 
+    it("republishes through the real queue after a subscriber throws", async () => {
+        // Wired the way the daemon wires it, through publishLive rather than a hand-rolled
+        // callback. An earlier version isolated subscribers inside the queue and asked the tracker
+        // to detect failures, which cancelled out: publishLive could no longer throw, so delivery
+        // always looked successful and this scenario silently regressed.
+        const queue = new InMemoryGlobalEventQueue();
+        const received: string[] = [];
+        queue.subscribe((delivery) => {
+            if (received.length === 0) {
+                received.push("thrown");
+                throw new Error("subscriber exploded");
+            }
+            received.push(delivery.event.type);
+        });
+        const tracker = createTracker({
+            onLiveEvent: (event) => queue.publishLive(event),
+            scan: countingScan(() => ({ insertions: 4 })),
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => received.length === 1);
+        await tracker.refresh(entity());
+
+        // The repository never changed, so only an undelivered snapshot can explain a second
+        // delivery attempt.
+        expect(received).toEqual(["thrown", "project_git_changed"]);
+    });
+
+    it("does not inflate the version while retrying an undelivered snapshot", async () => {
+        let deliver = false;
+        const versions: number[] = [];
+        const tracker = createTracker({
+            onLiveEvent: () => deliver,
+            onSnapshot: (_entity, snapshot) => versions.push(snapshot.version),
+            scan: countingScan(() => ({ insertions: 3 })),
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => versions.length >= 1);
+        await tracker.refresh(entity());
+        await tracker.refresh(entity());
+        deliver = true;
+        await tracker.refresh(entity());
+
+        // Retrying the same state must reuse its version; bumping per attempt would let a failing
+        // subscriber run the counter up indefinitely.
+        expect(new Set(versions).size).toBe(1);
+    });
+
     it("republishes after an observer throws instead of going quiet forever", async () => {
         let insertions = 1;
         let failNext = true;
         const published: GitChangeSnapshot[] = [];
         const tracker = createTracker({
             onLiveEvent: () => {
-                if (!failNext) return;
+                if (!failNext) return true;
                 failNext = false;
                 throw new Error("subscriber exploded");
             },

@@ -246,7 +246,23 @@ export async function runLocalProtocolServer(
         gitStateTracker = new GitStateTracker({
             // Snapshots ride the live channel, so they reach subscribers without ever entering the
             // durable log; branch and HEAD changes travel as ordinary project/workspace updates.
-            onLiveEvent: (event) => store?.globalEventQueue.publishLive(event),
+            // No store means nobody received it, which is a delivery failure rather than a
+            // silent success.
+            onLiveEvent: (event) => store?.globalEventQueue.publishLive(event) ?? false,
+            onObserverError: (error, entity) => {
+                daemonLog.record(
+                    "error",
+                    "git_state_observer_failed",
+                    "Rig could not record or publish a Git state update.",
+                    {
+                        error: errorToMessage(error),
+                        projectId: entity.projectId,
+                        ...(entity.workspaceId === undefined
+                            ? {}
+                            : { workspaceId: entity.workspaceId }),
+                    },
+                );
+            },
             onSnapshot: (entity, snapshot) => {
                 if (snapshot.comparison !== "ready") return;
                 store?.applyGitFacts(

@@ -65,14 +65,18 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         for (const listener of this.#listeners) listener(entry);
     }
 
-    publishLive(event: GlobalLiveEvent): void {
+    publishLive(event: GlobalLiveEvent): boolean {
+        let delivered = true;
         for (const listener of this.#listeners) {
             try {
                 listener({ event, live: true });
             } catch {
-                // One failing subscriber must not stop the others from being told.
+                // One failing subscriber must not stop the others from being told, but the caller
+                // still has to learn that this event did not reach everyone.
+                delivered = false;
             }
         }
+        return delivered;
     }
 
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void {

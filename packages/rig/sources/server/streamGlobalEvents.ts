@@ -41,25 +41,30 @@ export function streamGlobalEvents(
     });
     response.write(": connected\n\n");
 
+    let overwhelmed = false;
     for (;;) {
         for (const entry of catchup) writeGlobalSseEvent(response, entry);
+        // Replaying an untrimmed durable log to a slow reader would buffer the whole thing into
+        // this response in one synchronous pass, which is exactly what the subscriber limit exists
+        // to prevent. The client re-bootstraps from /state, the documented recovery path.
+        if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) {
+            overwhelmed = true;
+            break;
+        }
         if (catchup.length < catchupLimit) break;
         const nextCursor: string | undefined = catchup.at(-1)?.cursor;
         if (nextCursor === undefined) break;
         catchup = queue.list({ after: nextCursor, limit: catchupLimit }) ?? [];
+    }
+    if (overwhelmed) {
+        response.end();
+        return;
     }
 
     const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
     heartbeat.unref?.();
     let closed = false;
     let unsubscribe = () => {};
-    const close = () => {
-        if (closed) return;
-        closed = true;
-        clearInterval(heartbeat);
-        unsubscribe();
-        response.end();
-    };
 
     // One live snapshot per entity is retained while the socket is backed up, and a later snapshot
     // replaces the pending one. Stored events are never coalesced or dropped; only live snapshots
@@ -67,6 +72,9 @@ export function streamGlobalEvents(
     const pendingLive = new Map<string, GlobalLiveEvent>();
     let backedUp = false;
     const flushLive = () => {
+        // Without this guard a drain arriving after close would write to an ended response, which
+        // surfaces as an uncaught daemon exception. Today only a Node internal prevents it.
+        if (closed) return;
         backedUp = false;
         // Copied first because the loop deletes from the map it iterates.
         for (const [key, event] of Array.from(pendingLive)) {
@@ -76,6 +84,15 @@ export function streamGlobalEvents(
                 break;
             }
         }
+    };
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        clearInterval(heartbeat);
+        unsubscribe();
+        response.off("drain", flushLive);
+        pendingLive.clear();
+        response.end();
     };
     response.on("drain", flushLive);
 

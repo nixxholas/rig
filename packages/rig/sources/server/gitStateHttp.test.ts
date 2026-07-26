@@ -98,6 +98,11 @@ describe("Git state over HTTP", () => {
         await writeFile(join(repository, "a.txt"), "1\n");
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
         await fixture.get(`/projects/${projectId}/git`);
+        // Background project initialization publishes durable events of its own, so the cursor is
+        // only stable once it has settled; capturing before that races it.
+        await waitUntil(
+            () => fixture.store.getProject(projectId)?.initializationStatus !== "initializing",
+        );
         const cursorBefore = fixture.store.globalEventQueue.cursor();
 
         const stream = await fixture.openStream("/events/stream");

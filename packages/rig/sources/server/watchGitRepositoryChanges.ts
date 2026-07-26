@@ -120,10 +120,10 @@ export function gitWatchTargets(options: {
             recursive: false,
         });
     }
-    targets.push(
-        { directory: join(options.commonDirectory, "refs", "heads"), recursive: true },
-        { directory: join(options.commonDirectory, "refs", "remotes"), recursive: true },
-    );
+    // The whole ref root rather than heads and remotes separately: `refs/remotes` does not exist
+    // until the first fetch, so watching it directly fails to arm in a fresh clone-less repository
+    // and never retries once a remote appears.
+    targets.push({ directory: join(options.commonDirectory, "refs"), recursive: true });
     if (supportsRecursiveWorktreeWatch()) {
         targets.push({ directory: options.path, recursive: true });
     }
