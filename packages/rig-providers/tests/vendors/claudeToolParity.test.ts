@@ -27,7 +27,9 @@ describe("Claude provider tool goldens", () => {
                     .map(modelFacingShape)
                     .sort(byToolName),
             );
-            for (const name of ["Agent", "TaskOutput", "TaskStop"]) {
+            // Agent keeps the captured callable shape, but its runtime descriptions document
+            // Rig's provider/model inference extensions. The task-control tools remain exact.
+            for (const name of ["TaskOutput", "TaskStop"]) {
                 expect(productionTools.find((tool) => tool.name === name)).toEqual(
                     goldenTools.find((tool) => tool.name === name),
                 );
