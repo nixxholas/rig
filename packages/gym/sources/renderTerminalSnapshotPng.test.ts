@@ -66,6 +66,7 @@ function snapshot(
                 bold: false,
                 dim: false,
                 foreground: null,
+                hyperlink: null,
                 italic: false,
                 text: "█",
                 x: 0,

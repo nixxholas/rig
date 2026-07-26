@@ -14,6 +14,10 @@ export interface RemoteTerminalGridRow {
     wrapped: boolean;
 }
 
+export interface RemoteTerminalGridStyle extends Readonly<Record<string, unknown>> {
+    readonly hyperlink: string | null;
+}
+
 export interface RemoteTerminalGridState {
     cols: number;
     coversOutputOffset: number;
@@ -22,7 +26,7 @@ export interface RemoteTerminalGridState {
     revision: number;
     rows: readonly RemoteTerminalGridRow[];
     startRow: number;
-    styles: readonly Readonly<Record<string, unknown>>[];
+    styles: readonly RemoteTerminalGridStyle[];
     title: string;
     totalRows: number;
 }
@@ -55,7 +59,7 @@ export interface RemoteTerminalScrollbackPage {
     palette?: readonly string[];
     rows: readonly RemoteTerminalGridRow[];
     start: number;
-    styles?: readonly Readonly<Record<string, unknown>>[];
+    styles?: readonly RemoteTerminalGridStyle[];
     totalRows: number;
 }
 

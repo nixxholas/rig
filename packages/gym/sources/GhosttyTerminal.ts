@@ -131,6 +131,7 @@ export class GhosttyTerminal {
                 bold: cell.style.bold,
                 dim: cell.style.dim,
                 foreground: cell.style.foreground,
+                hyperlink: cell.hyperlink,
                 invisible: cell.style.invisible,
                 inverse: cell.style.inverse,
                 italic: cell.style.italic,

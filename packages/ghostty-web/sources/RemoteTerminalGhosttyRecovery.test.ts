@@ -7,8 +7,12 @@ import {
     createGhosttyRemoteTerminalServer,
     GhosttyRemoteTerminalReplica,
     ghosttySnapshotToGrid,
+    type GhosttySnapshot,
 } from "./GhosttyRemoteTerminal.js";
+import { applyGridPatch } from "./applyGridPatch.js";
+import { diffGridState } from "./diffGridState.js";
 import { RemoteTerminalProtocolClient } from "./RemoteTerminalProtocolClient.js";
+import { RemoteTerminalProtocolServer } from "./RemoteTerminalProtocolServer.js";
 import type { RemoteTerminalGridState } from "./types.js";
 
 const cleanups: (() => void | Promise<void>)[] = [];
@@ -18,6 +22,113 @@ afterEach(async () => {
 });
 
 describe("concrete Ghostty recovery", () => {
+    it("deduplicates hyperlinks as semantic styles and patches hyperlink-only changes", () => {
+        const previous = {
+            ...ghosttySnapshotToGrid(hyperlinkSnapshot("https://one.test"), 8),
+            coversOutputOffset: 1,
+            revision: 1,
+        };
+        const next = {
+            ...ghosttySnapshotToGrid(hyperlinkSnapshot("javascript:exact()"), 8),
+            coversOutputOffset: 1,
+            revision: 2,
+        };
+
+        expect(previous.styles).toEqual([
+            expect.objectContaining({ hyperlink: "https://one.test" }),
+            expect.objectContaining({ hyperlink: null }),
+        ]);
+        expect(previous.rows[0]?.cells.map((cell) => cell.styleId)).toEqual([0, 0, 1]);
+        expect(JSON.parse(JSON.stringify(previous))).toEqual(previous);
+
+        const patch = diffGridState(previous, next);
+        expect(patch).toBeDefined();
+        expect(patch?.rows).toEqual([]);
+        expect(patch?.styles).toEqual([
+            expect.objectContaining({ hyperlink: "javascript:exact()" }),
+            expect.objectContaining({ hyperlink: null }),
+        ]);
+        expect(applyGridPatch(previous, patch!)).toEqual(next);
+    });
+
+    it("preserves hyperlink metadata in keyframes, reconnect recovery, and scrollback", async () => {
+        const initial = ghosttySnapshotToGrid(hyperlinkSnapshot("https://initial.test"), 8);
+        let current = initial;
+        const server = new RemoteTerminalProtocolServer({
+            initialCols: 8,
+            initialRows: 1,
+            onInput() {},
+            onResize() {},
+            onScrollback(start, count) {
+                return {
+                    baseRow: 0,
+                    count,
+                    historyEpoch: "hyperlink-history",
+                    historyRevision: 1,
+                    palette: current.palette,
+                    rows: current.rows,
+                    start,
+                    styles: current.styles,
+                    totalRows: current.totalRows,
+                };
+            },
+        });
+        server.publishGrid({ ...initial, coversOutputOffset: 0 });
+        const endpoint = await listen(server);
+        const firstGrids: RemoteTerminalGridState[] = [];
+        const first = new RemoteTerminalProtocolClient({
+            capabilities: { grid: true, vt: false },
+            clientId: "hyperlink-recovery",
+            replica: {
+                applyGrid(grid) {
+                    firstGrids.push(grid);
+                },
+                applyVt() {},
+                resize() {},
+            },
+            stream: await endpoint.connect(),
+        });
+        await first.ready;
+        await vi.waitFor(() => expect(firstGrids).toHaveLength(1));
+        expect(firstGrids[0]?.styles).toContainEqual(
+            expect.objectContaining({ hyperlink: "https://initial.test" }),
+        );
+
+        const reconnect = first.reconnectState();
+        first.close();
+        current = ghosttySnapshotToGrid(hyperlinkSnapshot("file:///tmp/recovered"), 8);
+        server.publishGrid({ ...current, coversOutputOffset: 0 });
+
+        const recovered: RemoteTerminalGridState[] = [];
+        const resumed = new RemoteTerminalProtocolClient({
+            capabilities: { grid: true, vt: false },
+            clientId: "hyperlink-recovery",
+            ...(reconnect.epoch === undefined ? {} : { epoch: reconnect.epoch }),
+            ...(reconnect.inputLease === undefined ? {} : { inputLease: reconnect.inputLease }),
+            replica: {
+                applyGrid(grid) {
+                    recovered.push(grid);
+                },
+                applyVt() {},
+                resize() {},
+            },
+            resumeInputSequence: reconnect.resumeInputSequence,
+            resumeOutputOffset: reconnect.resumeOutputOffset,
+            stream: await endpoint.connect(),
+        });
+        await resumed.ready;
+        await vi.waitFor(() => expect(recovered).toHaveLength(1));
+        expect(recovered[0]?.styles).toContainEqual(
+            expect.objectContaining({ hyperlink: "file:///tmp/recovered" }),
+        );
+
+        const scrollback = await resumed.requestScrollback(0, 1);
+        expect(scrollback.styles).toContainEqual(
+            expect.objectContaining({ hyperlink: "file:///tmp/recovered" }),
+        );
+        expect(scrollback.rows).toEqual(current.rows);
+    });
+
     it("uses a render-faithful semantic keyframe for wide, combining, styled, and wrapped content", async () => {
         const canonical = await GhosttyTerminal.create(10, 4);
         cleanups.push(() => canonical.close());
@@ -128,7 +239,9 @@ describe("concrete Ghostty recovery", () => {
         await controller.resize(16, 3);
         await driver.publishOutput(Buffer.from("before-resize"));
         await controller.resize(10, 3);
-        await driver.publishOutput(Buffer.from("\r\nafter界"));
+        await driver.publishOutput(
+            Buffer.from("\r\n\x1b]8;;https://resize.test\x1b\\after\x1b]8;;\x1b\\界"),
+        );
 
         const recovered: RemoteTerminalGridState[] = [];
         const fresh = new RemoteTerminalProtocolClient({
@@ -149,6 +262,9 @@ describe("concrete Ghostty recovery", () => {
         expect(fresh.mode).toBe("grid");
         expect(recovered[0]!.cols).toBe(10);
         expect(recovered[0]!.coversOutputOffset).toBe(protocol.outputOffset());
+        expect(recovered[0]!.styles).toContainEqual(
+            expect.objectContaining({ hyperlink: "https://resize.test" }),
+        );
     });
 
     it("drains canonical parsing before durable exit and fails closed on partial resize", async () => {
@@ -327,4 +443,35 @@ async function listen(protocol: {
 function closeServer(server: Server, sockets: Set<Socket>): Promise<void> {
     for (const socket of sockets) socket.destroy();
     return new Promise((resolve) => server.close(() => resolve()));
+}
+
+function hyperlinkSnapshot(hyperlink: string): GhosttySnapshot {
+    return {
+        cells: [
+            snapshotCell(0, "g", hyperlink),
+            snapshotCell(1, "o", hyperlink),
+            snapshotCell(2, "!", null),
+        ],
+        cursor: { visible: true, x: 3, y: 0 },
+        palette: ["#000000"],
+        rows: ["go!"],
+        scroll: { offset: 0, totalRows: 1, visibleRows: 1 },
+        title: "linked",
+        wrappedRows: [false],
+    };
+}
+
+function snapshotCell(x: number, text: string, hyperlink: string | null) {
+    return {
+        background: "#000000",
+        bold: false,
+        dim: false,
+        foreground: "#ffffff",
+        hyperlink,
+        italic: false,
+        text,
+        width: 1 as const,
+        x,
+        y: 0,
+    };
 }

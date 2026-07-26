@@ -92,7 +92,7 @@ describe("WebSocketDuplex", () => {
             palette: [],
             rows: [{ cells: [], wrapped: false }],
             startRow: 0,
-            styles: [{}],
+            styles: [{ hyperlink: null }],
             title: "bounded",
             totalRows: 1,
         });

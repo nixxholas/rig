@@ -2,6 +2,7 @@ import { RemoteTerminalProtocolServer } from "./RemoteTerminalProtocolServer.js"
 import type {
     RemoteTerminalGridRow,
     RemoteTerminalGridState,
+    RemoteTerminalGridStyle,
     RemoteTerminalReplica,
     RemoteTerminalServerOptions,
 } from "./types.js";
@@ -12,6 +13,7 @@ export interface GhosttySnapshotCell {
     bold: boolean;
     dim: boolean;
     foreground: unknown;
+    hyperlink: string | null;
     invisible?: boolean;
     inverse?: boolean;
     italic: boolean;
@@ -245,7 +247,7 @@ export function ghosttySnapshotToGrid(
     ),
 ): Omit<RemoteTerminalGridState, "coversOutputOffset" | "revision"> {
     const styleIds = new Map<string, number>();
-    const styles: Readonly<Record<string, unknown>>[] = [];
+    const styles: RemoteTerminalGridStyle[] = [];
     const cellsByRow = new Map<number, GhosttySnapshotCell[]>();
     for (const cell of snapshot.cells) {
         const row = cellsByRow.get(cell.y) ?? [];
@@ -262,6 +264,7 @@ export function ghosttySnapshotToGrid(
                     bold: cell.bold,
                     dim: cell.dim,
                     foreground: cell.foreground,
+                    hyperlink: cell.hyperlink,
                     invisible: cell.invisible ?? false,
                     inverse: cell.inverse ?? false,
                     italic: cell.italic,
@@ -290,7 +293,7 @@ export function ghosttySnapshotToGrid(
         palette: snapshot.palette ?? [],
         rows,
         startRow: snapshot.scroll.offset,
-        styles: styles.length === 0 ? [{}] : styles,
+        styles: styles.length === 0 ? [{ hyperlink: null }] : styles,
         title: snapshot.title,
         totalRows: snapshot.scroll.totalRows,
     };

@@ -37,6 +37,7 @@ function cell(text: string, x: number, bold: boolean) {
         bold,
         dim: false,
         foreground: null,
+        hyperlink: null,
         italic: false,
         text,
         x,

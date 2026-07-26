@@ -279,7 +279,7 @@ function gridState(
             },
         ],
         startRow: 0,
-        styles: [{}],
+        styles: [{ hyperlink: null }],
         title,
         totalRows: 1,
     };

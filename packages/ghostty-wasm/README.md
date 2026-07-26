@@ -239,6 +239,7 @@ interface GhosttyRow {
 }
 
 interface GhosttyCell {
+    hyperlink: string | null;
     style: GhosttyStyle;
     text: string;
     width: 1 | 2;
@@ -255,6 +256,8 @@ interface GhosttyCursor {
 ```
 
 Blank cells with default styling are omitted from `GhosttyRow.cells`; use each cell's `x` coordinate to preserve its grid position. Styled blank cells are returned with a single-space `text` value. `palette` always contains Ghostty's 256 resolved RGB entries. `startRow` is the first returned row's absolute offset in `totalRows`; `visibleRows` is Ghostty's native viewport height. A `snapshotPage` result may contain more or fewer rows than `visibleRows`.
+
+`hyperlink` is Ghostty's parsed OSC 8 URI for that cell, or `null`. It is terminal metadata only: this package never opens it, normalizes its scheme, or infers a link from visible URL text. UI consumers must allowlist acceptable URI schemes before creating anchors. Ghostty limits normal OSC payloads to 2,048 bytes, and the WASM ABI applies the same explicit maximum when extracting a cell URI.
 
 `outputRevision` advances for input writes and resizes, not for viewport scrolling. This makes it suitable for invalidating rendered output without treating a scroll gesture as new PTY output. `synchronizedOutputActive` reflects DEC private mode 2026 so a renderer can defer painting until a synchronized update ends.
 
@@ -351,7 +354,7 @@ This package does not maintain a broad fork of Ghostty's terminal behavior. It p
 4. Page destruction uses `wasm_allocator.free` instead of `munmap`.
 5. Page cloning allocates its destination with the WebAssembly allocator instead of `mmap`.
 
-The Zig bridge adds the stable JavaScript-facing ABI for lifecycle, input, resizing, native viewport positioning, arbitrary scrollback access, viewport cells, grapheme text, styles, cursor state, palette/default colors, terminal modes, wrapping, and scrollback metadata. The Node/browser loaders, chunk-safe input buffer, PTY response surface, title tracking, and rich snapshot API are maintained in this package rather than patched into Ghostty.
+The Zig bridge adds the stable JavaScript-facing ABI for lifecycle, input, resizing, native viewport positioning, arbitrary scrollback access, viewport cells, grapheme text, parsed OSC 8 hyperlinks, styles, cursor state, palette/default colors, terminal modes, wrapping, and scrollback metadata. The Node/browser loaders, chunk-safe input buffer, PTY response surface, title tracking, and rich snapshot API are maintained in this package rather than patched into Ghostty.
 
 The allocator approach was derived from `@wterm/ghostty`. Its Apache 2.0 license and Ghostty's MIT license are included in the published package.
 

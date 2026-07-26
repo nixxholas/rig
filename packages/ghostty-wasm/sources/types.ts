@@ -20,6 +20,7 @@ export interface GhosttyStyle {
 }
 
 export interface GhosttyCell {
+    hyperlink: string | null;
     style: GhosttyStyle;
     text: string;
     width: 1 | 2;

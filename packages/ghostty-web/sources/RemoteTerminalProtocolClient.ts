@@ -2,6 +2,7 @@ import type { Duplex } from "node:stream";
 
 import { applyGridPatch } from "./applyGridPatch.js";
 import { encodeWirePacket } from "./encodeWirePacket.js";
+import { isValidGridStyles } from "./isValidGridStyles.js";
 import { decodeJsonPayload, encodeJsonPayload } from "./jsonPayload.js";
 import type {
     RemoteTerminalClientOptions,
@@ -322,8 +323,11 @@ export class RemoteTerminalProtocolClient {
         if (packet.type === WirePacketType.ScrollbackPage) {
             const pending = this.#pendingScrollback.get(packet.sequence);
             if (pending === undefined) throw new Error("Unknown scrollback response.");
+            const page = decodeJsonPayload<RemoteTerminalScrollbackPage>(packet.payload);
+            if (page.styles !== undefined && !isValidGridStyles(page.styles))
+                throw new Error("Invalid terminal scrollback styles.");
             this.#pendingScrollback.delete(packet.sequence);
-            pending.resolve(decodeJsonPayload(packet.payload));
+            pending.resolve(page);
             return;
         }
         if (packet.type === WirePacketType.Exit) {
@@ -405,8 +409,7 @@ function validateGrid(grid: RemoteTerminalGridState): void {
         grid.cols > 1_000 ||
         !Array.isArray(grid.rows) ||
         grid.rows.length > 1_000 ||
-        !Array.isArray(grid.styles) ||
-        grid.styles.length > 4_096
+        !isValidGridStyles(grid.styles)
     )
         throw new Error("Invalid terminal grid.");
 }

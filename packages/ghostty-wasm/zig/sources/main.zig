@@ -3,6 +3,7 @@ const vt = @import("ghostty-vt");
 
 const allocator = std.heap.wasm_allocator;
 const CellBytes = 24;
+const MaximumHyperlinkBytes = 2048;
 
 pub const std_options: std.Options = .{ .logFn = wasmLog };
 
@@ -171,7 +172,7 @@ export fn get_viewport(ptr: usize, buffer: [*]u8) u32 {
             };
             buffer[offset + 21] = if (cell.content_tag == .bg_color_rgb) cell.content.color_rgb.g else 0;
             buffer[offset + 22] = if (cell.content_tag == .bg_color_rgb) cell.content.color_rgb.b else 0;
-            buffer[offset + 23] = 0;
+            buffer[offset + 23] = if (cell.hyperlink) 1 else 0;
             offset += CellBytes;
         }
     }
@@ -200,6 +201,34 @@ export fn get_cell_text(ptr: usize, row: u16, col: u16, buffer: [*]u8, capacity:
         }
     }
     return @intCast(output);
+}
+
+export fn get_cell_hyperlink(
+    ptr: usize,
+    row: u16,
+    col: u16,
+    buffer: [*]u8,
+    capacity: u32,
+) u32 {
+    const state = stateFromPtr(ptr);
+    if (row >= state.render.rows or col >= state.render.cols) return 0;
+
+    const render_cells = state.render.row_data.items(.cells)[row].items(.raw);
+    if (!render_cells[col].hyperlink) return 0;
+
+    const pin = state.render.row_data.items(.pin)[row];
+    const page = &pin.node.data;
+    const cell = page.getRowAndCell(col, pin.y).cell;
+    const hyperlink_id = page.lookupHyperlink(cell) orelse return 0;
+    const entry = page.hyperlink_set.get(page.memory, hyperlink_id);
+    const uri = entry.uri.slice(page.memory);
+    if (uri.len == 0 or uri.len > MaximumHyperlinkBytes or uri.len > capacity) return 0;
+    @memcpy(buffer[0..uri.len], uri);
+    return @intCast(uri.len);
+}
+
+export fn maximum_hyperlink_bytes() u32 {
+    return MaximumHyperlinkBytes;
 }
 
 export fn get_row_wrapped(ptr: usize, row: u16) u32 {

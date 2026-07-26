@@ -83,3 +83,13 @@ flaky microbenchmarks.
 
 The transport is a Node `Duplex`; TCP, Unix sockets, TLS, or a binary WebSocket adapter can supply
 that boundary. Authentication and encryption belong to the enclosing transport.
+
+## Hyperlinks
+
+`GhosttySnapshotCell.hyperlink` is `string | null`. Semantic grids include it in the deduplicated
+JSON style table, so keyframes, row patches, reconnect recovery, resize snapshots, and scrollback
+retain the exact OSC 8 URI independently of the visible cell text. The protocol does not infer
+links from URL-looking labels, open links, or normalize schemes.
+
+The URI remains untrusted terminal metadata. UI consumers must allowlist acceptable schemes before
+creating anchors; in particular, they must not pass arbitrary values directly to `href`.

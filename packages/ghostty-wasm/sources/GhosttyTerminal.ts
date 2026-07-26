@@ -13,6 +13,7 @@ import type {
 import { instantiateGhostty, type GhosttyExports } from "./wasm.js";
 
 const textCapacity = 256;
+const maximumHyperlinkBytes = 2_048;
 const maximumPendingText = 1024 * 1024;
 const retainedTextSuffix = 64;
 const encoder = new TextEncoder();
@@ -26,6 +27,7 @@ export class GhosttyTerminal {
     readonly #pointer: number;
     readonly #queries = new TerminalQueryTracker();
     readonly #title = new TitleTracker();
+    readonly #hyperlinkDecoder = new TextDecoder();
     readonly #utf8Decoder = new TextDecoder();
     #disposed = false;
     #outputRevision = 0;
@@ -200,9 +202,19 @@ export class GhosttyTerminal {
         const cols = this.#exports.get_cols(this.#pointer);
         const rowCount = this.#exports.get_rows(this.#pointer);
         const cellBytes = this.#exports.cell_bytes();
+        const advertisedHyperlinkBytes = this.#exports.maximum_hyperlink_bytes();
+        if (!Number.isSafeInteger(advertisedHyperlinkBytes) || advertisedHyperlinkBytes <= 0) {
+            throw new Error("Ghostty returned an invalid hyperlink size limit.");
+        }
+        const hyperlinkCapacity = Math.min(maximumHyperlinkBytes, advertisedHyperlinkBytes);
         const bufferLength = cols * rowCount * cellBytes;
         const bufferPointer = this.#exports.alloc_buffer(bufferLength);
         if (bufferPointer === 0) throw new Error("Ghostty could not allocate its viewport buffer.");
+        const hyperlinkBufferPointer = this.#exports.alloc_buffer(hyperlinkCapacity);
+        if (hyperlinkBufferPointer === 0) {
+            this.#exports.free_buffer(bufferPointer, bufferLength);
+            throw new Error("Ghostty could not allocate its hyperlink buffer.");
+        }
 
         try {
             this.#exports.get_viewport(this.#pointer, bufferPointer);
@@ -213,7 +225,14 @@ export class GhosttyTerminal {
             ).slice();
             const view = new DataView(packedViewport.buffer);
             const rows = Array.from({ length: rowCount }, (_, y) => ({
-                cells: this.#readRow(view, y, cols, cellBytes),
+                cells: this.#readRow(
+                    view,
+                    y,
+                    cols,
+                    cellBytes,
+                    hyperlinkBufferPointer,
+                    hyperlinkCapacity,
+                ),
                 wrapped: this.#exports.get_row_wrapped(this.#pointer, y) !== 0,
             }));
             const totalRows = this.#exports.get_scroll_total(this.#pointer);
@@ -236,6 +255,7 @@ export class GhosttyTerminal {
                 visibleRows: this.#exports.get_scroll_visible(this.#pointer),
             };
         } finally {
+            this.#exports.free_buffer(hyperlinkBufferPointer, hyperlinkCapacity);
             this.#exports.free_buffer(bufferPointer, bufferLength);
         }
     }
@@ -290,7 +310,14 @@ export class GhosttyTerminal {
         return packed < 0 ? null : rgbColor(packed);
     }
 
-    #readRow(view: DataView, y: number, cols: number, cellBytes: number): readonly GhosttyCell[] {
+    #readRow(
+        view: DataView,
+        y: number,
+        cols: number,
+        cellBytes: number,
+        hyperlinkBufferPointer: number,
+        hyperlinkCapacity: number,
+    ): readonly GhosttyCell[] {
         const cells: GhosttyCell[] = [];
         for (let x = 0; x < cols; x += 1) {
             const offset = (y * cols + x) * cellBytes;
@@ -298,10 +325,39 @@ export class GhosttyTerminal {
             if (width === 0) continue;
             const text = this.#readText(y, x);
             const style = readStyle(view, offset);
-            if (text.length === 0 && isDefaultStyle(style)) continue;
-            cells.push({ style, text: text || " ", width: width === 2 ? 2 : 1, x });
+            const hyperlink =
+                view.getUint8(offset + 23) === 0
+                    ? null
+                    : this.#readHyperlink(y, x, hyperlinkBufferPointer, hyperlinkCapacity);
+            if (text.length === 0 && isDefaultStyle(style) && hyperlink === null) continue;
+            cells.push({
+                hyperlink,
+                style,
+                text: text || " ",
+                width: width === 2 ? 2 : 1,
+                x,
+            });
         }
         return cells;
+    }
+
+    #readHyperlink(
+        row: number,
+        col: number,
+        bufferPointer: number,
+        capacity: number,
+    ): string | null {
+        const length = this.#exports.get_cell_hyperlink(
+            this.#pointer,
+            row,
+            col,
+            bufferPointer,
+            capacity,
+        );
+        if (length <= 0 || length > capacity) return null;
+        return this.#hyperlinkDecoder.decode(
+            new Uint8Array(this.#exports.memory.buffer, bufferPointer, length),
+        );
     }
 
     #readText(row: number, col: number): string {

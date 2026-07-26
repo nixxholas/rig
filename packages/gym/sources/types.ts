@@ -66,6 +66,7 @@ export interface TerminalCellSnapshot {
     bold: boolean;
     dim: boolean;
     foreground: TerminalColorSnapshot | null;
+    hyperlink: string | null;
     invisible?: boolean;
     inverse?: boolean;
     italic: boolean;

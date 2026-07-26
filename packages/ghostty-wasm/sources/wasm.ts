@@ -12,6 +12,13 @@ export interface GhosttyExports {
         bufferPointer: number,
         capacity: number,
     ): number;
+    get_cell_hyperlink(
+        pointer: number,
+        row: number,
+        col: number,
+        bufferPointer: number,
+        capacity: number,
+    ): number;
     get_cols(pointer: number): number;
     get_cursor_blinking(pointer: number): number;
     get_cursor_color(pointer: number): number;
@@ -33,6 +40,7 @@ export interface GhosttyExports {
     get_viewport(pointer: number, bufferPointer: number): number;
     init(cols: number, rows: number, maxScrollback: number): number;
     memory: WebAssembly.Memory;
+    maximum_hyperlink_bytes(): number;
     resize(pointer: number, cols: number, rows: number): void;
     scroll_bottom(pointer: number): void;
     scroll_by(pointer: number, rows: number): void;

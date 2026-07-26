@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 
 import { diffGridState } from "./diffGridState.js";
 import { encodeWirePacket } from "./encodeWirePacket.js";
+import { isValidGridStyles } from "./isValidGridStyles.js";
 import { decodeJsonPayload, encodeJsonPayload } from "./jsonPayload.js";
 import type {
     RemoteTerminalGridState,
@@ -918,6 +919,7 @@ function validateScrollbackPage(
         historyRevision: number;
         rows: readonly unknown[];
         start: number;
+        styles?: unknown;
         totalRows: number;
     },
     start: number,
@@ -932,7 +934,8 @@ function validateScrollbackPage(
         page.start !== start ||
         page.count !== count ||
         !Array.isArray(page.rows) ||
-        page.rows.length > count
+        page.rows.length > count ||
+        (page.styles !== undefined && !isValidGridStyles(page.styles))
     )
         throw new Error("Invalid scrollback page.");
 }

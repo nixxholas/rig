@@ -19,6 +19,7 @@ export type {
     RemoteTerminalGridPatch,
     RemoteTerminalGridRow,
     RemoteTerminalGridState,
+    RemoteTerminalGridStyle,
     RemoteTerminalMode,
     RemoteTerminalProtocolMetrics,
     RemoteTerminalReplica,

@@ -59,6 +59,7 @@ function adaptGhosttySnapshot(snapshot: WasmGhosttySnapshot): GhosttySnapshot {
                 bold: cell.style.bold,
                 dim: cell.style.dim,
                 foreground: cell.style.foreground ?? snapshot.defaultForeground,
+                hyperlink: cell.hyperlink,
                 invisible: cell.style.invisible,
                 inverse: cell.style.inverse,
                 italic: cell.style.italic,
