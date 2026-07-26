@@ -45,6 +45,7 @@ describe("createDurableSkillTool", () => {
         ) => Promise<unknown>;
         await expect(
             execute({ name: "release-check" }, context, {
+                providerToolCallId: "provider-call-1",
                 toolBatchId: "batch-1",
                 toolCallId: "call-1",
                 toolCallIndex: 0,
@@ -55,6 +56,7 @@ describe("createDurableSkillTool", () => {
             {
                 arguments: { name: "release-check" },
                 batchId: "batch-1",
+                providerToolCallId: "provider-call-1",
                 toolCallId: "call-1",
                 toolCallIndex: 0,
             },

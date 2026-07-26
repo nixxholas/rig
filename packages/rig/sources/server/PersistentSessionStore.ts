@@ -1378,6 +1378,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     run_id,
                     batch_id,
                     tool_call_id,
+                    provider_tool_call_id,
                     tool_call_index,
                     definition_json,
                     skill_json,
@@ -1387,7 +1388,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     consumed,
                     created_at_ms,
                     resolved_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status = excluded.status,
                     resolution_json = excluded.resolution_json,
@@ -1401,6 +1402,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 call.runId,
                 call.batchId,
                 call.toolCallId,
+                call.providerToolCallId ?? null,
                 call.toolCallIndex,
                 JSON.stringify(call.definition),
                 call.skill === undefined ? null : JSON.stringify(call.skill),
@@ -2222,6 +2224,7 @@ function readString(row: Record<string, unknown>, key: string): string {
 }
 
 function readExternalToolCallRow(row: Record<string, unknown>): ExternalToolCall {
+    const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
     const resolutionJson = readOptionalString(row, "resolution_json");
     const skillJson = readOptionalString(row, "skill_json");
     const resolvedAt = readOptionalNumber(row, "resolved_at_ms");
@@ -2238,6 +2241,7 @@ function readExternalToolCallRow(row: Record<string, unknown>): ExternalToolCall
         runId: readString(row, "run_id"),
         sessionId: readString(row, "session_id"),
         status: readString(row, "status") as ExternalToolCall["status"],
+        ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
         toolCallId: readString(row, "tool_call_id"),
         toolCallIndex: readNumber(row, "tool_call_index"),
         ...(resolutionJson === undefined ? {} : { resolution: JSON.parse(resolutionJson) }),

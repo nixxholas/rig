@@ -11,6 +11,48 @@ import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 
 describe("Codex response items", () => {
+    it("deterministically hashes overlong call IDs across opaque calls and their results", () => {
+        const overlongCallId = `call_${"x".repeat(78)}`;
+        const context: SessionContext = {
+            instructions: "instructions",
+            messages: [
+                {
+                    role: "assistant",
+                    content: "",
+                    responseItems: [
+                        JSON.stringify({
+                            arguments: "{}",
+                            call_id: overlongCallId,
+                            name: "inspect",
+                            type: "function_call",
+                        }),
+                    ],
+                    toolCalls: [
+                        {
+                            arguments: "{}",
+                            callId: overlongCallId,
+                            name: "inspect",
+                        },
+                    ],
+                },
+                {
+                    role: "tool",
+                    callId: overlongCallId,
+                    content: "done",
+                },
+            ],
+        };
+
+        const first = toOpenAIResponseInput(context);
+        const second = toOpenAIResponseInput(context);
+        const callId = (first[0] as { call_id: string }).call_id;
+
+        expect(first).toEqual(second);
+        expect(callId).not.toBe(overlongCallId);
+        expect(callId).toHaveLength(64);
+        expect((first[1] as { call_id: string }).call_id).toBe(callId);
+    });
+
     it("preserves function namespaces through streaming and replay", async () => {
         const functionCall = {
             type: "function_call",

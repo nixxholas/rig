@@ -20,6 +20,8 @@ export interface ExternalToolCall {
     sessionId: string;
     skill?: DurableSkillDefinition;
     status: "pending" | "completed" | "failed" | "cancelled";
+    /** Original identifier emitted by the provider and replayed on the provider wire. */
+    providerToolCallId?: string;
     toolCallId: string;
     toolCallIndex: number;
     consumed: boolean;

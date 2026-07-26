@@ -10,6 +10,7 @@ export function createExternalTool(options: {
         request: {
             arguments: unknown;
             batchId: string;
+            providerToolCallId?: string;
             toolCallId: string;
             toolCallIndex: number;
         },
@@ -40,6 +41,9 @@ export function createExternalTool(options: {
                 {
                     arguments: args,
                     batchId: execution.toolBatchId,
+                    ...(execution.providerToolCallId === undefined
+                        ? {}
+                        : { providerToolCallId: execution.providerToolCallId }),
                     toolCallId: execution.toolCallId,
                     toolCallIndex: execution.toolCallIndex,
                 },

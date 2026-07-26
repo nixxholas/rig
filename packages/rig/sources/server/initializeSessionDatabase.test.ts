@@ -29,7 +29,27 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived"),
             ).toMatchObject({ dflt_value: "0", notnull: 1, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("adds provider tool identity storage to version 10 databases", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            database.exec(`
+                ALTER TABLE external_tool_calls DROP COLUMN provider_tool_call_id;
+                PRAGMA user_version = 10;
+            `);
+
+            initializeSessionDatabase(database);
+
+            expect(
+                columnInfo(database, "external_tool_calls", "provider_tool_call_id"),
+            ).toBeDefined();
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
         } finally {
             database.close();
         }
@@ -52,7 +72,7 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived_at_ms"),
             ).toMatchObject({ notnull: 0, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
         } finally {
             database.close();
         }
@@ -124,7 +144,7 @@ describe("initializeSessionDatabase", () => {
 
             expect(() => initializeSessionDatabase(database)).not.toThrow();
 
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
             const project = database
                 .prepare("SELECT presence FROM projects WHERE path = ?")
                 .get("/tmp/rig-legacy");
@@ -166,10 +186,10 @@ describe("initializeSessionDatabase", () => {
     it("refuses to open a database from a newer Rig schema", () => {
         const database = new DatabaseSync(":memory:");
         try {
-            database.exec("PRAGMA user_version = 11");
+            database.exec("PRAGMA user_version = 12");
 
             expect(() => initializeSessionDatabase(database)).toThrow(
-                "The session database uses schema version 11, but this Rig version supports up to 10.",
+                "The session database uses schema version 12, but this Rig version supports up to 11.",
             );
             expect(
                 database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),
@@ -436,7 +456,7 @@ describe("initializeSessionDatabase", () => {
             expect(columnInfo(database, "project_workspaces", "base_commit")).toBeDefined();
             expect(columnInfo(database, "project_workspaces", "git_branch")).toBeDefined();
             expect(columnInfo(database, "project_workspaces", "branch")).toBeUndefined();
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
         } finally {
             database.close();
         }

@@ -1,6 +1,7 @@
 import type { ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
 import type { SessionContext } from "@/core/SessionContext.js";
+import { createCodexCallIdMapper } from "@/core/responses/createCodexCallIdMapper.js";
 import { toOpenAIInputContent } from "@/core/responses/toOpenAIInputContent.js";
 import type { CodexToolVendor } from "@/vendors/codex/CodexToolVendor.js";
 
@@ -8,6 +9,7 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
     const input: ResponseInput = [];
     const customToolCallIds = new Set<string>();
     const toolSearchCallIds = new Set<string>();
+    const mapCallId = createCodexCallIdMapper();
     let messageId = 0;
     for (const message of context.messages) {
         if (message.role === "system") {
@@ -52,12 +54,13 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
             continue;
         }
         if (message.role === "tool") {
-            if (toolSearchCallIds.has(message.callId)) {
+            const callId = mapCallId(message.callId);
+            if (toolSearchCallIds.has(callId)) {
                 try {
                     const parsed: unknown = JSON.parse(message.content);
                     input.push({
                         type: "tool_search_output",
-                        call_id: message.callId,
+                        call_id: callId,
                         execution: "client",
                         status: "completed",
                         tools:
@@ -75,11 +78,11 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
             }
             input.push({
                 type:
-                    customToolCallIds.has(message.callId) ||
+                    customToolCallIds.has(callId) ||
                     toolVendorType(message.vendor) === "custom_tool_call"
                         ? "custom_tool_call_output"
                         : "function_call_output",
-                call_id: message.callId,
+                call_id: callId,
                 output: toOpenAIInputContent(message.content, message.input),
             } as ResponseInputItem);
             continue;
@@ -87,7 +90,14 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
         if (message.responseItems !== undefined) {
             for (const encoded of message.responseItems) {
                 try {
-                    const item = JSON.parse(encoded) as ResponseInputItem;
+                    const parsed = JSON.parse(encoded) as ResponseInputItem;
+                    const item =
+                        "call_id" in parsed && typeof parsed.call_id === "string"
+                            ? ({
+                                  ...parsed,
+                                  call_id: mapCallId(parsed.call_id),
+                              } as ResponseInputItem)
+                            : parsed;
                     input.push(item);
                     if (
                         item.type === "tool_search_call" &&
@@ -113,32 +123,33 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
             }
         }
         for (const toolCall of message.toolCalls ?? []) {
+            const callId = mapCallId(toolCall.callId);
             const vendorType = toolVendorType(toolCall.vendor);
             if (vendorType === "tool_search_call") {
                 try {
                     input.push({
                         type: "tool_search_call",
-                        call_id: toolCall.callId,
+                        call_id: callId,
                         execution: "client",
                         arguments: JSON.parse(toolCall.arguments),
                     } as ResponseInputItem);
-                    toolSearchCallIds.add(toolCall.callId);
+                    toolSearchCallIds.add(callId);
                 } catch {
                     // Malformed tool-search arguments are omitted from replay.
                 }
             } else if (vendorType === "custom_tool_call") {
                 input.push({
                     type: "custom_tool_call",
-                    call_id: toolCall.callId,
+                    call_id: callId,
                     name: toolCall.name,
                     ...(toolCall.namespace === undefined ? {} : { namespace: toolCall.namespace }),
                     input: toolCall.arguments,
                 } as ResponseInputItem);
-                customToolCallIds.add(toolCall.callId);
+                customToolCallIds.add(callId);
             } else {
                 input.push({
                     type: "function_call",
-                    call_id: toolCall.callId,
+                    call_id: callId,
                     name: toolCall.name,
                     ...(toolCall.namespace === undefined ? {} : { namespace: toolCall.namespace }),
                     arguments: toolCall.arguments,

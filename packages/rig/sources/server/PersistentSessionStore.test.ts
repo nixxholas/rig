@@ -139,6 +139,21 @@ describe("PersistentSessionStore", () => {
             });
             expect(requests).toHaveLength(2);
             expect(JSON.stringify(requests[1]?.context.messages)).toContain("resolved");
+            expect(requests[1]?.context.messages.slice(-2)).toMatchObject([
+                {
+                    content: [
+                        {
+                            providerToolCallId: "provider-call-1",
+                            type: "toolCall",
+                        },
+                    ],
+                    role: "assistant",
+                },
+                {
+                    providerToolCallId: "provider-call-1",
+                    role: "toolResult",
+                },
+            ]);
             expect(
                 restored.resolveExternalToolCall(pending.id, {
                     output: { state: "resolved" },
@@ -426,6 +441,21 @@ describe("PersistentSessionStore", () => {
             expect(JSON.stringify(requests[1]?.context.messages)).toContain(
                 "DURABLE_SKILL_BODY_SENTINEL",
             );
+            expect(requests[1]?.context.messages.slice(-2)).toMatchObject([
+                {
+                    content: [
+                        {
+                            providerToolCallId: "provider-skill-call-1",
+                            type: "toolCall",
+                        },
+                    ],
+                    role: "assistant",
+                },
+                {
+                    providerToolCallId: "provider-skill-call-1",
+                    role: "toolResult",
+                },
+            ]);
         } finally {
             store?.close();
             globalThis.fetch = originalFetch;

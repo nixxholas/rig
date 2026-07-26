@@ -3094,6 +3094,7 @@ export class InMemorySession {
         request: {
             arguments: unknown;
             batchId: string;
+            providerToolCallId?: string;
             toolCallId: string;
             toolCallIndex: number;
         },
@@ -3119,6 +3120,9 @@ export class InMemorySession {
             runId,
             sessionId: this.id,
             status: "pending",
+            ...(request.providerToolCallId === undefined
+                ? {}
+                : { providerToolCallId: request.providerToolCallId }),
             toolCallId: request.toolCallId,
             toolCallIndex: request.toolCallIndex,
             ...(skill === undefined ? {} : { skill: { ...skill } }),
@@ -3174,6 +3178,9 @@ export class InMemorySession {
                   }
                 : {}),
             rendered: externalToolResolutionToContent(resolution),
+            ...(call.providerToolCallId === undefined
+                ? {}
+                : { providerToolCallId: call.providerToolCallId }),
             toolCallId: call.toolCallId,
             toolName: call.definition.name,
             type: "tool_result",

@@ -9,7 +9,7 @@ import { folderProjectName, projectNameKey, projectStorageKey } from "./projectI
 import { initializePersistentGlobalEventQueueSchema } from "./PersistentGlobalEventQueue.js";
 import { generateKeyBetween, generateNKeysBetween } from "../utils/fractionalIndexing.js";
 
-const CURRENT_SCHEMA_VERSION = 10;
+const CURRENT_SCHEMA_VERSION = 11;
 
 const sessionColumnMigrations = [
     ["project_id", "TEXT"],
@@ -323,6 +323,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 run_id TEXT NOT NULL,
                 batch_id TEXT NOT NULL,
                 tool_call_id TEXT NOT NULL,
+                provider_tool_call_id TEXT,
                 tool_call_index INTEGER NOT NULL,
                 definition_json TEXT NOT NULL,
                 skill_json TEXT,
@@ -405,6 +406,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             "order_key",
             "TEXT NOT NULL COLLATE BINARY DEFAULT ''",
         );
+        ensureColumn(database, "external_tool_calls", "provider_tool_call_id", "TEXT");
 
         if (legacyGlobalEventTable) {
             const streamId = createId();

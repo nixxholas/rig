@@ -12,6 +12,7 @@ export function createDurableSkillTool(options: {
         request: {
             arguments: unknown;
             batchId: string;
+            providerToolCallId?: string;
             toolCallId: string;
             toolCallIndex: number;
         },
@@ -54,6 +55,9 @@ export function createDurableSkillTool(options: {
                 {
                     arguments: args,
                     batchId: execution.toolBatchId,
+                    ...(execution.providerToolCallId === undefined
+                        ? {}
+                        : { providerToolCallId: execution.providerToolCallId }),
                     toolCallId: execution.toolCallId,
                     toolCallIndex: execution.toolCallIndex,
                 },
