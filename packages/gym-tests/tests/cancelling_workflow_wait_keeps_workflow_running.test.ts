@@ -117,7 +117,7 @@ describe("cancelling a workflow wait", () => {
                 "cancelled workflow wait",
                 30_000,
             );
-            expect(cancelled.text).toContain("workflow is still running in the background");
+            expect(cancelled.text).toContain("1 workflow running · /workflows to view");
 
             submit(gym, "Confirm what happened to the workflow wait.");
             await gym.terminal.waitForText("WAIT_ABORTED_WORKFLOW_CONTINUES", 30_000);

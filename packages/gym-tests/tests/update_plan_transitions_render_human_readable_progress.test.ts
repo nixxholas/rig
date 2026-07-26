@@ -45,7 +45,7 @@ describe("update_plan transitions render human-readable progress", () => {
                         content: [{ text: "Plan updated", type: "text" }],
                         isError: false,
                         role: "toolResult",
-                        toolCallId: `plan-transition-${String(callIndex - 1)}`,
+                        providerToolCallId: `plan-transition-${String(callIndex - 1)}`,
                         toolName: "update_plan",
                     });
                     return callIndex < 3

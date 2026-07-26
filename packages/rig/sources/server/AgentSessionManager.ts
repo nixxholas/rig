@@ -240,7 +240,13 @@ export class AgentSessionManager {
     }
 
     async stopDescendants(parentSessionId: string): Promise<number> {
-        const descendants = this.#descendantsOf(parentSessionId);
+        const parent = this.#repository.get(parentSessionId);
+        if (parent === undefined) return 0;
+        // Workflows are independently managed background runs. Interrupting the parent can
+        // cancel a wait for one, but only stopWorkflow, reset, or shutdown should stop its agents.
+        const descendants = this.#descendantsOf(parentSessionId).filter(
+            (child) => !this.#belongsToRunningWorkflow(child, parent),
+        );
         const active = descendants.filter((child) => {
             const status = child.subagentSummary().status;
             return status === "queued" || status === "running";

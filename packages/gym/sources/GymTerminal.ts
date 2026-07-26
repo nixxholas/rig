@@ -21,12 +21,18 @@ export type GymKey = keyof typeof KEYS;
 
 export class GymTerminal {
     #ghostty: GhosttyTerminal;
+    #inferenceFailures: () => readonly Error[];
     #inputRevision = 0;
     #pty: IPty;
 
-    constructor(pty: IPty, ghostty: GhosttyTerminal) {
+    constructor(
+        pty: IPty,
+        ghostty: GhosttyTerminal,
+        inferenceFailures: () => readonly Error[] = () => [],
+    ) {
         this.#pty = pty;
         this.#ghostty = ghostty;
+        this.#inferenceFailures = inferenceFailures;
     }
 
     get inputRevision(): number {
@@ -101,7 +107,11 @@ export class GymTerminal {
     ): Promise<TerminalSnapshot> {
         const deadline = Date.now() + timeoutMs;
         let last = await this.snapshot();
+        this.#throwInferenceFailure();
         while (!predicate(last)) {
+            // An assertion that failed inside the inference handler is the real reason the agent
+            // stopped making progress, so it is reported instead of the wait it caused.
+            this.#throwInferenceFailure();
             if (Date.now() >= deadline) {
                 throw new Error(
                     `Timed out waiting for ${description}. Last terminal snapshot:\n\n${last.text}`,
@@ -110,6 +120,7 @@ export class GymTerminal {
             await new Promise((resolve) => setTimeout(resolve, 50));
             last = await this.snapshot();
         }
+        this.#throwInferenceFailure();
         while (last.synchronizedOutputActive) {
             if (Date.now() >= deadline) {
                 throw new Error(
@@ -118,7 +129,15 @@ export class GymTerminal {
             }
             await new Promise((resolve) => setTimeout(resolve, 50));
             last = await this.snapshot();
+            this.#throwInferenceFailure();
         }
         return last;
+    }
+
+    #throwInferenceFailure(): void {
+        const failure = this.#inferenceFailures()[0];
+        if (failure === undefined) return;
+        failure.message = `The inference handler failed, so the agent could not continue.\n\n${failure.message}`;
+        throw failure;
     }
 }

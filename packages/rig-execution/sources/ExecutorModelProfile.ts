@@ -20,7 +20,6 @@ export interface ExecutorModelProfile {
     providerType: ProviderModelCompatibilityType;
     serviceTiers?: readonly SessionServiceTier[];
     prompt: string;
-    toolMode?: "code_mode" | "standard";
 }
 
 export interface ExecutorSelection {

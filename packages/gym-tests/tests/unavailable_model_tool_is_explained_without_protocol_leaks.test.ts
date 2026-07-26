@@ -35,7 +35,7 @@ describe("unavailable model tool is explained without protocol leaks", () => {
                     expect(lastMessage).toMatchObject({
                         isError: true,
                         role: "toolResult",
-                        toolCallId: "raw-unavailable-tool-call-id",
+                        providerToolCallId: "raw-unavailable-tool-call-id",
                         toolName: "erase_everything",
                     });
                     expect(messageText(lastMessage)).toBe(

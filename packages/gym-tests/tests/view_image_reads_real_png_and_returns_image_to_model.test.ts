@@ -51,7 +51,7 @@ describe("view_image reads a real PNG and returns an image to the model", () => 
                         ],
                         isError: false,
                         role: "toolResult",
-                        toolCallId: "view-real-png",
+                        providerToolCallId: "view-real-png",
                         toolName: "view_image",
                     });
                     return {

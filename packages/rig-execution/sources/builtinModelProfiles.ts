@@ -55,7 +55,6 @@ export function builtinModelProfiles(
                 prompt: codex_agent_instructions,
             }),
             collaborationMode: "namespaced",
-            toolMode: "code_mode",
             ...(candidate.id === modelOpenaiCodexAutoReview.id ? { hidden: true } : {}),
         }));
     }
@@ -85,7 +84,6 @@ export function builtinModelProfiles(
                     ...candidate,
                     collaborationMode: "direct" as const,
                     providerType,
-                    toolMode: "standard" as const,
                 })),
             {
                 ...profile(providerId, "codex", modelOpenaiGpt54, {
@@ -94,7 +92,6 @@ export function builtinModelProfiles(
                 collaborationMode: "direct" as const,
                 hidden: true,
                 providerType,
-                toolMode: "standard" as const,
             },
         ];
     }

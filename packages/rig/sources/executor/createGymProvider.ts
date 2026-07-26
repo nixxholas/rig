@@ -55,13 +55,14 @@ export function createGymProvider(options: CreateGymProviderOptions) {
               : { serviceTiers: options.serviceTiers }),
         stream(model, context, streamOptions = {}) {
             return createInferenceStream(async function* () {
+                const runtimeModel = `# Runtime model\nModel ID: ${model.id}\nProvider ID: ${providerId}`;
                 const preparedContext =
                     options.prepareContext === undefined
                         ? {
                               ...context,
                               systemPrompt: [
                                   context.systemPromptOverride,
-                                  `# Runtime model\nModel ID: ${model.id}\nProvider ID: ${providerId}`,
+                                  runtimeModel,
                                   context.systemPrompt,
                               ]
                                   .filter(
@@ -70,7 +71,15 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                                   )
                                   .join("\n\n"),
                           }
-                        : await options.prepareContext(model, context);
+                        : await options.prepareContext(model, {
+                              ...context,
+                              systemPrompt: [runtimeModel, context.systemPrompt]
+                                  .filter(
+                                      (part): part is string =>
+                                          part !== undefined && part.length > 0,
+                                  )
+                                  .join("\n\n"),
+                          });
                 const response = await request(options.endpoint, {
                     body: JSON.stringify({
                         context: preparedContext,

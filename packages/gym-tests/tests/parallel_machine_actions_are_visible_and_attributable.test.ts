@@ -38,7 +38,7 @@ describe("parallel machine actions are visible and attributable", () => {
                         (message) => message.role === "toolResult",
                     );
                     expect(results).toHaveLength(3);
-                    expect(results.map((message) => message.toolCallId).sort()).toEqual([
+                    expect(results.map((message) => message.providerToolCallId).sort()).toEqual([
                         "parallel-command-1",
                         "parallel-command-2",
                         "parallel-command-3",

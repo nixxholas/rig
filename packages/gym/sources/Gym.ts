@@ -66,7 +66,11 @@ export class Gym {
         this.#pty = options.pty;
         this.httpProxy = options.httpProxy;
         this.inference = options.inference;
-        this.terminal = new GymTerminal(options.pty, options.ghostty);
+        this.terminal = new GymTerminal(
+            options.pty,
+            options.ghostty,
+            () => options.inference.handlerFailures,
+        );
         this.workspacePath = options.workspacePath;
         this.#exit = new Promise((resolve) => {
             options.pty.onExit(resolve);

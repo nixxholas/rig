@@ -162,7 +162,7 @@ describe("structured questions navigate multiple and free-form answers", () => {
         expect(toolResult).toMatchObject({
             isError: false,
             role: "toolResult",
-            toolCallId: "question-workflow",
+            providerToolCallId: "question-workflow",
             toolName: "request_user_input",
         });
         expect(toolResult?.content).toEqual([

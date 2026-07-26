@@ -19,7 +19,7 @@ describe("background subagent completion routes to its parent", () => {
     it("reports deterministic child work and leaves the parent terminal usable", async () => {
         let childRunId: string | undefined;
         let parentInitialRunId: string | undefined;
-        let spawnedAgentId: string | undefined;
+        let spawnedTaskName: string | undefined;
         let parentObservedCompletion = false;
         let parentObservedSpawnResult = false;
         const gym = await createGym({
@@ -93,16 +93,14 @@ describe("background subagent completion routes to its parent", () => {
                         toolName: "spawn_agent",
                     });
                     const parsed = JSON.parse(spawnResultText) as {
-                        agent_id: string;
-                        path: string;
+                        nickname: string | null;
                         task_name: string;
                     };
-                    expect(parsed).toMatchObject({
-                        path: "/root/inspect_workspace",
-                        task_name: "inspect_workspace",
+                    expect(parsed).toEqual({
+                        nickname: null,
+                        task_name: "/root/inspect_workspace",
                     });
-                    expect(parsed.agent_id).toBeTypeOf("string");
-                    spawnedAgentId = parsed.agent_id;
+                    spawnedTaskName = parsed.task_name;
                     parentObservedSpawnResult = true;
                 }
 
@@ -169,7 +167,7 @@ describe("background subagent completion routes to its parent", () => {
         expect(parentObservedSpawnResult).toBe(true);
         expect(parentObservedCompletion).toBe(true);
         expect(childRunId).toBeTypeOf("string");
-        expect(spawnedAgentId).toBeTypeOf("string");
+        expect(spawnedTaskName).toBe("/root/inspect_workspace");
         expect(completed.rows).toHaveLength(28);
         expect(completed.scroll.visibleRows).toBe(28);
         expect(completed.scroll.bottomDepartureCount).toBe(baseline.bottomDepartureCount);
@@ -236,7 +234,7 @@ describe("background subagent completion routes to its parent", () => {
                 dim: false,
                 foreground: null,
                 italic: false,
-                text: '"Inspect workspace" completed in 0s · 0 tokens.',
+                text: '"Inspect workspace" completed in 0s · 0 context tokens.',
                 x: 4,
             },
         ]);
@@ -256,7 +254,6 @@ describe("background subagent completion routes to its parent", () => {
         const agents = await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("Completed · Inspect workspace") &&
-                snapshot.text.includes("Ask Rig to do anything") &&
                 snapshot.scroll.atBottom,
             "completed delegated work status",
         );
@@ -266,6 +263,8 @@ describe("background subagent completion routes to its parent", () => {
         expect(agents.scroll.bottomDepartureCount).toBe(baseline.bottomDepartureCount);
         expect(agents.scroll.topArrivalCount).toBe(baseline.topArrivalCount);
 
+        gym.terminal.press("escape");
+        await gym.terminal.waitForText("Ask Rig to do anything");
         gym.terminal.type("Confirm the parent still accepts a follow-up.");
         gym.terminal.press("enter");
         const followUp = await gym.terminal.waitUntil(

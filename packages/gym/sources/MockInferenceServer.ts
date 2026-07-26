@@ -5,6 +5,12 @@ import type { GymInferenceRequest } from "../../rig/sources/executor/gym-types.j
 import type { GymInferenceHandler, GymMockResponse } from "./types.js";
 
 export class MockInferenceServer {
+    /**
+     * Failures thrown by the inference handler, which is where a test puts its assertions about
+     * what the agent sent. The agent only ever sees an HTTP error, so without these the assertion
+     * would surface as whatever the test was waiting for simply never arriving.
+     */
+    readonly handlerFailures: Error[] = [];
     readonly requests: GymInferenceRequest[] = [];
     readonly token = randomBytes(24).toString("hex");
 
@@ -121,6 +127,9 @@ export class MockInferenceServer {
                 ),
             );
         } catch (error) {
+            if (this.handlerFailures.length === 0) {
+                this.handlerFailures.push(error instanceof Error ? error : new Error(String(error)));
+            }
             send(response, 500, error instanceof Error ? error.message : String(error));
         }
     }

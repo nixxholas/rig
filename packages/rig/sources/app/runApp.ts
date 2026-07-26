@@ -458,9 +458,8 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                 const shouldChime =
                     !observedChimeEvents.has(event.id) &&
                     (event.type === "user_input_requested" ||
-                        (event.type === "session_title_changed" &&
-                            event.data.status === "ready" &&
-                            event.data.metadataUpdatedAt !== undefined));
+                        event.type === "run_error" ||
+                        (event.type === "run_finished" && event.data.stopReason !== "aborted"));
                 if (shouldChime) {
                     observedChimeEvents.add(event.id);
                     if (completionChime) terminal.write("\x07");

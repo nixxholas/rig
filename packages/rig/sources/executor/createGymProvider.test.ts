@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createGymProvider, gymModel } from "./createGymProvider.js";
 
@@ -78,5 +78,51 @@ describe("createGymProvider", () => {
         } finally {
             server.close();
         }
+    });
+
+    it("keeps runtime model identity when a native provider prepares the prompt", async () => {
+        let payload: {
+            context: { systemPrompt?: string; systemPromptOverride?: string };
+        } | undefined;
+        const request = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+            payload = JSON.parse(String(init?.body)) as typeof payload;
+            return new Response(
+                JSON.stringify({
+                    content: [{ text: "prepared", type: "text" }],
+                    stopReason: "stop",
+                }),
+                { status: 200 },
+            );
+        });
+        const prepareContext = vi.fn(async (_model, context) => ({
+            ...context,
+            systemPrompt: `Native prompt\n\n${context.systemPrompt ?? ""}`,
+        }));
+        const provider = createGymProvider({
+            endpoint: "https://gym.test/inference",
+            fetch: request as typeof fetch,
+            prepareContext,
+            providerId: "bedrock",
+        });
+
+        await provider
+            .stream(
+                gymModel,
+                {
+                    messages: [],
+                    systemPrompt: "Rig instructions",
+                    systemPromptOverride: "User override",
+                },
+                { sessionId: "prepared-session" },
+            )
+            .result();
+
+        expect(prepareContext).toHaveBeenCalledOnce();
+        expect(payload?.context.systemPrompt).toContain("Native prompt");
+        expect(payload?.context.systemPrompt).toContain(
+            "# Runtime model\nModel ID: openai/gym\nProvider ID: bedrock",
+        );
+        expect(payload?.context.systemPrompt).toContain("Rig instructions");
+        expect(payload?.context.systemPromptOverride).toBe("User override");
     });
 });

@@ -36,26 +36,28 @@ describe("subagent provider, model, and context selection", () => {
                         content: [
                             {
                                 arguments: {
-                                    context: "parent",
-                                    effort: "high",
+                                    fork_turns: "all",
                                     message: "Verify inherited context and return PARENT_CHILD_OK.",
                                     model: "anthropic/sonnet-5",
+                                    reasoning_effort: "high",
                                     task_name: "parent_context_child",
                                 },
                                 id: "spawn-parent-context-child",
                                 name: "spawn_agent",
+                                namespace: "collaboration",
                                 type: "toolCall",
                             },
                             {
                                 arguments: {
-                                    context: "task",
-                                    effort: "high",
+                                    fork_turns: "none",
                                     message: "Verify isolated context and return TASK_CHILD_OK.",
                                     model: "anthropic/sonnet-5",
+                                    reasoning_effort: "high",
                                     task_name: "task_only_child",
                                 },
                                 id: "spawn-task-only-child",
                                 name: "spawn_agent",
+                                namespace: "collaboration",
                                 type: "toolCall",
                             },
                         ],
@@ -90,12 +92,13 @@ describe("subagent provider, model, and context selection", () => {
                         content: [
                             {
                                 arguments: {
-                                    effort: "low",
                                     message: "Reuse your context at low effort.",
+                                    reasoning_effort: "low",
                                     target: "task_only_child",
                                 },
                                 id: "follow-up-task-only-child",
                                 name: "followup_task",
+                                namespace: "collaboration_ext",
                                 type: "toolCall",
                             },
                         ],

@@ -69,7 +69,7 @@ describe("duplicate model tool call identifier handling", () => {
         await expect(gym.readFile("benign-action-ran.txt")).resolves.toBe("benign ran\n");
         await expect(gym.readFile("hostile-action-ran.txt")).resolves.toBe("hostile ran\n");
         assertHealthyTerminal(completed, baseline);
-        expect(agentRequests(gym)).toHaveLength(1);
+        expect(agentRequests(gym)).toHaveLength(2);
     }, 120_000);
 
     it("allows identifier reuse on a later turn without colliding with earlier history", async () => {

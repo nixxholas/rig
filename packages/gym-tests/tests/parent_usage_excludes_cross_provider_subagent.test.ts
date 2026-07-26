@@ -33,7 +33,7 @@ describe("parent session usage", () => {
                         content: [
                             {
                                 arguments: {
-                                    context: "task",
+                                    fork_turns: "none",
                                     message: "Complete the cross-provider audit.",
                                     model: "anthropic/sonnet-5",
                                     provider: "claude",
@@ -41,6 +41,7 @@ describe("parent session usage", () => {
                                 },
                                 id: "spawn-usage-heavy-child",
                                 name: "spawn_agent",
+                                namespace: "collaboration_ext",
                                 type: "toolCall",
                             },
                         ],

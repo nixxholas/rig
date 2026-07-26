@@ -151,7 +151,7 @@ describe("stdio MCP server connects and echoes through the agent", () => {
                         ],
                         isError: false,
                         role: "toolResult",
-                        toolCallId: "mcp-echo-call",
+                        providerToolCallId: "mcp-echo-call",
                         toolName: MCP_TOOL_NAME,
                     });
                     return {
@@ -191,7 +191,7 @@ describe("stdio MCP server connects and echoes through the agent", () => {
                         ],
                         isError: true,
                         role: "toolResult",
-                        toolCallId: "mcp-error-call",
+                        providerToolCallId: "mcp-error-call",
                         toolName: MCP_TOOL_NAME,
                     });
                     return {

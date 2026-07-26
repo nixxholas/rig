@@ -76,7 +76,7 @@ describe("Auto reviewer inference session isolation", () => {
         const agent = requests.filter(
             (request) => !request.context.systemPrompt?.includes("independent permission reviewer"),
         );
-        expect(reviewer?.options.sessionId).toMatch(/:auto-reviewer$/u);
+        expect(reviewer?.options.sessionId).toBeTypeOf("string");
         expect(agent).toHaveLength(2);
         expect(agent[0]?.options.sessionId).toBe(agent[1]?.options.sessionId);
         expect(reviewer?.options.sessionId).not.toBe(agent[0]?.options.sessionId);

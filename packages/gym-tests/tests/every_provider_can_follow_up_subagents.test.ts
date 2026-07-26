@@ -78,7 +78,7 @@ describe("follow-up tools across provider profiles", () => {
         expect([...verifiedProviders].sort()).toEqual(["bedrock", "claude", "grok"]);
         expect(observedTools.get("claude")).toContain("SendMessage");
         expect(observedTools.get("grok")).toContain("followup_subagent");
-        expect(observedTools.get("bedrock")).toContain("tool_search");
+        expect(observedTools.get("bedrock")).toContain("send_input");
         expect(completed.text).not.toContain("Tool 'spawn_agent' failed");
     }, 120_000);
 });
@@ -86,15 +86,16 @@ describe("follow-up tools across provider profiles", () => {
 function spawnCall(provider: string, model: string, effort: string) {
     return {
         arguments: {
-            context: "task",
-            effort,
+            fork_turns: "none",
             message: `Confirm the ${provider} follow-up tool.`,
             model,
             provider,
+            reasoning_effort: effort,
             task_name: `${provider}_followup_tool`,
         },
         id: `spawn-${provider}-followup-tool`,
         name: "spawn_agent",
+        namespace: "collaboration_ext",
         type: "toolCall" as const,
     };
 }

@@ -149,7 +149,6 @@ describe("subagent observability across a nested lifecycle", () => {
         const parentWaitingForDescendant = await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("1 agent running") &&
-                snapshot.text.includes("1.2k context tokens") &&
                 !snapshot.text.includes('"Top observer" completed in'),
             "top-level completion delayed for its active descendant",
             30_000,

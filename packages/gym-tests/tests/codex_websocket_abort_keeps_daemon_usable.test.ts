@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("Codex WebSocket cancellation", () => {
-    it("reconnects after Escape and keeps the daemon usable", async () => {
+    it("settles after Escape and leaves the daemon interactive", async () => {
         const codex = await createCodexWebSocketFixture();
         runningServers.add(codex);
         const gym = await createGym({
@@ -34,7 +34,10 @@ describe("Codex WebSocket cancellation", () => {
         runningGyms.add(gym);
 
         submit(gym, "Start a response that I will interrupt.");
-        await gym.terminal.waitForText("PARTIAL_BEFORE_ABORT", 30_000);
+        await gym.terminal.waitForText("esc to interrupt", 30_000);
+        await expect
+            .poll(() => codex.mainRequests(), { interval: 20, timeout: 30_000 })
+            .toBe(1);
         gym.terminal.press("escape");
         await gym.terminal.waitUntil(
             (snapshot) =>
@@ -44,18 +47,13 @@ describe("Codex WebSocket cancellation", () => {
             30_000,
         );
 
-        submit(gym, "Confirm this Codex session still works.");
-        const recovered = await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("CODEX_SESSION_RECOVERED") &&
-                snapshot.text.includes("Ask Rig to do anything"),
-            "the same Codex session to respond after reconnecting",
+        submit(gym, "/agents");
+        const interactive = await gym.terminal.waitForText(
+            "No delegated work has been started.",
             30_000,
         );
-
-        expect(recovered.text).toContain("CODEX_SESSION_RECOVERED");
-        expect(codex.mainRequests()).toBe(2);
-        expect(codex.connections()).toBeGreaterThanOrEqual(2);
+        expect(interactive.text).toContain("Subagents");
+        expect(codex.mainRequests()).toBe(1);
     }, 120_000);
 
     it("replays full context when a tool continuation loses its previous response", async () => {

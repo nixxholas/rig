@@ -9,8 +9,8 @@ afterEach(async () => {
     running.clear();
 });
 
-describe("Escape pauses delegated work with the parent", () => {
-    it("hides inactive agents and requires the parent to explicitly resume retained work", async () => {
+describe("Escape stops delegated work with the parent", () => {
+    it("hides inactive agents and lets the parent explicitly restart retained work", async () => {
         let parentSessionId: string | undefined;
         let childRunCount = 0;
         const gym = await createGym({
@@ -45,11 +45,6 @@ describe("Escape pauses delegated work with the parent", () => {
 
                 if (lastText.includes("Continue the parent and its delegated work.")) {
                     expect(childRunCount).toBe(1);
-                    expect(
-                        request.context.messages
-                            .map((message) => messageText(message.content))
-                            .join("\n"),
-                    ).toContain("They will not resume automatically");
                     return {
                         content: [
                             {
@@ -115,22 +110,22 @@ describe("Escape pauses delegated work with the parent", () => {
         gym.terminal.press("escape");
         const paused = await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes('"Paused audit" was suspended in') &&
-                snapshot.text.includes("Subagents suspended") &&
-                snapshot.text.includes("1 subagent was suspended: Paused audit") &&
+                snapshot.text.includes('"Paused audit" was stopped in') &&
                 !snapshot.text.includes("agent running · /agents to view") &&
                 !snapshot.text.includes("esc to interrupt") &&
                 snapshot.text.includes("Ask Rig to do anything"),
-            "Escape to pause the parent and remove the inactive agent row",
+            "Escape to stop the parent and remove the inactive agent row",
             30_000,
         );
         expect(paused.text).not.toContain("STALE_PARENT_RESPONSE");
         expect(paused.text).not.toContain("STALE_CHILD_RESPONSE");
 
         submit(gym, "/agents");
-        const retained = await gym.terminal.waitForText("Suspended · Paused audit", 30_000);
+        const retained = await gym.terminal.waitForText("Stopped · Paused audit", 30_000);
         expect(retained.text).not.toContain("agent running · /agents to view");
 
+        gym.terminal.press("escape");
+        await gym.terminal.waitForText("Ask Rig to do anything", 30_000);
         submit(gym, "Continue the parent and its delegated work.");
         await gym.terminal.waitUntil(
             (snapshot) =>

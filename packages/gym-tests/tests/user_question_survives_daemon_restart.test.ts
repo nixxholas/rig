@@ -97,7 +97,7 @@ describe("user question across a daemon restart", () => {
             ],
             isError: false,
             role: "toolResult",
-            toolCallId: "restart-question",
+            providerToolCallId: "restart-question",
             toolName: "request_user_input",
         });
     }, 120_000);

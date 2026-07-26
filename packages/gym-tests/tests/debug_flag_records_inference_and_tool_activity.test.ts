@@ -99,8 +99,8 @@ describe("request debug logging", () => {
         expect(toolCall?.data).toMatchObject({
             toolCall: {
                 arguments: { cmd: "cat debug-seed.txt" },
-                id: "debug-tool-call",
                 name: "exec_command",
+                providerToolCallId: "debug-tool-call",
             },
         });
         const rawToolResult = records.find((record) => record.type === "tool-raw-result");
@@ -111,7 +111,7 @@ describe("request debug logging", () => {
                 rendered: expect.arrayContaining([
                     expect.objectContaining({ text: expect.stringContaining("debug fixture") }),
                 ]),
-                toolCallId: "debug-tool-call",
+                providerToolCallId: "debug-tool-call",
                 toolName: "exec_command",
             },
         });

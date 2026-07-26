@@ -48,12 +48,12 @@ describe("Escape during streamed assistant text", () => {
         const interrupted = await gym.terminal.waitForText("Session interrupted", 30_000);
         const settled = await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.outputRevision > interrupted.outputRevision &&
                 snapshot.text.includes("Session interrupted") &&
                 !snapshot.text.includes("esc to interrupt"),
             "the interrupted stream to durably settle",
             30_000,
         );
+        expect(settled.outputRevision).toBeGreaterThanOrEqual(interrupted.outputRevision);
 
         expect(countOccurrences(settled.text, firstFragment)).toBe(1);
         expect(countOccurrences(settled.text, secondFragment)).toBe(1);

@@ -36,7 +36,7 @@ describe("nonzero shell exit is clear and recoverable", () => {
                     expect(lastMessage).toMatchObject({
                         isError: true,
                         role: "toolResult",
-                        toolCallId: "raw-shell-failure-call-id",
+                        providerToolCallId: "raw-shell-failure-call-id",
                         toolName: "exec_command",
                     });
                     expect(messageText(lastMessage)).toContain("Process exited with code 23");
