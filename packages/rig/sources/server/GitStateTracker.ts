@@ -254,7 +254,7 @@ export class GitStateTracker {
         const tracker = this.#trackers.get(key);
         if (tracker === undefined) {
             // A refresh for an unwatched entity is still answered, without retaining it.
-            return this.#stamp(key, await this.#runScan(entity));
+            return this.#stamp(key, await this.#runScan(entity), 0);
         }
         tracker.lastActiveAt = this.#now();
         // A scan already running observed the repository before this call, so it is waited out and
@@ -432,13 +432,18 @@ export class GitStateTracker {
             // the last scan instead would let a throwing observer — a busy SQLite write, a bad
             // subscriber — silence an idle repository forever, because the next identical scan
             // would look like "no change" even though the change was never delivered.
-            if (!sameState(tracker.delivered, state)) {
+            if (sameState(tracker.delivered, state)) {
+                // The repository came back to the last delivered state — an undo, a stash pop, an
+                // aborted rebase. Reads have to follow it back, or an undelivered intermediate
+                // state stays pinned as the answer until some third state appears.
+                tracker.snapshot = tracker.delivered;
+            } else {
                 // Retrying an undelivered but otherwise identical state reuses its version, so a
                 // subscriber that keeps failing cannot inflate the counter once per scan.
                 const snapshot =
                     tracker.snapshot !== undefined && sameState(tracker.snapshot, state)
                         ? tracker.snapshot
-                        : this.#stamp(tracker.key, state);
+                        : this.#stamp(tracker.key, state, versionFloor(tracker));
                 // Reads report the latest scan either way; only delivery decides republication.
                 tracker.snapshot = snapshot;
                 if (this.#deliver(tracker.entity, snapshot)) tracker.delivered = snapshot;
@@ -516,8 +521,11 @@ export class GitStateTracker {
         });
     }
 
-    #stamp(key: string, state: GitChangeState): GitChangeSnapshot {
-        const version = (this.#versions.get(key) ?? 0) + 1;
+    #stamp(key: string, state: GitChangeState, floor: number): GitChangeSnapshot {
+        // The retained counter can have been evicted while this entity sat idle, so the versions it
+        // has already published are the real floor. Without this an entity that outlived its map
+        // entry restarts at 1 inside the same generation and every client ignores it.
+        const version = Math.max(this.#versions.get(key) ?? 0, floor) + 1;
         // Re-inserted so the map stays in least-recently-stamped order, then trimmed. Counters must
         // outlive eviction so a re-tracked entity never restarts at 1, but an archived workspace
         // can never be re-tracked and its counter would otherwise live until the daemon exits.
@@ -530,6 +538,11 @@ export class GitStateTracker {
         }
         return { ...state, generation: this.#generation, version };
     }
+}
+
+/** Highest version this tracker has already published, whatever the retained counters say. */
+function versionFloor(tracker: RepositoryTracker): number {
+    return Math.max(tracker.snapshot?.version ?? 0, tracker.delivered?.version ?? 0);
 }
 
 export function entityKey(entity: GitTrackedEntity): string {

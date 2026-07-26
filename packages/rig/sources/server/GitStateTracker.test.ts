@@ -332,6 +332,55 @@ describe("GitStateTracker", () => {
         expect(scan.calls).toBeGreaterThanOrEqual(2);
     });
 
+    it("follows the repository back when it returns to the last delivered state", async () => {
+        let insertions = 1;
+        let deliver = true;
+        const tracker = createTracker({
+            onLiveEvent: () => deliver,
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => tracker.snapshot(entity())?.insertions === 1);
+        // An undelivered intermediate state, then a revert back to what clients already hold.
+        deliver = false;
+        insertions = 2;
+        await tracker.refresh(entity());
+        expect(tracker.snapshot(entity())?.insertions).toBe(2);
+        insertions = 1;
+        await tracker.refresh(entity());
+
+        // Skipping the update because the scan matched what was delivered would leave the
+        // undelivered intermediate pinned as the answer to every read until a third state appeared.
+        expect(tracker.snapshot(entity())?.insertions).toBe(1);
+        expect(tracker.liveSnapshots()[0]?.data.git.insertions).toBe(1);
+    });
+
+    it("never regresses a version after its retained counter is evicted", async () => {
+        let insertions = 1;
+        const published: GitChangeSnapshot[] = [];
+        const tracker = createTracker({
+            onSnapshot: (_entity, snapshot) => published.push(snapshot),
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity("kept"));
+        await waitFor(() => published.length === 1);
+        insertions = 2;
+        await tracker.refresh(entity("kept"));
+        const before = published.at(-1)!.version;
+
+        // Churn enough distinct entities to evict the retained counter of the tracked one.
+        for (let index = 0; index < 600; index += 1) {
+            await tracker.refresh(entity(`churn-${String(index)}`));
+        }
+        insertions = 3;
+        await tracker.refresh(entity("kept"));
+
+        // A client holding the earlier version would ignore every later snapshot forever.
+        expect(published.at(-1)!.version).toBeGreaterThan(before);
+    }, 20_000);
+
     it("answers a refresh for an entity it is not watching without retaining it", async () => {
         const tracker = createTracker({ scan: countingScan(() => ({ insertions: 5 })) });
 
