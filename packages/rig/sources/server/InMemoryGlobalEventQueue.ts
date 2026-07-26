@@ -3,6 +3,7 @@ import { createId } from "@paralleldrive/cuid2";
 import type {
     GlobalEvent,
     GlobalEventQueueEntry,
+    GlobalLiveEvent,
     TrimGlobalEventsResponse,
 } from "../protocol/index.js";
 import type {
@@ -62,6 +63,10 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
 
     publish(entry: GlobalEventQueueEntry): void {
         for (const listener of this.#listeners) listener(entry);
+    }
+
+    publishLive(event: GlobalLiveEvent): void {
+        for (const listener of this.#listeners) listener({ event, live: true });
     }
 
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void {

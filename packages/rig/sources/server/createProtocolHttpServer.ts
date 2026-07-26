@@ -24,6 +24,7 @@ import type {
     ListExternalToolCallsResponse,
     ListSecretsResponse,
     HealthResponse,
+    GitStateResponse,
     GlobalStateResponse,
     GoalSessionResponse,
     ListModelsResponse,
@@ -85,6 +86,8 @@ import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
 import { selectRecentSessionEvents } from "./selectRecentSessionEvents.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
+import type { GitStateTracker } from "./GitStateTracker.js";
+import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
 import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permissions/index.js";
 import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
@@ -107,6 +110,7 @@ import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminal
 
 export interface ProtocolHttpServerOptions {
     defaultDocker?: DockerExecutionConfig;
+    gitStateTracker?: GitStateTracker;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
     fileSearchService?: FileSearchServiceContract;
@@ -138,6 +142,7 @@ export function createProtocolHttpServer(
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
+        gitStateTracker: options.gitStateTracker,
         globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
         onDurableGlobalEventQueueChange: options.onDurableGlobalEventQueueChange,
         onReloadHappy: options.onReloadHappy,
@@ -204,6 +209,7 @@ export function createProtocolHttpServer(
 }
 
 interface ProtocolServerRuntimeConfig {
+    gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
     onDurableGlobalEventQueueChange:
         | ((
@@ -413,6 +419,50 @@ async function handleRequest(
             } catch (error) {
                 sendJson(response, 400, { error: errorToMessage(error) });
             }
+            return;
+        }
+    }
+
+    if (route.name === "project-git" || route.name === "project-workspace-git") {
+        const tracker = runtimeConfig.gitStateTracker;
+        if (tracker === undefined) {
+            sendJson(response, 503, { error: "Git tracking is unavailable." });
+            return;
+        }
+        const project = store.getProject(route.projectId);
+        if (project === undefined) {
+            sendJson(response, 404, { error: "Project not found" });
+            return;
+        }
+        const workspace =
+            route.name === "project-workspace-git"
+                ? store.getWorkspace(route.projectId, route.workspaceId)
+                : undefined;
+        if (route.name === "project-workspace-git" && workspace === undefined) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+        }
+        const entity = resolveGitTrackedEntity(project, workspace);
+        if (entity === undefined) {
+            sendJson(response, 409, {
+                error: "This folder is not available for Git tracking right now.",
+            });
+            return;
+        }
+        if (request.method === "GET") {
+            // Asking for a snapshot is itself the demand signal, so the entity stays warm.
+            tracker.watch(entity);
+            const cached = tracker.snapshot(entity);
+            if (cached !== undefined && url.searchParams.get("refresh") !== "1") {
+                sendJson<GitStateResponse>(response, 200, { git: cached });
+                return;
+            }
+            const fresh = await tracker.refresh(entity);
+            if (fresh === undefined) {
+                sendJson(response, 503, { error: "Git tracking is unavailable." });
+                return;
+            }
+            sendJson<GitStateResponse>(response, 200, { git: fresh });
             return;
         }
     }
@@ -784,7 +834,13 @@ async function handleRequest(
         }
 
         if (request.method === "GET" && route.name === "global-events-stream") {
-            streamGlobalEvents(request, response, globalEventQueue, url.searchParams.get("after"));
+            streamGlobalEvents(
+                request,
+                response,
+                globalEventQueue,
+                url.searchParams.get("after"),
+                () => runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
+            );
             return;
         }
 
@@ -1614,6 +1670,7 @@ function matchRoute(pathname: string):
               | "project"
               | "project-archive"
               | "project-avatar"
+              | "project-git"
               | "project-refresh"
               | "project-reorder"
               | "project-workspaces";
@@ -1621,7 +1678,11 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
       }
     | {
-          name: "project-workspace" | "project-workspace-archive" | "project-workspace-reorder";
+          name:
+              | "project-workspace"
+              | "project-workspace-archive"
+              | "project-workspace-git"
+              | "project-workspace-reorder";
           projectId: string;
           sessionId?: undefined;
           workspaceId: string;
@@ -1739,6 +1800,9 @@ function matchRoute(pathname: string):
                 terminalId: decodeURIComponent(globalParts[3]),
             };
         }
+        if (globalParts.length === 3 && globalParts[2] === "git") {
+            return { name: "project-git", projectId };
+        }
         if (globalParts.length === 3 && globalParts[2] === "workspaces") {
             return { name: "project-workspaces", projectId };
         }
@@ -1771,6 +1835,9 @@ function matchRoute(pathname: string):
                     terminalId: decodeURIComponent(globalParts[5]),
                     workspaceId,
                 };
+        }
+            if (globalParts.length === 5 && globalParts[4] === "git") {
+                return { name: "project-workspace-git", projectId, workspaceId };
             }
         }
     }

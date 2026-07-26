@@ -4,13 +4,18 @@ export type {
     BaseProjectEvent,
     BaseProjectWorkspaceEvent,
     CreateProjectWorkspaceRequest,
+    GitChangeSnapshot,
     GitChangeState,
     GitComparisonState,
+    GitStateResponse,
     GitFileChange,
     GitFileChangeStatus,
     GitRepositoryFacts,
     GlobalEvent,
+    GlobalEventDelivery,
     GlobalEventQueueEntry,
+    GlobalLiveEvent,
+    GlobalLiveEventDelivery,
     GlobalStateResponse,
     ListGlobalEventsResponse,
     ListProjectsResponse,
@@ -19,6 +24,7 @@ export type {
     ProjectAvatar,
     ProjectAvatarSource,
     ProjectEvent,
+    ProjectGitEvent,
     ProjectInitializationStatus,
     ProjectKind,
     ProjectNameSource,
@@ -26,6 +32,7 @@ export type {
     ProjectResponse,
     ProjectWorkspace,
     ProjectWorkspaceEvent,
+    ProjectWorkspaceGitEvent,
     ProjectWorkspaceKind,
     ProjectWorkspaceResponse,
     ProjectWorkspaceStatus,
@@ -51,6 +58,7 @@ export type {
 export type { GoalStatus, SessionGoal } from "../goals/index.js";
 export type { DurableSkillDefinition } from "../external-skills/index.js";
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
+export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
     createEventIdFactory,
     eventIdsShareScope,

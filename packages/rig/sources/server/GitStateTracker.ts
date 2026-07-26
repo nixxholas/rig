@@ -1,6 +1,11 @@
 import { createId } from "@paralleldrive/cuid2";
 
-import type { GitChangeState } from "../protocol/index.js";
+import {
+    createEventIdFactory,
+    type GitChangeSnapshot,
+    type GitChangeState,
+    type GlobalLiveEvent,
+} from "../protocol/index.js";
 import { scanGitRepository } from "./scanGitRepository.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import { watchGitRepositoryChanges } from "./watchGitRepositoryChanges.js";
@@ -30,15 +35,12 @@ export interface GitTrackedEntity {
     workspaceId?: string;
 }
 
-export interface GitChangeSnapshot extends GitChangeState {
-    /** Identity of the daemon run, so a client can tell a restart from an update. */
-    generation: string;
-    /** Monotonic within one generation; survives eviction so a client never regresses. */
-    version: number;
-}
+export type { GitChangeSnapshot };
 
 export interface GitStateTrackerOptions {
     now?: () => number;
+    /** Receives each published snapshot as a ready-to-deliver live event. */
+    onLiveEvent?: (event: GlobalLiveEvent) => void;
     onSnapshot?: (entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void;
     /** Test seam for the scanner. */
     scan?: typeof scanGitRepository;
@@ -63,6 +65,8 @@ interface RepositoryTracker {
     firstDirtyAt: number | undefined;
     /** Incremented on eviction and disposal so in-flight work can detect it is obsolete. */
     generation: number;
+    /** Resolves when the current scan finishes, so a forced refresh can wait it out. */
+    inFlight: Promise<void> | undefined;
     key: string;
     lastActiveAt: number;
     reconcileTimer: NodeJS.Timeout | undefined;
@@ -80,8 +84,10 @@ interface RepositoryTracker {
  * timers; the caps below are a second line of defence.
  */
 export class GitStateTracker {
+    readonly #createEventId = createEventIdFactory();
     readonly #generation = createId();
     readonly #now: () => number;
+    readonly #onLiveEvent: ((event: GlobalLiveEvent) => void) | undefined;
     readonly #onSnapshot:
         | ((entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void)
         | undefined;
@@ -98,6 +104,7 @@ export class GitStateTracker {
 
     constructor(options: GitStateTrackerOptions = {}) {
         this.#now = options.now ?? Date.now;
+        this.#onLiveEvent = options.onLiveEvent;
         this.#onSnapshot = options.onSnapshot;
         this.#scan = options.scan ?? scanGitRepository;
         this.#taskDrain = options.taskDrain;
@@ -141,6 +148,7 @@ export class GitStateTracker {
             expiresAt: this.#now() + this.#tuning.watchTtlMs,
             firstDirtyAt: undefined,
             generation: 0,
+            inFlight: undefined,
             key,
             lastActiveAt: this.#now(),
             reconcileTimer: undefined,
@@ -164,6 +172,35 @@ export class GitStateTracker {
 
     snapshot(entity: GitTrackedEntity): GitChangeSnapshot | undefined {
         return this.#trackers.get(entityKey(entity))?.snapshot;
+    }
+
+    /**
+     * Current snapshots as live events. Replayed to a new subscriber because live events are never
+     * stored, so a client that reconnects with a valid cursor would otherwise show stale counts.
+     */
+    liveSnapshots(): readonly GlobalLiveEvent[] {
+        const events: GlobalLiveEvent[] = [];
+        for (const tracker of this.#trackers.values()) {
+            if (tracker.snapshot === undefined) continue;
+            events.push(this.#createLiveEvent(tracker.entity, tracker.snapshot));
+        }
+        return events;
+    }
+
+    #createLiveEvent(entity: GitTrackedEntity, git: GitChangeSnapshot): GlobalLiveEvent {
+        const base = {
+            createdAt: this.#now(),
+            id: this.#createEventId(),
+            projectId: entity.projectId,
+        };
+        return entity.workspaceId === undefined
+            ? { ...base, data: { git }, type: "project_git_changed" }
+            : {
+                  ...base,
+                  data: { git },
+                  type: "workspace_git_changed",
+                  workspaceId: entity.workspaceId,
+              };
     }
 
     /** Records that something may have changed. Cheap, and the primary signal for Rig's own writes. */
@@ -200,6 +237,9 @@ export class GitStateTracker {
             return this.#stamp(key, await this.#runScan(entity));
         }
         tracker.lastActiveAt = this.#now();
+        // A scan already running observed the repository before this call, so waiting it out and
+        // scanning again is what makes a forced refresh actually fresh rather than merely recent.
+        await tracker.inFlight?.catch(() => undefined);
         await this.#scanTracker(tracker);
         return tracker.snapshot;
     }
@@ -296,6 +336,16 @@ export class GitStateTracker {
 
     async #scanTracker(tracker: RepositoryTracker): Promise<void> {
         if (this.#disposed || tracker.scanning) return;
+        const scan = this.#runScanTracker(tracker);
+        tracker.inFlight = scan;
+        try {
+            await scan;
+        } finally {
+            if (tracker.inFlight === scan) tracker.inFlight = undefined;
+        }
+    }
+
+    async #runScanTracker(tracker: RepositoryTracker): Promise<void> {
         const generation = tracker.generation;
         const controller = new AbortController();
         tracker.scanning = true;
@@ -307,6 +357,7 @@ export class GitStateTracker {
                 const snapshot = this.#stamp(tracker.key, state);
                 tracker.snapshot = snapshot;
                 this.#onSnapshot?.(tracker.entity, snapshot);
+                this.#onLiveEvent?.(this.#createLiveEvent(tracker.entity, snapshot));
             }
             tracker.backoffMs = BACKOFF_START_MS;
         } catch {

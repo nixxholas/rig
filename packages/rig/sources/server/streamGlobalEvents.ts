@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import type { GlobalLiveEvent } from "../protocol/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { parseGlobalEventCursor } from "./parseGlobalEventCursor.js";
 import { sendJson } from "./sendJson.js";
@@ -10,6 +11,8 @@ export function streamGlobalEvents(
     response: ServerResponse,
     queue: GlobalEventQueue,
     afterValue: string | null,
+    /** Current live snapshots, replayed on subscribe because live events are never stored. */
+    liveSnapshots?: () => readonly GlobalLiveEvent[],
 ): void {
     const lastEventId = request.headers["last-event-id"];
     const cursorValue = Array.isArray(lastEventId) ? lastEventId.at(-1) : lastEventId;
@@ -57,6 +60,51 @@ export function streamGlobalEvents(
         unsubscribe();
         response.end();
     };
-    unsubscribe = queue.subscribe((entry) => writeGlobalSseEvent(response, entry), close);
+
+    // One live snapshot per entity is retained while the socket is backed up, and a later snapshot
+    // replaces the pending one. Stored events are never coalesced or dropped; only live snapshots
+    // are, and they are safe to drop because each one supersedes the last.
+    const pendingLive = new Map<string, GlobalLiveEvent>();
+    let backedUp = false;
+    const flushLive = () => {
+        backedUp = false;
+        // Copied first because the loop deletes from the map it iterates.
+        for (const [key, event] of Array.from(pendingLive)) {
+            pendingLive.delete(key);
+            if (!writeGlobalSseEvent(response, { event, live: true })) {
+                backedUp = true;
+                break;
+            }
+        }
+    };
+    response.on("drain", flushLive);
+
+    unsubscribe = queue.subscribe((delivery) => {
+        if (closed) return;
+        if ("live" in delivery) {
+            const key = liveEventKey(delivery.event);
+            if (backedUp) {
+                pendingLive.set(key, delivery.event);
+                if (pendingLive.size > LIVE_BACKLOG_LIMIT) close();
+                return;
+            }
+            backedUp = !writeGlobalSseEvent(response, delivery);
+            return;
+        }
+        if (!writeGlobalSseEvent(response, delivery)) backedUp = true;
+    }, close);
+
+    // Subscribing before capturing the current snapshots is what makes this gapless: capturing
+    // first would drop any snapshot published in between.
+    for (const event of liveSnapshots?.() ?? []) {
+        if (!writeGlobalSseEvent(response, { event, live: true })) backedUp = true;
+    }
     request.on("close", close);
+}
+
+/** One pending live snapshot per entity; more distinct entities than this means a stuck consumer. */
+const LIVE_BACKLOG_LIMIT = 64;
+
+function liveEventKey(event: GlobalLiveEvent): string {
+    return "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;
 }

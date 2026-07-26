@@ -163,6 +163,10 @@ export interface ProjectResponse {
     project: Project;
 }
 
+export interface GitStateResponse {
+    git: GitChangeSnapshot;
+}
+
 export interface ListProjectWorkspacesResponse {
     workspaces: readonly ProjectWorkspace[];
 }
@@ -205,11 +209,49 @@ export type ProjectWorkspaceEvent =
     | BaseProjectWorkspaceEvent<"workspace_created", { workspace: ProjectWorkspace }>
     | BaseProjectWorkspaceEvent<"workspace_updated", { workspace: ProjectWorkspace }>;
 
-export type GlobalEvent = SessionEvent | ProjectEvent | ProjectWorkspaceEvent;
+/**
+ * Git change snapshots, carrying the detail that is recomputed from disk on demand.
+ *
+ * These are live-only: delivered to current subscribers, never stored, and never advancing a
+ * cursor. Persisting them would grow the durable log without adding recoverable information, since
+ * one bounded scan reproduces them exactly. The durable half of Git state — branch, HEAD, upstream,
+ * presence — rides on `project_updated` and `workspace_updated` instead.
+ */
+export type ProjectGitEvent = BaseProjectEvent<"project_git_changed", { git: GitChangeSnapshot }>;
+export type ProjectWorkspaceGitEvent = BaseProjectWorkspaceEvent<
+    "workspace_git_changed",
+    { git: GitChangeSnapshot }
+>;
+
+export interface GitChangeSnapshot extends GitChangeState {
+    /** Identity of the daemon run, so a client can tell a restart from an update. */
+    generation: string;
+    /** Monotonic within one generation; survives eviction so a client never regresses. */
+    version: number;
+}
+
+export type GlobalLiveEvent = ProjectGitEvent | ProjectWorkspaceGitEvent;
+
+export type GlobalEvent = SessionEvent | ProjectEvent | ProjectWorkspaceEvent | GlobalLiveEvent;
 
 export interface GlobalEventQueueEntry {
     cursor: string;
     event: GlobalEvent;
+}
+
+/**
+ * A live delivery. It carries no cursor, so a client's `Last-Event-Id` keeps pointing at the last
+ * durable position and reconnecting never skips stored events.
+ */
+export interface GlobalLiveEventDelivery {
+    event: GlobalLiveEvent;
+    live: true;
+}
+
+export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDelivery;
+
+export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
+    return event.type === "project_git_changed" || event.type === "workspace_git_changed";
 }
 
 export interface ListGlobalEventsResponse {

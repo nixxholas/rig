@@ -242,7 +242,12 @@ export async function runLocalProtocolServer(
         });
         mcpToolProvider = new McpClientManager();
         taskDrain = new TrackedTaskDrain();
-        gitStateTracker = new GitStateTracker({ taskDrain });
+        gitStateTracker = new GitStateTracker({
+            // Snapshots ride the live channel, so they reach subscribers without ever entering the
+            // durable log; branch and HEAD changes travel as ordinary project/workspace updates.
+            onLiveEvent: (event) => store?.globalEventQueue.publishLive(event),
+            taskDrain,
+        });
         const happyModule = await loadHappyIntegration(
             resolveHappyIntegrationMode(
                 options.happyIntegration,
@@ -326,6 +331,7 @@ export async function runLocalProtocolServer(
                 ...(store.globalEventQueue === undefined
                     ? {}
                     : { globalEventQueue: store.globalEventQueue }),
+                ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 onDurableGlobalEventQueueChange: async (enabled) => {

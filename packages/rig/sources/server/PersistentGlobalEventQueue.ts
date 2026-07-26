@@ -4,6 +4,7 @@ import { createId } from "@paralleldrive/cuid2";
 
 import type {
     GlobalEvent,
+    GlobalLiveEvent,
     GlobalEventQueueEntry,
     ProjectEvent,
     TrimGlobalEventsResponse,
@@ -108,6 +109,12 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
 
     publish(entry: GlobalEventQueueEntry): void {
         for (const listener of this.#listeners) listener(entry);
+    }
+
+    publishLive(event: GlobalLiveEvent): void {
+        // Identical to the in-memory queue: a live event is delivered and forgotten, so durable
+        // retention never grows with Git activity.
+        for (const listener of this.#listeners) listener({ event, live: true });
     }
 
     deactivate(): void {
