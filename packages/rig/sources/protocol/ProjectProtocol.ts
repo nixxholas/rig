@@ -22,6 +22,53 @@ export interface GitRepositoryFacts {
     upstream?: string;
 }
 
+export type GitFileChangeStatus =
+    | "added"
+    | "conflicted"
+    | "copied"
+    | "deleted"
+    | "modified"
+    | "renamed"
+    | "submodule"
+    | "type_changed"
+    | "untracked";
+
+export interface GitFileChange {
+    binary: boolean;
+    /** Absent for binary files, submodule pointers, and files a cap left uncounted. */
+    deletions?: number;
+    insertions?: number;
+    path: string;
+    /** Original path of a rename or copy. */
+    previousPath?: string;
+    staged: boolean;
+    status: GitFileChangeStatus;
+    unstaged: boolean;
+}
+
+export type GitComparisonState = "ready" | "unavailable";
+
+/** Everything a change snapshot reports, before the tracker stamps it with an identity. */
+export interface GitChangeState {
+    /** Commit the comparison is measured against. */
+    base?: string;
+    /** Total changed files, including any the list cap omitted. */
+    changedFiles: number;
+    comparison: GitComparisonState;
+    /** True while a merge or rebase is unresolved, so a client can suppress a misleading total. */
+    conflicted: boolean;
+    /** False when any cap or failure prevented exact line counting. */
+    countsExact: boolean;
+    deletions: number;
+    /** Human-readable explanation of a failed scan or an unavailable comparison. */
+    error?: string;
+    facts: GitRepositoryFacts;
+    files: readonly GitFileChange[];
+    filesTruncated: boolean;
+    insertions: number;
+    scannedAt: number;
+}
+
 export interface ProjectAvatar {
     hash: string;
     height: number;
