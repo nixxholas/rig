@@ -2855,7 +2855,8 @@ describe("PersistentSessionStore", () => {
 });
 
 async function waitForExternalToolCall(session: InMemorySession) {
-    for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
         const call = session.externalToolCalls({ status: "pending" })[0];
         if (call !== undefined) return call;
         await new Promise((resolve) => setImmediate(resolve));
@@ -2864,7 +2865,8 @@ async function waitForExternalToolCall(session: InMemorySession) {
 }
 
 async function waitForPendingUserInputs(session: InMemorySession, count: number) {
-    for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
         const requests = session.snapshot().pendingUserInputs;
         if (requests.length === count) return requests;
         await new Promise((resolve) => setImmediate(resolve));
