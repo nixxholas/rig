@@ -737,7 +737,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#projects.listProjects();
     }
 
-
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
         return this.#projects.getWorkspace(projectId, workspaceId);
     }

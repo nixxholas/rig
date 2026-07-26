@@ -350,7 +350,6 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.listProjects();
     }
 
-
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
         return this.#projects.getWorkspace(projectId, workspaceId);
     }

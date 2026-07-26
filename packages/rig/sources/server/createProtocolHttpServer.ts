@@ -1866,7 +1866,7 @@ function matchRoute(pathname: string):
                     terminalId: decodeURIComponent(globalParts[5]),
                     workspaceId,
                 };
-        }
+            }
             if (globalParts.length === 5 && globalParts[4] === "git") {
                 return { name: "project-workspace-git", projectId, workspaceId };
             }

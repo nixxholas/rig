@@ -480,7 +480,6 @@ describe("projects", () => {
         expect(workspace?.baseRef).toBe("main");
         expect(workspace?.baseCommit).toBe(expected.toLowerCase());
     });
-
 });
 
 async function createFixture(

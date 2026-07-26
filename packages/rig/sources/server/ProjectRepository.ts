@@ -75,7 +75,6 @@ export interface ProjectRepositoryOptions {
     homeDirectory?: string;
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
-    hasLiveSession?: (projectId: string) => boolean;
     onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void;
     stateDirectory?: string;
     taskDrain?: TaskDrain;
@@ -89,7 +88,6 @@ export class ProjectRepository {
     readonly #database: DatabaseSync;
     readonly #gitRunner: ProjectGitRunner;
     readonly #injectedGitRunner: ProjectGitRunner | undefined;
-    readonly #hasLiveSession: ((projectId: string) => boolean) | undefined;
     readonly #homeDirectory: string;
     readonly #initializing = new Set<string>();
     readonly #pendingInitializations: string[] = [];
@@ -106,7 +104,6 @@ export class ProjectRepository {
         this.#database = options.database;
         this.#gitRunner = options.git ?? runGit;
         this.#injectedGitRunner = options.git;
-        this.#hasLiveSession = options.hasLiveSession;
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
         this.#now = options.now ?? Date.now;
         this.#onEvent = options.onEvent;

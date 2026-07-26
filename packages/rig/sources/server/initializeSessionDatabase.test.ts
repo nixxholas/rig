@@ -441,7 +441,6 @@ describe("initializeSessionDatabase", () => {
             database.close();
         }
     });
-
 });
 
 function columnInfo(

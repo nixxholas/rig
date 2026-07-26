@@ -74,7 +74,6 @@ const gitFactColumnMigrations = [
     ["git_detached", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
-
 export function initializeSessionDatabase(database: DatabaseSync): void {
     database.exec(`
         PRAGMA journal_mode = WAL;
