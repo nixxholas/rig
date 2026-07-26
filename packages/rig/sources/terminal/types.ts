@@ -1,5 +1,10 @@
 export type RemoteTerminalStatus = "exited" | "running";
 
+export interface RemoteTerminalScope {
+    projectId: string;
+    workspaceId?: string;
+}
+
 export interface CreateRemoteTerminalRequest {
     cols?: number;
     command?: string;

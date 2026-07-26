@@ -87,6 +87,7 @@ import type {
     CreateRemoteTerminalResponse,
     ListRemoteTerminalsResponse,
     RemoteTerminalResponse,
+    RemoteTerminalScope,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
@@ -370,18 +371,14 @@ export class ProtocolHttpClient {
     }
 
     createRemoteTerminal(
-        sessionId: string,
+        scope: RemoteTerminalScope,
         request: CreateRemoteTerminalRequest = {},
     ): Promise<CreateRemoteTerminalResponse> {
-        return this.#requestJson(
-            "POST",
-            `/sessions/${encodeURIComponent(sessionId)}/terminals`,
-            request,
-        );
+        return this.#requestJson("POST", this.#remoteTerminalCollectionPath(scope), request);
     }
 
     async attachRemoteTerminal(
-        sessionId: string,
+        scope: RemoteTerminalScope,
         terminalId: string,
         options: AttachRemoteTerminalOptions = {},
     ): Promise<RemoteTerminalAttachment> {
@@ -389,7 +386,7 @@ export class ProtocolHttpClient {
         let stream: Duplex;
         try {
             stream = await connectRemoteTerminalWebSocket({
-                path: `${this.#remoteTerminalPath(sessionId, terminalId)}/attach`,
+                path: `${this.#remoteTerminalPath(scope, terminalId)}/attach`,
                 socketPath: this.socketPath,
                 token: this.token,
             });
@@ -434,20 +431,23 @@ export class ProtocolHttpClient {
         }
     }
 
-    listRemoteTerminals(sessionId: string): Promise<ListRemoteTerminalsResponse> {
-        return this.#requestJson("GET", `/sessions/${encodeURIComponent(sessionId)}/terminals`);
+    listRemoteTerminals(scope: RemoteTerminalScope): Promise<ListRemoteTerminalsResponse> {
+        return this.#requestJson("GET", this.#remoteTerminalCollectionPath(scope));
     }
 
     resizeRemoteTerminal(
-        sessionId: string,
+        scope: RemoteTerminalScope,
         terminalId: string,
         request: ResizeRemoteTerminalRequest,
     ): Promise<RemoteTerminalResponse> {
-        return this.#requestJson("PATCH", this.#remoteTerminalPath(sessionId, terminalId), request);
+        return this.#requestJson("PATCH", this.#remoteTerminalPath(scope, terminalId), request);
     }
 
-    stopRemoteTerminal(sessionId: string, terminalId: string): Promise<RemoteTerminalResponse> {
-        return this.#requestJson("DELETE", this.#remoteTerminalPath(sessionId, terminalId));
+    stopRemoteTerminal(
+        scope: RemoteTerminalScope,
+        terminalId: string,
+    ): Promise<RemoteTerminalResponse> {
+        return this.#requestJson("DELETE", this.#remoteTerminalPath(scope, terminalId));
     }
 
     updateSession(
@@ -1011,8 +1011,15 @@ export class ProtocolHttpClient {
         });
     }
 
-    #remoteTerminalPath(sessionId: string, terminalId: string): string {
-        return `/sessions/${encodeURIComponent(sessionId)}/terminals/${encodeURIComponent(terminalId)}`;
+    #remoteTerminalCollectionPath(scope: RemoteTerminalScope): string {
+        const project = `/projects/${encodeURIComponent(scope.projectId)}`;
+        return scope.workspaceId === undefined
+            ? `${project}/terminals`
+            : `${project}/workspaces/${encodeURIComponent(scope.workspaceId)}/terminals`;
+    }
+
+    #remoteTerminalPath(scope: RemoteTerminalScope, terminalId: string): string {
+        return `${this.#remoteTerminalCollectionPath(scope)}/${encodeURIComponent(terminalId)}`;
     }
 
     #watchGlobalEventsOnce(

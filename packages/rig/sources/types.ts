@@ -36,5 +36,6 @@ export type {
 export type {
     CreateRemoteTerminalRequest,
     RemoteTerminalResponse,
+    RemoteTerminalScope,
     RemoteTerminalSummary,
 } from "./terminal/types.js";

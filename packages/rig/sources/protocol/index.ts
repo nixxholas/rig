@@ -36,6 +36,7 @@ export type {
     CreateRemoteTerminalResponse,
     ListRemoteTerminalsResponse,
     RemoteTerminalResponse,
+    RemoteTerminalScope,
     RemoteTerminalStatus,
     RemoteTerminalSummary,
     ResizeRemoteTerminalRequest,

@@ -64,6 +64,11 @@ import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
+import {
+    ProjectRemoteTerminalStore,
+    type ProjectRemoteTerminalContext,
+    type RemoteTerminalScope,
+} from "../terminal/index.js";
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -104,6 +109,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     });
     #taskDrain: TaskDrain | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
+    readonly remoteTerminals: ProjectRemoteTerminalStore;
 
     constructor(options: PersistentSessionStoreOptions) {
         this.#secrets = new SecretRegistry();
@@ -143,6 +149,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : options.databasePath === ":memory:"
                   ? {}
                   : { stateDirectory: dirname(options.databasePath) }),
+        });
+        this.remoteTerminals = new ProjectRemoteTerminalStore({
+            resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
         this.#agentManager = new AgentSessionManager({
             repository: {
@@ -227,6 +236,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     close(): void {
+        void this.remoteTerminals.close();
         this.#projects.close();
         this.#globalEventQueue.deactivate();
         this.#database.close();
@@ -821,6 +831,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .map((row) => readString(row, "id"));
         });
         if (project === undefined) return undefined;
+        await this.remoteTerminals.closeProject(projectId);
         for (const sessionId of rootSessionIds) {
             this.get(sessionId)?.setArchived(true);
         }
@@ -861,6 +872,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .filter((task): task is Promise<void> => task !== undefined);
         });
         if (workspace === undefined || workspace.status === "archived") return workspace;
+        await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
         const results = await Promise.allSettled(cleanup);
         const failure = results.find(
             (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -1080,7 +1092,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     async prepareForShutdown(reason: SessionInterruption["reason"]): Promise<void> {
         this.#taskDrain?.beginClose();
         const closingSessions = new Set(this.#cachedSessions());
-        const cleanup = [...closingSessions].map((session) => session.beginShutdown());
+        const cleanup = [
+            ...[...closingSessions].map((session) => session.beginShutdown()),
+            this.remoteTerminals.close(),
+        ];
         let repairError: unknown;
         try {
             this.repairInterruptedSessions(reason);
@@ -1990,6 +2005,59 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             id: readString(row, "id"),
             orderKey: readString(row, "order_key"),
         }));
+    }
+
+    #remoteTerminalContext(scope: RemoteTerminalScope): ProjectRemoteTerminalContext {
+        const project = this.#projects.getProject(scope.projectId);
+        if (project === undefined) throw new Error("Project not found.");
+        if (project.archivedAt !== undefined) {
+            throw new Error("Archived projects cannot open terminals.");
+        }
+        const workspace =
+            scope.workspaceId === undefined
+                ? undefined
+                : this.#projects.getWorkspace(scope.projectId, scope.workspaceId);
+        if (scope.workspaceId !== undefined && workspace === undefined) {
+            throw new Error("Workspace not found.");
+        }
+        if (workspace !== undefined && workspace.status !== "ready") {
+            throw new Error("Only ready workspaces can open terminals.");
+        }
+        const row =
+            scope.workspaceId === undefined
+                ? this.#database
+                      .prepare(
+                          `
+                          SELECT docker_json
+                          FROM sessions
+                          WHERE project_id = ?
+                              AND workspace_id IS NULL
+                              AND parent_session_id IS NULL
+                          ORDER BY updated_at_ms DESC, id DESC
+                          LIMIT 1
+                          `,
+                      )
+                      .get(scope.projectId)
+                : this.#database
+                      .prepare(
+                          `
+                          SELECT docker_json
+                          FROM sessions
+                          WHERE project_id = ?
+                              AND workspace_id = ?
+                              AND parent_session_id IS NULL
+                          ORDER BY updated_at_ms DESC, id DESC
+                          LIMIT 1
+                          `,
+                      )
+                      .get(scope.projectId, scope.workspaceId);
+        const dockerJson = row === undefined ? undefined : readOptionalString(row, "docker_json");
+        return {
+            cwd: workspace?.path ?? project.path,
+            ...(dockerJson === undefined
+                ? {}
+                : { docker: JSON.parse(dockerJson) as DockerExecutionConfig }),
+        };
     }
 
     #projectSecrets(projectId: string): readonly string[] {

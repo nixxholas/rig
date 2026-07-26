@@ -55,7 +55,7 @@ export class RemoteTerminalManager {
                 (terminal) => terminal.summary().status === "exited",
             );
             if (exited === undefined)
-                throw new Error("This session already has too many terminals.");
+                throw new Error("This project or workspace already has too many terminals.");
             this.#terminals.delete(exited.id);
             await exited.dispose();
         }

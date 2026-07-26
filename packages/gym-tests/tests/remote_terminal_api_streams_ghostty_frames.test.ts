@@ -110,8 +110,8 @@ function rowText(row) {
 }
 
 const sessions = await requestJson("GET", "/sessions");
-const sessionId = sessions.sessions[0].id;
-const terminalPath = "/sessions/" + encodeURIComponent(sessionId) + "/terminals";
+const projectId = sessions.sessions[0].projectId;
+const terminalPath = "/projects/" + encodeURIComponent(projectId) + "/terminals";
 const created = await requestJson("POST", terminalPath, {
     cols: 30,
     rows: 3,

@@ -33,6 +33,11 @@ import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
+import {
+    ProjectRemoteTerminalStore,
+    type ProjectRemoteTerminalContext,
+    type RemoteTerminalScope,
+} from "../terminal/index.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -52,6 +57,7 @@ export class InMemorySessionStore implements SessionStore {
     #database = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
     readonly #projects: ProjectRepository;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
+    readonly remoteTerminals: ProjectRemoteTerminalStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
     #transactionCommitCallbacks: (() => void)[] | undefined;
@@ -68,6 +74,9 @@ export class InMemorySessionStore implements SessionStore {
                 ? {}
                 : { stateDirectory: options.stateDirectory }),
             transaction: (body) => this.#transaction(body),
+        });
+        this.remoteTerminals = new ProjectRemoteTerminalStore({
+            resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
         this.#secrets = new SecretRegistry(options.secrets);
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
@@ -413,6 +422,7 @@ export class InMemorySessionStore implements SessionStore {
     ): Promise<Project | undefined> {
         const project = this.#projects.archiveProject(projectId, expectedVersion);
         if (project === undefined) return undefined;
+        await this.remoteTerminals.closeProject(projectId);
         for (const session of this.#sessions.values()) {
             if (session.isSubagent()) continue;
             const snapshot = session.snapshot();
@@ -441,6 +451,7 @@ export class InMemorySessionStore implements SessionStore {
             expectedVersion,
         );
         if (workspace === undefined || workspace.status === "archived") return workspace;
+        await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
         const cleanup = [...this.#sessions.values()]
             .filter((session) => session.snapshot().workspaceId === workspaceId)
             .map((session) => session.archiveForWorkspace(workspaceId));
@@ -486,6 +497,40 @@ export class InMemorySessionStore implements SessionStore {
 
     #projectSecrets(projectId: string): readonly string[] {
         return [...(this.#projectSecretIds.get(projectId) ?? [])];
+    }
+
+    #remoteTerminalContext(scope: RemoteTerminalScope): ProjectRemoteTerminalContext {
+        const project = this.#projects.getProject(scope.projectId);
+        if (project === undefined) throw new Error("Project not found.");
+        if (project.archivedAt !== undefined) {
+            throw new Error("Archived projects cannot open terminals.");
+        }
+        const workspace =
+            scope.workspaceId === undefined
+                ? undefined
+                : this.#projects.getWorkspace(scope.projectId, scope.workspaceId);
+        if (scope.workspaceId !== undefined && workspace === undefined) {
+            throw new Error("Workspace not found.");
+        }
+        if (workspace !== undefined && workspace.status !== "ready") {
+            throw new Error("Only ready workspaces can open terminals.");
+        }
+        const session = [...this.#sessions.values()]
+            .filter((candidate) => {
+                if (candidate.isSubagent()) return false;
+                const snapshot = candidate.snapshot();
+                return (
+                    snapshot.projectId === scope.projectId &&
+                    snapshot.workspaceId === scope.workspaceId
+                );
+            })
+            .sort((left, right) => right.summary().updatedAt - left.summary().updatedAt)
+            .at(0);
+        const docker = session?.requestForSubagent().docker;
+        return {
+            cwd: workspace?.path ?? project.path,
+            ...(docker === undefined ? {} : { docker }),
+        };
     }
 
     #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {

@@ -1,8 +1,10 @@
 # Remote terminals
 
-Rig exposes session-scoped interactive terminals independently of agent runs. Each terminal owns a
-real host or Docker PTY and one canonical Ghostty emulator in the daemon. Lifecycle operations use
-the daemon's existing JSON-over-HTTP API; interactive display and input use the
+Rig exposes project- and workspace-scoped interactive terminals independently of agent runs and
+chats. Every chat in the same project or managed workspace sees the same terminal collection and
+execution environment. Each terminal owns a real host or Docker PTY and one canonical Ghostty
+emulator in the daemon. Lifecycle operations use the daemon's existing JSON-over-HTTP API;
+interactive display and input use the
 [`@slopus/ghostty-web`](packages/ghostty-web/README.md) hybrid binary protocol over WebSocket.
 
 HTTP Upgrade keeps terminal attachments on the daemon's existing routing and bearer-token rails.
@@ -10,23 +12,26 @@ WebSocket supplies standard binary framing, full-duplex input, and the browser-c
 needed by future web clients. The local daemon currently listens on a Unix socket; the same attach
 path can be served over TCP later without changing the terminal wire protocol.
 
-All requests and WebSocket upgrades use the daemon's bearer token. Replace `{sessionId}` and
-`{terminalId}` with URL-encoded identifiers.
+All requests and WebSocket upgrades use the daemon's bearer token. Replace `{projectId}`,
+`{workspaceId}`, and `{terminalId}` with URL-encoded identifiers. Project routes target the
+project's root checkout; workspace routes target one managed worktree.
 
 ## Lifecycle over HTTP
 
-| Method   | Path                                                  | Purpose                    |
-| -------- | ----------------------------------------------------- | -------------------------- |
-| `POST`   | `/sessions/{sessionId}/terminals`                     | Create a terminal          |
-| `GET`    | `/sessions/{sessionId}/terminals`                     | List terminal metadata     |
-| `PATCH`  | `/sessions/{sessionId}/terminals/{terminalId}`        | Request a terminal resize  |
-| `DELETE` | `/sessions/{sessionId}/terminals/{terminalId}`        | Stop the terminal          |
-| Upgrade  | `/sessions/{sessionId}/terminals/{terminalId}/attach` | Attach the binary protocol |
+| Method   | Project path                                          | Workspace path                                                                 | Purpose                    |
+| -------- | ----------------------------------------------------- | ------------------------------------------------------------------------------ | -------------------------- |
+| `POST`   | `/projects/{projectId}/terminals`                     | `/projects/{projectId}/workspaces/{workspaceId}/terminals`                     | Create a terminal          |
+| `GET`    | `/projects/{projectId}/terminals`                     | `/projects/{projectId}/workspaces/{workspaceId}/terminals`                     | List terminal metadata     |
+| `PATCH`  | `/projects/{projectId}/terminals/{terminalId}`        | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Request a terminal resize  |
+| `DELETE` | `/projects/{projectId}/terminals/{terminalId}`        | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}`        | Stop the terminal          |
+| Upgrade  | `/projects/{projectId}/terminals/{terminalId}/attach` | `/projects/{projectId}/workspaces/{workspaceId}/terminals/{terminalId}/attach` | Attach the binary protocol |
 
-Create accepts `cols`, `rows`, `maxScrollback`, `cwd`, `shell`, and an optional `command`. Defaults
-are 80 columns, 24 rows, and 10,000 scrollback rows. Without a command, Rig starts the environment's
-interactive shell. Lifecycle responses contain stable terminal ID and epoch, dimensions, running
-or exited status, and the exit code when known. They do not contain terminal screen snapshots.
+Create accepts `cols`, `rows`, `maxScrollback`, `cwd`, `shell`, and an optional `command`. The
+working directory defaults to the project root or managed worktree in the scope's shared host or
+Docker execution environment. Dimensions default to 80 columns, 24 rows, and 10,000 scrollback
+rows. Without a command, Rig starts the environment's interactive shell. Lifecycle responses
+contain stable terminal ID and epoch, dimensions, running or exited status, and the exit code when
+known. They do not contain terminal screen snapshots.
 
 Resize accepts `{ "cols": 100, "rows": 30 }`. Rig performs the request through the protocol's
 canonical resize operation: it drains parsing, resizes the PTY and server Ghostty state, broadcasts

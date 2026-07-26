@@ -30,7 +30,7 @@ export function attachRemoteTerminalWebSocketServer(options: {
             rejectUpgrade(socket, 401, "Unauthorized");
             return;
         }
-        const terminal = options.store.get(route.sessionId)?.remoteTerminal(route.terminalId);
+        const terminal = options.store.remoteTerminals.get(route.scope, route.terminalId);
         if (terminal === undefined) {
             rejectUpgrade(socket, 404, "Not Found");
             return;
@@ -49,24 +49,42 @@ export function attachRemoteTerminalWebSocketServer(options: {
     };
 }
 
-function parseAttachRoute(
-    requestUrl: string | undefined,
-): { sessionId: string; terminalId: string } | undefined {
+function parseAttachRoute(requestUrl: string | undefined):
+    | {
+          scope: { projectId: string; workspaceId?: string };
+          terminalId: string;
+      }
+    | undefined {
     try {
         const pathname = new URL(requestUrl ?? "/", "http://unix").pathname;
         const parts = pathname.split("/").filter(Boolean);
         if (
-            parts.length !== 5 ||
-            parts[0] !== "sessions" ||
-            parts[2] !== "terminals" ||
-            parts[4] !== "attach"
+            parts.length === 5 &&
+            parts[0] === "projects" &&
+            parts[2] === "terminals" &&
+            parts[4] === "attach"
         ) {
-            return undefined;
+            return {
+                scope: { projectId: decodeURIComponent(parts[1]!) },
+                terminalId: decodeURIComponent(parts[3]!),
+            };
         }
-        return {
-            sessionId: decodeURIComponent(parts[1]!),
-            terminalId: decodeURIComponent(parts[3]!),
-        };
+        if (
+            parts.length === 7 &&
+            parts[0] === "projects" &&
+            parts[2] === "workspaces" &&
+            parts[4] === "terminals" &&
+            parts[6] === "attach"
+        ) {
+            return {
+                scope: {
+                    projectId: decodeURIComponent(parts[1]!),
+                    workspaceId: decodeURIComponent(parts[3]!),
+                },
+                terminalId: decodeURIComponent(parts[5]!),
+            };
+        }
+        return undefined;
     } catch {
         return undefined;
     }

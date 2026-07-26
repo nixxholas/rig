@@ -17,9 +17,11 @@ import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import type { ProjectAvatarAsset } from "./ProjectRepository.js";
+import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 
 export interface SessionStore {
     readonly globalEventQueue: GlobalEventQueue;
+    readonly remoteTerminals: ProjectRemoteTerminalStore;
     attachSecret(
         sessionId: string,
         secretId: string,

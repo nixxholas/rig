@@ -9,10 +9,10 @@ import { RemoteTerminalManager } from "./RemoteTerminalManager.js";
 export function createRemoteTerminalManager(options: {
     cwd: string;
     docker?: DockerExecutionConfig;
-    sessionId: string;
+    ownerId: string;
 }): RemoteTerminalManager {
     if (options.docker !== undefined) {
-        const environment = new DockerEnvironment(options.docker, options.sessionId);
+        const environment = new DockerEnvironment(options.docker, options.ownerId);
         return new RemoteTerminalManager({
             cwd: options.docker.workingDirectory,
             processFactory: createDockerRemoteTerminalProcessFactory(environment),

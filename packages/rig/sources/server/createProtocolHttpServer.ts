@@ -148,6 +148,9 @@ export function createProtocolHttpServer(
     const sessionTerminals = new SessionTerminalTracker();
 
     attachRemoteTerminalWebSocketServer({ server, store, token: options.token });
+    server.once("close", () => {
+        void store.remoteTerminals.close();
+    });
 
     server.on("request", (request, response) => {
         const mutating = isMutatingProtocolRequest(request);
@@ -297,6 +300,77 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "projects") {
         sendJson<ListProjectsResponse>(response, 200, { projects: store.listProjects() });
+        return;
+    }
+
+    if (route.name === "project-terminals" || route.name === "project-terminal") {
+        const scope = {
+            projectId: route.projectId,
+            ...(route.workspaceId === undefined ? {} : { workspaceId: route.workspaceId }),
+        };
+        const project = store.getProject(route.projectId);
+        if (project === undefined) {
+            sendJson(response, 404, { error: "Project not found" });
+            return;
+        }
+        if (
+            route.workspaceId !== undefined &&
+            store.getWorkspace(route.projectId, route.workspaceId) === undefined
+        ) {
+            sendJson(response, 404, { error: "Workspace not found" });
+            return;
+        }
+        if (route.name === "project-terminals") {
+            if (request.method === "GET") {
+                sendJson<ListRemoteTerminalsResponse>(response, 200, {
+                    terminals: store.remoteTerminals
+                        .list(scope)
+                        .map((terminal) => terminal.summary()),
+                });
+                return;
+            }
+            if (request.method === "POST") {
+                const body = await readJson<CreateRemoteTerminalRequest | null>(request);
+                if (body === null || typeof body !== "object" || Array.isArray(body)) {
+                    sendJson(response, 400, {
+                        error: "Terminal settings must be a JSON object.",
+                    });
+                    return;
+                }
+                try {
+                    const terminal = await store.remoteTerminals.create(scope, body);
+                    sendJson<CreateRemoteTerminalResponse>(response, 201, {
+                        terminal: terminal.summary(),
+                    });
+                } catch (error) {
+                    sendJson(response, 400, { error: errorToMessage(error) });
+                }
+                return;
+            }
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const terminal = store.remoteTerminals.get(scope, route.terminalId);
+        if (terminal === undefined) {
+            sendJson(response, 404, { error: "Terminal not found" });
+            return;
+        }
+        if (request.method === "DELETE") {
+            sendJson<RemoteTerminalResponse>(response, 200, { terminal: await terminal.stop() });
+            return;
+        }
+        if (request.method === "PATCH") {
+            const body = await readJson<ResizeRemoteTerminalRequest>(request);
+            try {
+                sendJson<RemoteTerminalResponse>(response, 200, {
+                    terminal: await terminal.resize(body.cols, body.rows),
+                });
+            } catch (error) {
+                sendJson(response, 400, { error: errorToMessage(error) });
+            }
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
         return;
     }
 
@@ -910,62 +984,6 @@ async function handleRequest(
             sendJson<DisconnectSessionTerminalResponse>(response, 200, {
                 disconnected: sessionTerminals.disconnect(sessionId, route.connectionId),
             });
-            return;
-        }
-        sendJson(response, 405, { error: "Method not allowed" });
-        return;
-    }
-
-    if (route.name === "terminals") {
-        if (request.method === "GET") {
-            sendJson<ListRemoteTerminalsResponse>(response, 200, {
-                terminals: session.remoteTerminals().map((terminal) => terminal.summary()),
-            });
-            return;
-        }
-        if (request.method === "POST") {
-            const body = await readJson<CreateRemoteTerminalRequest | null>(request);
-            if (body === null || typeof body !== "object" || Array.isArray(body)) {
-                sendJson(response, 400, { error: "Terminal settings must be a JSON object." });
-                return;
-            }
-            try {
-                const terminal = await session.createRemoteTerminal(body);
-                sendJson<CreateRemoteTerminalResponse>(response, 201, {
-                    terminal: terminal.summary(),
-                });
-            } catch (error) {
-                sendJson(response, 400, {
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            }
-            return;
-        }
-        sendJson(response, 405, { error: "Method not allowed" });
-        return;
-    }
-
-    if ("terminalId" in route) {
-        const terminal = session.remoteTerminal(route.terminalId);
-        if (terminal === undefined) {
-            sendJson(response, 404, { error: "Terminal not found" });
-            return;
-        }
-        if (request.method === "DELETE" && route.name === "terminal") {
-            sendJson<RemoteTerminalResponse>(response, 200, { terminal: await terminal.stop() });
-            return;
-        }
-        if (request.method === "PATCH" && route.name === "terminal") {
-            const body = await readJson<ResizeRemoteTerminalRequest>(request);
-            try {
-                sendJson<RemoteTerminalResponse>(response, 200, {
-                    terminal: await terminal.resize(body.cols, body.rows),
-                });
-            } catch (error) {
-                sendJson(response, 400, {
-                    error: error instanceof Error ? error.message : String(error),
-                });
-            }
             return;
         }
         sendJson(response, 405, { error: "Method not allowed" });
@@ -1608,6 +1626,19 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
           workspaceId: string;
       }
+    | {
+          name: "project-terminals";
+          projectId: string;
+          sessionId?: undefined;
+          workspaceId?: string;
+      }
+    | {
+          name: "project-terminal";
+          projectId: string;
+          sessionId?: undefined;
+          terminalId: string;
+          workspaceId?: string;
+      }
     | { name: "secret-registration"; secretId: string; sessionId?: undefined }
     | {
           name:
@@ -1637,15 +1668,9 @@ function matchRoute(pathname: string):
               | "stream"
               | "steer"
               | "subagents"
-              | "terminals"
               | "unarchive"
               | "usage";
           sessionId: string;
-      }
-    | {
-          name: "terminal";
-          sessionId: string;
-          terminalId: string;
       }
     | {
           connectionId: string;
@@ -1700,6 +1725,20 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "reorder") {
             return { name: "project-reorder", projectId };
         }
+        if (globalParts.length === 3 && globalParts[2] === "terminals") {
+            return { name: "project-terminals", projectId };
+        }
+        if (
+            globalParts.length === 4 &&
+            globalParts[2] === "terminals" &&
+            globalParts[3] !== undefined
+        ) {
+            return {
+                name: "project-terminal",
+                projectId,
+                terminalId: decodeURIComponent(globalParts[3]),
+            };
+        }
         if (globalParts.length === 3 && globalParts[2] === "workspaces") {
             return { name: "project-workspaces", projectId };
         }
@@ -1717,6 +1756,21 @@ function matchRoute(pathname: string):
             }
             if (globalParts.length === 5 && globalParts[4] === "reorder") {
                 return { name: "project-workspace-reorder", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "terminals") {
+                return { name: "project-terminals", projectId, workspaceId };
+            }
+            if (
+                globalParts.length === 6 &&
+                globalParts[4] === "terminals" &&
+                globalParts[5] !== undefined
+            ) {
+                return {
+                    name: "project-terminal",
+                    projectId,
+                    terminalId: decodeURIComponent(globalParts[5]),
+                    workspaceId,
+                };
             }
         }
     }
@@ -1736,13 +1790,6 @@ function matchRoute(pathname: string):
     if (parts.length === 2) return { name: "session", sessionId };
     if (parts.length === 3 && parts[2] === "reorder") {
         return { name: "reorder", sessionId };
-    }
-    if (parts.length === 4 && parts[2] === "terminals" && parts[3] !== undefined) {
-        return {
-            name: "terminal",
-            sessionId,
-            terminalId: decodeURIComponent(parts[3]),
-        };
     }
     if (parts.length === 4 && parts[2] === "terminal-connections" && parts[3] !== undefined) {
         return {
@@ -1817,7 +1864,6 @@ function matchRoute(pathname: string):
     if (parts[2] === "stream") return { name: "stream", sessionId };
     if (parts[2] === "steer") return { name: "steer", sessionId };
     if (parts[2] === "subagents") return { name: "subagents", sessionId };
-    if (parts[2] === "terminals") return { name: "terminals", sessionId };
     if (parts[2] === "usage") return { name: "usage", sessionId };
     if (parts[2] === "unarchive") return { name: "unarchive", sessionId };
     return undefined;
@@ -1842,7 +1888,6 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "secrets",
                 "shell",
                 "steer",
-                "terminals",
                 "unarchive",
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
@@ -1851,7 +1896,6 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
         (["DELETE", "PATCH", "POST"].includes(method ?? "") && routeName === "goal") ||
         (method === "POST" && routeName === "user-input") ||
         (method === "DELETE" && routeName === "secret") ||
-        (["DELETE", "PATCH"].includes(method ?? "") && routeName === "terminal") ||
         (method === "PUT" && routeName === "draft") ||
         (method === "PATCH" &&
             ["effort", "model", "permissions", "service-tier"].includes(routeName))
@@ -1879,6 +1923,8 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
             "project-avatar",
             "project-refresh",
             "project-reorder",
+            "project-terminal",
+            "project-terminals",
             "project-workspace",
             "project-workspace-archive",
             "project-workspace-reorder",
