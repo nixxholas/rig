@@ -1,4 +1,5 @@
 import type { DockerExecutionConfig, DockerMountConfig } from "../execution/index.js";
+import { RigUserError } from "../RigUserError.js";
 
 export interface ParsedSessionEnvironmentOptions {
     debug?: boolean;
@@ -45,7 +46,7 @@ export function parseSessionEnvironmentOptions(
             const separator = entry.indexOf("=");
             const key = separator < 0 ? "" : entry.slice(0, separator);
             if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-                throw new Error("--docker-env must use NAME=value.");
+                throw new RigUserError("--docker-env must use NAME=value.");
             }
             environment[key] = entry.slice(separator + 1);
         } else if (argument === "--docker-mount") {
@@ -63,23 +64,26 @@ export function parseSessionEnvironmentOptions(
         Object.keys(environment).length > 0;
     if (mode === undefined) {
         if (hasDockerOptions) {
-            throw new Error("Choose --docker-container or --docker-image with Docker options.");
+            throw new RigUserError(
+                "Choose --docker-container or --docker-image with Docker options.",
+            );
         }
         return { ...(debug ? { debug: true } : {}), remaining };
     }
     if (mode === "local") {
-        if (hasDockerOptions) throw new Error("--local cannot be combined with Docker options.");
+        if (hasDockerOptions)
+            throw new RigUserError("--local cannot be combined with Docker options.");
         return { ...(debug ? { debug: true } : {}), docker: null, remaining };
     }
-    if (reference === undefined) throw new Error("A Docker container or image is required.");
+    if (reference === undefined) throw new RigUserError("A Docker container or image is required.");
     if (!workingDirectory.startsWith("/")) {
-        throw new Error("--docker-workdir must be an absolute container path.");
+        throw new RigUserError("--docker-workdir must be an absolute container path.");
     }
     if (
         mode === "container" &&
         (name !== undefined || mounts.length > 0 || Object.keys(environment).length > 0)
     ) {
-        throw new Error(
+        throw new RigUserError(
             "--docker-name, --docker-env, and --docker-mount can only be used with --docker-image.",
         );
     }
@@ -98,7 +102,7 @@ export function parseSessionEnvironmentOptions(
 
     function selectMode(nextMode: typeof mode): void {
         if (mode !== undefined && mode !== nextMode) {
-            throw new Error("Choose one of --local, --docker-container, or --docker-image.");
+            throw new RigUserError("Choose one of --local, --docker-container, or --docker-image.");
         }
         mode = nextMode;
     }
@@ -111,7 +115,7 @@ function parseMount(value: string): DockerMountConfig {
     const source = separator < 0 ? "" : withoutMode.slice(0, separator);
     const target = separator < 0 ? "" : withoutMode.slice(separator + 1);
     if (source.length === 0 || !target.startsWith("/")) {
-        throw new Error(
+        throw new RigUserError(
             "--docker-mount must use /host/path:/container/path or append :ro for read-only.",
         );
     }
@@ -121,7 +125,7 @@ function parseMount(value: string): DockerMountConfig {
 function requiredValue(args: readonly string[], index: number, option: string): string {
     const value = args[index];
     if (value === undefined || value.startsWith("--")) {
-        throw new Error(`${option} requires a value.`);
+        throw new RigUserError(`${option} requires a value.`);
     }
     return value;
 }

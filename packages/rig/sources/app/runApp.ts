@@ -28,8 +28,13 @@ import { ensureSessionCanResume } from "./ensureSessionCanResume.js";
 import { installTerminalCrashCleanup } from "./installTerminalCrashCleanup.js";
 import { providerQuotaToStartupStatusUsage } from "./providerQuotaToStartupStatusUsage.js";
 import { readPackageVersion } from "../readPackageVersion.js";
+import { reportCliFailure } from "../reportCliFailure.js";
 import { resolveTerminalTheme } from "./resolveTerminalTheme.js";
 import { resolveStartupProviderQuota } from "./resolveStartupProviderQuota.js";
+import {
+    resolveStartupSessionId,
+    type StartupSessionSelection,
+} from "./resolveStartupSessionId.js";
 import { RigTerminal } from "./RigTerminal.js";
 import { sessionAgentFooterLabel } from "./sessionAgentFooterLabel.js";
 import { StartupStatusApp } from "./StartupStatusApp.js";
@@ -53,6 +58,7 @@ export interface RunAppOptions {
     providerId?: string;
     permissionMode?: PermissionMode;
     resumeSessionId?: string;
+    sessionSelection?: StartupSessionSelection;
     showReasoning?: boolean;
     showUsage?: boolean;
     docker?: DockerExecutionConfig | null;
@@ -122,6 +128,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     const tui = new TUI(terminal, false);
     const startup = new StartupStatusApp({
         cwd,
+        rows: () => terminal.rows,
         theme: startupTheme,
         tui,
         version: readPackageVersion(),
@@ -140,12 +147,12 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         } catch {
             // Preserve the startup failure while restoring the terminal below.
         }
-        terminalCrashCleanup.restore();
+        await terminalCrashCleanup.restoreAndDrain();
         terminalCrashCleanup.uninstall();
         throw error;
     }
 
-    const { history, localServer, modelCatalog, session, sessionTerminal } = await (async () => {
+    const opened = await (async () => {
         let sessionTerminal: SessionTerminalConnection | undefined;
         try {
             const connection = await ensureLocalProtocolServer({
@@ -154,16 +161,27 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                     startup.setStatus(message);
                 },
             });
+            let resumeSessionId = options.resumeSessionId;
+            if (options.sessionSelection !== undefined) {
+                resumeSessionId = await resolveStartupSessionId({
+                    client: connection.client,
+                    cwd,
+                    selection: options.sessionSelection,
+                    startup,
+                });
+                // Dismissing the picker is a decision to stop, not a failure to report.
+                if (resumeSessionId === undefined) return undefined;
+            }
             startup.setStatus("Opening session.");
             const [openedSession, modelsResponse] = await Promise.all([
-                options.resumeSessionId === undefined
+                resumeSessionId === undefined
                     ? connection.client.createSession(agentOptions)
-                    : connection.client.getSession(options.resumeSessionId, {
+                    : connection.client.getSession(resumeSessionId, {
                           messageLimit: INITIAL_TUI_MESSAGE_LIMIT,
                       }),
                 connection.client.models(),
             ]);
-            if (options.resumeSessionId !== undefined) {
+            if (resumeSessionId !== undefined) {
                 ensureSessionCanResume(openedSession.session);
             }
             sessionTerminal = await connection.client.connectSessionTerminal(
@@ -172,7 +190,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             );
             startup.setStatus("Loading transcript.");
             const loadedHistory =
-                options.resumeSessionId === undefined
+                resumeSessionId === undefined
                     ? { events: [] as SessionEvent[] }
                     : await connection.client.getEvents(openedSession.session.id, undefined, {
                           messageLimit: INITIAL_TUI_MESSAGE_LIMIT,
@@ -182,6 +200,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                 history: loadedHistory,
                 localServer: connection,
                 modelCatalog: modelsResponse.catalog,
+                resumed: resumeSessionId !== undefined,
                 session: openedSession,
                 sessionTerminal,
             };
@@ -191,12 +210,19 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             } catch {
                 // Preserve the connection failure while restoring the terminal below.
             }
-            terminalCrashCleanup.restore();
+            await terminalCrashCleanup.restoreAndDrain();
             terminalCrashCleanup.uninstall();
             await sessionTerminal?.close().catch(() => undefined);
             throw error;
         }
     })();
+    if (opened === undefined) {
+        startup.stop();
+        await terminalCrashCleanup.restoreAndDrain();
+        terminalCrashCleanup.uninstall();
+        return { action: "exit" };
+    }
+    const { history, localServer, modelCatalog, resumed, session, sessionTerminal } = opened;
     try {
         const processManager = new NativeProcessManager();
         const theme = resolveTerminalTheme(loadedConfig.config.theme, await terminalBackground);
@@ -209,13 +235,13 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             resolveStartupProviderQuota(() =>
                 localServer.client.getCurrentProviderQuota(session.session.id),
             ),
-        ]).catch((error: unknown) => {
+        ]).catch(async (error: unknown) => {
             try {
                 startup.stop();
             } catch {
                 // Preserve the session failure while restoring the terminal below.
             }
-            terminalCrashCleanup.restore();
+            await terminalCrashCleanup.restoreAndDrain();
             terminalCrashCleanup.uninstall();
             throw error;
         });
@@ -382,7 +408,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             showUsage,
             startupStatus: createStartupStatusCardModel({
                 model: agent.model,
-                resumed: options.resumeSessionId !== undefined,
+                resumed,
                 session: session.session,
                 ...(startupUsage === undefined ? {} : { usage: startupUsage }),
                 version,
@@ -449,8 +475,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         const requestStop = createStopOnceHandler(
             () => app.stop(),
             (error) => {
-                console.error(error);
-                process.exitCode = 1;
+                reportCliFailure(error);
             },
         );
         const stop = () => {
@@ -465,7 +490,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             exitReason = await app.waitForExit();
             appExitedNormally = true;
         } finally {
-            if (!appExitedNormally) terminalCrashCleanup.restore();
+            if (!appExitedNormally) await terminalCrashCleanup.restoreAndDrain();
             terminalCrashCleanup.uninstall();
             stopWatchingTerminalTheme();
             process.off("SIGINT", stop);
@@ -480,7 +505,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             }
         }
     } catch (error) {
-        terminalCrashCleanup.restore();
+        await terminalCrashCleanup.restoreAndDrain();
         terminalCrashCleanup.uninstall();
         throw error;
     } finally {

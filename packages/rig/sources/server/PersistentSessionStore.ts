@@ -522,6 +522,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         title_status,
                         title_error,
                         recap,
+                        session_token_count_json,
                         metadata_updated_at_ms,
                         metadata_run_id,
                         interruption_json,
@@ -551,6 +552,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             const title = readOptionalString(row, "title");
             const titleError = readOptionalString(row, "title_error");
             const recap = readOptionalString(row, "recap");
+            const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
             const metadataUpdatedAt = readOptionalNumber(row, "metadata_updated_at_ms");
             const metadataRunId = readOptionalString(row, "metadata_run_id");
             const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
@@ -594,6 +596,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ...(title !== undefined ? { title } : {}),
                 ...(titleError !== undefined ? { titleError } : {}),
                 ...(recap !== undefined ? { recap } : {}),
+                ...(sessionTokenCountJson !== undefined
+                    ? {
+                          sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount,
+                      }
+                    : {}),
                 ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
                 ...(metadataRunId !== undefined ? { metadataRunId } : {}),
                 ...(interruptionJson !== undefined

@@ -1,5 +1,6 @@
 import { parsePermissionMode, type PermissionMode } from "../permissions/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
+import { RigUserError } from "../RigUserError.js";
 
 export interface ExecCommandOptions {
     debug?: boolean;
@@ -31,14 +32,14 @@ export function parseExecCommand(args: readonly string[]): ExecCommandOptions {
         }
         if (arg === "--json") {
             if (options.outputFormat === "stream-json") {
-                throw new Error("Choose either --json or --stream-json, not both.");
+                throw new RigUserError("Choose either --json or --stream-json, not both.");
             }
             options.outputFormat = "json";
             continue;
         }
         if (arg === "--stream-json") {
             if (options.outputFormat === "json") {
-                throw new Error("Choose either --json or --stream-json, not both.");
+                throw new RigUserError("Choose either --json or --stream-json, not both.");
             }
             options.outputFormat = "stream-json";
             continue;
@@ -72,16 +73,16 @@ export function parseExecCommand(args: readonly string[]): ExecCommandOptions {
             continue;
         }
         if (arg?.startsWith("-")) {
-            throw new Error(`Unknown rig exec option '${arg}'.`);
+            throw new RigUserError(`Unknown rig exec option '${arg}'.`);
         }
         if (arg !== undefined) prompt.push(arg);
     }
 
     if (options.last && options.resumeSessionId !== undefined) {
-        throw new Error("Choose either --last or --resume, not both.");
+        throw new RigUserError("Choose either --last or --resume, not both.");
     }
     if (options.fork && !options.last && options.resumeSessionId === undefined) {
-        throw new Error("--fork requires --last or --resume <session-id>.");
+        throw new RigUserError("--fork requires --last or --resume <session-id>.");
     }
     if (prompt.length > 0) options.prompt = prompt.join(" ");
     return options;
@@ -90,7 +91,7 @@ export function parseExecCommand(args: readonly string[]): ExecCommandOptions {
 function requiredValue(args: readonly string[], index: number, option: string): string {
     const value = args[index];
     if (value === undefined || value.startsWith("-")) {
-        throw new Error(`${option} requires a value.`);
+        throw new RigUserError(`${option} requires a value.`);
     }
     return value;
 }

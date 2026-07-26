@@ -1,3 +1,5 @@
+import { RigUserError } from "../RigUserError.js";
+
 export interface SessionCommandOptions {
     all: boolean;
     last: boolean;
@@ -12,15 +14,21 @@ export function parseSessionCommand(args: readonly string[]): SessionCommandOpti
         } else if (arg === "--last") {
             options.last = true;
         } else if (arg.startsWith("-")) {
-            throw new Error(`Unknown session option '${arg}'.`);
+            throw new RigUserError(`Rig does not understand the option '${arg}'.`, {
+                hint: "Session commands accept --all and --last.",
+            });
         } else if (options.sessionId === undefined) {
             options.sessionId = arg;
         } else {
-            throw new Error("Provide only one session identifier.");
+            throw new RigUserError("Rig can only resume one session at a time.", {
+                hint: "Pass a single session identifier.",
+            });
         }
     }
     if (options.last && options.sessionId !== undefined) {
-        throw new Error("Choose either --last or a session identifier, not both.");
+        throw new RigUserError("Rig cannot use --last together with a session identifier.", {
+            hint: "Choose one of them.",
+        });
     }
     return options;
 }

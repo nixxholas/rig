@@ -238,6 +238,7 @@ export interface SessionSummary {
     titleError?: string;
     titleStatus: SessionTitleStatus;
     recap?: string;
+    sessionTokenCount?: SessionTokenCount;
     metadataUpdatedAt?: number;
     metadataRunId?: string;
     createdAt: number;

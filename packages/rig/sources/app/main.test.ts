@@ -87,7 +87,7 @@ describe("main command dispatch", () => {
     });
 
     it.each(["resmue", "--unknown"])("rejects unknown top-level input %s", async (input) => {
-        await expect(main([input])).rejects.toThrow(`Unknown rig`);
+        await expect(main([input])).rejects.toThrow(`Rig does not have`);
 
         expect(runApp).not.toHaveBeenCalled();
         expect(runExec).not.toHaveBeenCalled();

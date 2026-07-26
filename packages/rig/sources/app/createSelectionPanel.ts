@@ -1,14 +1,13 @@
 import {
     matchesKey,
     SelectList,
-    truncateToWidth,
-    visibleWidth,
     wrapTextWithAnsi,
     type Component,
     type SelectItem,
 } from "@earendil-works/pi-tui";
 
 import { sanitizeTerminalText } from "./sanitizeTerminalText.js";
+import { surfaceThemedLine } from "./surfaceThemedLine.js";
 import { DEFAULT_TERMINAL_THEME } from "./defaultTerminalTheme.js";
 import type { TerminalTheme } from "./TerminalTheme.js";
 
@@ -109,22 +108,12 @@ class SelectionPanel implements Component {
             "",
         ];
 
-        return lines.map((line) => this.#surfaceLine(line, safeWidth));
+        return lines.map((line) => surfaceThemedLine(line, safeWidth, this.#theme));
     }
 
     handleInput(data: string): void {
         if (this.#cancelDisabled && matchesKey(data, "escape")) return;
         this.#list.handleInput(data);
-    }
-
-    #surfaceLine(content: string, width: number): string {
-        const restored = content.replaceAll(
-            RESET,
-            `${RESET}${this.#theme.inputBackground}${this.#theme.primary}`,
-        );
-        const fitted = truncateToWidth(restored, width, "", true);
-        const padding = " ".repeat(Math.max(0, width - visibleWidth(fitted)));
-        return `${this.#theme.inputBackground}${this.#theme.primary}${fitted}${padding}${RESET}`;
     }
 
     #createList(maxVisible: number): SelectList {

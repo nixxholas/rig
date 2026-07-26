@@ -113,13 +113,13 @@ describe("settled session metadata", () => {
         gym.terminal.press("enter");
         const picker = await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes("RESUME_PICKER_VIEW") &&
-                snapshot.text.includes("Saved sessions:") &&
+                snapshot.text.includes("Resume a session") &&
                 snapshot.text.includes("The user worked with Rig in the Gym environment."),
             "the resume picker recap",
             30_000,
         );
-        expect(picker.text).toContain("1. Gym session");
+        expect(picker.text).toContain("Gym session");
+        expect(picker.text).toContain("Use ↑/↓ to move, Enter to resume, Esc to cancel.");
         expect(standaloneBellCount(rawOutput)).toBe(2);
         await gym.terminal.screenshot(`${artifacts}/resume-picker-recap.png`);
         await writeFile(

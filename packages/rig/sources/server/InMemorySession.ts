@@ -2286,6 +2286,7 @@ export class InMemorySession {
             status: this.#status,
             titleStatus: this.#titleStatus,
             ...(this.#recap !== undefined ? { recap: this.#recap } : {}),
+            sessionTokenCount: { ...this.#sessionTokenCount },
             ...(this.#metadataUpdatedAt !== undefined
                 ? { metadataUpdatedAt: this.#metadataUpdatedAt }
                 : {}),

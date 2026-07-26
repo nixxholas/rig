@@ -14,6 +14,7 @@ import type { ExecCommandOptions } from "./parseExecCommand.js";
 import { readExecPrompt } from "./readExecPrompt.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { resolveDockerExecutionConfig } from "../execution/index.js";
+import { RigUserError } from "../RigUserError.js";
 
 export async function runExec(
     options: ExecCommandOptions,
@@ -217,7 +218,9 @@ async function openSession(
         const listed = await client.listSessions();
         sessionId = listed.sessions.find((session) => session.cwd === cwd)?.id;
         if (sessionId === undefined) {
-            throw new Error("No saved sessions were found for the current directory.");
+            throw new RigUserError("Rig has no saved sessions in this directory.", {
+                hint: "Pass --resume <session-id> to name one explicitly.",
+            });
         }
     }
     if (sessionId !== undefined) return (await client.getSession(sessionId)).session;

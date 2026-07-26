@@ -6,10 +6,10 @@ import { parsePermissionMode } from "../permissions/index.js";
 import { runLocalProtocolServer } from "../server/index.js";
 import { parseExecCommand } from "./parseExecCommand.js";
 import { parseSessionCommand } from "./parseSessionCommand.js";
-import { resolveSessionCommand } from "./resolveSessionCommand.js";
 import { parseSessionEnvironmentOptions } from "./parseSessionEnvironmentOptions.js";
 import { formatCliHelp } from "./formatCliHelp.js";
 import { readPackageVersion } from "../readPackageVersion.js";
+import { RigUserError } from "../RigUserError.js";
 
 export async function main(argv: readonly string[] = process.argv.slice(2)): Promise<void> {
     if (argv.length === 1 && argv[0] === "--server") {
@@ -51,27 +51,28 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     }
     if (command === "resume" || command === "fork") {
         if (parsedEnvironment.docker !== undefined) {
-            throw new Error(
+            throw new RigUserError(
                 "A resumed or forked session keeps its existing execution environment.",
+                { hint: "Drop the environment flags, or start a new session with rig." },
             );
         }
-        options.resumeSessionId = await resolveSessionCommand({
-            command,
-            cwd: options.cwd ?? process.cwd(),
-            selection: parseSessionCommand(commandArgs),
-        });
+        options.sessionSelection = { command, selection: parseSessionCommand(commandArgs) };
     }
     if (command === "daemon") {
         const daemonCommand = commandArgs[0];
         if (!isDaemonCommand(daemonCommand)) {
-            throw new Error("Usage: rig daemon <start|stop|status|reload>");
+            throw new RigUserError("Rig needs to know what to do with the daemon.", {
+                hint: "Usage: rig daemon <start|stop|status|reload>",
+            });
         }
         await runDaemonCommand(daemonCommand);
         return;
     }
     if (command === "happy") {
         if (commandArgs.length !== 1 || commandArgs[0] !== "auth") {
-            throw new Error("Usage: rig happy auth");
+            throw new RigUserError("Rig only supports one Happy command.", {
+                hint: "Usage: rig happy auth",
+            });
         }
         const { runHappyAuthCommand } = await import("../happy/index.js");
         await runHappyAuthCommand();
@@ -82,8 +83,10 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
         return;
     }
     if (command !== undefined && command !== "resume" && command !== "fork") {
-        const kind = command.startsWith("-") ? "option" : "command";
-        throw new Error(`Unknown rig ${kind} '${command}'. Run 'rig --help' for usage.`);
+        const kind = command.startsWith("-") ? "an option" : "a command";
+        throw new RigUserError(`Rig does not have ${kind} called '${command}'.`, {
+            hint: "Run rig --help to see everything Rig can do.",
+        });
     }
     if (process.env.OPENAI_API_KEY !== undefined) {
         options.apiKey = process.env.OPENAI_API_KEY;
@@ -105,7 +108,9 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
     for (;;) {
         const result = await runApp(runOptions);
         if (result.action === "exit") return;
-        runOptions = { ...runOptions, resumeSessionId: result.sessionId };
+        // A reload reopens the session that was already chosen, so the picker must not run again.
+        const { sessionSelection: _, ...reloadOptions } = runOptions;
+        runOptions = { ...reloadOptions, resumeSessionId: result.sessionId };
     }
 }
 

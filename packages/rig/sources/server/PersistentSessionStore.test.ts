@@ -1766,6 +1766,30 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("reports the stored context size in session summaries", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            const state = sessionState({
+                sessionTokenCount: { lastContextTokens: 34_500, totalTokens: 120_000 },
+            });
+            store.saveSession(state);
+            store.close();
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                expect(restoredStore.list().at(0)?.sessionTokenCount).toEqual({
+                    lastContextTokens: 34_500,
+                    totalTokens: 120_000,
+                });
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("persists the selected service tier in session details and summaries", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {

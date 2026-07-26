@@ -13,6 +13,7 @@ import {
     type LocalServerPaths,
 } from "../server/index.js";
 import { daemonIdentitiesMatch, getDaemonIdentity } from "../daemon/index.js";
+import { RigUserError } from "../RigUserError.js";
 import type { DaemonIdentity, ReadyHealthResponse } from "../protocol/index.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { loadDaemonSettings } from "../config/index.js";
@@ -62,9 +63,9 @@ export async function ensureLocalProtocolServer(
                 };
                 const shouldRestart = (await options.confirmRestart?.(request)) ?? false;
                 if (!shouldRestart) {
-                    throw new Error(
-                        "The running daemon does not match this Rig CLI. Stop the running daemon, then try again.",
-                    );
+                    throw new RigUserError("The running daemon does not match this Rig CLI.", {
+                        hint: "Run rig daemon stop, then try again.",
+                    });
                 }
             }
             options.onStatus?.("Restarting local daemon.");

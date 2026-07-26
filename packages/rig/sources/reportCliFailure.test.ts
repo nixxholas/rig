@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { reportCliFailure } from "./reportCliFailure.js";
+import { RigUserError } from "./RigUserError.js";
 
 afterEach(() => {
     process.exitCode = undefined;
@@ -8,16 +9,40 @@ afterEach(() => {
 });
 
 describe("reportCliFailure", () => {
-    it("prints a concise user-facing message without an error stack", () => {
-        const error = vi.spyOn(console, "error").mockImplementation(() => {});
-        const failure = new Error("The configured provider is unavailable.");
+    it("explains an actionable failure without an error stack", () => {
+        const { report, written } = capture();
+        const failure = new RigUserError("Rig has no saved sessions in ~/dev/rig.", {
+            hint: "Use --all to pick a session from another directory.",
+        });
 
-        reportCliFailure(failure);
+        reportCliFailure(failure, report);
 
-        expect(error).toHaveBeenCalledWith(
-            "Rig could not start: The configured provider is unavailable.",
-        );
-        expect(error.mock.calls[0]?.[0]).not.toContain(failure.stack);
+        expect(written()).toContain("Rig has no saved sessions in ~/dev/rig.");
+        expect(written()).toContain("Use --all to pick a session from another directory.");
+        expect(written()).not.toContain("at ");
+        expect(written()).not.toContain(".ts:");
+        expect(process.exitCode).toBe(1);
+    });
+
+    it("summarises an unexpected crash instead of dumping a raw trace", () => {
+        const { report, written } = capture();
+
+        reportCliFailure(new TypeError("Cannot read properties of undefined"), report);
+
+        expect(written()).toContain("Rig stopped unexpectedly.");
+        expect(written()).toContain("Cannot read properties of undefined");
+        expect(written()).toContain("--debug");
+        expect(written()).not.toContain("node:internal");
         expect(process.exitCode).toBe(1);
     });
 });
+
+function capture(): { report: (text: string) => void; written: () => string } {
+    let output = "";
+    return {
+        report: (text) => {
+            output += text;
+        },
+        written: () => output,
+    };
+}

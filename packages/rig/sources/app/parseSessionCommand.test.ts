@@ -15,7 +15,7 @@ describe("parseSessionCommand", () => {
 
     it("rejects conflicting selectors", () => {
         expect(() => parseSessionCommand(["--last", "session-1"])).toThrow(
-            "either --last or a session identifier",
+            "Rig cannot use --last together with a session identifier.",
         );
     });
 });

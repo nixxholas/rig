@@ -1,5 +1,14 @@
+/** Long enough to swallow a terminal's answer, short enough that nobody notices the wait. */
+const DRAIN_MAX_MS = 150;
+const DRAIN_IDLE_MS = 30;
+
 export interface TerminalCrashCleanup {
     restore(): void;
+    /**
+     * Restores the terminal and briefly swallows late answers to Rig's terminal queries, so
+     * focus events and background-colour replies never land in the shell as escape garbage.
+     */
+    restoreAndDrain(): Promise<void>;
     uninstall(): void;
 }
 
@@ -17,6 +26,7 @@ export interface TerminalCrashCleanupProcessEvents {
 export function installTerminalCrashCleanup(options: {
     processEvents?: TerminalCrashCleanupProcessEvents;
     terminal: {
+        drainInput?(maxMs?: number, idleMs?: number): Promise<void>;
         stop(): void;
         write(data: string): void;
     };
@@ -28,16 +38,15 @@ export function installTerminalCrashCleanup(options: {
     let restored = false;
     let installed = true;
 
-    const restore = (): void => {
-        if (restored) return;
-        restored = true;
-
+    const disableTerminalModes = (): void => {
         try {
-            options.terminal.write("\x1b[?2026l\x1b[?1004l\x1b[?1049l");
+            options.terminal.write("\x1b[?2026l\x1b[?1004l\x1b[?1049l\x1b[?2031l");
         } catch {
             // Continue through every independent best-effort restoration step.
         }
+    };
 
+    const stopRendering = (): void => {
         let tuiStopped = false;
         try {
             options.tui.stop();
@@ -54,11 +63,32 @@ export function installTerminalCrashCleanup(options: {
         }
 
         try {
-            options.terminal.write("\x1b[?2031l\x1b[0m\x1b[?25h\r\n");
+            options.terminal.write("\x1b[0m\x1b[?25h\r\n");
         } catch {
             // The original fatal error must remain the process failure.
         }
     };
+
+    const restore = (): void => {
+        if (restored) return;
+        restored = true;
+        disableTerminalModes();
+        stopRendering();
+    };
+
+    const restoreAndDrain = async (): Promise<void> => {
+        if (restored) return;
+        restored = true;
+        // Draining has to happen while stdin is still flowing, before the terminal stops.
+        disableTerminalModes();
+        try {
+            await options.terminal.drainInput?.(DRAIN_MAX_MS, DRAIN_IDLE_MS);
+        } catch {
+            // A terminal that cannot drain still has to be restored below.
+        }
+        stopRendering();
+    };
+
     const onUncaughtException = (): void => {
         restore();
     };
@@ -67,6 +97,7 @@ export function installTerminalCrashCleanup(options: {
 
     return {
         restore,
+        restoreAndDrain,
         uninstall: () => {
             if (!installed) return;
             installed = false;

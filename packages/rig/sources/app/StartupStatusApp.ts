@@ -1,7 +1,9 @@
 import { truncateToWidth, type Component, type Focusable, type TUI } from "@earendil-works/pi-tui";
 
 import type { DaemonRestartRequest } from "../client/index.js";
+import type { SessionSummary } from "../protocol/index.js";
 import { createSelectionPanel } from "./createSelectionPanel.js";
+import { createSessionPicker, fitSessionPickerToViewport } from "./createSessionPicker.js";
 import { formatActivityElapsedTime } from "./formatActivityElapsedTime.js";
 import { formatDaemonRestartMessage } from "./formatDaemonRestartMessage.js";
 import { renderActivityWave } from "./renderActivityWave.js";
@@ -12,10 +14,13 @@ import type { TerminalTheme } from "./TerminalTheme.js";
 const RESET = "\x1b[0m";
 const DIM = "\x1b[2m";
 const ACTIVITY_ANIMATION_MS = 120;
+/** Rows the banner, status line, and surrounding blanks occupy above a panel. */
+const STARTUP_CHROME_ROWS = 10;
 
 export interface StartupStatusAppOptions {
     cwd: string;
     now?: () => number;
+    rows?: () => number;
     tui: TUI;
     version: string;
     theme?: TerminalTheme;
@@ -23,6 +28,7 @@ export interface StartupStatusAppOptions {
 
 export class StartupStatusApp implements Component, Focusable {
     readonly #now: () => number;
+    readonly #rows: () => number;
     readonly #tui: TUI;
     readonly #version: string;
     readonly #theme: TerminalTheme;
@@ -36,6 +42,7 @@ export class StartupStatusApp implements Component, Focusable {
 
     constructor(options: StartupStatusAppOptions) {
         this.#now = options.now ?? Date.now;
+        this.#rows = options.rows ?? (() => process.stdout.rows ?? 24);
         this.#startedAtMs = this.#now();
         this.#tui = options.tui;
         this.#version = options.version;
@@ -59,9 +66,48 @@ export class StartupStatusApp implements Component, Focusable {
             "",
         ];
         if (this.#selectionPanel !== undefined) {
+            fitSessionPickerToViewport(
+                this.#selectionPanel,
+                safeWidth,
+                Math.max(1, this.#rows() - STARTUP_CHROME_ROWS),
+            );
             lines.push(...this.#selectionPanel.render(safeWidth));
         }
         return lines;
+    }
+
+    /**
+     * Lets the user pick a saved session on the same startup screen the daemon status uses, so
+     * `rig resume` never drops out of the TUI into a numbered prompt. Resolves undefined when the
+     * user dismisses the picker.
+     */
+    selectSession(options: {
+        confirmVerb: string;
+        sessions: readonly SessionSummary[];
+        showDirectory: boolean;
+        subtitle: string;
+        title: string;
+    }): Promise<string | undefined> {
+        this.setStatus("Waiting for a session choice.");
+        return new Promise((resolve) => {
+            const finish = (sessionId: string | undefined) => {
+                this.#selectionPanel = undefined;
+                this.#tui.requestRender();
+                resolve(sessionId);
+            };
+            this.#selectionPanel = createSessionPicker({
+                confirmVerb: options.confirmVerb,
+                now: this.#now,
+                onCancel: () => finish(undefined),
+                onSelect: (session) => finish(session.id),
+                sessions: options.sessions,
+                showDirectory: options.showDirectory,
+                subtitle: options.subtitle,
+                theme: this.#theme,
+                title: options.title,
+            });
+            this.#tui.requestRender();
+        });
     }
 
     confirmDaemonRestart(request: DaemonRestartRequest): Promise<boolean> {
