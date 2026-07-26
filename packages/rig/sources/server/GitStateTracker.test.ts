@@ -227,6 +227,23 @@ describe("GitStateTracker", () => {
         expect(scan.calls).toBe(1);
     });
 
+    it("does not let a replaced backoff timer fire inside the new window", async () => {
+        const scan = countingScan(() => {
+            throw new Error("git exploded");
+        });
+        const tracker = createTracker({ scan });
+
+        tracker.watch(entity());
+        await waitFor(() => scan.calls === 1);
+        // A forced refresh during the first backoff fails too and installs a longer window. If the
+        // timer it replaces is left armed, it fires inside that window and defeats the throttle.
+        await tracker.refresh(entity());
+        const afterRefresh = scan.calls;
+        await new Promise((resolve) => setTimeout(resolve, 1_400));
+
+        expect(scan.calls).toBe(afterRefresh);
+    }, 10_000);
+
     it("republishes through the real queue after a subscriber throws", async () => {
         // Wired the way the daemon wires it, through publishLive rather than a hand-rolled
         // callback. An earlier version isolated subscribers inside the queue and asked the tracker
