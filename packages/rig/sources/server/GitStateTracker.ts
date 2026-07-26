@@ -75,6 +75,8 @@ interface RepositoryTracker {
     firstDirtyAt: number | undefined;
     /** Incremented on eviction and disposal so in-flight work can detect it is obsolete. */
     generation: number;
+    /** Highest version ever stamped here; never reset, so a version is never reissued. */
+    highestVersion: number;
     /** Resolves when the current scan finishes, so a forced refresh can wait it out. */
     inFlight: Promise<void> | undefined;
     key: string;
@@ -167,6 +169,7 @@ export class GitStateTracker {
             expiresAt: this.#now() + this.#tuning.watchTtlMs,
             firstDirtyAt: undefined,
             generation: 0,
+            highestVersion: 0,
             inFlight: undefined,
             key,
             lastActiveAt: this.#now(),
@@ -432,18 +435,20 @@ export class GitStateTracker {
             // the last scan instead would let a throwing observer — a busy SQLite write, a bad
             // subscriber — silence an idle repository forever, because the next identical scan
             // would look like "no change" even though the change was never delivered.
-            if (sameState(tracker.delivered, state)) {
-                // The repository came back to the last delivered state — an undo, a stash pop, an
-                // aborted rebase. Reads have to follow it back, or an undelivered intermediate
-                // state stays pinned as the answer until some third state appears.
-                tracker.snapshot = tracker.delivered;
-            } else {
-                // Retrying an undelivered but otherwise identical state reuses its version, so a
-                // subscriber that keeps failing cannot inflate the counter once per scan.
+            // Two questions decide what happens: does the scan match what clients were last
+            // given, and does it match what reads currently report. Anything else republishes.
+            const clientsAgree = sameState(tracker.delivered, state);
+            const readsAgree = tracker.snapshot !== undefined && sameState(tracker.snapshot, state);
+            if (!clientsAgree || !readsAgree) {
+                // Retrying an undelivered but identical state reuses its version, so a subscriber
+                // that keeps failing cannot inflate the counter once per scan. Every other case
+                // takes a fresh version — including a repository reverting to the delivered state,
+                // because subscribers handed the undelivered intermediate must be corrected and a
+                // repeat of an old version would be ignored by anyone comparing versions.
                 const snapshot =
-                    tracker.snapshot !== undefined && sameState(tracker.snapshot, state)
+                    readsAgree && !clientsAgree && tracker.snapshot !== undefined
                         ? tracker.snapshot
-                        : this.#stamp(tracker.key, state, versionFloor(tracker));
+                        : this.#stampFor(tracker, state);
                 // Reads report the latest scan either way; only delivery decides republication.
                 tracker.snapshot = snapshot;
                 if (this.#deliver(tracker.entity, snapshot)) tracker.delivered = snapshot;
@@ -521,6 +526,13 @@ export class GitStateTracker {
         });
     }
 
+    /** Stamps for a tracked entity, remembering the version so a reset can never reissue it. */
+    #stampFor(tracker: RepositoryTracker, state: GitChangeState): GitChangeSnapshot {
+        const snapshot = this.#stamp(tracker.key, state, tracker.highestVersion);
+        tracker.highestVersion = snapshot.version;
+        return snapshot;
+    }
+
     #stamp(key: string, state: GitChangeState, floor: number): GitChangeSnapshot {
         // The retained counter can have been evicted while this entity sat idle, so the versions it
         // has already published are the real floor. Without this an entity that outlived its map
@@ -538,11 +550,6 @@ export class GitStateTracker {
         }
         return { ...state, generation: this.#generation, version };
     }
-}
-
-/** Highest version this tracker has already published, whatever the retained counters say. */
-function versionFloor(tracker: RepositoryTracker): number {
-    return Math.max(tracker.snapshot?.version ?? 0, tracker.delivered?.version ?? 0);
 }
 
 export function entityKey(entity: GitTrackedEntity): string {

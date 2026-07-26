@@ -381,6 +381,63 @@ describe("GitStateTracker", () => {
         expect(published.at(-1)!.version).toBeGreaterThan(before);
     }, 20_000);
 
+    it("never reissues a version after a revert followed by counter eviction", async () => {
+        let insertions = 1;
+        let deliver = true;
+        const seen: number[] = [];
+        const tracker = createTracker({
+            onSnapshot: (_entity, snapshot) => seen.push(snapshot.version),
+            onLiveEvent: () => deliver,
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity("kept"));
+        await waitFor(() => seen.length === 1);
+        deliver = false;
+        insertions = 2;
+        await tracker.refresh(entity("kept"));
+        const handedOut = seen.at(-1)!;
+        deliver = true;
+        insertions = 1;
+        await tracker.refresh(entity("kept"));
+        for (let index = 0; index < 600; index += 1) {
+            await tracker.refresh(entity(`churn-${String(index)}`));
+        }
+        insertions = 3;
+        await tracker.refresh(entity("kept"));
+
+        // Deriving the floor from resettable fields let the revert erase the tracker's memory of
+        // the higher version, so eviction then reissued it for different content.
+        expect(seen.at(-1)!).toBeGreaterThan(handedOut);
+    }, 20_000);
+
+    it("tells subscribers about a revert to the state they were last given", async () => {
+        let insertions = 1;
+        let deliver = true;
+        const delivered: number[] = [];
+        const tracker = createTracker({
+            onLiveEvent: (event) => {
+                if (deliver) delivered.push(event.data.git.insertions);
+                return deliver;
+            },
+            scan: countingScan(() => ({ insertions })),
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => delivered.length === 1);
+        // A subscriber picks the intermediate up from the prelude even though delivery failed.
+        deliver = false;
+        insertions = 2;
+        await tracker.refresh(entity());
+        deliver = true;
+        insertions = 1;
+        await tracker.refresh(entity());
+
+        // Staying silent because the scan matched the last delivered state would leave that
+        // subscriber showing the intermediate until some unrelated third state appeared.
+        expect(delivered).toEqual([1, 1]);
+    });
+
     it("answers a refresh for an entity it is not watching without retaining it", async () => {
         const tracker = createTracker({ scan: countingScan(() => ({ insertions: 5 })) });
 
