@@ -38,7 +38,10 @@ export interface ThinkingBlock {
 /** A model-requested tool invocation embedded in a message. */
 export interface ToolCallBlock {
     type: "tool_call";
+    /** Globally unique identifier owned by Rig. */
     id: string;
+    /** Original identifier emitted by the provider and replayed on the provider wire. */
+    providerToolCallId?: string;
     name: string;
     namespace?: string;
     arguments: unknown;
@@ -58,7 +61,10 @@ export interface ToolResultFailure {
 
 export interface ToolResultBlock {
     type: "tool_result";
+    /** Globally unique Rig identifier of the matching tool call. */
     toolCallId: string;
+    /** Original identifier replayed when returning this result to the provider. */
+    providerToolCallId?: string;
     toolName: string;
     /** Rendered tool answer produced by the tool's `toLLM` serializer. */
     rendered: readonly ContentBlock[];

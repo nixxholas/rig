@@ -7,6 +7,7 @@ export function createToolResultBlock(
     result: unknown,
     toolCallId: string,
     vendor?: unknown,
+    providerToolCallId?: string,
 ): ToolResultBlock {
     const isError = tool.isError as ((result: unknown) => boolean) | undefined;
     const toLLM = tool.toLLM as (result: unknown) => ToolResultBlock["rendered"];
@@ -25,6 +26,7 @@ export function createToolResultBlock(
     return {
         type: "tool_result",
         toolCallId,
+        ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
         toolName: tool.name,
         rendered: boundToolResultContent(toLLM(result)),
         display: toUI(result, args),

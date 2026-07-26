@@ -54,7 +54,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
             );
             return {
                 role: "tool",
-                callId: message.toolCallId,
+                callId: message.providerToolCallId ?? message.toolCallId,
                 content: message.content
                     .filter((content) => content.type === "text")
                     .map((content) => content.text)
@@ -68,7 +68,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
         const toolCalls = message.content
             .filter((content) => content.type === "toolCall")
             .map((content) => ({
-                callId: content.id,
+                callId: content.providerToolCallId ?? content.id,
                 name: content.name,
                 ...(content.namespace === undefined ? {} : { namespace: content.namespace }),
                 arguments:

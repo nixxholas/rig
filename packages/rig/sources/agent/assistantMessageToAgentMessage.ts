@@ -56,6 +56,9 @@ function providerToolCallToAgentBlock(
     return {
         type: "tool_call",
         id: toolCall.id,
+        ...(toolCall.providerToolCallId === undefined
+            ? {}
+            : { providerToolCallId: toolCall.providerToolCallId }),
         name: toolCall.name,
         ...(toolCall.namespace === undefined ? {} : { namespace: toolCall.namespace }),
         arguments: toolCall.arguments,

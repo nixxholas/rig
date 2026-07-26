@@ -68,7 +68,10 @@ export interface ImageContent {
 /** Tool invocation requested by the model. */
 export interface ToolCall {
     type: "toolCall";
+    /** Globally unique identifier owned by Rig. */
     id: string;
+    /** Original identifier emitted by the provider and replayed on the provider wire. */
+    providerToolCallId?: string;
     name: string;
     namespace?: string;
     arguments: Record<string, unknown>;
@@ -129,7 +132,10 @@ export interface AssistantMessage {
 
 export interface ToolResultMessage {
     role: "toolResult";
+    /** Globally unique Rig identifier of the matching tool call. */
     toolCallId: string;
+    /** Original identifier replayed when returning this result to the provider. */
+    providerToolCallId?: string;
     toolName: string;
     content: readonly ToolResultContent[];
     isError: boolean;

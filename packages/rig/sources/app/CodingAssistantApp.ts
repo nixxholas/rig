@@ -3464,24 +3464,6 @@ export class CodingAssistantApp implements Component, Focusable {
                       ? "Compacting conversation"
                       : "Idle";
             }
-        } else if (event.type === "tool_batch_rejected") {
-            const rejectedIds = new Set(event.toolCallIds);
-            this.#entries = this.#entries.filter(
-                (entry) => !this.#streamedToolCallEntries.has(entry),
-            );
-            this.#streamedToolCallEntries.clear();
-            for (const toolCallId of rejectedIds) {
-                this.#activeToolCallIds.delete(toolCallId);
-                this.#awaitingApprovalToolCallIds.delete(toolCallId);
-                this.#reviewingPermissionToolCallIds.delete(toolCallId);
-                this.#runningToolCallIds.delete(toolCallId);
-                this.#toolStatusByCallId.delete(toolCallId);
-                if (!this.#entries.some((entry) => entry.id === toolCallId)) {
-                    this.#seenToolCallIds.delete(toolCallId);
-                    this.#stoppedToolCallIds.delete(toolCallId);
-                }
-            }
-            this.#statusText = "Working";
         } else if (event.type === "permission_review") {
             if (event.decision === "deny") {
                 this.#reviewingPermissionToolCallIds.delete(event.toolCallId);

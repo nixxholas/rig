@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 describe("duplicate model tool call identifier handling", () => {
-    it("runs neither a benign nor hostile action and makes the rejection unmistakable", async () => {
+    it("executes each call under a unique Rig ID and replays the provider ID", async () => {
         const benignCommand = "printf 'benign ran\\n' > benign-action-ran.txt";
         const hostileCommand = "printf 'hostile ran\\n' > hostile-action-ran.txt";
         const gym = await createGym({
@@ -42,15 +42,15 @@ describe("duplicate model tool call identifier handling", () => {
                     (message) => message.role === "toolResult",
                 );
                 expect(toolResults).toHaveLength(2);
-                expect(toolResults.every((message) => message.isError)).toBe(true);
+                expect(toolResults.every((message) => !message.isError)).toBe(true);
                 expect(new Set(toolResults.map((message) => message.toolCallId)).size).toBe(2);
-                expect(JSON.stringify(toolResults)).toContain("No tools were run.");
-                expect(JSON.stringify(request.context.messages)).not.toContain(
-                    "compromised-model-reused-id",
-                );
-                return {
-                    content: [{ text: "DUPLICATE_BATCH_RECOVERY_OK", type: "text" }],
-                };
+                expect(
+                    toolResults.every(
+                        (message) =>
+                            message.providerToolCallId === "compromised-model-reused-id",
+                    ),
+                ).toBe(true);
+                return { content: [{ text: "DUPLICATE_BATCH_OK", type: "text" }] };
             },
             rows: ROWS,
         });
@@ -58,50 +58,21 @@ describe("duplicate model tool call identifier handling", () => {
         const baseline = (await gym.terminal.snapshot()).scroll;
 
         submit(gym, "Inspect the workspace, but do not make any changes.");
-        const rejected = await gym.terminal.waitUntil(
-            (snapshot) => {
-                const text = normalizeWhitespace(snapshot.text);
-                return (
-                    text.includes("Rig rejected this entire batch of 2 requested actions") &&
-                    text.includes("The requests could not be safely distinguished") &&
-                    text.includes("No tools were run") &&
-                    text.includes("Ask Rig to do anything") &&
-                    snapshot.scroll.atBottom
-                );
-            },
-            "a complete and visible rejection of the ambiguous batch",
-            30_000,
-        );
-        expect(rejected.text).toContain(benignCommand);
-        expect(rejected.text).toContain(hostileCommand);
-        expect(rejected.text).not.toContain("Running 1 tool");
-        expect(rejected.text).not.toContain("Running 2 tools");
-        expect(rejected.text).not.toContain("compromised-model-reused-id");
-        expect(rejected.text).not.toContain("exec_command");
-        expect(rejected.rows.filter((row) => row.includes("• Failed printf"))).toHaveLength(2);
-        await expect(gym.readFile("benign-action-ran.txt")).rejects.toMatchObject({
-            code: "ENOENT",
-        });
-        await expect(gym.readFile("hostile-action-ran.txt")).rejects.toMatchObject({
-            code: "ENOENT",
-        });
-        assertHealthyTerminal(rejected, baseline);
-
-        submit(gym, "Confirm that the session recovered without running those actions.");
-        const recovered = await gym.terminal.waitUntil(
+        const completed = await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes("DUPLICATE_BATCH_RECOVERY_OK") &&
+                snapshot.text.includes("DUPLICATE_BATCH_OK") &&
                 snapshot.text.includes("Ask Rig to do anything") &&
                 snapshot.scroll.atBottom,
-            "a healthy follow-up after the rejected batch",
+            "both calls with a repeated provider ID completing",
             30_000,
         );
-        expect(recovered.text).not.toContain("compromised-model-reused-id");
-        assertHealthyTerminal(recovered, baseline);
-        expect(agentRequests(gym)).toHaveLength(2);
+        await expect(gym.readFile("benign-action-ran.txt")).resolves.toBe("benign ran\n");
+        await expect(gym.readFile("hostile-action-ran.txt")).resolves.toBe("hostile ran\n");
+        assertHealthyTerminal(completed, baseline);
+        expect(agentRequests(gym)).toHaveLength(1);
     }, 120_000);
 
-    it("rejects identifier reuse on a later turn without erasing earlier audit history", async () => {
+    it("allows identifier reuse on a later turn without colliding with earlier history", async () => {
         const firstCommand = "printf 'first audited action\\n' > first-audited-action.txt";
         const reusedCommand = "printf 'reused id ran\\n' > reused-id-action-ran.txt";
         const providerId = "provider-id-from-earlier-turn";
@@ -123,8 +94,8 @@ describe("duplicate model tool call identifier handling", () => {
                 if (callIndex === 1) {
                     expect(request.context.messages.at(-1)).toMatchObject({
                         isError: false,
+                        providerToolCallId: providerId,
                         role: "toolResult",
-                        toolCallId: providerId,
                     });
                     return { content: [{ text: "FIRST_ACTION_AUDITED", type: "text" }] };
                 }
@@ -139,6 +110,14 @@ describe("duplicate model tool call identifier handling", () => {
                             },
                         ],
                     };
+                }
+                if (callIndex === 3) {
+                    expect(request.context.messages.at(-1)).toMatchObject({
+                        isError: false,
+                        providerToolCallId: providerId,
+                        role: "toolResult",
+                    });
+                    return { content: [{ text: "REUSED_ACTION_AUDITED", type: "text" }] };
                 }
                 throw new Error(`Unexpected inference call ${String(callIndex)}.`);
             },
@@ -164,27 +143,19 @@ describe("duplicate model tool call identifier handling", () => {
 
         submit(gym, "Run a later action even if its provider identifier repeats.");
         const reused = await gym.terminal.waitUntil(
-            (snapshot) => {
-                const text = normalizeWhitespace(snapshot.text);
-                return (
-                    text.includes("Rig rejected this entire batch of 1 requested actions") &&
-                    text.includes("the model reused an action identifier") &&
-                    text.includes("No tools were run") &&
-                    text.includes("Ask Rig to do anything") &&
-                    snapshot.scroll.atBottom
-                );
-            },
-            "cross-turn identifier reuse being rejected",
+            (snapshot) =>
+                snapshot.text.includes("REUSED_ACTION_AUDITED") &&
+                snapshot.text.includes("Ask Rig to do anything") &&
+                snapshot.scroll.atBottom,
+            "cross-turn provider identifier reuse completing",
             30_000,
         );
         expect(reused.text).toContain("Ran printf 'first audited action");
-        expect(reused.text).toContain("Failed printf 'reused id ran");
+        expect(reused.text).toContain("Ran printf 'reused id ran");
         expect(reused.text).not.toContain(providerId);
-        await expect(gym.readFile("reused-id-action-ran.txt")).rejects.toMatchObject({
-            code: "ENOENT",
-        });
+        await expect(gym.readFile("reused-id-action-ran.txt")).resolves.toBe("reused id ran\n");
         assertHealthyTerminal(reused, baseline);
-        expect(agentRequests(gym)).toHaveLength(3);
+        expect(agentRequests(gym)).toHaveLength(4);
     }, 120_000);
 });
 
@@ -197,10 +168,6 @@ function agentRequests(gym: Gym) {
     return gym.inference.requests.filter(
         (request) => !request.options.sessionId?.endsWith(":title"),
     );
-}
-
-function normalizeWhitespace(value: string): string {
-    return value.replace(/\s+/gu, " ");
 }
 
 function assertHealthyTerminal(

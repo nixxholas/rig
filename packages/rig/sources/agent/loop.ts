@@ -3,8 +3,6 @@ import { Value } from "@sinclair/typebox/value";
 
 import { assistantMessageToAgentMessage } from "./assistantMessageToAgentMessage.js";
 import { boundToolResultBlocks } from "./boundToolResultBlocks.js";
-import { collectToolCallIds } from "./collectToolCallIds.js";
-import { createAmbiguousToolCallRejection } from "./createAmbiguousToolCallRejection.js";
 import { createErrorToolResultBlock } from "./createErrorToolResultBlock.js";
 import { createToolResultBlock } from "./createToolResultBlock.js";
 import type { AgentContext } from "./context/AgentContext.js";
@@ -170,10 +168,6 @@ export type AgentLoopEvent =
           toolCallId: string;
       }
     | {
-          type: "tool_batch_rejected";
-          toolCallIds: readonly string[];
-      }
-    | {
           type: "permission_review";
           action: string;
           decision: "allow" | "deny";
@@ -250,7 +244,6 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
     );
     const toolContext = options.context;
     const toolLocks = new ToolLockManager();
-    const usedToolCallIds = collectToolCallIds(transcript);
     const compactCurrentContext = (compaction: { force: boolean; reportedTokens?: number }) =>
         compactLoopContext({
             compaction,
@@ -285,6 +278,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         let assistantMessage: ProviderAssistantMessage;
         let pendingStartEvent: AgentLoopEvent | undefined;
         let deferredErrorEvents: AgentLoopEvent[] = [];
+        const rigToolCallIds = new Map<number, string>();
         try {
             const preparedProviderMessages = await prepareProviderMessageImages(
                 providerMessages,
@@ -303,7 +297,11 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     if (options.signal?.aborted) {
                         throw new Error("Provider stream was aborted.");
                     }
-                    const event = next.value;
+                    const event = assignRigToolCallEventIds(
+                        next.value,
+                        rigToolCallIds,
+                        idFactory,
+                    );
                     if (event.type === "start") {
                         pendingStartEvent = event;
                         continue;
@@ -318,7 +316,11 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     }
                     await options.onEvent?.(event);
                 }
-                return stream.result();
+                return assignRigToolCallIds(
+                    await stream.result(),
+                    rigToolCallIds,
+                    idFactory,
+                );
             };
             const outcome = await raceWithAbort(consume(), options.signal);
             if (outcome === ABORTED_BY_SIGNAL) {
@@ -409,40 +411,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             await options.onEvent?.(event);
         }
 
-        const ambiguousToolCallRejection = createAmbiguousToolCallRejection(
-            assistantMessage,
-            idFactory,
-            { providerId: options.provider.id, requestedModelId: model.id },
-            usedToolCallIds,
-        );
-        if (ambiguousToolCallRejection !== undefined) {
-            await options.onEvent?.({
-                type: "tool_batch_rejected",
-                toolCallIds: ambiguousToolCallRejection.originalToolCallIds,
-            });
-            transcript.push(
-                ambiguousToolCallRejection.assistantMessage,
-                ambiguousToolCallRejection.resultMessage,
-            );
-            contextTranscript.push(
-                ambiguousToolCallRejection.assistantMessage,
-                ambiguousToolCallRejection.resultMessage,
-            );
-            await options.onMessage?.(ambiguousToolCallRejection.assistantMessage);
-            await options.onMessage?.(ambiguousToolCallRejection.resultMessage);
-            await appendSteering(options, transcript, contextTranscript, providerMessages, now);
-            return {
-                errorMessage: ambiguousToolCallRejection.errorMessage,
-                messages: transcript,
-                contextMessages: contextTranscript,
-                stopReason: "error",
-            };
-        }
-
         providerMessages.push(assistantMessage);
-        for (const block of assistantMessage.content) {
-            if (block.type === "toolCall") usedToolCallIds.add(block.id);
-        }
 
         const toolCalls = assistantMessage.content
             .filter(isProviderToolCall)
@@ -1103,6 +1072,9 @@ function toProviderAssistantContent(
         return {
             type: "toolCall",
             id: block.id,
+            ...(block.providerToolCallId === undefined
+                ? {}
+                : { providerToolCallId: block.providerToolCallId }),
             name: block.name,
             ...(block.namespace === undefined ? {} : { namespace: block.namespace }),
             arguments: block.arguments as Record<string, unknown>,
@@ -1132,6 +1104,9 @@ function toProviderToolResultMessage(
     return {
         role: "toolResult",
         toolCallId: block.toolCallId,
+        ...(block.providerToolCallId === undefined
+            ? {}
+            : { providerToolCallId: block.providerToolCallId }),
         toolName: block.toolName,
         content: block.rendered.map(toProviderToolResultContent),
         isError: block.isError ?? false,
@@ -1362,6 +1337,7 @@ async function executeToolCall(
             result,
             toolCall.id,
             toolCall.vendor,
+            toolCall.providerToolCallId,
         );
     } catch (error) {
         await options.onError?.(error);
@@ -1411,6 +1387,63 @@ function toolDispatchKey(name: string, namespace: string | undefined): string {
 
 function isProviderToolCall(content: ProviderAssistantContent): content is ProviderToolCall {
     return content.type === "toolCall";
+}
+
+function assignRigToolCallIds(
+    message: ProviderAssistantMessage,
+    rigToolCallIds: Map<number, string>,
+    idFactory: () => string,
+): ProviderAssistantMessage {
+    return {
+        ...message,
+        content: message.content.map((content, contentIndex) =>
+            content.type === "toolCall"
+                ? localizeToolCall(content, contentIndex, rigToolCallIds, idFactory)
+                : content,
+        ),
+    };
+}
+
+function assignRigToolCallEventIds(
+    event: AssistantMessageEvent,
+    rigToolCallIds: Map<number, string>,
+    idFactory: () => string,
+): AssistantMessageEvent {
+    if (event.type === "done") {
+        return {
+            ...event,
+            message: assignRigToolCallIds(event.message, rigToolCallIds, idFactory),
+        };
+    }
+    if (event.type === "error") {
+        return {
+            ...event,
+            error: assignRigToolCallIds(event.error, rigToolCallIds, idFactory),
+        };
+    }
+    if (!("partial" in event)) return event;
+    const partial = assignRigToolCallIds(event.partial, rigToolCallIds, idFactory);
+    if (event.type !== "toolcall_end") return { ...event, partial };
+    const toolCall = partial.content[event.contentIndex];
+    return toolCall?.type === "toolCall" ? { ...event, partial, toolCall } : { ...event, partial };
+}
+
+function localizeToolCall(
+    toolCall: ProviderToolCall,
+    contentIndex: number,
+    rigToolCallIds: Map<number, string>,
+    idFactory: () => string,
+): ProviderToolCall {
+    let rigId = rigToolCallIds.get(contentIndex);
+    if (rigId === undefined) {
+        rigId = idFactory();
+        rigToolCallIds.set(contentIndex, rigId);
+    }
+    return {
+        ...toolCall,
+        id: rigId,
+        providerToolCallId: toolCall.providerToolCallId ?? toolCall.id,
+    };
 }
 
 function zeroUsage(): Usage {
