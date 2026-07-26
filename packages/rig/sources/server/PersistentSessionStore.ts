@@ -9,6 +9,7 @@ import type {
     ChangeServiceTierRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    GitRepositoryFacts,
     ModelCatalog,
     Project,
     ProjectWorkspace,
@@ -723,6 +724,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     getProject(projectId: string): Project | undefined {
         return this.#projects.getProject(projectId);
+    }
+
+    applyGitFacts(
+        target: { projectId: string; workspaceId?: string },
+        facts: GitRepositoryFacts,
+    ): void {
+        this.#projects.applyGitFacts(target, facts);
     }
 
     listProjects(): readonly Project[] {

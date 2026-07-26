@@ -4,6 +4,7 @@ import type {
     ChangeServiceTierRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    GitRepositoryFacts,
     Project,
     ProjectWorkspace,
     ReorderRequest,
@@ -55,6 +56,10 @@ export interface SessionStore {
     }): readonly ExternalToolCall[];
     listSubagents(parentSessionId: string): readonly SubagentSummary[];
     listSecrets(): readonly SecretSummary[];
+    applyGitFacts(
+        target: { projectId: string; workspaceId?: string },
+        facts: GitRepositoryFacts,
+    ): void;
     listProjects(): readonly Project[];
     listWorkspaces(projectId?: string): readonly ProjectWorkspace[];
     renameProject(projectId: string, name: string): Project | undefined;

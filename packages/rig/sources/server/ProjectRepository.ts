@@ -309,6 +309,66 @@ export class ProjectRepository {
         );
     }
 
+    /**
+     * Persists Git facts observed by a live scan.
+     *
+     * Branch, HEAD, and upstream are durable state, so a commit or a checkout has to reach clients
+     * that are not watching the live stream. The change snapshot itself stays live-only; only these
+     * few slow-moving fields are written, and only when one actually differs.
+     */
+    applyGitFacts(
+        target: { projectId: string; workspaceId?: string },
+        facts: GitRepositoryFacts,
+    ): void {
+        const bindings = [
+            facts.branch ?? null,
+            facts.head ?? null,
+            facts.upstream ?? null,
+            facts.ahead,
+            facts.behind,
+            facts.detached ? 1 : 0,
+        ];
+        this.#transaction(() => {
+            const isWorkspace = target.workspaceId !== undefined;
+            const result = this.#database
+                .prepare(
+                    isWorkspace
+                        ? `
+                        UPDATE project_workspaces
+                        SET git_branch = ?, git_head = ?, git_upstream = ?,
+                            git_ahead = ?, git_behind = ?, git_detached = ?,
+                            version = version + 1, updated_at_ms = ?
+                        WHERE id = ? AND (
+                            git_branch IS NOT ? OR git_head IS NOT ? OR git_upstream IS NOT ?
+                            OR git_ahead IS NOT ? OR git_behind IS NOT ? OR git_detached IS NOT ?
+                        )
+                        `
+                        : `
+                        UPDATE projects
+                        SET git_branch = ?, git_head = ?, git_upstream = ?,
+                            git_ahead = ?, git_behind = ?, git_detached = ?,
+                            version = version + 1, updated_at_ms = ?
+                        WHERE id = ? AND removed_at_ms IS NULL AND (
+                            git_branch IS NOT ? OR git_head IS NOT ? OR git_upstream IS NOT ?
+                            OR git_ahead IS NOT ? OR git_behind IS NOT ? OR git_detached IS NOT ?
+                        )
+                        `,
+                )
+                .run(
+                    ...bindings,
+                    this.#now(),
+                    isWorkspace ? target.workspaceId! : target.projectId,
+                    ...bindings,
+                );
+            if (result.changes === 0) return;
+            if (isWorkspace) {
+                this.#publishedWorkspace(target.projectId, target.workspaceId!);
+            } else {
+                this.#publishedProject(target.projectId);
+            }
+        });
+    }
+
     async #reconcileProjectGitFacts(project: Project): Promise<void> {
         const probe = await probeGitRepository({
             git: (cwd, args) => this.#git(cwd, args),

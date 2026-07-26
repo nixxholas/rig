@@ -247,6 +247,18 @@ export async function runLocalProtocolServer(
             // Snapshots ride the live channel, so they reach subscribers without ever entering the
             // durable log; branch and HEAD changes travel as ordinary project/workspace updates.
             onLiveEvent: (event) => store?.globalEventQueue.publishLive(event),
+            onSnapshot: (entity, snapshot) => {
+                if (snapshot.comparison !== "ready") return;
+                store?.applyGitFacts(
+                    {
+                        projectId: entity.projectId,
+                        ...(entity.workspaceId === undefined
+                            ? {}
+                            : { workspaceId: entity.workspaceId }),
+                    },
+                    snapshot.facts,
+                );
+            },
             taskDrain,
         });
         const happyModule = await loadHappyIntegration(
