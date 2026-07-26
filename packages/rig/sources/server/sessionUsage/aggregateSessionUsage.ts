@@ -66,6 +66,41 @@ export function aggregateSessionUsage(
 
         if (
             event.type === "agent_event" &&
+            event.data.event.type === "permission_review" &&
+            event.data.event.transcript !== undefined
+        ) {
+            // The reviewer spends the user's tokens on its own model, so it is billed under that
+            // model. It never becomes the active model, because it is not what the conversation
+            // is running on and its history is not the context window the user is watching.
+            const transcript = event.data.event.transcript;
+            const groupKey = JSON.stringify([
+                transcript.providerId,
+                transcript.modelId,
+                "permission_review",
+            ]);
+            let groupIndex = attributedGroupIndexes.get(groupKey);
+            if (groupIndex === undefined) {
+                groupIndex = groups.length;
+                attributedGroupIndexes.set(groupKey, groupIndex);
+                groups.push({
+                    kind: "attributed",
+                    modelId: transcript.modelId,
+                    providerId: transcript.providerId,
+                    requestedModelId: transcript.modelId,
+                    role: "permission_review",
+                    usage: zeroUsage(),
+                });
+            }
+            const reviewerGroup = groups[groupIndex] as AttributedSessionUsageGroup;
+            groups[groupIndex] = {
+                ...reviewerGroup,
+                usage: addUsage(reviewerGroup.usage, transcript.usage),
+            };
+            continue;
+        }
+
+        if (
+            event.type === "agent_event" &&
             event.data.event.type === "context_compacted" &&
             activeModel !== undefined
         ) {

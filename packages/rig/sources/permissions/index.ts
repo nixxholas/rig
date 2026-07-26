@@ -10,6 +10,8 @@ export type {
     PermissionReviewAgent,
     PermissionReviewRequest,
     PermissionReviewResponse,
+    PermissionReviewTranscript,
+    PermissionReviewTranscriptEntry,
 } from "./PermissionReviewAgent.js";
 export { createPermissionReviewSideAgent } from "./createPermissionReviewSideAgent.js";
 export { DEFAULT_PERMISSION_MODE } from "./PermissionMode.js";

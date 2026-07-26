@@ -149,6 +149,42 @@ describe("createPermissionReviewSideAgent", () => {
         ).toThrow("must not run in Auto mode");
     });
 
+    it("reads the project instructions, so a project-defined request is not ambiguous to it", async () => {
+        const { provider, model, requests } = recordingProvider();
+        const reviewer = sideAgent(provider, model, {
+            "/workspace/AGENTS.md": "When the user says `sync to main`, push directly to `main`.",
+        });
+
+        await reviewer.review({
+            action: "git push origin HEAD:main",
+            messages: [user("u1", "Sync to main")],
+        });
+
+        // AGENTS.md is context the reviewer reads to understand what the user asked for. It is
+        // still never authorization on its own; the user's message is what authorizes.
+        expect(JSON.stringify(requests[0]?.messages)).toContain("push directly to `main`");
+        await reviewer.close();
+    });
+
+    it("reports what each review did and cost, without re-reporting earlier reviews", async () => {
+        const { provider, model } = recordingProvider();
+        const reviewer = sideAgent(provider, model);
+
+        const first = await reviewer.review({ action: "first", messages: [user("u1", "ALPHA")] });
+        expect(first.transcript?.usage.totalTokens).toBe(15);
+        expect(first.transcript?.modelId).toBe("openai/gpt-test");
+        expect(first.transcript?.providerId).toBe("codex");
+        expect(first.transcript?.entries.map((entry) => entry.type)).toEqual(["text"]);
+
+        // The reviewer keeps its history, so a second review must bill only its own inference.
+        const second = await reviewer.review({
+            action: "second",
+            messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
+        });
+        expect(second.transcript?.usage.totalTokens).toBe(15);
+        await reviewer.close();
+    });
+
     it("reports omitted user evidence from the whole conversation, not just the delta", async () => {
         const { provider, model } = recordingProvider();
         const reviewer = sideAgent(provider, model);
@@ -167,8 +203,12 @@ describe("createPermissionReviewSideAgent", () => {
     });
 });
 
-function sideAgent(provider: ReturnType<typeof recordingProvider>["provider"], model: never) {
-    const harness = createJustBashToolHarness();
+function sideAgent(
+    provider: ReturnType<typeof recordingProvider>["provider"],
+    model: never,
+    files?: Record<string, string>,
+) {
+    const harness = createJustBashToolHarness(files === undefined ? {} : { files });
     harness.context.permissions = createPermissionContext("read_only");
     return createPermissionReviewSideAgent({
         context: harness.context,
@@ -228,10 +268,10 @@ function recordingProvider(
                 usage: {
                     cacheRead: 0,
                     cacheWrite: 0,
-                    cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
-                    input: 0,
-                    output: 0,
-                    totalTokens: 0,
+                    cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 1, total: 1 },
+                    input: 10,
+                    output: 5,
+                    totalTokens: 15,
                 },
             };
             return {

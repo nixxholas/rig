@@ -1,4 +1,5 @@
 import { parseJsonFromModelOutput } from "../utils/parseJsonFromModelOutput.js";
+import type { PermissionReviewTranscript } from "./PermissionReviewAgent.js";
 
 export type AutoPermissionRisk = "low" | "medium" | "high" | "critical";
 export type AutoPermissionUserAuthorization = "unknown" | "low" | "medium" | "high";
@@ -18,6 +19,8 @@ export interface AutoPermissionReview {
     reason: string;
     risk: AutoPermissionRisk;
     userAuthorization: AutoPermissionUserAuthorization;
+    /** What the reviewer did to reach this verdict, and what that cost. */
+    transcript?: PermissionReviewTranscript;
 }
 
 const RISKS: readonly AutoPermissionRisk[] = ["low", "medium", "high", "critical"];

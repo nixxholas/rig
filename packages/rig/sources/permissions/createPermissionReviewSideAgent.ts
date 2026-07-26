@@ -11,7 +11,11 @@ import type {
     PermissionReviewAgent,
     PermissionReviewRequest,
     PermissionReviewResponse,
+    PermissionReviewTranscript,
+    PermissionReviewTranscriptEntry,
 } from "./PermissionReviewAgent.js";
+import { addUsage } from "../server/sessionUsage/addUsage.js";
+import { zeroUsage } from "../server/sessionUsage/zeroUsage.js";
 
 /**
  * Builds the sister agent that reviews Auto permission decisions.
@@ -42,15 +46,21 @@ export function createPermissionReviewSideAgent(options: {
         id: options.id,
         modelId: options.model.id,
         printToConsole: false,
-        // AGENTS.md is repository content, so it is evidence for the reviewer at most, never
-        // instructions to it.
-        projectInstructions: "exclude",
+        // The reviewer reads the project instructions for the same reason Codex's guardian does:
+        // without them a project-defined request is unintelligible, and the reviewer mistakes a
+        // precise instruction for a vague one. They describe what the user asked for; they never
+        // authorize anything by themselves, which the review policy states explicitly.
+        projectInstructions: "include",
         provider: options.provider,
         ...(options.startDate === undefined ? {} : { startDate: options.startDate }),
         systemPrompt: PERMISSION_REVIEW_INSTRUCTIONS,
         tools: options.tools,
     });
     let reviewedMessageCount = 0;
+    // Where this review's own work starts inside the reviewer's history. The reviewer keeps that
+    // history across reviews, so without an offset every review would re-report earlier reviews'
+    // reasoning and re-count their tokens.
+    let reportedOwnMessageCount = 0;
     let reviewQueue = Promise.resolve();
     const serialize = <T>(operation: () => Promise<T>): Promise<T> => {
         const result = reviewQueue.then(operation);
@@ -65,6 +75,7 @@ export function createPermissionReviewSideAgent(options: {
     // reviewer over instead, which also means the next review has to resend the conversation.
     const discardUnfinishedReview = async (): Promise<void> => {
         reviewedMessageCount = 0;
+        reportedOwnMessageCount = 0;
         await agent.reset();
     };
     return {
@@ -103,18 +114,106 @@ export function createPermissionReviewSideAgent(options: {
                     await discardUnfinishedReview();
                     throw error;
                 }
+                // An unfinished review still spent whatever it spent before it stopped, so its
+                // work is reported either way and only the reusable history is discarded.
+                const own = result.messages.slice(reportedOwnMessageCount);
+                const transcript = createReviewTranscript(
+                    own,
+                    options.model.id,
+                    options.provider.id,
+                );
                 if (result.stopReason !== "stop") {
                     await discardUnfinishedReview();
-                    return { text: "", userEvidenceOmitted: whole.userEvidenceOmitted };
+                    return {
+                        text: "",
+                        userEvidenceOmitted: whole.userEvidenceOmitted,
+                        ...(transcript === undefined ? {} : { transcript }),
+                    };
                 }
                 reviewedMessageCount = request.messages.length;
+                reportedOwnMessageCount = result.messages.length;
                 return {
                     text: finalText(result.messages),
                     userEvidenceOmitted: whole.userEvidenceOmitted,
+                    ...(transcript === undefined ? {} : { transcript }),
                 };
             }),
         close: () => serialize(() => agent.close()),
     };
+}
+
+/**
+ * Records what one review did, bounded so a reviewer that investigates at length cannot grow the
+ * session's stored history without limit. Usage is summed before any entry is dropped, so what a
+ * review cost stays exact even when what it said is abbreviated.
+ */
+function createReviewTranscript(
+    own: readonly Message[],
+    modelId: string,
+    providerId: string,
+): PermissionReviewTranscript | undefined {
+    const entries: PermissionReviewTranscriptEntry[] = [];
+    let usage = zeroUsage();
+    let inferred = false;
+    for (const message of own) {
+        if (message.role !== "agent") continue;
+        if (message.usage !== undefined) {
+            usage = addUsage(usage, message.usage);
+            inferred = true;
+        }
+        for (const block of message.blocks) {
+            if (block.type === "thinking") {
+                entries.push({ type: "thinking", text: block.thinking });
+            } else if (block.type === "text") {
+                entries.push({ type: "text", text: block.text });
+            } else if (block.type === "tool_call") {
+                entries.push({
+                    type: "tool_call",
+                    name: block.name,
+                    arguments: safeJson(block.arguments),
+                });
+            } else if (block.type === "tool_result") {
+                entries.push({
+                    type: "tool_result",
+                    name: block.toolName,
+                    isError: block.isError === true,
+                    text: block.rendered
+                        .map((part) => (part.type === "text" ? part.text : "[image]"))
+                        .join("\n"),
+                });
+            }
+        }
+    }
+    if (!inferred && entries.length === 0) return undefined;
+    return { entries: boundEntries(entries), modelId, providerId, usage };
+}
+
+const MAX_TRANSCRIPT_ENTRY_CHARACTERS = 2_000;
+const MAX_TRANSCRIPT_ENTRIES = 60;
+
+function boundEntries(
+    entries: readonly PermissionReviewTranscriptEntry[],
+): readonly PermissionReviewTranscriptEntry[] {
+    // The verdict is the last thing the reviewer says, so the tail is what must survive.
+    const retained = entries.slice(-MAX_TRANSCRIPT_ENTRIES);
+    return retained.map((entry) =>
+        entry.type === "tool_call"
+            ? { ...entry, arguments: truncate(entry.arguments) }
+            : { ...entry, text: truncate(entry.text) },
+    );
+}
+
+function truncate(text: string): string {
+    if (text.length <= MAX_TRANSCRIPT_ENTRY_CHARACTERS) return text;
+    return `${text.slice(0, MAX_TRANSCRIPT_ENTRY_CHARACTERS)}\n[...truncated...]`;
+}
+
+function safeJson(value: unknown): string {
+    try {
+        return JSON.stringify(value) ?? String(value);
+    } catch {
+        return String(value);
+    }
 }
 
 function finalText(messages: readonly Message[]): string {

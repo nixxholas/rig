@@ -237,9 +237,99 @@ describe("aggregateSessionUsage", () => {
             sessionTokenCount: { lastContextTokens: 35, totalTokens: 35 },
         });
     });
+    it("bills permission review usage to the reviewer model without making it the active model", () => {
+        const result = aggregateSessionUsage(
+            [
+                inference("event-1", usage(10), {
+                    providerId: "codex",
+                    requestedModelId: "openai/gpt-5.6",
+                }),
+                permissionReview("event-2", usage(3), "codex", "openai/codex-auto-review"),
+                permissionReview("event-3", usage(2), "codex", "openai/codex-auto-review"),
+            ],
+            primary,
+        );
+
+        expect(result.groups).toHaveLength(2);
+        expect(result.groups[1]).toMatchObject({
+            kind: "attributed",
+            modelId: "openai/codex-auto-review",
+            providerId: "codex",
+            usage: { input: 5, totalTokens: 50 },
+        });
+        // The reviewer's own history is not the conversation's context window.
+        expect(result.currentContext).toMatchObject({
+            modelId: "openai/gpt-5.6",
+            totalTokens: 100,
+        });
+    });
+
+    it("ignores a permission review that recorded no inference", () => {
+        const result = aggregateSessionUsage(
+            [
+                inference("event-1", usage(10), {
+                    providerId: "codex",
+                    requestedModelId: "openai/gpt-5.6",
+                }),
+                {
+                    createdAt: 1,
+                    data: {
+                        event: {
+                            action: "running a command",
+                            decision: "deny",
+                            reason: "No reviewer was available.",
+                            risk: "medium",
+                            toolCallId: "call-1",
+                            type: "permission_review",
+                            userAuthorization: "low",
+                        },
+                        runId: "run-1",
+                    },
+                    id: "event-2",
+                    sessionId: "session-1",
+                    type: "agent_event",
+                } as SessionEvent,
+            ],
+            primary,
+        );
+
+        expect(result.groups).toHaveLength(1);
+    });
 });
 
 const primary = { type: "primary" } as const;
+
+function permissionReview(
+    id: string,
+    reviewUsage: Usage,
+    providerId: string,
+    modelId: string,
+): SessionEvent {
+    return {
+        createdAt: 1,
+        data: {
+            event: {
+                action: "running a command",
+                decision: "allow",
+                reason: "Routine.",
+                risk: "low",
+                toolCallId: `call-${id}`,
+                transcript: {
+                    entries: [{ text: "Routine.", type: "text" }],
+                    modelId,
+                    providerId,
+                    usage: reviewUsage,
+                },
+                type: "permission_review",
+                userAuthorization: "high",
+            },
+            runId: `run-${id}`,
+        },
+        id,
+        sessionId: "session-1",
+        type: "agent_event",
+    } as SessionEvent;
+}
 
 function usage(input: number): Usage {
     return {

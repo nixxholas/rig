@@ -383,6 +383,8 @@ export interface SessionUsageGroup {
     modelId: string;
     providerId: string;
     requestedModelId: string;
+    /** Set when these tokens were spent reviewing permissions rather than answering the user. */
+    role?: "permission_review";
     usage: Usage;
     responseModel?: string;
 }

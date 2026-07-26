@@ -55,6 +55,7 @@ import {
     type AutoPermissionRisk,
     type AutoPermissionUserAuthorization,
     type PermissionReviewAgent,
+    type PermissionReviewTranscript,
 } from "../permissions/index.js";
 import type { DebugLog } from "../debug/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
@@ -174,6 +175,8 @@ export type AgentLoopEvent =
           reason: string;
           risk: AutoPermissionRisk;
           toolCallId: string;
+          /** The reviewer's own reasoning, tool calls, and token usage for this verdict. */
+          transcript?: PermissionReviewTranscript;
           userAuthorization: AutoPermissionUserAuthorization;
       }
     | {
@@ -1118,6 +1121,7 @@ async function prepareToolPermission(
             decision: "allow" | "deny";
             reason: string;
             risk: AutoPermissionRisk;
+            transcript?: PermissionReviewTranscript;
             userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
         permissionReviewAgent?: () => PermissionReviewAgent;
@@ -1175,6 +1179,7 @@ async function prepareToolPermission(
             decision: review.decision,
             reason: review.reason,
             risk: review.risk,
+            ...(review.transcript === undefined ? {} : { transcript: review.transcript }),
             userAuthorization: review.userAuthorization,
         });
         return { action, kind: "review", review };
@@ -1206,6 +1211,7 @@ async function executeToolCall(
             decision: "allow" | "deny";
             reason: string;
             risk: AutoPermissionRisk;
+            transcript?: PermissionReviewTranscript;
             userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
         onError?: (error: unknown) => void | Promise<void>;

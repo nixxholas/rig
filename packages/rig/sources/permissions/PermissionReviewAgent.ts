@@ -1,3 +1,4 @@
+import type { Usage } from "@slopus/rig-execution";
 import type { Message } from "../agent/types.js";
 
 export interface PermissionReviewRequest {
@@ -13,7 +14,31 @@ export interface PermissionReviewResponse {
     text: string;
     /** True when user authorization history did not fit, which forces a fail-closed result. */
     userEvidenceOmitted: boolean;
+    /**
+     * What the reviewer did to reach this verdict, recorded so a decision can be explained after
+     * the fact. A review that produced no inference reports no transcript.
+     */
+    transcript?: PermissionReviewTranscript;
 }
+
+/**
+ * One review's own work: the reasoning and tool calls behind a verdict, plus what it cost.
+ *
+ * The reviewer spends real tokens on the user's account, so its usage is attributed to the model
+ * that actually ran rather than folded into the agent it reviews.
+ */
+export interface PermissionReviewTranscript {
+    entries: readonly PermissionReviewTranscriptEntry[];
+    modelId: string;
+    providerId: string;
+    usage: Usage;
+}
+
+export type PermissionReviewTranscriptEntry =
+    | { type: "thinking"; text: string }
+    | { type: "text"; text: string }
+    | { type: "tool_call"; name: string; arguments: string }
+    | { type: "tool_result"; name: string; isError: boolean; text: string };
 
 /**
  * A side agent that reviews one proposed action.

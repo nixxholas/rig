@@ -90,7 +90,10 @@ function modelName(
         (candidate) =>
             candidate.providerId === group.providerId && candidate.model.id === group.modelId,
     );
-    return choice?.model.name ?? humanizeIdentifier(group.modelId);
+    const name = choice?.model.name ?? humanizeIdentifier(group.modelId);
+    // Reviews are work the user never asked for directly, so they are named for what they did
+    // rather than left to look like another slice of the conversation.
+    return group.role === "permission_review" ? `${name} (permission review)` : name;
 }
 
 function formatModelUsage(group: SessionUsageGroup): string {
@@ -112,6 +115,9 @@ function isCurrentContextGroup(
     const context = summary.context;
     return (
         context !== undefined &&
+        // A reviewer running on the conversation's model still has its own history, so it never
+        // owns the context window even when every other field matches.
+        group.role === undefined &&
         group.providerId === summary.currentProviderId &&
         group.providerId === context.providerId &&
         group.modelId === context.modelId

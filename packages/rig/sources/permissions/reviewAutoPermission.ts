@@ -43,26 +43,34 @@ export async function reviewAutoPermission(options: {
             options.signal,
         );
         if (response === ABORTED_BY_SIGNAL) throw new Error("Permission review was stopped.");
-        if (deadline.signal.aborted) return timedOutReview();
+        // What the review did and cost is recorded even when its verdict is unreadable, refused,
+        // or overridden, because the work happened regardless of how it ended.
+        const withTranscript = <TReview extends AutoPermissionReview>(
+            review: TReview,
+        ): TReview => ({
+            ...review,
+            ...(response.transcript === undefined ? {} : { transcript: response.transcript }),
+        });
+        if (deadline.signal.aborted) return withTranscript(timedOutReview());
         const review = parseAutoPermissionReview(response.text);
         if (review?.decision === "allow") {
             // Routine low-risk work does not depend on historical authorization. Actions with
             // meaningful impact must still fail closed when that evidence is incomplete.
             if (response.userEvidenceOmitted && review.risk !== "low") {
-                return incompleteUserEvidenceReview(review.risk);
+                return withTranscript(incompleteUserEvidenceReview(review.risk));
             }
             if (!shouldAllowAutoPermissionReview(review)) {
-                return { ...review, decision: "deny", denialKind: "rejected" };
+                return withTranscript({ ...review, decision: "deny", denialKind: "rejected" });
             }
         }
-        return (
+        return withTranscript(
             review ?? {
                 decision: "deny",
                 denialKind: "rejected",
                 reason: "The automatic permission review returned an unreadable decision.",
                 risk: "medium",
                 userAuthorization: "low",
-            }
+            },
         );
     } catch (error) {
         if (options.signal?.aborted) throw error;
