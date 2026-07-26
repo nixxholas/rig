@@ -286,7 +286,13 @@ export async function runLocalProtocolServer(
             onSessionEvent: (event, session) => {
                 if (happyModule !== undefined) happySyncService?.observe(event, session);
                 if (store !== undefined && gitStateTracker !== undefined) {
-                    markGitStateFromSessionEvent(event, store, gitStateTracker);
+                    const identity = session?.projectIdentity();
+                    markGitStateFromSessionEvent(
+                        event,
+                        store,
+                        gitStateTracker,
+                        ...(identity === undefined ? [] : ([identity] as const)),
+                    );
                 }
             },
             taskDrain,

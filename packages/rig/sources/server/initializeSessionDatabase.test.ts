@@ -58,6 +58,82 @@ describe("initializeSessionDatabase", () => {
         }
     });
 
+    it("migrates an older database that still has sessions without a project", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            for (const [table, columns] of [
+                [
+                    "projects",
+                    [
+                        "presence",
+                        "worktree_support",
+                        "worktree_support_reason",
+                        "git_branch",
+                        "git_head",
+                        "git_upstream",
+                        "git_ahead",
+                        "git_behind",
+                        "git_detached",
+                    ],
+                ],
+                [
+                    "project_workspaces",
+                    [
+                        "base_commit",
+                        "presence",
+                        "git_branch",
+                        "git_head",
+                        "git_upstream",
+                        "git_ahead",
+                        "git_behind",
+                        "git_detached",
+                    ],
+                ],
+            ] as const) {
+                for (const column of columns) {
+                    database.exec(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+                }
+            }
+            database.exec("ALTER TABLE project_workspaces ADD COLUMN branch TEXT");
+            // A legacy session with no project is what forces the backfill to insert a project
+            // row, which is where column ordering during the migration becomes observable.
+            database
+                .prepare(
+                    `
+                    INSERT INTO sessions (
+                        id, agent_id, cwd, provider_id, model_id, models_json, tools_json,
+                        status, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                )
+                .run(
+                    "legacy-session",
+                    "codex",
+                    "/tmp/rig-legacy",
+                    "codex",
+                    "gpt",
+                    "[]",
+                    "[]",
+                    "idle",
+                    1,
+                    1,
+                );
+            database.exec("UPDATE sessions SET project_id = NULL");
+            database.exec("PRAGMA user_version = 9");
+
+            expect(() => initializeSessionDatabase(database)).not.toThrow();
+
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 10 });
+            const project = database
+                .prepare("SELECT presence FROM projects WHERE path = ?")
+                .get("/tmp/rig-legacy");
+            expect(project).toMatchObject({ presence: "missing" });
+        } finally {
+            database.close();
+        }
+    });
+
     it("rolls back every schema change when a migration fails", () => {
         const database = new DatabaseSync(":memory:");
         try {

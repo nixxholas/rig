@@ -349,7 +349,9 @@ describe("ProtocolHttpClient", () => {
 
             const watching = client.watchGlobalEvents({
                 signal: controller.signal,
-                async onEvent(entry) {
+                async onEvent(delivery) {
+                    if ("live" in delivery) return;
+                    const entry = delivery;
                     attempted.push(entry.cursor);
                     if (entry.cursor === first.cursor && failFirstOnce) {
                         await firstGate.promise;
@@ -400,7 +402,7 @@ describe("ProtocolHttpClient", () => {
                     applicationStarted.resolve(undefined);
                     controller.abort();
                     await releaseApplication.promise;
-                    applied.push(received.cursor);
+                    if (!("live" in received)) applied.push(received.cursor);
                 },
             });
             void watching.then(() => {

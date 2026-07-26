@@ -204,6 +204,27 @@ describe("scanGitRepository", () => {
         expect(file(snapshot, "conflict.txt").status).toBe("conflicted");
     });
 
+    it("counts a staged deletion once even though Git also lists it as untracked", async () => {
+        const repository = await createRepository();
+        await write(repository, "removed.txt", "one\ntwo\n");
+        await commitAll(repository);
+        // `git rm --cached` leaves the file on disk, so porcelain v2 reports both a staged deletion
+        // and an untracked file for the same path.
+        await git(repository, ["rm", "--cached", "--quiet", "removed.txt"]);
+
+        const snapshot = await scanGitRepository({ path: repository });
+
+        expect(snapshot.changedFiles).toBe(1);
+        expect(file(snapshot, "removed.txt")).toMatchObject({
+            deletions: 2,
+            insertions: 0,
+            staged: true,
+            status: "deleted",
+        });
+        expect(snapshot.insertions).toBe(0);
+        expect(snapshot.deletions).toBe(2);
+    });
+
     it("reports a clean tree as no change at all", async () => {
         const repository = await createRepository();
         await write(repository, "a.txt", "1\n");

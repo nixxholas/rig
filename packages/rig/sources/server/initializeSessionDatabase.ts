@@ -474,6 +474,23 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             backfillProjectOrderKeys(database);
         }
 
+        // Columns are added before the backfill below, which inserts project rows and therefore
+        // binds every column this version knows about. Running the backfill first fails the whole
+        // migration transaction on an older database that still has sessions without a project,
+        // leaving the daemon unable to start.
+        for (const [name, definition] of gitFactColumnMigrations) {
+            ensureColumn(database, "projects", name, definition);
+            ensureColumn(database, "project_workspaces", name, definition);
+        }
+        ensureColumn(database, "projects", "worktree_support", "TEXT NOT NULL DEFAULT 'unknown'");
+        ensureColumn(database, "projects", "worktree_support_reason", "TEXT");
+        ensureColumn(database, "project_workspaces", "base_commit", "TEXT");
+        // Managed worktrees are always created detached, so the superseded `branch` column was
+        // never populated. Git tracking reports the branch through `git_branch` instead.
+        if (hasColumn(database, "project_workspaces", "branch")) {
+            database.exec("ALTER TABLE project_workspaces DROP COLUMN branch");
+        }
+
         const historicalSessions = database
             .prepare(
                 "SELECT DISTINCT cwd FROM sessions WHERE project_id IS NULL ORDER BY created_at_ms ASC",
@@ -503,19 +520,6 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         if (schemaVersion < 8) {
             backfillWorkspaceOrderKeys(database);
             backfillSessionOrderKeys(database);
-        }
-
-        for (const [name, definition] of gitFactColumnMigrations) {
-            ensureColumn(database, "projects", name, definition);
-            ensureColumn(database, "project_workspaces", name, definition);
-        }
-        ensureColumn(database, "projects", "worktree_support", "TEXT NOT NULL DEFAULT 'unknown'");
-        ensureColumn(database, "projects", "worktree_support_reason", "TEXT");
-        ensureColumn(database, "project_workspaces", "base_commit", "TEXT");
-        // Managed worktrees are always created detached, so the superseded `branch` column was
-        // never populated. Git tracking reports the branch through `git_branch` instead.
-        if (hasColumn(database, "project_workspaces", "branch")) {
-            database.exec("ALTER TABLE project_workspaces DROP COLUMN branch");
         }
 
         const queuedRunColumns = new Set(

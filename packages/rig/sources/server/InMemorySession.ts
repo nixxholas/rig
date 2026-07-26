@@ -1320,6 +1320,17 @@ export class InMemorySession {
         return this.snapshot();
     }
 
+    /**
+     * Project and workspace identity without building a protocol snapshot. Observers on hot paths
+     * need only these two fields, and `snapshot()` walks every message to produce them.
+     */
+    projectIdentity(): { projectId: string; workspaceId?: string } {
+        return {
+            projectId: this.#projectId,
+            ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
+        };
+    }
+
     setArchived(archived: boolean): ProtocolSession {
         if (!archived && this.#workspaceArchived) {
             throw new Error("A session archived with its workspace cannot be restored.");

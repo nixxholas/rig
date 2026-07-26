@@ -20,9 +20,15 @@ export function markGitStateFromSessionEvent(
     event: SessionEvent,
     store: SessionStore,
     tracker: GitStateTracker,
+    /**
+     * The live session the observer was already handed. Re-fetching it would rebuild the whole
+     * protocol snapshot — filtering, sorting, and mapping every message — and would additionally
+     * fire session-access notifications, on every tool execution.
+     */
+    live?: { projectId: string; workspaceId?: string },
 ): void {
     if (!isWorkSignal(event)) return;
-    const session = store.get(event.sessionId)?.snapshot();
+    const session = live ?? store.get(event.sessionId)?.snapshot();
     if (session === undefined) return;
     const project = store.getProject(session.projectId);
     if (project === undefined) return;

@@ -1,4 +1,4 @@
-import { open } from "node:fs/promises";
+import { lstat, open } from "node:fs/promises";
 
 const BINARY_SNIFF_BYTES = 8 * 1024;
 const READ_CHUNK_BYTES = 64 * 1024;
@@ -26,6 +26,14 @@ export async function countUntrackedFileLines(
     path: string,
     maximumBytes: number,
 ): Promise<UntrackedFileCount> {
+    try {
+        // `open` follows symlinks, so a link would otherwise report its target's line count. Git
+        // stores the link itself, which is a single line.
+        const link = await lstat(path);
+        if (link.isSymbolicLink()) return { binary: false, inexact: false, insertions: 1 };
+    } catch {
+        return { binary: false, inexact: true };
+    }
     let handle;
     try {
         handle = await open(path, "r");
@@ -45,8 +53,9 @@ export async function countUntrackedFileLines(
             const { bytesRead } = await handle.read(buffer, 0, READ_CHUNK_BYTES, null);
             if (bytesRead === 0) break;
             const chunk = buffer.subarray(0, bytesRead);
-            if (inspected < BINARY_SNIFF_BYTES && chunk.includes(0)) {
-                return { binary: true, inexact: false };
+            if (inspected < BINARY_SNIFF_BYTES) {
+                const window = chunk.subarray(0, BINARY_SNIFF_BYTES - inspected);
+                if (window.includes(0)) return { binary: true, inexact: false };
             }
             inspected += bytesRead;
             for (let index = 0; index < bytesRead; index += 1) {

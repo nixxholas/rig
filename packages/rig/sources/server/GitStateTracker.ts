@@ -57,6 +57,8 @@ export interface GitStateTrackerOptions {
 
 interface RepositoryTracker {
     backoffMs: number;
+    backoffTimer: NodeJS.Timeout | undefined;
+    backoffUntil: number;
     debounceTimer: NodeJS.Timeout | undefined;
     dirtyAgain: boolean;
     entity: GitTrackedEntity;
@@ -143,6 +145,8 @@ export class GitStateTracker {
         }
         const tracker: RepositoryTracker = {
             backoffMs: BACKOFF_START_MS,
+            backoffTimer: undefined,
+            backoffUntil: 0,
             debounceTimer: undefined,
             dirtyAgain: false,
             entity,
@@ -238,10 +242,17 @@ export class GitStateTracker {
             return this.#stamp(key, await this.#runScan(entity));
         }
         tracker.lastActiveAt = this.#now();
-        // A scan already running observed the repository before this call, so waiting it out and
-        // scanning again is what makes a forced refresh actually fresh rather than merely recent.
-        await tracker.inFlight?.catch(() => undefined);
-        await this.#scanTracker(tracker);
+        // A scan already running observed the repository before this call, so it is waited out and
+        // a scan of this caller's own is then guaranteed. Settling for the in-flight result would
+        // make a forced refresh merely recent rather than fresh.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            await tracker.inFlight?.catch(() => undefined);
+            if (this.#disposed || this.#trackers.get(tracker.key) !== tracker) break;
+            if (!tracker.scanning) {
+                await this.#scanTracker(tracker);
+                break;
+            }
+        }
         return tracker.snapshot;
     }
 
@@ -306,6 +317,8 @@ export class GitStateTracker {
      */
     #retire(tracker: RepositoryTracker): void {
         tracker.generation += 1;
+        if (tracker.backoffTimer !== undefined) clearTimeout(tracker.backoffTimer);
+        tracker.backoffTimer = undefined;
         tracker.scanController?.abort();
         tracker.scanController = undefined;
         tracker.dirtyAgain = false;
@@ -336,6 +349,7 @@ export class GitStateTracker {
         if (this.#disposed || this.#taskDrain?.closing === true) return;
         const tracker = this.#trackers.get(key);
         if (tracker === undefined) return;
+        if (tracker.backoffTimer !== undefined && this.#now() < tracker.backoffUntil) return;
         if (tracker.scanning) {
             tracker.dirtyAgain = true;
             return;
@@ -391,15 +405,21 @@ export class GitStateTracker {
                 this.#onLiveEvent?.(this.#createLiveEvent(tracker.entity, snapshot));
             }
             tracker.backoffMs = BACKOFF_START_MS;
+            tracker.backoffUntil = 0;
         } catch {
             if (this.#disposed || tracker.generation !== generation) return;
             // A repository that keeps failing backs off instead of spinning on every dirty signal.
             const delay = tracker.backoffMs;
             tracker.backoffMs = Math.min(BACKOFF_LIMIT_MS, tracker.backoffMs * 2);
+            // Held until the backoff elapses so the dirty-again re-enqueue below cannot turn a
+            // repository whose scans keep failing into a spin.
+            tracker.backoffUntil = this.#now() + delay;
             const timer = setTimeout(() => {
+                tracker.backoffTimer = undefined;
                 this.#enqueue(tracker.key);
             }, delay);
             timer.unref?.();
+            tracker.backoffTimer = timer;
         } finally {
             tracker.scanning = false;
             tracker.scanController = undefined;

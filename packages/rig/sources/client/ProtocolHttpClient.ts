@@ -28,7 +28,7 @@ import type {
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
     GetSessionUsageResponse,
-    GlobalEventQueueEntry,
+    GlobalEventDelivery,
     GlobalStateResponse,
     HealthResponse,
     GoalSessionResponse,
@@ -112,7 +112,8 @@ export interface WatchSessionEventsOptions {
 export interface WatchGlobalEventsOptions {
     after?: string;
     signal?: AbortSignal;
-    onEvent: (entry: GlobalEventQueueEntry) => void | Promise<void>;
+    /** Receives stored entries and live deliveries; only stored ones carry a cursor. */
+    onEvent: (delivery: GlobalEventDelivery) => void | Promise<void>;
 }
 
 export interface AttachRemoteTerminalOptions {
@@ -786,9 +787,10 @@ export class ProtocolHttpClient {
             try {
                 after = await this.#watchGlobalEventsOnce(after, {
                     ...options,
-                    onEvent: async (entry) => {
-                        await options.onEvent(entry);
-                        after = entry.cursor;
+                    onEvent: async (delivery) => {
+                        await options.onEvent(delivery);
+                        // Resumption follows stored events only; a live delivery has no position.
+                        if (!("live" in delivery)) after = delivery.cursor;
                     },
                 });
             } catch (error) {
@@ -1069,11 +1071,13 @@ export class ProtocolHttpClient {
                             if (boundary < 0) break;
                             const rawEvent = buffer.slice(0, boundary);
                             buffer = buffer.slice(boundary + 2);
-                            const entry = parseGlobalSseEvent(rawEvent);
-                            if (entry === undefined) continue;
+                            const delivery = parseGlobalSseEvent(rawEvent);
+                            if (delivery === undefined) continue;
                             application = application.then(async () => {
-                                await options.onEvent(entry);
-                                cursor = entry.cursor;
+                                await options.onEvent(delivery);
+                                // A live delivery has no cursor, so resumption stays anchored to
+                                // the last stored event.
+                                if (!("live" in delivery)) cursor = delivery.cursor;
                             });
                             void application.catch((error: unknown) => {
                                 response.destroy();

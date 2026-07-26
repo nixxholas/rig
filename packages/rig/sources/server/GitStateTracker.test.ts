@@ -184,6 +184,48 @@ describe("GitStateTracker", () => {
         expect(scan.calls).toBe(1);
     });
 
+    it("owns a scan of its own when a refresh lands during one", async () => {
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        let first = true;
+        const scan = countingScan(
+            () => ({}),
+            async () => {
+                if (!first) return;
+                first = false;
+                await gate;
+            },
+        );
+        const tracker = createTracker({ scan });
+
+        tracker.watch(entity());
+        await waitFor(() => scan.calls === 1);
+        const refreshed = tracker.refresh(entity());
+        release();
+        await refreshed;
+
+        // Settling for the in-flight scan would make a forced refresh merely recent: that scan
+        // read the repository before the caller asked.
+        expect(scan.calls).toBeGreaterThanOrEqual(2);
+    });
+
+    it("backs off instead of spinning when a change arrives during a failing scan", async () => {
+        const scan = countingScan(() => {
+            throw new Error("git exploded");
+        });
+        const tracker = createTracker({ scan });
+
+        tracker.watch(entity());
+        await waitFor(() => scan.calls === 1);
+        for (let index = 0; index < 10; index += 1) tracker.markChanged(entity());
+        await settle();
+
+        // The dirty-again re-enqueue must not bypass the backoff window.
+        expect(scan.calls).toBe(1);
+    });
+
     it("answers a refresh for an entity it is not watching without retaining it", async () => {
         const tracker = createTracker({ scan: countingScan(() => ({ insertions: 5 })) });
 

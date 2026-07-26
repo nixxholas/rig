@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { GitStateTracker, type GitChangeSnapshot } from "./GitStateTracker.js";
+import { supportsRecursiveWorktreeWatch } from "./watchGitRepositoryChanges.js";
 import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
 import type { Project } from "../protocol/index.js";
 
@@ -24,29 +25,33 @@ describe("GitStateTracker watching", () => {
      * arming no watchers at all, because the entity never carried the Git directories the tracker
      * required and every other test either stubbed the watcher or called `?refresh=1`.
      */
-    it("publishes a snapshot from a file change alone, without a forced refresh", async () => {
-        const repository = await createRepository();
-        const published: GitChangeSnapshot[] = [];
-        const tracker = new GitStateTracker({
-            onSnapshot: (_entity, snapshot) => published.push(snapshot),
-            // A reconciliation poll this slow cannot be what delivers the change.
-            tuning: { debounceMs: 20, maximumDebounceMs: 50, reconcileIntervalMs: 600_000 },
-        });
-        cleanups.push(async () => tracker.dispose());
-        const entity = resolveGitTrackedEntity(projectFor(repository));
-        if (entity === undefined) throw new Error("Expected a trackable project.");
+    it.runIf(supportsRecursiveWorktreeWatch())(
+        "publishes a snapshot from a working-tree edit alone, without a forced refresh",
+        async () => {
+            const repository = await createRepository();
+            const published: GitChangeSnapshot[] = [];
+            const tracker = new GitStateTracker({
+                onSnapshot: (_entity, snapshot) => published.push(snapshot),
+                // A reconciliation poll this slow cannot be what delivers the change.
+                tuning: { debounceMs: 20, maximumDebounceMs: 50, reconcileIntervalMs: 600_000 },
+            });
+            cleanups.push(async () => tracker.dispose());
+            const entity = resolveGitTrackedEntity(projectFor(repository));
+            if (entity === undefined) throw new Error("Expected a trackable project.");
 
-        tracker.watch(entity);
-        await waitFor(() => published.length >= 1);
-        const initial = published.length;
+            tracker.watch(entity);
+            await waitFor(() => published.length >= 1);
+            const initial = published.length;
 
-        await writeFile(join(repository, "watched.txt"), "one\ntwo\n");
+            await writeFile(join(repository, "watched.txt"), "one\ntwo\n");
 
-        await waitFor(() => published.length > initial, 15_000);
-        const latest = published.at(-1)!;
-        expect(latest.changedFiles).toBe(1);
-        expect(latest.insertions).toBe(2);
-    }, 30_000);
+            await waitFor(() => published.length > initial, 15_000);
+            const latest = published.at(-1)!;
+            expect(latest.changedFiles).toBe(1);
+            expect(latest.insertions).toBe(2);
+        },
+        30_000,
+    );
 
     it("notices a commit made outside Rig", async () => {
         const repository = await createRepository();

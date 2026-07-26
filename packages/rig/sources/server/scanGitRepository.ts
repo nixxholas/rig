@@ -82,7 +82,13 @@ async function scanOnce(
         // A truncated status silently drops files and staging flags, so the totals derived from it
         // can never be called exact.
         statusTruncated = result.truncated;
-        status = parseGitStatusV2(result.stdout);
+        // A truncated stream ends mid-record, so its last entry is a partial path that was never
+        // a real file. Reporting it would put a fabricated name in front of the user.
+        status = parseGitStatusV2(
+            result.truncated
+                ? result.stdout.slice(0, result.stdout.lastIndexOf("\0") + 1)
+                : result.stdout,
+        );
     } catch (error) {
         return failed(emptyFacts(), errorToMessage(error), now());
     }
@@ -126,12 +132,27 @@ async function scanOnce(
         return failed(facts, errorToMessage(error), now(), conflicted);
     }
 
-    const staging = new Map(status.entries.map((entry) => [entry.path, entry]));
+    // One path can appear twice in status: `git rm --cached` leaves a staged deletion *and* an
+    // untracked file for the same name. The tracked record wins, so the staged deletion is not
+    // relabelled as an ordinary new file.
+    const staging = new Map<string, GitStatusEntry>();
+    for (const entry of status.entries) {
+        const existing = staging.get(entry.path);
+        if (existing === undefined || (existing.untracked && !entry.untracked)) {
+            staging.set(entry.path, entry);
+        }
+    }
     const changes: GitFileChange[] = diff.map((change) =>
         trackedChange(change, staging.get(change.path)),
     );
 
-    const untracked = status.entries.filter((entry) => entry.untracked);
+    // The same duplication would otherwise count that path twice: once as a deletion from the diff
+    // and once as an addition from the untracked list, so a tree identical to the base reports
+    // changes in both directions.
+    const diffPaths = new Set(diff.map((change) => change.path));
+    const untracked = status.entries.filter(
+        (entry) => entry.untracked && !diffPaths.has(entry.path),
+    );
     let counted = 0;
     for (const entry of untracked) {
         if (counted >= UNTRACKED_COUNT_LIMIT) {
