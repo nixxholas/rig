@@ -511,6 +511,15 @@ export class ProtocolHttpClient {
         );
     }
 
+    archiveProject(projectId: string, expectedVersion: number): Promise<ProjectResponse> {
+        return this.#requestJson(
+            "POST",
+            `/projects/${encodeURIComponent(projectId)}/archive`,
+            {},
+            { "if-match": `"${String(expectedVersion)}"` },
+        );
+    }
+
     uploadProjectAvatar(
         projectId: string,
         bytes: Uint8Array,

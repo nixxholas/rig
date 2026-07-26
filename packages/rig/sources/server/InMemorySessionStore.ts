@@ -403,6 +403,33 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.createWorkspace(projectId, request);
     }
 
+    /*
+     * Archiving a project hides the whole folder: its root chats are archived, and every managed
+     * workspace is archived with the sessions and worktree directory it owns.
+     */
+    async archiveProject(
+        projectId: string,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        const project = this.#projects.archiveProject(projectId, expectedVersion);
+        if (project === undefined) return undefined;
+        for (const session of this.#sessions.values()) {
+            if (session.isSubagent()) continue;
+            const snapshot = session.snapshot();
+            if (snapshot.projectId !== projectId || snapshot.workspaceId !== undefined) continue;
+            session.setArchived(true);
+        }
+        for (const workspace of this.#projects.listWorkspaces(projectId)) {
+            if (workspace.status === "archived" || workspace.status === "archiving") continue;
+            await this.archiveWorkspace(projectId, workspace.id);
+        }
+        return this.getProject(projectId);
+    }
+
+    unarchiveProject(projectId: string): Project | undefined {
+        return this.#projects.unarchiveProject(projectId);
+    }
+
     async archiveWorkspace(
         projectId: string,
         workspaceId: string,

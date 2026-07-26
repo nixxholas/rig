@@ -29,7 +29,30 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived"),
             ).toMatchObject({ dflt_value: "0", notnull: 1, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 8 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("adds project archive state to earlier project databases", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            database.exec(`
+                ALTER TABLE projects DROP COLUMN archived_at_ms;
+                PRAGMA user_version = 8;
+            `);
+
+            initializeSessionDatabase(database);
+
+            expect(
+                database
+                    .prepare("PRAGMA table_info(projects)")
+                    .all()
+                    .find((column) => column.name === "archived_at_ms"),
+            ).toMatchObject({ notnull: 0, type: "INTEGER" });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 9 });
         } finally {
             database.close();
         }
@@ -67,10 +90,10 @@ describe("initializeSessionDatabase", () => {
     it("refuses to open a database from a newer Rig schema", () => {
         const database = new DatabaseSync(":memory:");
         try {
-            database.exec("PRAGMA user_version = 9");
+            database.exec("PRAGMA user_version = 10");
 
             expect(() => initializeSessionDatabase(database)).toThrow(
-                "The session database uses schema version 9, but this Rig version supports up to 8.",
+                "The session database uses schema version 10, but this Rig version supports up to 9.",
             );
             expect(
                 database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),

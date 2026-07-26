@@ -869,6 +869,23 @@ avatar sources remain protected.
 
 All successful mutations publish `project_updated`.
 
+### Project archival
+
+```http
+POST /projects/:projectId/archive
+If-Match: "<project-version>"
+```
+
+Archiving a project hides the whole folder at once. It stamps `archivedAt`, archives every chat in
+the project root, and archives each managed workspace through the workspace lifecycle above, so the
+attached sessions end archived and the worktree directories are removed. Repeating the request
+returns the already archived project unchanged, and the response is `202` because the workspace
+cleanup continues after the project is marked.
+
+A project is only a folder, so it comes back by being used rather than through an unarchive
+command: starting a session in the project path, or restoring one of its chats, clears `archivedAt`
+and publishes `project_updated`. Archived workspaces and chats stay archived.
+
 ### Workspace mutation
 
 ```text

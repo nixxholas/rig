@@ -119,6 +119,42 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("archives a project with its chats and restores it when the folder is used again", async () => {
+        const store = new InMemorySessionStore();
+        const { client, close } = await startServer({ store });
+        try {
+            const first = await client.createSession({ cwd: "/tmp/rig-archive-api/project" });
+            const second = await client.createSession({ cwd: "/tmp/rig-archive-api/project" });
+            const project = (await client.getProject(first.session.projectId)).project;
+
+            await expect(client.archiveProject(project.id, project.version + 1)).rejects.toThrow(
+                "changed before it could be archived",
+            );
+
+            const archived = await client.archiveProject(project.id, project.version);
+            expect(archived.project.archivedAt).toBeGreaterThan(0);
+            await expect(client.listSessions()).resolves.toMatchObject({
+                sessions: expect.not.arrayContaining([
+                    expect.objectContaining({ id: first.session.id }),
+                    expect.objectContaining({ id: second.session.id }),
+                ]),
+            });
+
+            await client.unarchiveSession(second.session.id);
+            expect((await client.getProject(project.id)).project.archivedAt).toBeUndefined();
+
+            await client.archiveProject(
+                project.id,
+                (await client.getProject(project.id)).project.version,
+            );
+            const resumed = await client.createSession({ cwd: "/tmp/rig-archive-api/project" });
+            expect(resumed.session.projectId).toBe(project.id);
+            expect((await client.getProject(project.id)).project.archivedAt).toBeUndefined();
+        } finally {
+            await close();
+        }
+    });
+
     it("lists, renames, snapshots, and updates project avatars", async () => {
         const store = new InMemorySessionStore();
         const { client, close } = await startServer({ store });

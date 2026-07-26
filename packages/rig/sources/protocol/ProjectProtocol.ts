@@ -16,6 +16,7 @@ export interface ProjectAvatar {
 }
 
 export interface Project {
+    archivedAt?: number;
     avatar?: ProjectAvatar;
     avatarBuiltin?: "home";
     createdAt: number;

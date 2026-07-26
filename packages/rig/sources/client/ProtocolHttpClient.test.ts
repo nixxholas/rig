@@ -60,8 +60,10 @@ describe("ProtocolHttpClient", () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
         const socketPath = join(directory, "server.sock");
         const versions: Array<string | undefined> = [];
+        const paths: Array<string | undefined> = [];
         const server = createServer((request, response) => {
             versions.push(request.headers["if-match"]);
+            paths.push(request.url);
             response.writeHead(200, { "content-type": "application/json" });
             response.end('{"workspace":{}}');
         });
@@ -72,8 +74,10 @@ describe("ProtocolHttpClient", () => {
 
             await client.renameProjectWorkspace("project-1", "workspace-1", { name: "Renamed" }, 3);
             await client.archiveProjectWorkspace("project-1", "workspace-1", 4);
+            await client.archiveProject("project-1", 5);
 
-            expect(versions).toEqual(['"3"', '"4"']);
+            expect(versions).toEqual(['"3"', '"4"', '"5"']);
+            expect(paths.at(-1)).toBe("/projects/project-1/archive");
         } finally {
             await new Promise<void>((resolve) => server.close(() => resolve()));
             await rm(directory, { recursive: true, force: true });

@@ -75,6 +75,8 @@ export interface SessionStore {
         request: ReorderRequest,
         expectedVersion?: number,
     ): ProjectWorkspace | undefined;
+    archiveProject(projectId: string, expectedVersion?: number): Promise<Project | undefined>;
+    unarchiveProject(projectId: string): Project | undefined;
     archiveWorkspace(
         projectId: string,
         workspaceId: string,

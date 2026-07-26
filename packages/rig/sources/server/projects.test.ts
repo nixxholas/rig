@@ -354,6 +354,69 @@ describe("projects", () => {
         expect(observedStates).toContain("archived");
         expect(observedStates).not.toContain("ready");
     });
+
+    it("archives its chats and workspaces, and returns when the folder is used again", async () => {
+        const fixture = await createFixture();
+        const repository = join(fixture.root, "source");
+        await mkdir(repository);
+        await git(repository, ["init"]);
+        await git(repository, ["config", "user.email", "rig@example.test"]);
+        await git(repository, ["config", "user.name", "Rig Test"]);
+        await writeFile(join(repository, "README.md"), "fixture\n");
+        await git(repository, ["add", "README.md"]);
+        await git(repository, ["commit", "-m", "Initial"]);
+
+        const root = fixture.store.create({ cwd: repository });
+        const projectId = root.snapshot().projectId;
+        const created = await fixture.store.createWorkspace(projectId, {
+            baseRef: "HEAD",
+            clientRequestId: "archive-project",
+            name: "Feature",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const workspace = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            created.id,
+            (value) => value.status === "ready",
+        );
+        const attached = fixture.store.create({ cwd: workspace.path, workspaceId: workspace.id });
+
+        const archived = await fixture.store.archiveProject(
+            projectId,
+            fixture.store.getProject(projectId)!.version,
+        );
+
+        expect(archived?.archivedAt).toBeGreaterThan(0);
+        expect(fixture.store.get(root.id)?.snapshot().archived).toBe(true);
+        expect(fixture.store.get(attached.id)?.snapshot().status).toBe("archived");
+        expect(fixture.store.getWorkspace(projectId, workspace.id)?.status).toBe("archived");
+        await expect(access(workspace.path)).rejects.toThrow();
+
+        const resumed = fixture.store.create({ cwd: repository });
+        expect(resumed.snapshot().projectId).toBe(projectId);
+        expect(fixture.store.getProject(projectId)?.archivedAt).toBeUndefined();
+    });
+
+    it("refuses to archive against a stale version and repeats without effect", async () => {
+        const fixture = await createFixture();
+        const directory = join(fixture.root, "folder");
+        await mkdir(directory);
+        const session = fixture.store.create({ cwd: directory });
+        const projectId = session.snapshot().projectId;
+
+        await expect(fixture.store.archiveProject(projectId, 999)).rejects.toThrow(
+            /changed before it could be archived/,
+        );
+
+        const archived = await fixture.store.archiveProject(
+            projectId,
+            fixture.store.getProject(projectId)!.version,
+        );
+        const repeated = await fixture.store.archiveProject(projectId, 999);
+        expect(repeated?.archivedAt).toBe(archived?.archivedAt);
+        expect(repeated?.version).toBe(archived?.version);
+    });
 });
 
 async function createFixture(

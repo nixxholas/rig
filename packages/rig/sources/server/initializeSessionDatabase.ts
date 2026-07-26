@@ -9,7 +9,7 @@ import { folderProjectName, projectNameKey, projectStorageKey } from "./projectI
 import { initializePersistentGlobalEventQueueSchema } from "./PersistentGlobalEventQueue.js";
 import { generateKeyBetween, generateNKeysBetween } from "../utils/fractionalIndexing.js";
 
-const CURRENT_SCHEMA_VERSION = 8;
+const CURRENT_SCHEMA_VERSION = 9;
 
 const sessionColumnMigrations = [
     ["project_id", "TEXT"],
@@ -163,7 +163,8 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 initialization_attempt INTEGER NOT NULL DEFAULT 0,
                 version INTEGER NOT NULL DEFAULT 1,
                 created_at_ms INTEGER NOT NULL,
-                updated_at_ms INTEGER NOT NULL
+                updated_at_ms INTEGER NOT NULL,
+                archived_at_ms INTEGER
             );
 
             CREATE TABLE IF NOT EXISTS project_workspaces (
@@ -365,6 +366,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         `);
 
         ensureColumn(database, "projects", "order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''");
+        ensureColumn(database, "projects", "archived_at_ms", "INTEGER");
         ensureColumn(
             database,
             "project_workspaces",

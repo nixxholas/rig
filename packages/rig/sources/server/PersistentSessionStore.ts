@@ -782,6 +782,49 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#projects.createWorkspace(projectId, request);
     }
 
+    archiveProject(projectId: string, expectedVersion?: number): Promise<Project | undefined> {
+        const archive = () => this.#archiveProject(projectId, expectedVersion);
+        return this.#taskDrain?.run(archive) ?? archive();
+    }
+
+    unarchiveProject(projectId: string): Project | undefined {
+        return this.#projects.unarchiveProject(projectId);
+    }
+
+    /*
+     * Archiving a project hides the whole folder: its root chats are archived, and every managed
+     * workspace is archived with the sessions and worktree directory it owns.
+     */
+    async #archiveProject(
+        projectId: string,
+        expectedVersion?: number,
+    ): Promise<Project | undefined> {
+        let project: Project | undefined;
+        let rootSessionIds: string[] = [];
+        this.#transaction(() => {
+            project = this.#projects.archiveProject(projectId, expectedVersion);
+            if (project === undefined) return;
+            rootSessionIds = this.#database
+                .prepare(
+                    `
+                    SELECT id FROM sessions
+                    WHERE project_id = ? AND workspace_id IS NULL AND parent_session_id IS NULL
+                    `,
+                )
+                .all(projectId)
+                .map((row) => readString(row, "id"));
+        });
+        if (project === undefined) return undefined;
+        for (const sessionId of rootSessionIds) {
+            this.get(sessionId)?.setArchived(true);
+        }
+        for (const workspace of this.#projects.listWorkspaces(projectId)) {
+            if (workspace.status === "archived" || workspace.status === "archiving") continue;
+            await this.#archiveWorkspace(projectId, workspace.id);
+        }
+        return this.getProject(projectId);
+    }
+
     archiveWorkspace(
         projectId: string,
         workspaceId: string,

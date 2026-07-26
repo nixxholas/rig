@@ -381,6 +381,25 @@ async function handleRequest(
         return;
     }
 
+    if (route.name === "project-archive" && request.method === "POST") {
+        const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+        if (expectedVersion === undefined) {
+            sendJson(response, 400, { error: "The project version is invalid." });
+            return;
+        }
+        try {
+            const project = await store.archiveProject(route.projectId, expectedVersion);
+            if (project === undefined) {
+                sendJson(response, 404, { error: "Project not found" });
+                return;
+            }
+            sendJson<ProjectResponse>(response, 202, { project });
+        } catch (error) {
+            sendJson(response, 409, { error: errorToMessage(error) });
+        }
+        return;
+    }
+
     if (route.name === "project-avatar") {
         if (request.method === "PUT") {
             const contentType = request.headers["content-type"]?.split(";", 1)[0]?.trim();
@@ -1005,9 +1024,12 @@ async function handleRequest(
          * running and queued sessions may be hidden, and every archived session remains readable
          * and resumable by ID. Repeating either action is intentionally idempotent.
          */
-        sendJson<SessionArchiveResponse>(response, 200, {
-            session: session.setArchived(route.name === "archive"),
-        });
+        const archived = session.setArchived(route.name === "archive");
+        if (route.name === "unarchive") {
+            // A visible chat must never sit under a project the user archived.
+            store.unarchiveProject(archived.projectId);
+        }
+        sendJson<SessionArchiveResponse>(response, 200, { session: archived });
         return;
     }
 
@@ -1549,6 +1571,7 @@ function matchRoute(pathname: string):
     | {
           name:
               | "project"
+              | "project-archive"
               | "project-avatar"
               | "project-refresh"
               | "project-reorder"
@@ -1641,6 +1664,9 @@ function matchRoute(pathname: string):
     if (globalParts[0] === "projects" && globalParts[1] !== undefined) {
         const projectId = decodeURIComponent(globalParts[1]);
         if (globalParts.length === 2) return { name: "project", projectId };
+        if (globalParts.length === 3 && globalParts[2] === "archive") {
+            return { name: "project-archive", projectId };
+        }
         if (globalParts.length === 3 && globalParts[2] === "avatar") {
             return { name: "project-avatar", projectId };
         }
@@ -1823,6 +1849,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (
         [
             "project",
+            "project-archive",
             "project-avatar",
             "project-refresh",
             "project-reorder",

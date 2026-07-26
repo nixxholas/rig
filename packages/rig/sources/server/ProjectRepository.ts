@@ -155,14 +155,21 @@ export class ProjectRepository {
             }
             const project = this.getProject(workspace.projectId);
             if (project === undefined) throw new Error("The workspace project was not found.");
-            return { project, workspace };
+            return { project: this.unarchiveProject(project.id) ?? project, workspace };
         }
         if (assertedWorkspaceId !== undefined) {
             throw new Error("The workspace ID does not match the session directory.");
         }
 
         const existing = this.#database.prepare("SELECT * FROM projects WHERE path = ?").get(path);
-        if (existing !== undefined) return { project: readProject(existing) };
+        if (existing !== undefined) {
+            /*
+             * A project is only a folder, so working in it again is what brings it back: starting a
+             * session restores an archived project instead of asking the user to unarchive it.
+             */
+            const project = readProject(existing);
+            return { project: this.unarchiveProject(project.id) ?? project };
+        }
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
         const baseName = kind === "home" ? "Home" : folderProjectName(path);
@@ -679,6 +686,45 @@ export class ProjectRepository {
                 )
                 .run(orderKey, this.#now(), workspaceId, projectId);
             return this.#publishedWorkspace(projectId, workspaceId);
+        });
+    }
+
+    archiveProject(projectId: string, expectedVersion?: number): Project | undefined {
+        const project = this.getProject(projectId);
+        if (project === undefined) return undefined;
+        if (project.archivedAt !== undefined) return project;
+        if (expectedVersion !== undefined && expectedVersion !== project.version) {
+            throw new Error("The project changed before it could be archived.");
+        }
+        const now = this.#now();
+        return this.#transaction(() => {
+            this.#database
+                .prepare(
+                    `
+                    UPDATE projects
+                    SET archived_at_ms = ?, version = version + 1, updated_at_ms = ?
+                    WHERE id = ? AND archived_at_ms IS NULL
+                    `,
+                )
+                .run(now, now, projectId);
+            return this.#publishedProject(projectId);
+        });
+    }
+
+    unarchiveProject(projectId: string): Project | undefined {
+        const project = this.getProject(projectId);
+        if (project === undefined || project.archivedAt === undefined) return project;
+        return this.#transaction(() => {
+            this.#database
+                .prepare(
+                    `
+                    UPDATE projects
+                    SET archived_at_ms = NULL, version = version + 1, updated_at_ms = ?
+                    WHERE id = ? AND archived_at_ms IS NOT NULL
+                    `,
+                )
+                .run(this.#now(), projectId);
+            return this.#publishedProject(projectId);
         });
     }
 
@@ -1636,9 +1682,11 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string> {
 }
 
 function readProject(row: Record<string, unknown>): Project {
+    const archivedAt = readOptionalNumber(row, "archived_at_ms");
     const avatarHash = readOptionalString(row, "avatar_hash");
     const initializationError = readOptionalString(row, "initialization_error");
     const project: Project = {
+        ...(archivedAt === undefined ? {} : { archivedAt }),
         createdAt: readNumber(row, "created_at_ms"),
         id: readString(row, "id"),
         initializationAttempt: readNumber(row, "initialization_attempt"),
