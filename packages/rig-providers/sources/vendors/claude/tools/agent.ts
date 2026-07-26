@@ -27,14 +27,11 @@ export const claude_agent_tool: SessionTool = {
         model: Type.Optional(
             Type.String({
                 description:
-                    "Child model ID. The provider is inferred from recent successful use, the current provider, or the first available match.",
+                    "Child model ID. The provider is inferred from the current provider or a unique match when omitted.",
             }),
         ),
         provider: Type.Optional(
-            Type.String({
-                description:
-                    "Child provider ID. The model is inferred from recent successful use, the current model, or the first available model.",
-            }),
+            Type.String({ description: "Child provider ID. Requires an explicit model." }),
         ),
         run_in_background: Type.Optional(
             Type.Boolean({
@@ -70,14 +67,11 @@ export const claude_agent_tool_sonnet: SessionTool = {
         model: Type.Optional(
             Type.String({
                 description:
-                    "Child model ID. The provider is inferred from recent successful use, the current provider, or the first available match.",
+                    "Child model ID. The provider is inferred from the current provider or a unique match when omitted.",
             }),
         ),
         provider: Type.Optional(
-            Type.String({
-                description:
-                    "Child provider ID. The model is inferred from recent successful use, the current model, or the first available model.",
-            }),
+            Type.String({ description: "Child provider ID. Requires an explicit model." }),
         ),
         run_in_background: Type.Optional(
             Type.Boolean({
