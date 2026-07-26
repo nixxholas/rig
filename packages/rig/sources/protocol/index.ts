@@ -168,4 +168,4 @@ export type {
     UserInputResolvedEvent,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
-export { SESSION_DRAFT_MAX_LENGTH } from "./SessionProtocol.js";
+export { SESSION_DRAFT_MAX_CLOCK_SKEW_MS, SESSION_DRAFT_MAX_LENGTH } from "./SessionProtocol.js";

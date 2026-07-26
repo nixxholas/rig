@@ -1360,7 +1360,8 @@ async function handleRequest(
         if (
             body === null ||
             typeof body !== "object" ||
-            (body.draft !== null && typeof body.draft !== "string")
+            (body.draft !== null && typeof body.draft !== "string") ||
+            (body.updatedAt !== undefined && typeof body.updatedAt !== "number")
         ) {
             sendJson(response, 400, { error: "A draft must be text." });
             return;

@@ -172,14 +172,23 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         return this.#session.draft ?? "";
     }
 
+    get draftUpdatedAt(): number | undefined {
+        return this.#session.draftUpdatedAt;
+    }
+
     /**
      * Store the composer draft on the daemon so the other terminals and clients
-     * attached to this session show the same unsent message.
+     * attached to this session show the same unsent message. `updatedAt` is when
+     * the user typed it, which decides who wins when two clients disagree.
      */
-    async setDraft(draft: string, options: { origin?: string } = {}): Promise<void> {
+    async setDraft(
+        draft: string,
+        options: { origin?: string; updatedAt?: number } = {},
+    ): Promise<void> {
         await this.#client.setSessionDraft(this.#session.id, {
             draft: draft.length === 0 ? null : draft,
             ...(options.origin === undefined ? {} : { origin: options.origin }),
+            ...(options.updatedAt === undefined ? {} : { updatedAt: options.updatedAt }),
         });
     }
 
@@ -553,9 +562,11 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
         }
 
         if (event.type === "session_draft_changed") {
-            const { draft } = event.data;
+            const { draft, updatedAt } = event.data;
             this.#session =
-                draft === undefined ? omitDraft(this.#session) : { ...this.#session, draft };
+                draft === undefined
+                    ? { ...omitDraft(this.#session), draftUpdatedAt: updatedAt }
+                    : { ...this.#session, draft, draftUpdatedAt: updatedAt };
             return;
         }
 

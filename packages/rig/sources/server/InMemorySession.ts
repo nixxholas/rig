@@ -66,6 +66,7 @@ import type {
     UpdateSessionRequest,
 } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
+import { clampSessionDraftTimestamp } from "./clampSessionDraftTimestamp.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { sessionUnreadStateAfterEvent } from "./sessionUnreadStateAfterEvent.js";
 import { aggregateSessionTokenCount } from "../sessionTokenCount/aggregateSessionTokenCount.js";
@@ -206,6 +207,7 @@ export interface PersistedSessionState {
     cwd: string;
     docker?: DockerExecutionConfig;
     draft?: string;
+    draftUpdatedAt?: number;
     elapsedMs?: number;
     contextMessages?: readonly Message[];
     effort?: string;
@@ -385,6 +387,7 @@ export class InMemorySession {
     #compactionActive = false;
     #debugLogs = new Map<string, DebugLog>();
     #draft: string | undefined;
+    #draftUpdatedAt: number | undefined;
     #draining: Promise<void> | undefined;
     #elapsedMs = 0;
     #effort: string | undefined;
@@ -534,6 +537,7 @@ export class InMemorySession {
         this.#orderKey =
             options.restore?.orderKey ?? options.orderKey ?? generateKeyBetween(null, null);
         this.#draft = options.restore?.draft;
+        this.#draftUpdatedAt = options.restore?.draftUpdatedAt;
         this.#appendSystemPrompt =
             options.restore?.appendSystemPrompt ?? options.request.appendSystemPrompt;
         this.#systemPrompt = options.restore?.systemPrompt;
@@ -1305,11 +1309,20 @@ export class InMemorySession {
         if (draft !== undefined && draft.length > SESSION_DRAFT_MAX_LENGTH) {
             throw new Error("The draft is too long to sync.");
         }
+        const updatedAt = clampSessionDraftTimestamp(request.updatedAt, this.#now());
+        // The newest message wins, not the last one to arrive. A draft typed
+        // before the one already stored is discarded even when a slow client
+        // delivers it afterwards.
+        if (this.#draftUpdatedAt !== undefined && updatedAt < this.#draftUpdatedAt) {
+            return this.snapshot();
+        }
         if (this.#draft === draft) return this.snapshot();
         this.#draft = draft;
+        this.#draftUpdatedAt = updatedAt;
         this.#append("session_draft_changed", {
             ...(draft === undefined ? {} : { draft }),
             ...(request.origin === undefined ? {} : { origin: request.origin }),
+            updatedAt,
         });
         return this.snapshot();
     }
@@ -2241,6 +2254,7 @@ export class InMemorySession {
                 : {}),
             cwd: this.#request.cwd,
             ...(this.#draft === undefined ? {} : { draft: this.#draft }),
+            ...(this.#draftUpdatedAt === undefined ? {} : { draftUpdatedAt: this.#draftUpdatedAt }),
             environment: summarizeDockerExecution(this.#request.docker),
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
@@ -2304,6 +2318,7 @@ export class InMemorySession {
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             cwd: this.#request.cwd,
             ...(this.#draft === undefined ? {} : { draft: this.#draft }),
+            ...(this.#draftUpdatedAt === undefined ? {} : { draftUpdatedAt: this.#draftUpdatedAt }),
             environment: summarizeDockerExecution(this.#request.docker),
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
@@ -2351,6 +2366,7 @@ export class InMemorySession {
                 : {}),
             cwd: this.#request.cwd,
             ...(this.#draft === undefined ? {} : { draft: this.#draft }),
+            ...(this.#draftUpdatedAt === undefined ? {} : { draftUpdatedAt: this.#draftUpdatedAt }),
             elapsedMs: this.#elapsedMs,
             ...(this.#request.docker === undefined ? {} : { docker: this.#request.docker }),
             ...(contextMessages !== undefined ? { contextMessages: [...contextMessages] } : {}),

@@ -511,6 +511,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         unread_since_ms,
                         cwd,
                         draft,
+                        draft_updated_at_ms,
                         docker_json,
                         secret_ids_json,
                         provider_id,
@@ -559,6 +560,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
             const interruptionJson = readOptionalString(row, "interruption_json");
             const draft = readOptionalString(row, "draft");
+            const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
             const dockerJson = readOptionalString(row, "docker_json");
             const unreadReason = readOptionalString(row, "unread_reason");
             const unreadSince = readOptionalNumber(row, "unread_since_ms");
@@ -581,6 +583,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : {}),
                 cwd: readString(row, "cwd"),
                 ...(draft === undefined ? {} : { draft }),
+                ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
                 providerId: readString(row, "provider_id"),
                 modelId: readString(row, "model_id"),
                 permissionMode: parsePermissionMode(readString(row, "permission_mode")),
@@ -1126,6 +1129,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     unread_since_ms,
                     cwd,
                     draft,
+                    draft_updated_at_ms,
                     docker_json,
                     secret_ids_json,
                     provider_id,
@@ -1165,7 +1169,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     created_at_ms,
                     updated_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     project_id = excluded.project_id,
@@ -1185,6 +1189,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     unread_since_ms = excluded.unread_since_ms,
                     cwd = excluded.cwd,
                     draft = excluded.draft,
+                    draft_updated_at_ms = excluded.draft_updated_at_ms,
                     docker_json = excluded.docker_json,
                     secret_ids_json = excluded.secret_ids_json,
                     provider_id = excluded.provider_id,
@@ -1244,6 +1249,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 state.unread?.since ?? null,
                 state.cwd,
                 state.draft ?? null,
+                state.draftUpdatedAt ?? null,
                 state.docker === undefined ? null : JSON.stringify(state.docker),
                 JSON.stringify(state.secretIds ?? []),
                 state.providerId,
@@ -1768,6 +1774,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
         const serviceTier = readOptionalString(row, "service_tier");
         const draft = readOptionalString(row, "draft");
+        const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
         const dockerJson = readOptionalString(row, "docker_json");
         const secretIdsJson = readOptionalString(row, "secret_ids_json");
         const instructions = readOptionalString(row, "instructions");
@@ -1825,6 +1832,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(systemPrompt !== undefined ? { systemPrompt } : {}),
             cwd: readString(row, "cwd"),
             ...(draft === undefined ? {} : { draft }),
+            ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
             elapsedMs: readNumber(row, "elapsed_ms"),
             ...(dockerJson !== undefined
                 ? { docker: JSON.parse(dockerJson) as DockerExecutionConfig }

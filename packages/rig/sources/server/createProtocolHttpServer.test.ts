@@ -1761,11 +1761,37 @@ describe("createProtocolHttpServer", () => {
             await watching;
 
             expect(streamed.map((event) => event.data)).toEqual([
-                { draft: "Ship the draft feature", origin: "terminal-a" },
-                {},
+                {
+                    draft: "Ship the draft feature",
+                    origin: "terminal-a",
+                    updatedAt: expect.any(Number),
+                },
+                { updatedAt: expect.any(Number) },
             ]);
             const reloaded = await client.getSession(created.session.id);
             expect(reloaded.session.draft).toBeUndefined();
+        } finally {
+            await close();
+        }
+    });
+
+    it("discards a draft that was typed before the one it already holds", async () => {
+        const { client, close } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
+            const now = Date.now();
+
+            await client.setSessionDraft(created.session.id, {
+                draft: "typed second",
+                updatedAt: now - 1_000,
+            });
+            const stale = await client.setSessionDraft(created.session.id, {
+                draft: "typed first",
+                updatedAt: now - 30_000,
+            });
+
+            expect(stale.session.draft).toBe("typed second");
+            expect(stale.session.draftUpdatedAt).toBe(now - 1_000);
         } finally {
             await close();
         }
@@ -1802,7 +1828,7 @@ describe("createProtocolHttpServer", () => {
             originalStore = new PersistentSessionStore({ databasePath });
             server = await startServer({ store: originalStore });
             const created = await server.client.createSession({ cwd: "/tmp/rig-protocol-test" });
-            await server.client.setSessionDraft(created.session.id, {
+            const written = await server.client.setSessionDraft(created.session.id, {
                 draft: "Unsent when the terminal closed",
             });
             await server.close();
@@ -1815,6 +1841,7 @@ describe("createProtocolHttpServer", () => {
 
             const restored = await server.client.getSession(created.session.id);
             expect(restored.session.draft).toBe("Unsent when the terminal closed");
+            expect(restored.session.draftUpdatedAt).toBe(written.session.draftUpdatedAt);
             const listed = await server.client.listSessions(10);
             expect(listed.sessions[0]?.draft).toBe("Unsent when the terminal closed");
         } finally {

@@ -42,6 +42,8 @@ export interface CodingAssistantAgentBackend {
     readonly permissionMode: PermissionMode;
     /** Unsent composer text shared with the other clients on this session. */
     readonly draft?: string;
+    /** When that draft was typed, which decides who wins between clients. */
+    readonly draftUpdatedAt?: number | undefined;
     readonly goal?: SessionGoal | undefined;
     readonly projectSecretIds?: readonly string[];
     readonly secretIds?: readonly string[];
@@ -84,7 +86,7 @@ export interface CodingAssistantAgentBackend {
     ): void | Promise<void>;
     setServiceTier(serviceTier: ServiceTier | undefined): void | Promise<void>;
     setPermissionMode(mode: PermissionMode): void | Promise<void>;
-    setDraft?(draft: string, options?: { origin?: string }): Promise<void>;
+    setDraft?(draft: string, options?: { origin?: string; updatedAt?: number }): Promise<void>;
     setGoal?(objective: string): Promise<void>;
     snapshot(): AgentSnapshot;
 }

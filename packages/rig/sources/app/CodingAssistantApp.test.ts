@@ -9077,6 +9077,7 @@ describe("CodingAssistantApp", () => {
                 "Unsent from the last terminal and still unsent",
                 {
                     origin: expect.any(String),
+                    updatedAt: expect.any(Number),
                 },
             ),
         );

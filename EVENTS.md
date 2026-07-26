@@ -57,7 +57,7 @@ event queue. Durable events remain available after a server restart.
 | `effort_changed`               | The reasoning effort changes for the selected model.                                                  | `modelId`, optional `effort`, `snapshot`                                                     | Yes    |
 | `service_tier_changed`         | The selected inference service tier changes.                                                          | `serviceTier`: selected tier or `null`; `snapshot`                                           | Yes    |
 | `permission_mode_changed`      | The session permission mode is applied.                                                               | `permissionMode`                                                                             | Yes    |
-| `session_draft_changed`        | A client stores or clears the session's unsent composer text.                                         | Optional `draft` and `origin`                                                                | **No** |
+| `session_draft_changed`        | A client stores or clears the session's unsent composer text.                                         | `updatedAt`; optional `draft` and `origin`                                                   | **No** |
 | `secrets_changed`              | A secret bundle's session or project attachment changes.                                              | `secretIds`: effective union; `sessionSecretIds`, `projectSecretIds`: source lists           | Yes    |
 | `user_input_requested`         | The agent opens a structured question for the user.                                                   | Complete `UserInputRequest`, including `requestId` and `questions`                           | Yes    |
 | `user_input_resolved`          | A structured question is answered or cancelled.                                                       | `requestId`, `status`, optional `answers`                                                    | Yes    |
@@ -81,6 +81,16 @@ event is delivered live but never written to the durable event log: the current
 draft is a field on `ProtocolSession` and `SessionSummary`, and a client that
 connects or reconnects reads it from the session instead of replaying edits.
 Drafts are limited to 100,000 characters and survive a daemon restart.
+
+The newest message wins, not the last write to arrive. A client sends
+`updatedAt`, the moment the user typed the draft, and the daemon discards a
+write whose stamp is older than the draft it already holds — including a stale
+clear. Because the stamp comes from the writing machine's clock, the daemon
+clamps it before trusting it: a draft is never dated in the future, and one from
+a clock more than five minutes behind is held at the edge of that window so it
+loses to recent drafts instead of never being able to win. The clamped value is
+published as `updatedAt` and exposed as `draftUpdatedAt` on the session, so every
+client orders drafts by the same numbers. Omitting `updatedAt` means now.
 
 ## `agent_event` subtypes
 

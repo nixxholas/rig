@@ -564,7 +564,9 @@ describe("InMemorySession", () => {
         session.setDraft({ draft: "Fix the flaky test", origin: "terminal-a" });
         expect(session.snapshot().draft).toBe("Fix the flaky test");
         expect(session.summary().draft).toBe("Fix the flaky test");
-        expect(delivered).toEqual([{ draft: "Fix the flaky test", origin: "terminal-a" }]);
+        expect(delivered).toEqual([
+            { draft: "Fix the flaky test", origin: "terminal-a", updatedAt: expect.any(Number) },
+        ]);
 
         // Rewriting the same draft is not a change worth broadcasting.
         session.setDraft({ draft: "Fix the flaky test" });
@@ -572,7 +574,59 @@ describe("InMemorySession", () => {
 
         session.setDraft({ draft: null });
         expect(session.snapshot().draft).toBeUndefined();
-        expect(delivered).toEqual([{ draft: "Fix the flaky test", origin: "terminal-a" }, {}]);
+        expect(delivered).toEqual([
+            { draft: "Fix the flaky test", origin: "terminal-a", updatedAt: expect.any(Number) },
+            { updatedAt: expect.any(Number) },
+        ]);
+    });
+
+    it("keeps the draft that was typed most recently, not the one that arrived last", () => {
+        const now = Date.now();
+        const store = new InMemorySessionStore();
+        const session = store.create({ cwd: "/tmp/rig-session-test" });
+        const delivered: unknown[] = [];
+        session.events.subscribe((event) => {
+            if (event.type === "session_draft_changed") delivered.push(event.data);
+        });
+
+        session.setDraft({ draft: "typed second", origin: "phone", updatedAt: now - 1_000 });
+        expect(session.snapshot().draft).toBe("typed second");
+        expect(session.snapshot().draftUpdatedAt).toBe(now - 1_000);
+
+        // A slow client delivers a message that was typed earlier. It loses.
+        session.setDraft({ draft: "typed first", origin: "terminal-a", updatedAt: now - 5_000 });
+        expect(session.snapshot().draft).toBe("typed second");
+        expect(delivered).toHaveLength(1);
+
+        // A message typed after the stored one replaces it.
+        session.setDraft({ draft: "typed third", origin: "terminal-a", updatedAt: now - 100 });
+        expect(session.snapshot().draft).toBe("typed third");
+        expect(delivered).toHaveLength(2);
+
+        // A stale clear cannot wipe a newer draft either.
+        session.setDraft({ draft: null, origin: "phone", updatedAt: now - 4_000 });
+        expect(session.snapshot().draft).toBe("typed third");
+        expect(delivered).toHaveLength(2);
+    });
+
+    it("refuses to date a draft in the future or before the skew window", () => {
+        const store = new InMemorySessionStore();
+
+        // A clock running fast cannot claim a draft from the future and win
+        // against everything typed after it.
+        const fast = store.create({ cwd: "/tmp/rig-session-fast" });
+        const beforeFast = Date.now();
+        fast.setDraft({ draft: "from a fast clock", updatedAt: beforeFast + 3_600_000 });
+        expect(fast.snapshot().draftUpdatedAt).toBeGreaterThanOrEqual(beforeFast);
+        expect(fast.snapshot().draftUpdatedAt).toBeLessThanOrEqual(Date.now());
+
+        // A clock far in the past is held at the edge of the skew window, so it
+        // loses to recent drafts instead of being unable to win at all.
+        const slow = store.create({ cwd: "/tmp/rig-session-slow" });
+        const beforeSlow = Date.now();
+        slow.setDraft({ draft: "from a slow clock", updatedAt: 0 });
+        expect(slow.snapshot().draftUpdatedAt).toBeGreaterThanOrEqual(beforeSlow - 300_000);
+        expect(slow.snapshot().draftUpdatedAt).toBeLessThanOrEqual(Date.now() - 300_000);
     });
 
     it("keeps drafts out of the durable event log", () => {

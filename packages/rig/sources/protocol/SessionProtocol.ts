@@ -159,6 +159,7 @@ export interface ProtocolSession {
     appendSystemPrompt?: string;
     cwd: string;
     draft?: string;
+    draftUpdatedAt?: number;
     providerId: string;
     permissionMode: PermissionMode;
     modelId: string;
@@ -228,6 +229,7 @@ export interface SessionSummary {
     unread?: SessionUnreadState;
     cwd: string;
     draft?: string;
+    draftUpdatedAt?: number;
     providerId: string;
     modelId: string;
     orderKey: string;
@@ -282,11 +284,23 @@ export interface ChangePermissionModeRequest {
  */
 export const SESSION_DRAFT_MAX_LENGTH = 100_000;
 
+/**
+ * How far a client's draft timestamp may trail the daemon's clock before it is
+ * treated as that old rather than older still.
+ */
+export const SESSION_DRAFT_MAX_CLOCK_SKEW_MS = 300_000;
+
 export interface SetSessionDraftRequest {
     /** Draft text, or `null` to clear the draft. */
     draft: string | null;
     /** Identifies the writing client so it can ignore its own echo. */
     origin?: string;
+    /**
+     * When the user typed this draft, in milliseconds since the epoch. The
+     * daemon keeps the newest draft, so a write created before the one already
+     * stored is discarded even if it arrives later. Omitting it means now.
+     */
+    updatedAt?: number;
 }
 
 export interface AttachSecretRequest {
@@ -771,11 +785,13 @@ export type PermissionModeChangedEvent = BaseSessionEvent<
 
 /**
  * A composer draft change. The `origin` identifies the client that wrote the
- * draft so that client can ignore the echo of its own keystrokes.
+ * draft so that client can ignore the echo of its own keystrokes. `updatedAt`
+ * is the daemon-clamped moment the draft was typed; clients compare it against
+ * their own unsent edit so the newer message wins rather than the later write.
  */
 export type SessionDraftChangedEvent = BaseSessionEvent<
     "session_draft_changed",
-    { draft?: string; origin?: string }
+    { draft?: string; origin?: string; updatedAt: number }
 >;
 
 export type SecretsChangedEvent = BaseSessionEvent<

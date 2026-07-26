@@ -1180,7 +1180,7 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         if (event.type === "session_draft_changed") {
-            this.#applyRemoteDraft(event.data.draft ?? "", event.data.origin);
+            this.#applyRemoteDraft(event.data.draft ?? "", event.data.origin, event.data.updatedAt);
             return;
         }
     }
@@ -2847,8 +2847,12 @@ export class CodingAssistantApp implements Component, Focusable {
         const origin = this.#idFactory();
         this.#draftSync = new SessionDraftSync({
             draft: this.#agent.draft ?? "",
+            ...(this.#agent.draftUpdatedAt === undefined
+                ? {}
+                : { draftUpdatedAt: this.#agent.draftUpdatedAt }),
+            now: this.#now,
             origin,
-            push: (draft) => setDraft(draft, { origin }),
+            push: (draft, updatedAt) => setDraft(draft, { origin, updatedAt }),
             // A draft that fails to sync stays in this composer. It is never
             // worth interrupting the session over.
             onError: () => {},
@@ -2862,8 +2866,8 @@ export class CodingAssistantApp implements Component, Focusable {
         };
     }
 
-    #applyRemoteDraft(draft: string, origin: string | undefined): void {
-        const text = this.#draftSync?.applyRemoteDraft(draft, origin);
+    #applyRemoteDraft(draft: string, origin: string | undefined, updatedAt: number): void {
+        const text = this.#draftSync?.applyRemoteDraft(draft, origin, updatedAt);
         if (text === undefined) return;
         if (this.#freeformUserInput !== undefined) return;
         if (this.#editor.getText() === text) return;
