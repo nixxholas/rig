@@ -2398,19 +2398,19 @@ describe("PersistentSessionStore", () => {
                     ? { content: [{ text: "PERSISTED_CHILD_REPORTED", type: "text" }] }
                     : userTexts.includes("Continue the persisted investigation.")
                       ? { content: [{ text: "PERSISTED_CHILD_REUSED", type: "text" }] }
-                      : lastMessage?.role === "toolResult" && lastMessage.toolName === "send_input"
+                      : lastMessage?.role === "toolResult" &&
+                          lastMessage.toolName === "followup_task"
                         ? { content: [{ text: "FOLLOWUP_ACCEPTED", type: "text" }] }
                         : {
                               content: [
                                   {
                                       arguments: {
-                                          interrupt: true,
                                           message: "Continue the persisted investigation.",
                                           target: "persisted_worker",
                                       },
                                       id: "follow-up-persisted-worker",
-                                      name: "send_input",
-                                      namespace: "multi_agent_v1",
+                                      name: "followup_task",
+                                      namespace: "collaboration",
                                       type: "toolCall",
                                   },
                               ],
