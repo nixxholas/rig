@@ -9,6 +9,7 @@ import {
     type DaemonStartupState,
 } from "./createDaemonStartupRequestListener.js";
 import { createModelCatalog } from "./createModelCatalog.js";
+import { GitStateTracker } from "./GitStateTracker.js";
 import { getEnvironmentLocalServerPaths } from "./getEnvironmentLocalServerPaths.js";
 import { installDaemonProcessFailureLogging } from "./installDaemonProcessFailureLogging.js";
 import { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyIntegration.js";
@@ -69,6 +70,7 @@ export async function runLocalProtocolServer(
     let mcpToolProvider: McpClientManager | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
+    let gitStateTracker: GitStateTracker | undefined;
     let store: PersistentSessionStore | undefined;
     let taskDrain: TrackedTaskDrain | undefined;
     let stopping = false;
@@ -88,6 +90,9 @@ export async function runLocalProtocolServer(
         if (stopping) return;
         stopping = true;
         daemonLog.record("info", "daemon_stopping", "Rig daemon is stopping.", { reason });
+        // Disposal comes before the drain closes: it aborts in-flight Git scans, so draining waits
+        // on work that has already been told to stop rather than on a full scan timeout.
+        gitStateTracker?.dispose();
         taskDrain?.beginClose();
         void (async () => {
             if (store !== undefined) {
@@ -177,6 +182,8 @@ export async function runLocalProtocolServer(
         process.off("SIGINT", stopForSigint);
         process.off("SIGTERM", stopForSigterm);
         await initialization;
+        // Idempotent: a daemon that failed before stopServer ran still releases its watches here.
+        gitStateTracker?.dispose();
         if (mcpToolProvider !== undefined) {
             try {
                 await mcpToolProvider.close();
@@ -235,6 +242,7 @@ export async function runLocalProtocolServer(
         });
         mcpToolProvider = new McpClientManager();
         taskDrain = new TrackedTaskDrain();
+        gitStateTracker = new GitStateTracker({ taskDrain });
         const happyModule = await loadHappyIntegration(
             resolveHappyIntegrationMode(
                 options.happyIntegration,
