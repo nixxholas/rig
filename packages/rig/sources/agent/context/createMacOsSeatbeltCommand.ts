@@ -19,8 +19,13 @@ export async function createMacOsSeatbeltCommand(options: {
 }): Promise<{ args: readonly string[]; command: string }> {
     const environment = options.environment ?? process.env;
     const temporaryDirectory = tmpdir();
+    // Read only withholds the workspace but still needs a writable temporary directory. Toolchain
+    // shims such as macOS `xcrun` cache into TMPDIR on every invocation, and denying that write
+    // makes them fall back to a path resolution that costs hundreds of milliseconds per command.
     const writableCandidates =
-        options.mode === "read_only" ? [] : [options.cwd, temporaryDirectory, "/tmp"];
+        options.mode === "read_only"
+            ? [temporaryDirectory, "/tmp"]
+            : [options.cwd, temporaryDirectory, "/tmp"];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ];

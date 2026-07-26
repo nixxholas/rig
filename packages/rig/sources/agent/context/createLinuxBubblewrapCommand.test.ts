@@ -38,6 +38,27 @@ describe("createLinuxBubblewrapCommand", () => {
         expect(result.args.slice(-4)).toEqual(["--", "/bin/sh", "-lc", "git status --short"]);
     });
 
+    it("keeps the temporary directory writable in Read only mode without exposing the workspace", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-read-only-temp-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "workspace");
+        const temporaryDirectory = join(root, "tmp");
+        await Promise.all([mkdir(cwd), mkdir(temporaryDirectory)]);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "git status --short",
+            commandCwd: cwd,
+            cwd,
+            mode: "read_only",
+            shell: "/bin/sh",
+            temporaryDirectory,
+        });
+
+        expect(bindMode(result.args, await realpath(temporaryDirectory))).toBe("--bind");
+        expect(bindMode(result.args, await realpath(cwd))).toBeUndefined();
+    });
+
     it("rebinds writable roots before protecting metadata and Rig control paths", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-bwrap-workspace-write-"));
         temporaryDirectories.push(root);

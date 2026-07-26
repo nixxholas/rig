@@ -27,8 +27,13 @@ export async function createLinuxBubblewrapCommand(options: {
 }> {
     const environment = options.environment ?? process.env;
     const temporaryDirectory = options.temporaryDirectory ?? tmpdir();
+    // Read only withholds the workspace but still needs a writable temporary directory, matching
+    // the Seatbelt policy and the sandbox-runtime filesystem config. Toolchain shims cache into
+    // TMPDIR on every invocation, and denying that write costs hundreds of milliseconds per command.
     const writableCandidates =
-        options.mode === "read_only" ? [] : [options.cwd, temporaryDirectory, "/tmp"];
+        options.mode === "read_only"
+            ? [temporaryDirectory, "/tmp"]
+            : [options.cwd, temporaryDirectory, "/tmp"];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ].filter(existsSync);
