@@ -72,10 +72,17 @@ async function scanOnce(
     now: () => number,
 ): Promise<GitChangeState> {
     let status: GitStatusV2;
+    let statusTruncated = false;
     try {
-        status = parseGitStatusV2(
-            await run(["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"]),
-        );
+        const result = await runScanGit({
+            args: ["status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all"],
+            cwd: options.path,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+        });
+        // A truncated status silently drops files and staging flags, so the totals derived from it
+        // can never be called exact.
+        statusTruncated = result.truncated;
+        status = parseGitStatusV2(result.stdout);
     } catch (error) {
         return failed(emptyFacts(), errorToMessage(error), now());
     }
@@ -104,7 +111,7 @@ async function scanOnce(
     }
 
     let diff: readonly GitDiffChange[];
-    let countsExact = true;
+    let countsExact = !statusTruncated;
     try {
         const result = await runScanGit({
             args: ["diff", "-z", "--raw", "--numstat", "--find-renames", comparison.base],

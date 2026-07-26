@@ -175,8 +175,18 @@ export interface ProjectWorkspaceResponse {
     workspace: ProjectWorkspace;
 }
 
+export interface GitWatchRequest {
+    entities: readonly { projectId: string; workspaceId?: string }[];
+}
+
+export interface GitWatchResponse {
+    snapshots: readonly GlobalLiveEvent[];
+}
+
 export interface GlobalStateResponse {
     cursor: string;
+    /** Live Git snapshots for watched entities; absent entries simply are not watched yet. */
+    gitSnapshots: readonly GlobalLiveEvent[];
     hasMoreSessions: boolean;
     projects: readonly Project[];
     sessions: readonly SessionSummary[];

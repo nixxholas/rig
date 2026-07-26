@@ -8,6 +8,8 @@ export type {
     GitChangeState,
     GitComparisonState,
     GitStateResponse,
+    GitWatchRequest,
+    GitWatchResponse,
     GitFileChange,
     GitFileChangeStatus,
     GitRepositoryFacts,

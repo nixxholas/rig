@@ -18,7 +18,6 @@ export function resolveGitTrackedEntity(
     if (workspace.status !== "ready" || workspace.presence !== "present") return undefined;
     return {
         ...(workspace.baseCommit === undefined ? {} : { baseCommit: workspace.baseCommit }),
-        gitCommonDirectory: workspace.gitCommonDir,
         path: workspace.path,
         projectId: workspace.projectId,
         workspaceId: workspace.id,

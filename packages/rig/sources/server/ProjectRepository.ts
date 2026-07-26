@@ -26,6 +26,7 @@ import { errorToMessage } from "../errorToMessage.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
+import { runScanGit } from "./runScanGit.js";
 import { type GitRepositoryProbe, probeGitRepository } from "./probeGitRepository.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import {
@@ -73,6 +74,8 @@ export interface ProjectRepositoryOptions {
     git?: ProjectGitRunner;
     homeDirectory?: string;
     now?: () => number;
+    /** Reports whether a project still has a session that would be stranded by removal. */
+    hasLiveSession?: (projectId: string) => boolean;
     onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void;
     stateDirectory?: string;
     taskDrain?: TaskDrain;
@@ -85,6 +88,8 @@ export class ProjectRepository {
     readonly #createEventId = createEventIdFactory();
     readonly #database: DatabaseSync;
     readonly #gitRunner: ProjectGitRunner;
+    readonly #injectedGitRunner: ProjectGitRunner | undefined;
+    readonly #hasLiveSession: ((projectId: string) => boolean) | undefined;
     readonly #homeDirectory: string;
     readonly #initializing = new Set<string>();
     readonly #pendingInitializations: string[] = [];
@@ -100,6 +105,8 @@ export class ProjectRepository {
     constructor(options: ProjectRepositoryOptions) {
         this.#database = options.database;
         this.#gitRunner = options.git ?? runGit;
+        this.#injectedGitRunner = options.git;
+        this.#hasLiveSession = options.hasLiveSession;
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
         this.#now = options.now ?? Date.now;
         this.#onEvent = options.onEvent;
@@ -371,7 +378,7 @@ export class ProjectRepository {
 
     async #reconcileProjectGitFacts(project: Project): Promise<void> {
         const probe = await probeGitRepository({
-            git: (cwd, args) => this.#git(cwd, args),
+            git: (cwd, args) => this.#probeGit(cwd, args),
             isHome: project.kind === "home",
             path: project.path,
         });
@@ -400,7 +407,7 @@ export class ProjectRepository {
 
     async #reconcileWorkspaceGitFacts(workspace: ProjectWorkspace): Promise<void> {
         const probe = await probeGitRepository({
-            git: (cwd, args) => this.#git(cwd, args),
+            git: (cwd, args) => this.#probeGit(cwd, args),
             path: workspace.path,
         });
         if (this.#closed) return;
@@ -1661,6 +1668,18 @@ export class ProjectRepository {
 
     async #git(cwd: string, args: readonly string[]): Promise<string> {
         return this.#gitRunner(cwd, args);
+    }
+
+    /**
+     * Reads used by background probes. They run in the daemon rather than inside a session, so they
+     * go through the sandboxed scan runner for the same reason live scans do: a repository must not
+     * be able to make an unattended read execute a helper. An injected runner still wins so tests
+     * can drive probes without Git.
+     */
+    async #probeGit(cwd: string, args: readonly string[]): Promise<string> {
+        if (this.#injectedGitRunner !== undefined) return this.#injectedGitRunner(cwd, args);
+        const result = await runScanGit({ args, cwd });
+        return result.stdout.trim();
     }
 
     #transaction<T>(body: () => T): T {

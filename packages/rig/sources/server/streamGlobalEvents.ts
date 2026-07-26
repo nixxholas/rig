@@ -85,13 +85,16 @@ export function streamGlobalEvents(
             const key = liveEventKey(delivery.event);
             if (backedUp) {
                 pendingLive.set(key, delivery.event);
-                if (pendingLive.size > LIVE_BACKLOG_LIMIT) close();
+                if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) close();
                 return;
             }
             backedUp = !writeGlobalSseEvent(response, delivery);
             return;
         }
+        // Stored events are never coalesced or dropped, so a subscriber that cannot keep up with
+        // them is disconnected and reloads from /state instead of growing the buffer without bound.
         if (!writeGlobalSseEvent(response, delivery)) backedUp = true;
+        if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) close();
     }, close);
 
     // Subscribing before capturing the current snapshots is what makes this gapless: capturing
@@ -102,8 +105,12 @@ export function streamGlobalEvents(
     request.on("close", close);
 }
 
-/** One pending live snapshot per entity; more distinct entities than this means a stuck consumer. */
-const LIVE_BACKLOG_LIMIT = 64;
+/**
+ * Bytes Node may hold for one subscriber before it is treated as stuck. Counting pending entities
+ * instead would be unreachable in practice, because the tracker holds fewer entities than any
+ * sensible entity cap, while the socket buffer is what actually grows.
+ */
+const SUBSCRIBER_BUFFER_LIMIT = 1024 * 1024;
 
 function liveEventKey(event: GlobalLiveEvent): string {
     return "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;

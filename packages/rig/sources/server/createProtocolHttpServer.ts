@@ -25,6 +25,7 @@ import type {
     ListSecretsResponse,
     HealthResponse,
     GitStateResponse,
+    GitWatchResponse,
     GlobalStateResponse,
     GoalSessionResponse,
     ListModelsResponse,
@@ -294,6 +295,7 @@ async function handleRequest(
         const sessions = store.list({ limit: 501 });
         sendJson<GlobalStateResponse>(response, 200, {
             cursor: runtimeConfig.globalEventQueue.cursor(),
+            gitSnapshots: runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
             hasMoreSessions: sessions.length > 500,
             projects: store.listProjects(),
             sessions: sessions
@@ -421,6 +423,33 @@ async function handleRequest(
             }
             return;
         }
+    }
+
+    if (route.name === "git-watch" && request.method === "POST") {
+        const tracker = runtimeConfig.gitStateTracker;
+        if (tracker === undefined) {
+            sendJson(response, 503, { error: "Git tracking is unavailable." });
+            return;
+        }
+        const body = await readJson<unknown>(request);
+        if (!hasOnlyObjectKeys(body, ["entities"]) || !Array.isArray(body.entities)) {
+            sendJson(response, 400, { error: "The watch request is invalid." });
+            return;
+        }
+        for (const requested of body.entities as { projectId?: unknown; workspaceId?: unknown }[]) {
+            if (typeof requested?.projectId !== "string") continue;
+            const project = store.getProject(requested.projectId);
+            if (project === undefined) continue;
+            const workspace =
+                typeof requested.workspaceId === "string"
+                    ? store.getWorkspace(requested.projectId, requested.workspaceId)
+                    : undefined;
+            if (typeof requested.workspaceId === "string" && workspace === undefined) continue;
+            const entity = resolveGitTrackedEntity(project, workspace);
+            if (entity !== undefined) tracker.watch(entity);
+        }
+        sendJson<GitWatchResponse>(response, 200, { snapshots: tracker.liveSnapshots() });
+        return;
     }
 
     if (route.name === "project-git" || route.name === "project-workspace-git") {
@@ -1648,6 +1677,7 @@ function matchRoute(pathname: string):
     | {
           name:
               | "global-events"
+              | "git-watch"
               | "global-events-stream"
               | "global-events-trim"
               | "external-tool-calls"
@@ -1754,6 +1784,7 @@ function matchRoute(pathname: string):
     if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };
     if (pathname === "/messages") return { name: "messages" };
+    if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };

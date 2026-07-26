@@ -143,12 +143,7 @@ describe("GitStateTracker", () => {
             watch: () => closed,
         });
 
-        tracker.watch({
-            gitCommonDirectory: "/tmp/common",
-            gitDirectory: "/tmp/git",
-            path: "/tmp/repo",
-            projectId: "a",
-        });
+        tracker.watch({ path: "/tmp/repo", projectId: "a" });
         await waitFor(() => published.length === 1);
         tracker.dispose();
         tracker.markChanged(entity());
@@ -210,6 +205,12 @@ function createTracker(
             ...options.tuning,
         },
         ...options,
+        runGit:
+            options.runGit ??
+            ((async () => ({
+                stdout: "/tmp/repo/.git\n/tmp/repo/.git\n",
+                truncated: false,
+            })) as never),
         watch: options.watch ?? (() => () => {}),
     });
     trackers.push(tracker);

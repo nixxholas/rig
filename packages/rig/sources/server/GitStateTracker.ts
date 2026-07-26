@@ -6,6 +6,7 @@ import {
     type GitChangeState,
     type GlobalLiveEvent,
 } from "../protocol/index.js";
+import { runScanGit } from "./runScanGit.js";
 import { scanGitRepository } from "./scanGitRepository.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import { watchGitRepositoryChanges } from "./watchGitRepositoryChanges.js";
@@ -26,10 +27,6 @@ const BACKOFF_LIMIT_MS = 30_000;
 export interface GitTrackedEntity {
     /** Immutable commit a managed workspace was created from. */
     baseCommit?: string;
-    /** Per-worktree Git directory. */
-    gitDirectory?: string;
-    /** Common Git directory shared with linked worktrees. */
-    gitCommonDirectory?: string;
     path: string;
     projectId: string;
     workspaceId?: string;
@@ -42,6 +39,8 @@ export interface GitStateTrackerOptions {
     /** Receives each published snapshot as a ready-to-deliver live event. */
     onLiveEvent?: (event: GlobalLiveEvent) => void;
     onSnapshot?: (entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void;
+    /** Test seam for raw Git reads used to locate a repository's control directories. */
+    runGit?: typeof runScanGit;
     /** Test seam for the scanner. */
     scan?: typeof scanGitRepository;
     taskDrain?: TaskDrain;
@@ -92,6 +91,7 @@ export class GitStateTracker {
         | ((entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void)
         | undefined;
     readonly #pendingScans: string[] = [];
+    readonly #runGit: typeof runScanGit;
     readonly #scan: typeof scanGitRepository;
     readonly #taskDrain: TaskDrain | undefined;
     readonly #trackers = new Map<string, RepositoryTracker>();
@@ -106,6 +106,7 @@ export class GitStateTracker {
         this.#now = options.now ?? Date.now;
         this.#onLiveEvent = options.onLiveEvent;
         this.#onSnapshot = options.onSnapshot;
+        this.#runGit = options.runGit ?? runScanGit;
         this.#scan = options.scan ?? scanGitRepository;
         this.#taskDrain = options.taskDrain;
         this.#watch = options.watch ?? watchGitRepositoryChanges;
@@ -253,20 +254,50 @@ export class GitStateTracker {
     }
 
     #arm(tracker: RepositoryTracker): void {
-        const { gitCommonDirectory, gitDirectory, path } = tracker.entity;
-        if (gitDirectory !== undefined && gitCommonDirectory !== undefined) {
-            tracker.unwatch = this.#watch({
-                commonDirectory: gitCommonDirectory,
-                gitDirectory,
-                onDirty: () => this.markChanged(tracker.entity),
-                path,
-            });
-        }
         const timer = setInterval(() => {
-            this.#enqueue(tracker.key);
+            // Expiry is checked here as well: otherwise interest only lapses when some other entity
+            // happens to be watched, and a forgotten tracker keeps its watches and timer forever.
+            this.#evictExpired();
+            if (this.#trackers.get(tracker.key) === tracker) this.#enqueue(tracker.key);
         }, this.#tuning.reconcileIntervalMs);
         timer.unref?.();
         tracker.reconcileTimer = timer;
+        // The Git directories are resolved here rather than supplied by the caller. A caller that
+        // forgets them silently degrades every repository to the reconciliation poll, which is
+        // exactly the failure this owns instead of delegating.
+        const generation = tracker.generation;
+        void this.#resolveGitDirectories(tracker.entity.path)
+            .then((directories) => {
+                if (directories === undefined) return;
+                if (this.#disposed || tracker.generation !== generation) return;
+                tracker.unwatch = this.#watch({
+                    commonDirectory: directories.commonDirectory,
+                    gitDirectory: directories.gitDirectory,
+                    onDirty: () => this.markChanged(tracker.entity),
+                    path: tracker.entity.path,
+                });
+            })
+            .catch(() => undefined);
+    }
+
+    async #resolveGitDirectories(
+        path: string,
+    ): Promise<{ commonDirectory: string; gitDirectory: string } | undefined> {
+        try {
+            const result = await this.#runGit({
+                args: ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir"],
+                cwd: path,
+            });
+            const [gitDirectory, commonDirectory] = result.stdout
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line.length > 0);
+            if (gitDirectory === undefined) return undefined;
+            return { commonDirectory: commonDirectory ?? gitDirectory, gitDirectory };
+        } catch {
+            // A directory that is not a repository simply has nothing to watch.
+            return undefined;
+        }
     }
 
     /**

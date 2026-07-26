@@ -65,6 +65,33 @@ describe("Git state over HTTP", () => {
         expect((await fixture.get(`/projects/${projectId}/workspaces/nope/git`)).status).toBe(404);
     });
 
+    it("starts watching the entities a client declares and returns their snapshots", async () => {
+        const fixture = await startServer();
+        const repository = await createRepository(fixture.root);
+        await writeFile(join(repository, "a.txt"), "1\n");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+
+        const response = await fixture.post("/git/watch", { entities: [{ projectId }] });
+
+        expect(response.status).toBe(200);
+        expect(fixture.tracker.trackedKeys).toEqual([`project:${projectId}`]);
+        await waitUntil(() => fixture.tracker.liveSnapshots().length === 1);
+    });
+
+    it("includes watched snapshots in the state bootstrap", async () => {
+        const fixture = await startServer();
+        const repository = await createRepository(fixture.root);
+        await writeFile(join(repository, "a.txt"), "1\n");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        await fixture.get(`/projects/${projectId}/git`);
+
+        const state = await fixture.get("/state");
+
+        // Without this a client that restarts has no counts at all until it asks per entity.
+        expect(state.body.gitSnapshots).toHaveLength(1);
+        expect(state.body.gitSnapshots[0].type).toBe("project_git_changed");
+    });
+
     it("streams live snapshots without an event id and without moving the cursor", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
@@ -102,8 +129,18 @@ describe("Git state over HTTP", () => {
     });
 });
 
+async function waitUntil(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+        if (predicate()) return;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error("Timed out waiting for tracker state.");
+}
+
 async function startServer(): Promise<{
     get: (path: string) => Promise<{ body: any; status: number }>;
+    post: (path: string, body: unknown) => Promise<{ body: any; status: number }>;
     openStream: (path: string) => Promise<{
         close: () => void;
         frames: string[];
@@ -195,7 +232,37 @@ async function startServer(): Promise<{
         };
     };
 
-    return { get, openStream, root, store, tracker };
+    const post = async (path: string, body: unknown) =>
+        await new Promise<{ body: any; status: number }>((resolve, reject) => {
+            const payload = JSON.stringify(body);
+            const call = httpRequest(
+                {
+                    headers: {
+                        authorization: "Bearer t",
+                        "content-length": Buffer.byteLength(payload),
+                        "content-type": "application/json",
+                    },
+                    method: "POST",
+                    path,
+                    socketPath,
+                },
+                (response) => {
+                    let raw = "";
+                    response.on("data", (chunk) => (raw += String(chunk)));
+                    response.on("end", () =>
+                        resolve({
+                            body: raw.length === 0 ? undefined : JSON.parse(raw),
+                            status: response.statusCode ?? 0,
+                        }),
+                    );
+                },
+            );
+            call.on("error", reject);
+            call.write(payload);
+            call.end();
+        });
+
+    return { get, openStream, post, root, store, tracker };
 }
 
 async function createRepository(root: string): Promise<string> {
