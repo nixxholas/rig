@@ -12,6 +12,7 @@ const CONTEXT_OVERFLOW_PATTERNS = [
 const BILLING_PATTERNS = [
     "subscription:free-usage-exhausted",
     "free grok build usage limit",
+    "grok build usage balance exhausted",
     "credit balance is too low",
     "out of credits",
     "insufficient credits",

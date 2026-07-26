@@ -19,6 +19,9 @@ describe("classifyGrokError", () => {
             "billing_error",
         );
         expect(classifyGrokError("Your credit balance is too low")).toBe("billing_error");
+        expect(classifyGrokError('Error 402 "Grok Build usage balance exhausted"')).toBe(
+            "billing_error",
+        );
     });
 
     it("classifies server and transport failures as internal errors", () => {
