@@ -113,6 +113,32 @@ describe("rig-connect groups against a live daemon", () => {
         expect(ids).toContain(first.id);
     });
 
+    it("reports the status the daemon reports, rather than guessing from run events", async () => {
+        const { endpoint, store } = await startDaemon();
+        const session = store.create({ cwd: "/tmp/rig-groups-status" });
+        connection = connectGroups({
+            endpoint,
+            onChange: () => undefined,
+            token: "secret",
+        });
+        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+        await waitFor(
+            () => listedSessionIds(connection).includes(session.id),
+            "the session to be listed",
+        );
+
+        const submitted = session.submit({ text: "Say hello." });
+        await session.waitForRun(submitted.runId);
+
+        // The daemon settles this session at the status it decides on. Deriving
+        // one from run events instead would put a different word in the sidebar
+        // than the one the session actually holds.
+        await waitFor(
+            () => listedStatus(connection, session.id) === session.snapshot().status,
+            `the listed status to match the daemon's ${session.snapshot().status}`,
+        );
+    });
+
     it("keeps a session listed when it is unarchived rather than dropping it", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-groups-a" });
@@ -145,4 +171,16 @@ function listedSessionIds(connection: GroupsConnection | undefined): string[] {
         ...group.sessions.map((item) => item.id),
         ...group.workspaces.flatMap((workspace) => workspace.sessions.map((item) => item.id)),
     ]);
+}
+
+function listedStatus(
+    connection: GroupsConnection | undefined,
+    sessionId: string,
+): string | undefined {
+    return (connection?.projects() ?? [])
+        .flatMap((group) => [
+            ...group.sessions,
+            ...group.workspaces.flatMap((workspace) => workspace.sessions),
+        ])
+        .find((item) => item.id === sessionId)?.status;
 }

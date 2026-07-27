@@ -475,7 +475,7 @@ export interface SessionSummary {
     modelId: string;
     orderKey: string;
     permissionMode: string;
-    status: string;
+    status: SessionStatus;
     title?: string;
     recap?: string;
     sessionTokenCount?: SessionTokenCount;

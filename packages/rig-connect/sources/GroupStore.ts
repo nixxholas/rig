@@ -6,6 +6,7 @@ import type {
     GlobalStreamHello,
     Project,
     ProjectWorkspace,
+    SessionStatus,
     SessionSummary,
 } from "./protocol.js";
 
@@ -339,11 +340,12 @@ function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
             // from setting it to an empty name.
             return title === undefined ? { clear: ["title"] } : { set: { title } };
         }
-        case "run_started":
-            return { set: { status: "running" } };
-        case "run_finished":
-        case "run_error":
-            return { set: { status: "idle" } };
+        case "session_status_changed":
+            // The daemon decides the lifecycle status and announces it. Deriving
+            // one from run boundaries instead would disagree with the session
+            // itself, which settles at "completed" rather than "idle", and would
+            // say nothing about a suspended or interrupted session.
+            return { set: { status: (event.data as { status: SessionStatus }).status } };
         default:
             return undefined;
     }

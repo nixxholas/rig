@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import { GroupStore } from "@/GroupStore.js";
-import type { GlobalEvent, GlobalStreamHello, Project, ProjectWorkspace } from "@/protocol.js";
+import type {
+    GlobalEvent,
+    GlobalStreamHello,
+    Project,
+    ProjectWorkspace,
+    SessionSummary,
+} from "@/protocol.js";
 
 let clock = 0;
 
@@ -44,7 +50,7 @@ function workspace(
     };
 }
 
-function session(id: string, projectId: string, workspaceId?: string) {
+function session(id: string, projectId: string, workspaceId?: string): SessionSummary {
     return {
         archived: false,
         createdAt: 1,
@@ -425,15 +431,38 @@ describe("GroupStore", () => {
         const store = new GroupStore();
         store.applyHello(hello({ sessions: [session("s1", "p1")] }));
 
-        store.apply(event("run_started", { runId: "run-1" }, { sessionId: "s1" }));
+        store.apply(event("session_status_changed", { status: "running" }, { sessionId: "s1" }));
         expect(store.projects()[0]?.sessions[0]?.status).toBe("running");
 
-        // A sidebar has to settle back on its own; the daemon does not restate
-        // the whole session when a run ends.
-        store.apply(
-            event("run_finished", { runId: "run-1", stopReason: "stop" }, { sessionId: "s1" }),
-        );
-        expect(store.projects()[0]?.sessions[0]?.status).toBe("idle");
+        // The daemon names the status a run settles at, so the sidebar shows
+        // that word rather than one inferred from the run ending.
+        store.apply(event("session_status_changed", { status: "completed" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.sessions[0]?.status).toBe("completed");
+    });
+
+    it("shows a lifecycle status that no run boundary implies", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(event("session_status_changed", { status: "suspended" }, { sessionId: "s1" }));
+
+        // Suspended, aborted, and error are states a sidebar has to distinguish
+        // from idle, and no run event says which of them a session reached.
+        expect(store.projects()[0]?.sessions[0]?.status).toBe("suspended");
+    });
+
+    it("keeps the newer status when an older event arrives late", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        const stale = event("session_status_changed", { status: "running" }, { sessionId: "s1" });
+        const fresh = event("session_status_changed", { status: "error" }, { sessionId: "s1" });
+        store.apply({ ...fresh, id: "g-0002" });
+        store.apply({ ...stale, id: "g-0001" });
+
+        // Streams run in parallel, so a late delivery must not resurrect a status
+        // the session has already moved past.
+        expect(store.projects()[0]?.sessions[0]?.status).toBe("error");
     });
 
     it("reports that older sessions exist beyond the opening frame", () => {
