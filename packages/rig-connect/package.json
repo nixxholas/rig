@@ -1,0 +1,34 @@
+{
+    "name": "@slopus/rig-connect",
+    "version": "0.0.0",
+    "description": "Live Rig session state for any user interface, from one subscription.",
+    "license": "MIT",
+    "files": [
+        "dist",
+        "README.md"
+    ],
+    "type": "module",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "import": "./dist/index.js",
+            "default": "./dist/index.js"
+        }
+    },
+    "scripts": {
+        "build": "node --eval \"import('node:fs/promises').then(({ rm }) => rm('dist', { force: true, recursive: true }))\" && tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json",
+        "check": "tsc --noEmit",
+        "test": "vitest run"
+    },
+    "devDependencies": {
+        "@slopus/rig": "workspace:*",
+        "@slopus/rig-execution": "workspace:*",
+        "@types/node": "^24.0.10",
+        "tsc-alias": "^1.8.16",
+        "typescript": "^7.0.2",
+        "vitest": "^3.2.4"
+    },
+    "engines": {
+        "node": ">=20"
+    }
+}
