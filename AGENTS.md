@@ -1,5 +1,11 @@
 # Agent Instructions
 
+## Master plans
+
+Read every file in [`master-plans/`](master-plans/) before starting any work. They are dictated by the user and describe where the product is going, in what order, and what counts as done. They outrank conclusions drawn from the existing code.
+
+Master plans are user-owned. Do not create, edit, rename, or delete a file in `master-plans/` unless the user explicitly asks for that change in the current task. When the code contradicts a master plan, report the contradiction instead of revising the plan.
+
 ## Product direction
 
 Build the best combined coding-agent experience from Codex and Claude Code, with a strong focus on simplicity, thoughtful defaults, and a polished user experience. Prioritize important, widely useful workflows over obscure features or exhaustive parity.
