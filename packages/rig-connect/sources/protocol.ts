@@ -267,6 +267,21 @@ export interface GitChangeSnapshot {
     version: number;
 }
 
+/**
+ * The durable lifecycle status of a session, as distinct from what it is doing
+ * at this moment. A session list uses this for archived, suspended, and failed
+ * sessions and for authoritative run completion.
+ */
+export type SessionStatus =
+    | "idle"
+    | "queued"
+    | "running"
+    | "completed"
+    | "aborted"
+    | "suspended"
+    | "error"
+    | "archived";
+
 export interface ProtocolSession {
     id: string;
     activity: SessionActivity;
@@ -276,7 +291,7 @@ export interface ProtocolSession {
     modelId: string;
     providerId: string;
     snapshot: { messages: readonly Message[] };
-    status: string;
+    status: SessionStatus;
     title?: string;
     sessionTokenCount?: SessionTokenCount;
 }

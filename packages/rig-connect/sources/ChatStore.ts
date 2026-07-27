@@ -7,6 +7,7 @@ import type {
     Message,
     ProtocolSession,
     SessionActivity,
+    SessionStatus,
     SessionEvent,
     SessionStreamHello,
     SessionTokenCount,
@@ -81,11 +82,13 @@ export class ChatStore {
     constructor(sessionId: string) {
         this.#session = {
             activity: IDLE_ACTIVITY,
+            archived: false,
             connection: "connecting",
             cwd: "",
             modelId: "",
             providerId: "",
             sessionId,
+            status: "idle",
             transcriptComplete: true,
         };
     }
@@ -108,6 +111,7 @@ export class ChatStore {
     applyHello(hello: SessionStreamHello): readonly ChatDelta[] {
         const deltas: ChatDelta[] = [];
         const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
         if (hello.session !== undefined) {
             this.#resetFromSession(hello.session, hello.transcript);
             // The opening frame carries a bounded window, so the caller is told
@@ -121,7 +125,7 @@ export class ChatStore {
         if (hello.partial !== undefined) {
             this.#applyPartialMessage(hello.partial.message, hello.partial.runId, deltas);
         }
-        return this.#finish(deltas, revisionBefore);
+        return this.#finish(deltas, revisionBefore, sessionBefore);
     }
 
     setConnection(connection: ConnectionState): readonly ChatDelta[] {
@@ -137,7 +141,25 @@ export class ChatStore {
     apply(event: SessionEvent): readonly ChatDelta[] {
         const deltas: ChatDelta[] = [];
         const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
         switch (event.type) {
+            case "session_status_changed": {
+                // A replayed or delayed event can restate the status the store
+                // already holds. Keeping the same session value means React
+                // consumers are not re-rendered for news they already have.
+                const status = (event.data as { status: SessionStatus }).status;
+                if (status !== this.#session.status) {
+                    this.#session = { ...this.#session, status };
+                }
+                break;
+            }
+            case "session_archived": {
+                const archived = (event.data as { archived: boolean }).archived;
+                if (archived !== this.#session.archived) {
+                    this.#session = { ...this.#session, archived };
+                }
+                break;
+            }
             case "session_activity_changed":
                 this.#setActivity((event.data as { activity: SessionActivity }).activity, deltas);
                 break;
@@ -234,7 +256,7 @@ export class ChatStore {
             default:
                 return [];
         }
-        return this.#finish(deltas, revisionBefore);
+        return this.#finish(deltas, revisionBefore, sessionBefore);
     }
 
     /**
@@ -244,10 +266,19 @@ export class ChatStore {
      * the list revision rather than the delta list decides whether subscribers
      * are told the elements moved.
      */
-    #finish(deltas: ChatDelta[], revisionBefore: number): readonly ChatDelta[] {
+    #finish(
+        deltas: ChatDelta[],
+        revisionBefore: number,
+        sessionBefore: SessionState,
+    ): readonly ChatDelta[] {
         this.#regroup();
         const elementsChanged = this.#revision !== revisionBefore;
-        if (deltas.length === 0 && !elementsChanged) return [];
+        // The session value is replaced rather than mutated whenever any fact on
+        // it changes, so an unchanged reference means there is nothing to report.
+        // Comparing it here means a new fact is announced without every case
+        // having to remember to push a delta of its own.
+        const sessionChanged = this.#session !== sessionBefore;
+        if (deltas.length === 0 && !elementsChanged && !sessionChanged) return [];
         if (!deltas.some((delta) => delta.type === "session_changed")) {
             deltas.push({ type: "session_changed", session: this.#session });
         }
@@ -281,6 +312,7 @@ export class ChatStore {
             modelId: session.modelId,
             providerId: session.providerId,
             sessionId: session.id,
+            status: session.status,
             ...(session.git === undefined ? {} : { git: session.git }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.sessionTokenCount === undefined

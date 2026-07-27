@@ -1,5 +1,11 @@
 import type { ToolPresentation } from "./ToolPresentation.js";
-import type { GitChangeSnapshot, SessionActivity, SessionTokenCount, Usage } from "./protocol.js";
+import type {
+    GitChangeSnapshot,
+    SessionActivity,
+    SessionStatus,
+    SessionTokenCount,
+    Usage,
+} from "./protocol.js";
 
 /**
  * One row of a conversation.
@@ -99,6 +105,14 @@ export interface TurnEndElement extends BaseChatElement {
 /** Live facts a UI shows next to the conversation. */
 export interface SessionState {
     activity: SessionActivity;
+    /**
+     * The durable lifecycle status, as opposed to `activity`, which describes
+     * only the current moment. A session list needs this to tell a suspended or
+     * failed session from an idle one.
+     */
+    status: SessionStatus;
+    /** Whether the session has been archived out of the active list. */
+    archived: boolean;
     sessionId: string;
     cwd: string;
     modelId: string;

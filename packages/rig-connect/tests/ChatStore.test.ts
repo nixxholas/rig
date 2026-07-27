@@ -1013,3 +1013,77 @@ describe("ChatStore", () => {
         expect(store.elements()).toMatchObject([{ kind: "user_message", text: "Start over" }]);
     });
 });
+
+describe("durable status", () => {
+    it("takes the status from the opening frame", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello({ session: { ...hello().session!, status: "suspended" } }));
+
+        // A session that is suspended has to read as suspended before anything
+        // happens on the stream.
+        expect(store.session().status).toBe("suspended");
+    });
+
+    it("follows the status without asking for the session again", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+
+        const deltas = store.apply(event("session_status_changed", { status: "error" }));
+
+        expect(store.session().status).toBe("error");
+        expect(deltas).toContainEqual(expect.objectContaining({ type: "session_changed" }));
+    });
+
+    it("keeps the status apart from the activity", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("session_status_changed", { status: "running" }));
+
+        store.apply(
+            event("session_activity_changed", {
+                activity: { kind: "idle", label: "Idle", since: 5 },
+            }),
+        );
+
+        // Activity is the current moment and settles on its own. The durable
+        // status is a lifecycle fact and must not be overwritten by it.
+        expect(store.session().activity.kind).toBe("idle");
+        expect(store.session().status).toBe("running");
+    });
+
+    it("reports a live fact that only lives on the session", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+
+        const git = store.apply(event("session_git_changed", { git: { branch: "main" } }));
+        const context = store.apply(
+            event("session_context_changed", { sessionTokenCount: { total: 5 } }),
+        );
+
+        // These change nothing in the element list, so nothing else would tell a
+        // subscriber they happened. A store that updated itself silently would
+        // leave a branch name or a context meter stale on screen forever.
+        expect(git.map((delta) => delta.type)).toEqual(["session_changed"]);
+        expect(context.map((delta) => delta.type)).toEqual(["session_changed"]);
+    });
+
+    it("stays quiet when an event changes nothing", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("session_status_changed", { status: "running" }));
+
+        const repeated = store.apply(event("session_status_changed", { status: "running" }));
+
+        expect(repeated).toEqual([]);
+    });
+
+    it("follows archiving, which is its own flag", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        expect(store.session().archived).toBe(false);
+
+        store.apply(event("session_archived", { archived: true }));
+
+        expect(store.session().archived).toBe(true);
+    });
+});
