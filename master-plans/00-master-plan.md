@@ -36,7 +36,7 @@ These documents belong to the user. They are dictated, not derived.
 - Write down what the user actually said. Do not soften it, do not add plans of
   your own, and do not invent detail to fill a gap. If the dictation is
   ambiguous, ask.
-- Only an agent running on a top-tier model may write here — Claude Opus, or
+- Only an agent running on a top-tier model may write here — Claude Fable, or
   GPT-5.6 Sol at extra-high reasoning effort. A small or fast model must not
   edit a master plan, even under direct instruction; it should hand the request
   back to the user.
