@@ -103,9 +103,40 @@ preprocessing once, so no client repeats it:
 The result must be shaped for a normal application: stable identities, ordinary
 values, nothing that requires the consumer to understand the wire format.
 
+## Mutations
+
+Reading is half of what a user interface does. It also archives a session,
+renames a group, switches a model, sends a message, stops a run. Those go
+through `rig-connect` as well, and every one of them is optimistic.
+
+An action takes effect the instant it is taken. Archiving a session hides it and
+disables everything it owns immediately: the row leaves the list, its controls
+stop responding, its conversation closes. Only then does the command travel to
+the daemon, in the background, retried with backoff until it lands. Nobody waits
+on a round trip to see a decision they already made, and no control sits inert
+after being used.
+
+The daemon stays authoritative. An optimistic change is a prediction of what it
+will say, superseded the moment the real state arrives, through the same
+ordered-identity merge that reconciles any two views of an entity. A prediction
+that turns out wrong is corrected on screen. A prediction that cannot be
+delivered at all is reverted and reported. What must never happen is a change
+that quietly disappears, or one that lingers after Rig has rejected it.
+
+Delivery is the library's problem, not the interface's. A pending mutation
+survives a reconnect, retries with backoff, and holds its order against other
+mutations of the same entity — sending them out of order would let a stale
+intent win.
+
+Loading is the one exception. Fetching earlier turns, or the rest of a long
+session list, has genuinely nothing to show until it arrives. That may present a
+loading state. Nothing else may.
+
 ## The public surface
 
-One function to subscribe to changes of that list. That is the surface.
+One function to subscribe to changes of that list, and actions that change it.
+That is the surface. An action returns as soon as the local state reflects it;
+it never hands back a promise the caller has to await before drawing.
 
 It is built for React. When the list changes, unchanged elements keep their
 identity: the same reference comes back for anything that did not change, and a
@@ -140,6 +171,10 @@ is the design constraint, not an optimization.
   without guessing which is newer. Every entity and every event carries an
   identifier bound to time or version. We already use ordered UUIDv7 identifiers
   and ordered events; continue with that rather than inventing a second scheme.
+- **A mutation carries its own identity.** A client changes its state locally and
+  sends the command; when Rig's version of that change arrives on the stream, the
+  client has to recognise it as the echo of its own action rather than applying
+  it a second time.
 
 ## Requirements
 
@@ -159,6 +194,10 @@ is the design constraint, not an optimization.
    subscriber can see, not a silent stall.
 5. **Correct under React.** Stable references, stable identities, no tearing
    between the list and the deltas.
+6. **Instant.** Every mutation applies locally at the moment it is made, and the
+   round trip happens behind it. Delivery, retry, ordering, and reconciliation
+   are the library's job. Loading more is the only thing allowed to make anyone
+   wait.
 
 ## The steps
 
@@ -172,9 +211,12 @@ follow-up request beyond the initial snapshot.
 
 **B. Build the package.** `rig-connect` connects, snapshots, follows the stream,
 maintains the element list and the session state, applies presentation and
-grouping, and exposes the subscription and the deltas. Done when the turn
+grouping, applies mutations optimistically and delivers them in the background,
+and exposes the subscription, the actions, and the deltas. Done when the turn
 guarantee, the ordering, and the reference stability hold under test, including
-across reconnects and interruptions.
+across reconnects and interruptions, and when a mutation survives a reconnect, a
+rejection, and a competing update without leaving the interface showing
+something untrue.
 
 **C. Move the clients onto it.** The terminal and the web UI read their session
 state through `rig-connect` and delete their own reconstruction logic. Done when
@@ -185,4 +227,6 @@ no UI in the repository interprets session events on its own.
 - One implementation of sync in the product.
 - A UI subscribes once and renders; it never asks the daemon a follow-up
   question to understand what it was just told.
+- Every action lands instantly, and the network is something the user never
+  waits on except to load more.
 - The library runs identically in Node and in a browser.
