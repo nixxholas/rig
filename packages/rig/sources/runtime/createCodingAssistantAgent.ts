@@ -8,6 +8,7 @@ import {
     createNodeAgentContext,
     createDockerAgentContext,
     type AgentOptions,
+    type AgentCommunicationContext,
     type ChatHistoryContext,
     type GoalContext,
     type PermissionMode,
@@ -38,9 +39,12 @@ import type { DurableSkillDefinition } from "../external-skills/types.js";
 import { resolveGeminiApiKey } from "../tools/webSearch/resolveGeminiApiKey.js";
 import { readAgentHistoryTool } from "../tools/read_agent_history.js";
 import { selectCollaborationToolsForModel } from "./selectCollaborationToolsForModel.js";
+import { agentCommunicationTools } from "../tools/agents/index.js";
+import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
+    agentCommunication?: AgentCommunicationContext;
     cwd: string;
     docker?: DockerExecutionConfig;
     durableSkills?: readonly DurableSkillDefinition[];
@@ -102,6 +106,17 @@ export function createCodingAssistantAgent(
                     sessionId: options.sessionId ?? options.agentId ?? "standalone",
                 });
     const runtimeCwd = context.fs.cwd;
+    context.agentCommunication =
+        options.agentCommunication ??
+        ({
+            info: () => {
+                throw new Error("Cross-agent messaging is unavailable in this session.");
+            },
+            me: () => ({ agentId, folder: agentFolderLabel(runtimeCwd) }),
+            send: () => {
+                throw new Error("Cross-agent messaging is unavailable in this session.");
+            },
+        } satisfies AgentCommunicationContext);
     if (options.chatHistory !== undefined) {
         context.chatHistory = options.chatHistory;
     }
@@ -221,6 +236,7 @@ export function createCodingAssistantAgent(
                 );
     const toolsWithoutGoals = [
         ...baseTools,
+        ...agentCommunicationTools,
         ...(options.chatHistory === undefined ? [] : [readAgentHistoryTool]),
         ...availableCollaborationTools,
     ];

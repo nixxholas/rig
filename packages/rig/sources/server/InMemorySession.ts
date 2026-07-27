@@ -8,10 +8,12 @@ import { areProviderModelsCompatible } from "@slopus/rig-providers";
 import { errorToMessage } from "../errorToMessage.js";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import { assistantMessageToAgentMessage } from "../agent/assistantMessageToAgentMessage.js";
+import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import { isInternalMessage } from "../agent/isInternalMessage.js";
 import { findFirstUserRequestText, findLastAgentResponseText } from "../agent/index.js";
 import type {
     AgentContext,
+    AgentCommunicationIdentity,
     AgentLoopEvent,
     AgentCompactionResult,
     AgentRunResult,
@@ -2301,6 +2303,27 @@ export class InMemorySession {
         return this.#activeRun?.debug === true;
     }
 
+    agentIdentity(): AgentCommunicationIdentity {
+        const folderPath = this.#request.docker?.workingDirectory ?? this.#request.cwd;
+        return {
+            agentId: this.#agentId,
+            folder: agentFolderLabel(folderPath),
+            ...(this.#title === undefined ? {} : { title: this.#title }),
+        };
+    }
+
+    agentCommunicationLocation(): {
+        cwd: string;
+        docker?: DockerExecutionConfig;
+        sessionId: string;
+    } {
+        return {
+            cwd: this.#request.cwd,
+            ...(this.#request.docker === undefined ? {} : { docker: this.#request.docker }),
+            sessionId: this.id,
+        };
+    }
+
     externalControlContext(): AgentContext {
         return this.#ensureRuntime().context;
     }
@@ -3777,6 +3800,11 @@ export class InMemorySession {
         const agentManager = this.#agentManager;
         const options: CreateCodingAssistantAgentOptions = {
             agentId: this.#agentId,
+            ...(agentManager === undefined
+                ? {}
+                : {
+                      agentCommunication: agentManager.communicationContext(this.id),
+                  }),
             ...(this.#appendSystemPrompt !== undefined
                 ? { appendSystemPrompt: this.#appendSystemPrompt }
                 : {}),

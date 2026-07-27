@@ -282,6 +282,9 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 updated_at_ms INTEGER NOT NULL
             );
 
+            CREATE INDEX IF NOT EXISTS sessions_agent_id
+                ON sessions(agent_id);
+
             CREATE TABLE IF NOT EXISTS session_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,

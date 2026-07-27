@@ -32,6 +32,9 @@ describe("createCodingAssistantAgent", () => {
         expect(runtime.context.bash.cwd).toBe(cwd);
         expect(runtime.agent.snapshot().instructions).toContain(cwd);
         expect(runtime.agent.snapshot().effort).toBe("medium");
+        expect(runtime.agent.tools.map((tool) => tool.name)).toEqual(
+            expect.arrayContaining(["agent_me", "agent_info", "agent_send"]),
+        );
     });
 
     it("automatically enables universal Gemini tools from the daemon environment", () => {
@@ -97,6 +100,9 @@ describe("createCodingAssistantAgent", () => {
             "WebSearch",
             "TaskStop",
             "AskUserQuestion",
+            "agent_me",
+            "agent_info",
+            "agent_send",
         ]);
     });
 
@@ -128,6 +134,9 @@ describe("createCodingAssistantAgent", () => {
             "grep",
             "get_command_or_subagent_output",
             "kill_command_or_subagent",
+            "agent_me",
+            "agent_info",
+            "agent_send",
         ]);
     });
 
@@ -617,6 +626,9 @@ describe("createCodingAssistantAgent", () => {
             "request_user_input",
             "apply_patch",
             "view_image",
+            "agent_me",
+            "agent_info",
+            "agent_send",
             "close_agent",
             "resume_agent",
             "send_input",

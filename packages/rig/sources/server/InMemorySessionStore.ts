@@ -87,6 +87,7 @@ export class InMemorySessionStore implements SessionStore {
             repository: {
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
+                findByAgentId: (agentId) => this.findByAgentId(agentId),
                 get: (sessionId) => this.get(sessionId),
                 listByRoot: (rootSessionId) =>
                     [...this.#sessions.values()].filter(
@@ -299,6 +300,13 @@ export class InMemorySessionStore implements SessionStore {
 
     get(sessionId: string): InMemorySession | undefined {
         return this.#sessions.get(sessionId);
+    }
+
+    findByAgentId(agentId: string): InMemorySession | undefined {
+        const matches = [...this.#sessions.values()].filter(
+            (session) => session.agentIdentity().agentId === agentId,
+        );
+        return matches.length === 1 ? matches[0] : undefined;
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {

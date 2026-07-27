@@ -59,6 +59,11 @@ export type {
     ToolResultPresentation,
 } from "./ToolResultPresentation.js";
 export type { AgentContext } from "./context/AgentContext.js";
+export type {
+    AgentCommunicationContext,
+    AgentCommunicationIdentity,
+    AgentCommunicationInfo,
+} from "./context/AgentCommunicationContext.js";
 export type { PermissionMode } from "../permissions/index.js";
 export type {
     BashContext,

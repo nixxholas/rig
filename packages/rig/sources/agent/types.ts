@@ -98,6 +98,15 @@ export interface UserMessage {
     blocks: readonly ContentBlock[];
     /** Durable origin for non-human messages that use a user-role provider input shape. */
     provenance?: "agent";
+    /** Durable sender identity for rendering and navigating agent-authored messages. */
+    agentSource?: {
+        /** Stable agent capability ID used for replies. */
+        agentId: string;
+        /** Stable Rig session ID of the chat that sent this message. */
+        sessionId: string;
+        /** Sender title captured when the message was sent. */
+        title?: string;
+    };
     /** Opaque provider-reviewed payload delivered between Codex agents. */
     encryptedAgentMessage?: {
         author: string;

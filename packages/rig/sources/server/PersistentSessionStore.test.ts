@@ -1093,7 +1093,15 @@ describe("PersistentSessionStore", () => {
             const state = sessionState({
                 status: "completed",
             });
-            const userMessage = textUserMessage("message-1", "persist me");
+            const userMessage: UserMessage = {
+                ...textUserMessage("message-1", "persist me"),
+                agentSource: {
+                    agentId: "sender-agent-id",
+                    sessionId: "sender-session-id",
+                    title: "Source chat",
+                },
+                provenance: "agent",
+            };
             const toolCallMessage: AgentMessage = {
                 role: "agent",
                 id: "message-2",

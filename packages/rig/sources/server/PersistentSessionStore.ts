@@ -158,6 +158,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             repository: {
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
+                findByAgentId: (agentId) => this.findByAgentId(agentId),
                 get: (sessionId) => this.get(sessionId),
                 listByRoot: (rootSessionId) => this.#listSubagentSessionsByRoot(rootSessionId),
             },
@@ -436,6 +437,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.#notifySessionAccess(session);
         }
         return session;
+    }
+
+    findByAgentId(agentId: string): InMemorySession | undefined {
+        const rows = this.#database
+            .prepare("SELECT id FROM sessions WHERE agent_id = ? LIMIT 2")
+            .all(agentId) as Record<string, unknown>[];
+        if (rows.length !== 1) return undefined;
+        return this.get(readString(rows[0] as Record<string, unknown>, "id"));
     }
 
     get globalEventQueue(): GlobalEventQueue {

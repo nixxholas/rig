@@ -9,8 +9,10 @@ import type { TaskContext } from "./TaskContext.js";
 import type { PermissionContext } from "../../permissions/index.js";
 import type { WorkflowContext } from "../../workflows/index.js";
 import type { SessionSecretContext } from "../../secrets/index.js";
+import type { AgentCommunicationContext } from "./AgentCommunicationContext.js";
 
 export interface AgentContext {
+    agentCommunication?: AgentCommunicationContext;
     fs: FileSystemContext;
     bash: BashContext;
     chatHistory?: ChatHistoryContext;

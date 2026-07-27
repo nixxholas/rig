@@ -174,6 +174,7 @@ describe("InMemorySession abort", () => {
         const stopDescendants = vi.fn(async () => 1);
         const session = new InMemorySession({
             agentManager: {
+                communicationContext: vi.fn(),
                 pauseDescendants,
                 stopDescendants,
             } as unknown as AgentSessionManager,
@@ -194,7 +195,10 @@ describe("InMemorySession abort", () => {
     it("stops active descendants even when the parent has no active run", async () => {
         const stopDescendants = vi.fn(async () => 2);
         const session = new InMemorySession({
-            agentManager: { stopDescendants } as unknown as AgentSessionManager,
+            agentManager: {
+                communicationContext: vi.fn(),
+                stopDescendants,
+            } as unknown as AgentSessionManager,
             createEventId: createEventIdFactory(),
             modelCatalog: testCatalog(),
             request: {
@@ -256,7 +260,10 @@ describe("InMemorySession abort", () => {
         const descendantsStopped = deferred<number>();
         const stopDescendants = vi.fn(() => descendantsStopped.promise);
         const session = new InMemorySession({
-            agentManager: { stopDescendants } as unknown as AgentSessionManager,
+            agentManager: {
+                communicationContext: vi.fn(),
+                stopDescendants,
+            } as unknown as AgentSessionManager,
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider, tools),
             modelCatalog: {
@@ -600,7 +607,10 @@ describe("InMemorySession abort", () => {
         let session: InMemorySession;
         const stopDescendants = vi.fn(() => releaseDescendants.promise);
         session = new InMemorySession({
-            agentManager: { stopDescendants } as unknown as AgentSessionManager,
+            agentManager: {
+                communicationContext: vi.fn(),
+                stopDescendants,
+            } as unknown as AgentSessionManager,
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {
@@ -678,7 +688,10 @@ describe("InMemorySession abort", () => {
         });
         const stopDescendants = vi.fn(() => releaseDescendants.promise);
         const session = new InMemorySession({
-            agentManager: { stopDescendants } as unknown as AgentSessionManager,
+            agentManager: {
+                communicationContext: vi.fn(),
+                stopDescendants,
+            } as unknown as AgentSessionManager,
             createEventId: createEventIdFactory(),
             createRuntime: (options) => createRuntime(options, provider),
             modelCatalog: {

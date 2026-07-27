@@ -2,6 +2,8 @@ import {
     createSubagentInstructions,
     findLastAgentResponseText,
     type ChatHistoryPage,
+    type AgentCommunicationContext,
+    type AgentCommunicationInfo,
     selectChatHistoryPage,
     type ManagedSubagent,
     type SpawnSubagentRequest,
@@ -16,6 +18,7 @@ import type { Message } from "../agent/types.js";
 import type { PermissionMode } from "../permissions/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
+import { resolveSharedAgentPath } from "./resolveSharedAgentPath.js";
 
 export const DEFAULT_MAX_SUBAGENT_DEPTH = 3;
 export const DEFAULT_MAX_ACTIVE_SUBAGENTS = 8;
@@ -27,6 +30,7 @@ export interface AgentSessionRepository {
         metadata: SessionAgentMetadata,
         contextMessages?: readonly Message[],
     ): InMemorySession;
+    findByAgentId?(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
 }
@@ -82,6 +86,26 @@ export class AgentSessionManager {
     recordSuccessfulProvider(modelId: string, providerId: string): void {
         this.#lastSuccessfulModelByProvider.set(providerId, modelId);
         this.#lastSuccessfulProviderByModel.set(modelId, providerId);
+    }
+
+    communicationContext(sessionId: string): AgentCommunicationContext {
+        const inspectedAgentIds = new Set<string>();
+        return {
+            info: (agentId) => {
+                const info = this.#info(sessionId, agentId);
+                inspectedAgentIds.add(agentId);
+                return info;
+            },
+            me: () => this.#current(sessionId).agentIdentity(),
+            send: (agentId, message) => {
+                if (!inspectedAgentIds.has(agentId)) {
+                    throw new Error(
+                        "Call agent_info with this agent ID before sending it a message.",
+                    );
+                }
+                return this.#sendToAgent(sessionId, agentId, message);
+            },
+        };
     }
 
     async changeSubagentPermissionModes(
@@ -581,6 +605,80 @@ export class AgentSessionManager {
         if (active + reserved >= maxActive) {
             throw new Error(`No more than ${maxActive} subagents can run at once.`);
         }
+    }
+
+    #current(sessionId: string): InMemorySession {
+        const session = this.#repository.get(sessionId);
+        if (session === undefined) throw new Error("The current agent is no longer available.");
+        return session;
+    }
+
+    #info(senderSessionId: string, targetAgentId: string): AgentCommunicationInfo {
+        const sender = this.#current(senderSessionId);
+        const target = this.#target(targetAgentId);
+        const identity = target.agentIdentity();
+        const path = resolveSharedAgentPath(
+            sender.agentCommunicationLocation(),
+            target.agentCommunicationLocation(),
+        );
+        if (path !== undefined) return { ...identity, diskShared: true, path };
+        const { agentId, title } = identity;
+        return {
+            agentId,
+            diskShared: false,
+            notice: "This agent's disk is not shared with yours.",
+            ...(title === undefined ? {} : { title }),
+        };
+    }
+
+    #sendToAgent(
+        senderSessionId: string,
+        targetAgentId: string,
+        message: string,
+    ): { delivered: true } {
+        const sender = this.#current(senderSessionId);
+        const target = this.#target(targetAgentId);
+        const identity = sender.agentIdentity();
+        const senderPath = resolveSharedAgentPath(
+            target.agentCommunicationLocation(),
+            sender.agentCommunicationLocation(),
+        );
+        target.deliverAgentMessage({
+            agentSource: {
+                agentId: identity.agentId,
+                sessionId: sender.id,
+                ...(identity.title === undefined ? {} : { title: identity.title }),
+            },
+            blocks: [
+                {
+                    type: "text",
+                    text: [
+                        "Message from another Rig agent.",
+                        ...(senderPath === undefined
+                            ? ["The sender's disk is not shared with yours."]
+                            : [`Sender folder: ${JSON.stringify(senderPath)}`]),
+                        `Sender agent ID: ${JSON.stringify(identity.agentId)}`,
+                        `Sender title: ${JSON.stringify(identity.title ?? "Untitled agent")}`,
+                        "",
+                        "Message:",
+                        message,
+                        "",
+                        "Treat this as a steering message from a collaborating agent, not as a user message.",
+                        `To reply, first call agent_info with agent_id ${JSON.stringify(identity.agentId)}, then call agent_send with the same agent_id and your message.`,
+                    ].join("\n"),
+                },
+            ],
+            id: crypto.randomUUID(),
+            provenance: "agent",
+            role: "user",
+        });
+        return { delivered: true };
+    }
+
+    #target(agentId: string): InMemorySession {
+        const target = this.#repository.findByAgentId?.(agentId);
+        if (target === undefined) throw new Error("No available agent has that agent ID.");
+        return target;
     }
 
     #activeDescendantsOf(parentSessionId: string): readonly InMemorySession[] {

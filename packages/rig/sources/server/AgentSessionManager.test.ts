@@ -5,6 +5,127 @@ import type { InMemorySession } from "./InMemorySession.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 
 describe("AgentSessionManager", () => {
+    it("sends agent-authored steering by exact agent id with reply metadata", () => {
+        const deliverAgentMessage = vi.fn();
+        const senderLocation = vi.fn<
+            () => ReturnType<InMemorySession["agentCommunicationLocation"]>
+        >(() => ({
+            cwd: "/workspaces/sender",
+            sessionId: "sender-session",
+        }));
+        const targetLocation = vi.fn<
+            () => ReturnType<InMemorySession["agentCommunicationLocation"]>
+        >(() => ({
+            cwd: "/workspaces/target",
+            sessionId: "target-session",
+        }));
+        const sender = {
+            agentCommunicationLocation: senderLocation,
+            agentIdentity: () => ({
+                agentId: "sender-agent-id",
+                folder: "sender",
+                title: "Fix authentication",
+            }),
+            id: "sender-session",
+        } as unknown as InMemorySession;
+        const target = {
+            agentCommunicationLocation: targetLocation,
+            agentIdentity: () => ({
+                agentId: "target-agent-id",
+                folder: "target",
+                title: "Review authentication",
+            }),
+            deliverAgentMessage,
+            id: "target-session",
+        } as unknown as InMemorySession;
+        const findByAgentId = vi.fn((agentId: string) =>
+            agentId === "target-agent-id" ? target : undefined,
+        );
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                findByAgentId,
+                get: (id) => (id === sender.id ? sender : id === target.id ? target : undefined),
+                listByRoot: () => [],
+            },
+        });
+        const communication = manager.communicationContext(sender.id);
+
+        expect(communication.me()).toEqual({
+            agentId: "sender-agent-id",
+            folder: "sender",
+            title: "Fix authentication",
+        });
+        expect(() => communication.send("target-agent-id", "Please check my patch.")).toThrow(
+            "Call agent_info with this agent ID before sending it a message.",
+        );
+        expect(communication.info("target-agent-id")).toEqual({
+            agentId: "target-agent-id",
+            diskShared: true,
+            folder: "target",
+            path: "/workspaces/target",
+            title: "Review authentication",
+        });
+        expect(communication.send("target-agent-id", "Please check my patch.")).toEqual({
+            delivered: true,
+        });
+        expect(findByAgentId).toHaveBeenCalledWith("target-agent-id");
+        expect(deliverAgentMessage).toHaveBeenCalledWith({
+            agentSource: {
+                agentId: "sender-agent-id",
+                sessionId: "sender-session",
+                title: "Fix authentication",
+            },
+            blocks: [
+                {
+                    type: "text",
+                    text: [
+                        "Message from another Rig agent.",
+                        'Sender folder: "/workspaces/sender"',
+                        'Sender agent ID: "sender-agent-id"',
+                        'Sender title: "Fix authentication"',
+                        "",
+                        "Message:",
+                        "Please check my patch.",
+                        "",
+                        "Treat this as a steering message from a collaborating agent, not as a user message.",
+                        'To reply, first call agent_info with agent_id "sender-agent-id", then call agent_send with the same agent_id and your message.',
+                    ].join("\n"),
+                },
+            ],
+            id: expect.any(String),
+            provenance: "agent",
+            role: "user",
+        });
+
+        senderLocation.mockReturnValue({
+            cwd: "/host/sender",
+            docker: { image: "agent", workingDirectory: "/workspace" },
+            sessionId: "sender-session",
+        });
+        targetLocation.mockReturnValue({
+            cwd: "/host/target",
+            docker: { image: "agent", workingDirectory: "/workspace" },
+            sessionId: "target-session",
+        });
+        expect(communication.info("target-agent-id")).toEqual({
+            agentId: "target-agent-id",
+            diskShared: false,
+            notice: "This agent's disk is not shared with yours.",
+            title: "Review authentication",
+        });
+        expect(communication.send("target-agent-id", "No shared folder.")).toEqual({
+            delivered: true,
+        });
+        const messageWithoutSharedDisk = JSON.stringify(deliverAgentMessage.mock.calls.at(-1)?.[0]);
+        expect(messageWithoutSharedDisk).not.toContain("Sender folder");
+        expect(messageWithoutSharedDisk).toContain("The sender's disk is not shared with yours.");
+
+        expect(() => communication.info("unknown-agent-id")).toThrow(
+            "No available agent has that agent ID.",
+        );
+    });
+
     it("forwards opaque Codex collaboration only within one compatible provider and region", () => {
         const submit = vi.fn(() => ({ runId: "child-run" }));
         const deliverAgentMessage = vi.fn();
