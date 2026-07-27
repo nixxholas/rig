@@ -557,6 +557,41 @@ describe("ChatStore", () => {
         expect(texts[0]).toMatchObject({ complete: true, text: "Done." });
     });
 
+    it("reconciles streamed text by its absolute block position", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+        store.apply(agentEvent({ contentIndex: 1, messageId: "m1", type: "text_start" }));
+        store.apply(
+            agentEvent({
+                contentIndex: 1,
+                delta: "One visible update.",
+                messageId: "m1",
+                type: "text_delta",
+            }),
+        );
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [
+                        { thinking: "Internal reasoning.", type: "thinking" },
+                        { text: "One visible update.", type: "text" },
+                    ],
+                    id: "m1",
+                    role: "agent",
+                },
+                runId: "run-1",
+            }),
+        );
+
+        expect(store.elements().filter((element) => element.kind === "agent_text")).toMatchObject([
+            { complete: true, text: "One visible update." },
+        ]);
+    });
+
     it("discards tentative text when the provider restarts the message", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());

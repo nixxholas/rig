@@ -866,12 +866,11 @@ export class ChatStore {
     #appendAgentBlocks(message: AgentMessage, at: number, deltas: ChatDelta[]): void {
         const turnId = this.#turnId ?? `history:${message.id}`;
         const streamed = this.#streamingMessageId === message.id;
-        let textIndex = 0;
-        let thinkingIndex = 0;
-        for (const block of message.blocks) {
+        for (const [contentIndex, block] of message.blocks.entries()) {
             if (isTextBlock(block)) {
-                const existing = streamed ? this.#findStreamed("agent_text", textIndex) : undefined;
-                textIndex += 1;
+                const existing = streamed
+                    ? this.#findStreamed("agent_text", contentIndex)
+                    : undefined;
                 if (existing !== undefined) {
                     this.#update(existing.id, { complete: true, text: block.text });
                     continue;
@@ -880,7 +879,7 @@ export class ChatStore {
                 this.#append({
                     complete: true,
                     createdAt: at,
-                    id: `${message.id}:text:${textIndex}`,
+                    id: `${message.id}:agent_text:${contentIndex}`,
                     kind: "agent_text",
                     text: block.text,
                     turnId,
@@ -889,9 +888,8 @@ export class ChatStore {
             }
             if (isThinkingBlock(block)) {
                 const existing = streamed
-                    ? this.#findStreamed("thinking", thinkingIndex)
+                    ? this.#findStreamed("thinking", contentIndex)
                     : undefined;
-                thinkingIndex += 1;
                 if (existing !== undefined) {
                     this.#update(existing.id, { complete: true, text: block.thinking });
                     continue;
@@ -900,7 +898,7 @@ export class ChatStore {
                 this.#append({
                     complete: true,
                     createdAt: at,
-                    id: `${message.id}:thinking:${thinkingIndex}`,
+                    id: `${message.id}:thinking:${contentIndex}`,
                     kind: "thinking",
                     text: block.thinking,
                     turnId,
@@ -939,17 +937,13 @@ export class ChatStore {
     #applyPartialMessage(message: AgentMessage, runId: string, deltas: ChatDelta[]): void {
         this.#startTurn(runId, this.#session.activity.since, deltas);
         this.#streamingMessageId = message.id;
-        let textIndex = 0;
-        let thinkingIndex = 0;
-        for (const block of message.blocks) {
+        for (const [contentIndex, block] of message.blocks.entries()) {
             if (isTextBlock(block)) {
-                this.#openStreamedElement("agent_text", textIndex, block.text, message.id);
-                textIndex += 1;
+                this.#openStreamedElement("agent_text", contentIndex, block.text, message.id);
                 continue;
             }
             if (isThinkingBlock(block)) {
-                this.#openStreamedElement("thinking", thinkingIndex, block.thinking, message.id);
-                thinkingIndex += 1;
+                this.#openStreamedElement("thinking", contentIndex, block.thinking, message.id);
                 continue;
             }
             if (isToolCallBlock(block))
