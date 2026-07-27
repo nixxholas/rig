@@ -1,4 +1,5 @@
 import type { ProtocolHttpClient } from "../client/index.js";
+import type { SessionSummary } from "../protocol/index.js";
 import { RigUserError } from "../RigUserError.js";
 import type { SessionCommandOptions } from "./parseSessionCommand.js";
 import { shortenHomePath } from "./shortenHomePath.js";
@@ -8,6 +9,9 @@ export interface StartupSessionSelection {
     command: "fork" | "resume";
     selection: SessionCommandOptions;
 }
+
+/** Enough history to find the session you meant, few enough to scroll through. */
+const MAX_OFFERED_SESSIONS = 50;
 
 /**
  * Turns a `rig resume` or `rig fork` invocation into the session the TUI should open, asking the
@@ -25,10 +29,17 @@ export async function resolveStartupSessionId(options: {
     let sessionId = requestedSessionId;
     if (sessionId === undefined) {
         options.startup.setStatus("Loading saved sessions.");
-        const listed = await options.client.listSessions();
-        const sessions = all
+        // Asking to resume is asking for saved sessions, so sessions the TUI archived on
+        // its way out belong in the list just as much as the ones still showing.
+        const listed = await options.client.listSessions({ archived: "all" });
+        const matching = all
             ? listed.sessions
             : listed.sessions.filter((session) => session.cwd === options.cwd);
+        // Resuming is about recent work, so recency wins over the board ordering the
+        // dashboard uses, and only the newest handful is worth paging through.
+        const sessions = [...matching]
+            .sort((left, right) => lastActivity(right) - lastActivity(left))
+            .slice(0, MAX_OFFERED_SESSIONS);
         if (sessions.length === 0) {
             throw all
                 ? new RigUserError("Rig has no saved sessions yet.", {
@@ -52,8 +63,10 @@ export async function resolveStartupSessionId(options: {
                 sessions,
                 showDirectory: all,
                 subtitle: all
-                    ? `${countLabel(sessions.length)} across every directory.`
-                    : `${countLabel(sessions.length)} in ${shortenHomePath(options.cwd)}.`,
+                    ? `${countLabel(sessions.length, matching.length)} across every directory.`
+                    : `${countLabel(sessions.length, matching.length)} in ${shortenHomePath(
+                          options.cwd,
+                      )}.`,
                 title: forking ? "Fork a session" : "Resume a session",
             });
             if (sessionId === undefined) return undefined;
@@ -66,6 +79,12 @@ export async function resolveStartupSessionId(options: {
     return forked.session.id;
 }
 
-function countLabel(count: number): string {
-    return `${count} saved session${count === 1 ? "" : "s"}`;
+function lastActivity(session: SessionSummary): number {
+    return session.lastMessageAt ?? session.updatedAt;
+}
+
+/** Says so plainly when older sessions exist beyond the ones being offered. */
+function countLabel(shown: number, available: number): string {
+    if (shown < available) return `${shown} most recent of ${available} saved sessions`;
+    return `${shown} saved session${shown === 1 ? "" : "s"}`;
 }
