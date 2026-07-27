@@ -103,10 +103,62 @@ export class ChatStore {
             cwd: "",
             modelId: "",
             providerId: "",
+            loadingEarlier: false,
             sessionId,
             status: "idle",
             transcriptComplete: true,
         };
+    }
+
+    /**
+     * The run to ask for earlier turns from, or undefined when there is nothing
+     * older to ask for.
+     */
+    earliestRunId(): string | undefined {
+        if (this.#session.transcriptComplete) return undefined;
+        return this.#loadedTranscript?.turns[0]?.runId;
+    }
+
+    /** Reports that earlier turns are being fetched, clearing any earlier failure. */
+    startLoadingEarlier(): readonly ChatDelta[] {
+        const before = this.#session;
+        this.#session = {
+            ...withoutKeys(this.#session, ["loadEarlierError"]),
+            loadingEarlier: true,
+        };
+        return this.#finish([], this.#revision, before);
+    }
+
+    /** Reports that loading earlier turns failed, in words a UI can show. */
+    failLoadingEarlier(message: string): readonly ChatDelta[] {
+        const before = this.#session;
+        this.#session = { ...this.#session, loadEarlierError: message, loadingEarlier: false };
+        return this.#finish([], this.#revision, before);
+    }
+
+    /**
+     * Adds a page of earlier turns in front of the list.
+     *
+     * The page is older than everything already loaded, so the existing rows keep
+     * both their order and their identity and only the new turns are built.
+     */
+    prependEarlier(page: SessionTranscriptWindow): readonly ChatDelta[] {
+        const deltas: ChatDelta[] = [];
+        const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
+        const loaded = this.#loadedTranscript;
+        const merged: SessionTranscriptWindow = {
+            complete: page.complete,
+            messages: [...page.messages, ...(loaded?.messages ?? [])],
+            turns: [...page.turns, ...(loaded?.turns ?? [])],
+        };
+        this.#resetTranscript(merged.messages, deltas, merged);
+        this.#session = {
+            ...withoutKeys(this.#session, ["loadEarlierError"]),
+            loadingEarlier: false,
+            transcriptComplete: merged.complete,
+        };
+        return this.#finish(deltas, revisionBefore, sessionBefore);
     }
 
     elements(): readonly ChatElement[] {

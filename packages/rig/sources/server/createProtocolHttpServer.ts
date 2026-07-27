@@ -1667,6 +1667,7 @@ async function handleRequest(
             session,
             url.searchParams.get("after") ?? undefined,
             sessionEventStreamLeases,
+            parseTurnLimit(url.searchParams.get("turns")),
         );
         return;
     }
@@ -2171,6 +2172,7 @@ function streamEvents(
     session: SessionEventSource,
     after: string | undefined,
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
+    turnLimit: number | undefined,
 ): void {
     const cursor = request.headers["last-event-id"];
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
@@ -2198,7 +2200,7 @@ function streamEvents(
     // A resuming client already holds the transcript, so it is sent only to a
     // client attaching fresh. The window is cut on turn boundaries so a tool
     // result never arrives without the call it belongs to.
-    const transcript = resumed ? undefined : session.transcriptWindow();
+    const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
     const full = resumed ? undefined : session.snapshot();
     const snapshot =
         full === undefined || transcript === undefined
@@ -2245,7 +2247,7 @@ interface SessionEventSource {
     activity: () => SessionActivity;
     partialMessage: () => SessionPartialMessage | undefined;
     snapshot: () => ProtocolSession;
-    transcriptWindow: () => SessionTranscriptWindow;
+    transcriptWindow: (turnLimit?: number) => SessionTranscriptWindow;
 }
 
 interface SessionEventStreamLease {
@@ -2261,4 +2263,19 @@ function writeSseEvent(response: ServerResponse, event: SessionEvent): void {
     response.write(`id: ${event.id}\n`);
     response.write(`event: ${event.type}\n`);
     response.write(`data: ${JSON.stringify(event)}\n\n`);
+}
+
+/**
+ * How many turns an opening frame should carry.
+ *
+ * A client may ask for fewer than the default, which is how a reader with a
+ * short viewport avoids paying for history it will not draw. Anything that is
+ * not a positive whole number is ignored in favour of the default rather than
+ * failing the stream.
+ */
+function parseTurnLimit(value: string | null): number | undefined {
+    if (value === null) return undefined;
+    const parsed = Number(value);
+    if (!Number.isInteger(parsed) || parsed < 1) return undefined;
+    return Math.min(parsed, SESSION_STREAM_TURN_LIMIT);
 }

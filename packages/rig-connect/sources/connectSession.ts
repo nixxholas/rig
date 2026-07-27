@@ -1,6 +1,7 @@
 import { ChatStore } from "./ChatStore.js";
 import { streamSessionEvents } from "./streamSessionEvents.js";
 import type { ChatDelta, ChatElement, SessionState } from "./ChatElement.js";
+import type { SessionTranscriptWindow } from "./protocol.js";
 
 export interface ConnectSessionOptions {
     /** Base URL of a Rig endpoint serving the protocol over HTTP. */
@@ -16,12 +17,25 @@ export interface ConnectSessionOptions {
     onError?: (error: unknown) => void;
     /** Test seam. Defaults to the global `fetch`. */
     fetch?: typeof globalThis.fetch;
+    /** How many turns the opening frame carries. Defaults to the daemon's bound. */
+    transcriptTurnLimit?: number;
 }
 
 export interface SessionConnection {
     /** The current element list. Same array identity until something changes. */
     elements: () => readonly ChatElement[];
     session: () => SessionState;
+    /**
+     * Adds the turns before the oldest one loaded to the front of the list.
+     *
+     * Loading is the one thing a caller waits on, so this is the only part of
+     * the surface that returns a promise. It resolves once the list reflects the
+     * outcome, whether that is more history, the beginning of the conversation,
+     * or a failure reported on the session state. Concurrent calls share one
+     * request, and a call that is still in flight when the connection closes
+     * resolves without touching the list.
+     */
+    loadEarlier: () => Promise<void>;
     /** Releases every resource held by this connection. */
     close: () => void;
 }
@@ -55,6 +69,9 @@ export function connectSession(options: ConnectSessionOptions): SessionConnectio
         signal: controller.signal,
         token: options.token,
         ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
+        ...(options.transcriptTurnLimit === undefined
+            ? {}
+            : { transcriptTurnLimit: options.transcriptTurnLimit }),
         onHello: (hello) => {
             const deltas = store.applyHello(hello);
             publish([...store.setConnection("live"), ...deltas]);
@@ -71,8 +88,33 @@ export function connectSession(options: ConnectSessionOptions): SessionConnectio
             if (!closed) publish(store.setConnection("closed"));
         });
 
+    let loading: Promise<void> | undefined;
+
+    const loadEarlier = async (): Promise<void> => {
+        const before = store.earliestRunId();
+        if (closed || before === undefined) return;
+        // Concurrent callers share one request. A virtual list can ask again
+        // while a page is still arriving, and two requests from the same anchor
+        // would fetch the same turns twice.
+        loading ??= (async () => {
+            try {
+                publish(store.startLoadingEarlier());
+                const page = await fetchEarlier(options, before, controller.signal);
+                if (closed) return;
+                publish(store.prependEarlier(page));
+            } catch (error: unknown) {
+                if (closed) return;
+                publish(store.failLoadingEarlier(describeLoadFailure(error)));
+            } finally {
+                loading = undefined;
+            }
+        })();
+        await loading;
+    };
+
     return {
         elements: () => store.elements(),
+        loadEarlier,
         session: () => store.session(),
         close: () => {
             if (closed) return;
@@ -80,4 +122,31 @@ export function connectSession(options: ConnectSessionOptions): SessionConnectio
             controller.abort();
         },
     };
+}
+
+/** Fetches the whole turns immediately before `before`. */
+async function fetchEarlier(
+    options: ConnectSessionOptions,
+    before: string,
+    signal: AbortSignal,
+): Promise<SessionTranscriptWindow> {
+    const request = options.fetch ?? globalThis.fetch;
+    const url = `${options.endpoint}/sessions/${encodeURIComponent(options.sessionId)}/transcript?before=${encodeURIComponent(before)}`;
+    const response = await request(url, {
+        headers: { authorization: `Bearer ${options.token}` },
+        signal,
+    });
+    if (!response.ok) {
+        throw new Error(
+            response.status === 409
+                ? "That part of the conversation is no longer available."
+                : `Rig answered with ${String(response.status)}.`,
+        );
+    }
+    return (await response.json()) as SessionTranscriptWindow;
+}
+
+function describeLoadFailure(error: unknown): string {
+    if (error instanceof Error && error.message.length > 0) return error.message;
+    return "Earlier messages could not be loaded.";
 }

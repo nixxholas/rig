@@ -15,6 +15,8 @@ export interface SessionStreamOptions extends SessionStreamHandlers {
     token: string;
     /** Milliseconds to wait before reconnecting. Grows up to a cap. */
     retryDelayMs?: number;
+    /** How many turns the opening frame carries. Defaults to the daemon's bound. */
+    transcriptTurnLimit?: number;
     /** Test seam. Defaults to the global `fetch`. */
     fetch?: typeof globalThis.fetch;
     /** Test seam for the reconnect delay. */
@@ -84,6 +86,9 @@ async function readStreamOnce(
         endpointBase(options.endpoint),
     );
     if (after !== undefined) url.searchParams.set("after", after);
+    if (options.transcriptTurnLimit !== undefined) {
+        url.searchParams.set("turns", String(options.transcriptTurnLimit));
+    }
 
     const response = await fetchImpl(url, {
         headers: { accept: "text/event-stream", authorization: `Bearer ${options.token}` },

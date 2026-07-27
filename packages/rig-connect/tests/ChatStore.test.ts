@@ -1212,6 +1212,50 @@ describe("recovering a connection", () => {
         expect(store.elements()).toEqual([]);
     });
 
+    it("adds earlier turns in front without disturbing the ones already loaded", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(4, 6, false));
+        const anchor = store.elements().find((element) => element.id === "message:u4");
+
+        store.prependEarlier(windowOf(1, 3, true));
+
+        const turnIds = store.elements().map((element) => element.turnId);
+        expect(turnIds.indexOf("run-1")).toBeLessThan(turnIds.indexOf("run-4"));
+        // A reader's scroll anchor is a row they are looking at. Rebuilding it
+        // while adding history above would jump the viewport.
+        expect(store.elements().find((element) => element.id === "message:u4")).toBe(anchor);
+        expect(store.session().transcriptComplete).toBe(true);
+        expect(store.session().loadingEarlier).toBe(false);
+    });
+
+    it("knows which run to ask from, and stops asking at the beginning", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(4, 6, false));
+        expect(store.earliestRunId()).toBe("run-4");
+
+        store.prependEarlier(windowOf(1, 3, true));
+
+        // The conversation is fully loaded, so there is nothing left to ask for.
+        expect(store.earliestRunId()).toBeUndefined();
+    });
+
+    it("reports a failure to load earlier turns, and clears it on the next try", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(4, 6, false));
+
+        store.startLoadingEarlier();
+        expect(store.session().loadingEarlier).toBe(true);
+        store.failLoadingEarlier("Could not reach Rig.");
+        expect(store.session().loadEarlierError).toBe("Could not reach Rig.");
+        expect(store.session().loadingEarlier).toBe(false);
+
+        store.startLoadingEarlier();
+
+        // A retry starts from a clean slate, so a stale message is not shown
+        // next to a request that is currently in flight.
+        expect(store.session().loadEarlierError).toBeUndefined();
+    });
+
     it("trusts a complete window to be the whole conversation", () => {
         const store = new ChatStore("session-1");
         store.applyHello(helloWith(1, 6, false));

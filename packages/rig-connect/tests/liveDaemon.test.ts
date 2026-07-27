@@ -260,6 +260,56 @@ function assistantMessage(model: string): AssistantMessage {
     };
 }
 
+describe("loading earlier turns through the connection", () => {
+    let connection: SessionConnection | undefined;
+
+    afterEach(() => {
+        connection?.close();
+        connection = undefined;
+    });
+
+    it("pages back to the beginning of a real conversation", async () => {
+        const { endpoint, store } = await startDaemon({ withModel: true });
+        const session = store.create({ cwd: "/tmp/rig-load-earlier" });
+        for (const text of ["One.", "Two.", "Three."]) {
+            const submitted = session.submit({ text });
+            await session.waitForRun(submitted.runId);
+        }
+
+        // One turn at a time, so the opening frame is deliberately short of the
+        // conversation and a reader has something to scroll back into.
+        connection = connectSession({
+            endpoint,
+            onChange: () => undefined,
+            sessionId: session.id,
+            token: "secret",
+            transcriptTurnLimit: 1,
+        });
+        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+        expect(connection.session().transcriptComplete).toBe(false);
+        const newest = connection.elements().map((element) => element.id);
+
+        await connection.loadEarlier();
+
+        const afterOnePage = connection.elements().map((element) => element.id);
+        // History is added in front, so what a reader is looking at keeps both
+        // its position relative to the end and its identity.
+        expect(afterOnePage.slice(-newest.length)).toEqual(newest);
+        expect(afterOnePage.length).toBeGreaterThan(newest.length);
+
+        await connection.loadEarlier();
+        await connection.loadEarlier();
+
+        expect(connection.session().transcriptComplete).toBe(true);
+        expect(connection.session().loadEarlierError).toBeUndefined();
+        // Nothing older remains, so further requests are refused rather than
+        // repeating the first page forever.
+        const settled = connection.elements().map((element) => element.id);
+        await connection.loadEarlier();
+        expect(connection.elements().map((element) => element.id)).toEqual(settled);
+    });
+});
+
 describe("paging back through a transcript", () => {
     it("serves the turns before an anchor, and refuses a missing one", async () => {
         const { endpoint, store } = await startDaemon({ withModel: true });

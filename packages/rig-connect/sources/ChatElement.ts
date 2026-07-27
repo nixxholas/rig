@@ -134,6 +134,10 @@ export interface SessionState {
      * long session; a UI that scrolls back asks for the earlier messages.
      */
     transcriptComplete: boolean;
+    /** True while earlier turns are being fetched. */
+    loadingEarlier: boolean;
+    /** Why the last attempt to load earlier turns failed, in words a UI can show. */
+    loadEarlierError?: string;
 }
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
