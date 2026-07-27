@@ -402,6 +402,32 @@ describe("projects", () => {
         expect(fixture.store.getProject(projectId)?.archivedAt).toBeUndefined();
     });
 
+    it("does not let delayed archive cleanup overtake a later unarchive", async () => {
+        const fixture = await createFixture();
+        const directory = join(fixture.root, "archive-race");
+        await mkdir(directory);
+        const session = fixture.store.create({ cwd: directory });
+        const projectId = session.snapshot().projectId;
+        let release!: () => void;
+        const held = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        fixture.store.remoteTerminals.closeProject = () => held;
+
+        const archiving = fixture.store.archiveProject(
+            projectId,
+            fixture.store.getProject(projectId)!.version,
+        );
+        expect(session.snapshot().archived).toBe(true);
+        session.setArchived(false);
+        fixture.store.unarchiveProject(projectId);
+        release();
+        await archiving;
+
+        expect(fixture.store.getProject(projectId)?.archivedAt).toBeUndefined();
+        expect(session.snapshot().archived).toBe(false);
+    });
+
     it("refuses to archive against a stale version and repeats without effect", async () => {
         const fixture = await createFixture();
         const directory = join(fixture.root, "folder");

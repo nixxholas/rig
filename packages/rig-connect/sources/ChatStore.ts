@@ -98,6 +98,8 @@ export class ChatStore {
      * known. Entries are dropped as results land and cleared on reset.
      */
     #callPresentations = new Map<string, ToolCallPresentation>();
+    /** Recent event identities make every reducer side effect idempotent. */
+    #appliedEventIds = new Set<string>();
     /**
      * The transcript window the list was built from.
      *
@@ -321,6 +323,134 @@ export class ChatStore {
     }
 
     /**
+     * Applies a local session prediction and returns the exact inverse.
+     *
+     * The mutation coordinator rolls predictions back in reverse order before
+     * applying an authoritative event, then reapplies them in FIFO order. A
+     * whole prior reference is therefore both cheaper and more exact than
+     * reconstructing optional fields one by one.
+     */
+    applyOptimisticSession(patch: Partial<SessionState>): {
+        deltas: readonly ChatDelta[];
+        undo: () => void;
+    } {
+        const before = this.#session;
+        const previous = new Map<
+            keyof SessionState,
+            { present: boolean; value: SessionState[keyof SessionState] }
+        >();
+        for (const key of Object.keys(patch) as (keyof SessionState)[]) {
+            previous.set(key, {
+                present: Object.hasOwn(before, key),
+                value: before[key],
+            });
+        }
+        this.#session = { ...this.#session, ...patch };
+        const deltas = this.#finish([], this.#revision, before);
+        return {
+            deltas,
+            undo: () => {
+                const restored = { ...this.#session } as SessionState;
+                for (const [key, prior] of previous) {
+                    if (prior.present) {
+                        (restored as unknown as Record<keyof SessionState, unknown>)[key] =
+                            prior.value;
+                    } else {
+                        delete restored[key];
+                    }
+                }
+                this.#session = restored;
+            },
+        };
+    }
+
+    /** Adds one immediately visible user bubble for a queued send mutation. */
+    applyOptimisticMessage(
+        mutationId: string,
+        text: string,
+        createdAt: number,
+    ): { deltas: readonly ChatDelta[]; undo: () => void } {
+        const elementId = `message:${mutationId}`;
+        if (this.#byId.has(elementId)) return { deltas: [], undo: () => undefined };
+        const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
+        this.#appliedMessageIds.add(mutationId);
+        this.#appendUserMessage(
+            {
+                blocks: [{ text, type: "text" }],
+                id: mutationId,
+                role: "user",
+            },
+            createdAt,
+            this.#session.activeTurn?.turnId ?? `optimistic:${mutationId}`,
+            this.#session.activeTurn === undefined ? "sent" : "pending_steering",
+        );
+        const deltas = this.#finish([], revisionBefore, sessionBefore);
+        return {
+            deltas,
+            undo: () => {
+                this.#remove(elementId);
+                this.#appliedMessageIds.delete(mutationId);
+            },
+        };
+    }
+
+    /** Merges an authoritative mutation response without rebuilding the transcript. */
+    applySessionSnapshot(session: ProtocolSession): readonly ChatDelta[] {
+        const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
+        this.#session = {
+            ...withoutKeys(this.#session, [
+                "draft",
+                "draftUpdatedAt",
+                "effort",
+                "goal",
+                "git",
+                "lastEventId",
+                "recap",
+                "serviceTier",
+                "title",
+                "tokens",
+                "workspaceId",
+            ]),
+            archived: session.archived,
+            backgroundProcesses: session.backgroundProcesses ?? [],
+            cwd: session.cwd,
+            modelLocked: session.modelLocked,
+            modelId: session.modelId,
+            models: session.models,
+            orderKey: session.orderKey,
+            pendingSteeringMessages: session.pendingSteeringMessages ?? [],
+            pendingUserInputs: session.pendingUserInputs,
+            permissionReviews: session.permissionReviews ?? [],
+            permissionMode: session.permissionMode,
+            projectId: session.projectId,
+            providerId: session.providerId,
+            sessionId: session.id,
+            shellCommands: session.shellCommands ?? [],
+            status: session.status,
+            subagents: session.subagents ?? [],
+            tasks: session.tasks,
+            ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+            ...(session.draft === undefined ? {} : { draft: session.draft }),
+            ...(session.draftUpdatedAt === undefined
+                ? {}
+                : { draftUpdatedAt: session.draftUpdatedAt }),
+            ...(session.effort === undefined ? {} : { effort: session.effort }),
+            ...(session.git === undefined ? {} : { git: applicationGit(session.git) }),
+            ...(session.lastEventId === undefined ? {} : { lastEventId: session.lastEventId }),
+            ...(session.goal === undefined ? {} : { goal: session.goal }),
+            ...(session.recap === undefined ? {} : { recap: session.recap }),
+            ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
+            ...(session.title === undefined ? {} : { title: session.title }),
+            ...(session.sessionTokenCount === undefined
+                ? {}
+                : { tokens: session.sessionTokenCount }),
+        };
+        return this.#finish([], revisionBefore, sessionBefore);
+    }
+
+    /**
      * Applies the opening frame of a stream.
      *
      * A first connection carries the whole session and rebuilds the list from its
@@ -349,6 +479,28 @@ export class ChatStore {
                 transcriptComplete: this.#loadedTranscript?.complete ?? true,
             };
         }
+        if (hello.current !== undefined) {
+            const current = hello.current;
+            this.#session = {
+                ...withoutKeys(this.#session, ["draft", "draftUpdatedAt", "git", "tokens"]),
+                ...(current.draft === undefined ? {} : { draft: current.draft }),
+                ...(current.draftUpdatedAt === undefined
+                    ? {}
+                    : { draftUpdatedAt: current.draftUpdatedAt }),
+                ...(current.git === undefined ? {} : { git: applicationGit(current.git) }),
+                ...(current.sessionTokenCount === undefined
+                    ? {}
+                    : { tokens: current.sessionTokenCount }),
+                ...(this.#session.usage === undefined || current.sessionTokenCount === undefined
+                    ? {}
+                    : {
+                          usage: {
+                              ...this.#session.usage,
+                              sessionTokenCount: current.sessionTokenCount,
+                          },
+                      }),
+            };
+        }
         this.#setActivity(hello.activity, deltas);
         if (hello.partial !== undefined) {
             this.#applyPartialMessage(hello.partial.message, hello.partial.runId, deltas);
@@ -367,9 +519,16 @@ export class ChatStore {
 
     /** Applies one session event. Unrecognised events are ignored, not an error. */
     apply(event: SessionEvent): readonly ChatDelta[] {
+        if (this.#appliedEventIds.has(event.id)) return [];
+        this.#appliedEventIds.add(event.id);
+        if (this.#appliedEventIds.size > 4_096) {
+            const oldest = this.#appliedEventIds.values().next().value;
+            if (oldest !== undefined) this.#appliedEventIds.delete(oldest);
+        }
         const deltas: ChatDelta[] = [];
         const revisionBefore = this.#revision;
         const sessionBefore = this.#session;
+        this.#session = { ...this.#session, lastEventId: event.id };
         switch (event.type) {
             case "session_status_changed": {
                 // A replayed or delayed event can restate the status the store
@@ -773,6 +932,7 @@ export class ChatStore {
                 "effort",
                 "goal",
                 "git",
+                "lastEventId",
                 "recap",
                 "serviceTier",
                 "title",
@@ -805,6 +965,7 @@ export class ChatStore {
                 : { draftUpdatedAt: session.draftUpdatedAt }),
             ...(session.effort === undefined ? {} : { effort: session.effort }),
             ...(session.git === undefined ? {} : { git: applicationGit(session.git) }),
+            ...(session.lastEventId === undefined ? {} : { lastEventId: session.lastEventId }),
             ...(session.goal === undefined ? {} : { goal: session.goal }),
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
@@ -863,6 +1024,7 @@ export class ChatStore {
         preservePriorElements = false,
     ): void {
         this.#transcriptGeneration += 1;
+        this.#activeLoadMoreAnchor = undefined;
         if (this.#elements.length > 0) this.#revision += 1;
         // Copied, not aliased: the map this reads from is cleared just below.
         this.#priorElements = new Map(this.#byId);
@@ -883,7 +1045,10 @@ export class ChatStore {
         this.#openTurnIds = [];
         this.#turnUsage = undefined;
         this.#retrying = false;
-        this.#session = withoutKeys(this.#session, ["activeTurn"]);
+        this.#session = {
+            ...withoutKeys(this.#session, ["activeTurn", "loadMoreError"]),
+            loadingMore: false,
+        };
         this.#loadedTranscript = transcript;
         try {
             if (transcript !== undefined && transcript.turns.length > 0) {
@@ -919,60 +1084,100 @@ export class ChatStore {
         deltas: ChatDelta[],
         activeTurn?: ActiveTurn,
     ): void {
-        const byId = new Map(messages.map((message) => [message.id, message]));
+        type TimelineItem =
+            | {
+                  at: number;
+                  eventId?: string;
+                  kind: "message";
+                  message: Message;
+                  order: number;
+                  runId: string;
+              }
+            | {
+                  at: number;
+                  eventId: string;
+                  kind: "retry";
+                  order: number;
+                  retry: NonNullable<SessionTranscriptWindow["turns"][number]["retries"]>[number];
+                  runId: string;
+              }
+            | {
+                  at: number;
+                  errorMessage?: string;
+                  eventId?: string;
+                  kind: "end";
+                  order: number;
+                  outcome: "success" | "error" | "stopped";
+                  runId: string;
+              };
+        const turnByMessageId = new Map<string, SessionTranscriptWindow["turns"][number]>();
         for (const turn of transcript.turns) {
-            this.#turnId = turn.runId;
             this.#rememberTurn(turn.runId, turn.startedAt);
-            const timeline = [
-                ...turn.messageIds.flatMap((messageId, order) => {
-                    const message = byId.get(messageId);
-                    return message === undefined
-                        ? []
-                        : [
-                              {
-                                  at: transcript.messageCreatedAt?.[messageId] ?? turn.startedAt,
-                                  eventId: transcript.messageEventId?.[messageId],
-                                  kind: "message" as const,
-                                  message,
-                                  order,
-                              },
-                          ];
-                }),
-                ...(turn.retries ?? []).map((retry, order) => ({
+            for (const messageId of turn.messageIds) turnByMessageId.set(messageId, turn);
+        }
+        const timeline: TimelineItem[] = messages.flatMap((message, order) => {
+            const turn = turnByMessageId.get(message.id);
+            return turn === undefined
+                ? []
+                : [
+                      {
+                          at: transcript.messageCreatedAt?.[message.id] ?? turn.startedAt,
+                          ...(transcript.messageEventId?.[message.id] === undefined
+                              ? {}
+                              : { eventId: transcript.messageEventId[message.id] }),
+                          kind: "message" as const,
+                          message,
+                          order,
+                          runId: turn.runId,
+                      },
+                  ];
+        });
+        let order = messages.length;
+        for (const turn of transcript.turns) {
+            for (const retry of turn.retries ?? []) {
+                timeline.push({
                     at: retry.createdAt,
                     eventId: retry.id,
                     kind: "retry" as const,
-                    order: turn.messageIds.length + order,
+                    order,
                     retry,
-                })),
-            ].sort(
-                (left, right) =>
-                    left.at - right.at ||
-                    compareEventOrder(left.eventId, right.eventId) ||
-                    left.order - right.order,
-            );
-            for (const item of timeline) {
-                if (item.kind === "message") {
-                    this.#applyMessage(item.message, item.at, deltas, turn.runId);
-                } else {
-                    this.#appendRetry(
-                        item.retry.id,
-                        turn.runId,
-                        item.retry.createdAt,
-                        item.retry.attempt,
-                        item.retry.reason,
-                    );
-                }
+                    runId: turn.runId,
+                });
+                order += 1;
             }
-            if (turn.endedAt === undefined) continue;
-            this.#endTurn(
-                turn.runId,
-                turn.outcome ?? "success",
-                turn.errorMessage,
-                turn.endedAt,
-                deltas,
-                false,
-            );
+            if (turn.endedAt !== undefined) {
+                timeline.push({
+                    at: turn.endedAt,
+                    ...(turn.errorMessage === undefined ? {} : { errorMessage: turn.errorMessage }),
+                    kind: "end",
+                    order,
+                    outcome: turn.outcome ?? "success",
+                    runId: turn.runId,
+                });
+                order += 1;
+            }
+        }
+        timeline.sort(
+            (left, right) =>
+                left.at - right.at ||
+                compareEventOrder(left.eventId, right.eventId) ||
+                left.order - right.order,
+        );
+        for (const item of timeline) {
+            this.#turnId = item.runId;
+            if (item.kind === "message") {
+                this.#applyMessage(item.message, item.at, deltas, item.runId);
+            } else if (item.kind === "retry") {
+                this.#appendRetry(
+                    item.retry.id,
+                    item.runId,
+                    item.retry.createdAt,
+                    item.retry.attempt,
+                    item.retry.reason,
+                );
+            } else {
+                this.#endTurn(item.runId, item.outcome, item.errorMessage, item.at, deltas, false);
+            }
         }
         const restored =
             activeTurn ??
@@ -996,6 +1201,14 @@ export class ChatStore {
         deltas.push({ type: "session_changed", session: this.#session });
         this.#retrying = activity.retry !== undefined;
         if (!this.#retrying && wasRetrying) deltas.push({ type: "retry_finished" });
+        for (const call of activity.toolCalls ?? []) {
+            const elementId = this.#toolCallElementIds.get(call.toolCallId);
+            if (elementId === undefined) continue;
+            this.#update(elementId, {
+                status: "running",
+                ...(call.status === undefined ? {} : { progress: call.status }),
+            });
+        }
     }
 
     #startTurn(runId: string, at: number, deltas: ChatDelta[]): void {
@@ -1991,8 +2204,11 @@ function withoutUsageContext(usage: SessionUsage): SessionUsage {
 }
 
 function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
+    const { facts, ...snapshot } = git;
+    const branch = facts?.branch ?? snapshot.branch;
     return {
-        ...git,
+        ...snapshot,
+        ...(branch === undefined ? {} : { branch }),
         revision: `${git.generation}:${String(git.version)}:${String(git.scannedAt)}`,
     };
 }

@@ -59,8 +59,8 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[1]?.messageIds).toEqual(["run-2-u", "run-2-a"]);
         expect(window.messages.map((message) => message.id)).toEqual([
             "run-1-u",
-            "run-1-a",
             "run-2-u",
+            "run-1-a",
             "run-2-a",
         ]);
     });

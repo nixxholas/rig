@@ -413,23 +413,6 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             );
         `);
 
-        const turnCount = Number(
-            (
-                database.prepare("SELECT COUNT(*) AS count FROM session_turns").get() as {
-                    count: number;
-                }
-            ).count,
-        );
-        if (turnCount === 0) {
-            database.exec(`
-                INSERT OR IGNORE INTO session_turns (session_id, run_id, first_position)
-                SELECT session_id, run_id, MIN(position)
-                FROM session_messages
-                WHERE run_id IS NOT NULL AND is_partial = 0
-                GROUP BY session_id, run_id
-            `);
-        }
-
         ensureColumn(database, "projects", "order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''");
         ensureColumn(database, "projects", "archived_at_ms", "INTEGER");
         ensureColumn(

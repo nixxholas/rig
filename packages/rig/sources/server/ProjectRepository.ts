@@ -438,9 +438,17 @@ export class ProjectRepository {
         });
     }
 
-    renameProject(projectId: string, requestedName: string): Project | undefined {
+    renameProject(
+        projectId: string,
+        requestedName: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined {
         const current = this.getProject(projectId);
         if (current === undefined) return undefined;
+        if (expectedVersion !== undefined && expectedVersion !== current.version) {
+            throw new Error("The project changed before it could be renamed.");
+        }
         const name = this.#reserveProjectName(validateProjectName(requestedName), projectId);
         return this.#transaction(() => {
             this.#database
@@ -453,7 +461,7 @@ export class ProjectRepository {
                     `,
                 )
                 .run(name, projectNameKey(name), this.#now(), projectId);
-            return this.#publishedProject(projectId);
+            return this.#publishedProject(projectId, mutationId);
         });
     }
 
@@ -804,6 +812,7 @@ export class ProjectRepository {
         workspaceId: string,
         requestedName: string,
         expectedVersion?: number,
+        mutationId?: string,
     ): ProjectWorkspace | undefined {
         const current = this.getWorkspace(projectId, workspaceId);
         if (current === undefined) return undefined;
@@ -825,7 +834,7 @@ export class ProjectRepository {
                     `,
                 )
                 .run(name, projectNameKey(name), this.#now(), workspaceId, projectId);
-            return this.#publishedWorkspace(projectId, workspaceId);
+            return this.#publishedWorkspace(projectId, workspaceId, mutationId);
         });
     }
 
@@ -1775,22 +1784,28 @@ export class ProjectRepository {
         }
     }
 
-    #publishedProject(projectId: string): Project | undefined {
+    #publishedProject(projectId: string, mutationId?: string): Project | undefined {
         const project = this.getProject(projectId);
-        if (project !== undefined) this.#publishProject("project_updated", project);
+        if (project !== undefined) this.#publishProject("project_updated", project, mutationId);
         return project;
     }
 
-    #publishedWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
+    #publishedWorkspace(
+        projectId: string,
+        workspaceId: string,
+        mutationId?: string,
+    ): ProjectWorkspace | undefined {
         const workspace = this.getWorkspace(projectId, workspaceId);
-        if (workspace !== undefined) this.#publishWorkspace("workspace_updated", workspace);
+        if (workspace !== undefined) {
+            this.#publishWorkspace("workspace_updated", workspace, mutationId);
+        }
         return workspace;
     }
 
-    #publishProject(type: ProjectEvent["type"], project: Project): void {
+    #publishProject(type: ProjectEvent["type"], project: Project, mutationId?: string): void {
         const event = {
             createdAt: this.#now(),
-            data: { project },
+            data: { project, ...(mutationId === undefined ? {} : { mutationId }) },
             id: this.#createEventId(),
             projectId: project.id,
             type,
@@ -1798,10 +1813,14 @@ export class ProjectRepository {
         this.#onEvent?.(event);
     }
 
-    #publishWorkspace(type: ProjectWorkspaceEvent["type"], workspace: ProjectWorkspace): void {
+    #publishWorkspace(
+        type: ProjectWorkspaceEvent["type"],
+        workspace: ProjectWorkspace,
+        mutationId?: string,
+    ): void {
         const event = {
             createdAt: this.#now(),
-            data: { workspace },
+            data: { workspace, ...(mutationId === undefined ? {} : { mutationId }) },
             id: this.#createEventId(),
             projectId: workspace.projectId,
             type,

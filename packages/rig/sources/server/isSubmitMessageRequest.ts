@@ -18,6 +18,13 @@ export function isSubmitMessageRequest(value: unknown): value is SubmitMessageRe
     )
         return false;
     if (
+        request.mutationId !== undefined &&
+        (typeof request.mutationId !== "string" ||
+            request.mutationId.length === 0 ||
+            request.mutationId.length > 256)
+    )
+        return false;
+    if (
         request.systemPrompt !== undefined &&
         request.systemPrompt !== null &&
         typeof request.systemPrompt !== "string"

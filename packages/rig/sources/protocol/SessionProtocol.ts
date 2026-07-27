@@ -354,6 +354,11 @@ export interface SessionTranscriptWindow {
  */
 export interface SessionStreamHello {
     activity: SessionActivity;
+    /**
+     * Current facts whose intermediate events are intentionally not retained.
+     * Present on resume after durable catch-up has been delivered.
+     */
+    current?: SessionStreamCurrentState;
     /** Complete session usage at the hello cursor; later durable events update it. */
     usage?: GetSessionUsageResponse;
     /**
@@ -371,6 +376,13 @@ export interface SessionStreamHello {
     lastEventId?: EventId;
     /** True when the client attached with a cursor and is resuming. */
     resumed: boolean;
+}
+
+export interface SessionStreamCurrentState {
+    draft?: string;
+    draftUpdatedAt?: number;
+    git?: GitChangeSnapshot;
+    sessionTokenCount?: SessionTokenCount;
 }
 
 /**
@@ -436,6 +448,8 @@ export interface SessionSummary {
     createdAt: number;
     updatedAt: number;
     lastMessageAt?: number;
+    /** Ordered identity of the newest session mutation/state event. */
+    lastEventId?: EventId;
     interruption?: SessionInterruption;
 }
 
@@ -670,6 +684,8 @@ export interface SubmitMessageRequest {
      */
     serviceTier?: ServiceTier | null;
     text: string;
+    /** Identity used to correlate the optimistic action with its stream echo. */
+    mutationId?: string;
 }
 
 export interface BroadcastMessageRequest extends SubmitMessageRequest {
@@ -764,6 +780,7 @@ export interface ChangeModelRequest {
     effort?: string;
     modelId: string;
     providerId?: string;
+    mutationId?: string;
 }
 
 export interface ChangeEffortRequest {
@@ -785,6 +802,7 @@ export interface AbortRunOptions {
     continuePendingSteering?: boolean;
     expectedRunId?: string;
     steeringMessageIds?: readonly string[];
+    mutationId?: string;
 }
 
 export type SessionEvent =
@@ -841,7 +859,7 @@ export type SessionUpdatedEvent = BaseSessionEvent<"session_updated", { session:
 
 export type SessionArchiveChangedEvent = BaseSessionEvent<
     "session_archived",
-    { archived: boolean }
+    { archived: boolean; mutationId?: string }
 >;
 
 export type SessionWorkspaceArchivedEvent = BaseSessionEvent<
@@ -855,6 +873,7 @@ export type MessageSubmittedEvent = BaseSessionEvent<
         displayText: string;
         delivery?: "run" | "steer";
         message: UserMessage;
+        mutationId?: string;
         runId: string;
         source?: "notification";
     }
@@ -932,6 +951,7 @@ export type RunErrorEvent = BaseSessionEvent<
 export type AbortRequestedEvent = BaseSessionEvent<
     "abort_requested",
     {
+        mutationId?: string;
         runId?: string;
     }
 >;
@@ -1062,6 +1082,7 @@ export type SessionConfigurationChangedEvent = BaseSessionEvent<
         providerId: string;
         serviceTier: ServiceTier | null;
         snapshot: AgentSnapshot;
+        mutationId?: string;
     }
 >;
 

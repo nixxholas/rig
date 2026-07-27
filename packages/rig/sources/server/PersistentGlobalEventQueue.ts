@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 
 import { createId } from "@paralleldrive/cuid2";
+import { isLiveGlobalEvent } from "../protocol/index.js";
 
 import type {
     GlobalEvent,
@@ -65,6 +66,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     }
 
     append(event: GlobalEvent): GlobalEventQueueEntry | undefined {
+        if (isLiveGlobalEvent(event)) return undefined;
         if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
         const state = this.#state();
         const position = state.lastPosition + 1;

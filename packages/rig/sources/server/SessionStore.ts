@@ -64,12 +64,18 @@ export interface SessionStore {
     ): void;
     listProjects(): readonly Project[];
     listWorkspaces(projectId?: string): readonly ProjectWorkspace[];
-    renameProject(projectId: string, name: string): Project | undefined;
+    renameProject(
+        projectId: string,
+        name: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined;
     renameWorkspace(
         projectId: string,
         workspaceId: string,
         name: string,
         expectedVersion?: number,
+        mutationId?: string,
     ): ProjectWorkspace | undefined;
     refreshProject(projectId: string): Project | undefined;
     reorderProject(

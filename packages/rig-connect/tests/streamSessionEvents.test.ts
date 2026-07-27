@@ -109,6 +109,36 @@ describe("streamSessionEvents", () => {
         expect(attempts).toEqual([{ after: null }, { after: "event-1" }]);
     });
 
+    it("does not skip catch-up when a resumed stream drops after its hello", async () => {
+        const controller = new AbortController();
+        const attempts: Attempt[] = [];
+        let delivered = 0;
+
+        await streamSessionEvents({
+            endpoint: "http://daemon.test",
+            sessionId: "session-1",
+            signal: controller.signal,
+            token: "secret",
+            fetch: scriptedFetch(
+                [
+                    [helloFrame(false), eventFrame("event-1")],
+                    [helloFrame(true, "event-3")],
+                    [helloFrame(true), eventFrame("event-2")],
+                ],
+                attempts,
+            ),
+            onHello: () => undefined,
+            onEvent: () => {
+                delivered += 1;
+                if (delivered === 2) controller.abort();
+            },
+            onDisconnected: () => undefined,
+            wait: () => Promise.resolve(),
+        });
+
+        expect(attempts).toEqual([{ after: null }, { after: "event-1" }, { after: "event-1" }]);
+    });
+
     it("resumes a quiet stream from the cursor covered by its hello frame", async () => {
         const controller = new AbortController();
         const attempts: Attempt[] = [];

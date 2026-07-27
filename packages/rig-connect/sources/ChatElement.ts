@@ -164,6 +164,7 @@ export interface SessionState {
     /** Whether the session has been archived out of the active list. */
     archived: boolean;
     sessionId: string;
+    lastEventId?: string;
     projectId: string;
     workspaceId?: string;
     orderKey: string;
@@ -215,6 +216,21 @@ export interface SessionState {
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 
+export type MutationAction =
+    | "send_message"
+    | "stop_run"
+    | "switch_model"
+    | "set_session_archived"
+    | "rename_group";
+
+export interface MutationRejectedDelta {
+    action: MutationAction;
+    /** Ready-to-display explanation of why Rig did not accept the action. */
+    message: string;
+    mutationId: string;
+    type: "mutation_rejected";
+}
+
 /** What changed, for a consumer that reacts to events rather than re-rendering. */
 export type ChatDelta =
     | { type: "elements_changed"; elements: readonly ChatElement[] }
@@ -231,4 +247,5 @@ export type ChatDelta =
     | { type: "compaction_finished"; compactionId: string }
     | { type: "retry_started"; attempt: number; reason: string }
     | { type: "retry_finished" }
-    | { type: "connection_changed"; connection: ConnectionState };
+    | { type: "connection_changed"; connection: ConnectionState }
+    | MutationRejectedDelta;

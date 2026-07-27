@@ -118,6 +118,7 @@ import { SessionTerminalTracker } from "./SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminalPresence.js";
 
 const createTerminalSnapshotEventId = createEventIdFactory();
+const createSessionSnapshotEventId = createEventIdFactory();
 
 export interface ProtocolHttpServerOptions {
     defaultDocker?: DockerExecutionConfig;
@@ -420,16 +421,51 @@ async function handleRequest(
         }
         if (request.method === "PATCH") {
             const body = await readJson<unknown>(request);
-            if (!hasOnlyObjectKeys(body, ["name"]) || typeof body.name !== "string") {
+            if (
+                (!hasOnlyObjectKeys(body, ["name"]) &&
+                    !hasOnlyObjectKeys(body, ["mutationId", "name"])) ||
+                typeof body.name !== "string" ||
+                (body.mutationId !== undefined && typeof body.mutationId !== "string")
+            ) {
                 sendJson(response, 400, { error: "Project name must be text." });
+                return;
+            }
+            const completed =
+                body.mutationId === undefined
+                    ? undefined
+                    : store.globalEventQueue
+                          .list()
+                          ?.find(
+                              (entry) =>
+                                  entry.event.type === "project_updated" &&
+                                  entry.event.projectId === project.id &&
+                                  entry.event.data.mutationId === body.mutationId,
+                          );
+            if (completed !== undefined) {
+                sendJson<ProjectResponse>(response, 200, {
+                    project: store.getProject(project.id)!,
+                });
+                return;
+            }
+            const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+            if (expectedVersion === undefined) {
+                sendJson(response, 400, { error: "The project version is invalid." });
                 return;
             }
             try {
                 sendJson<ProjectResponse>(response, 200, {
-                    project: store.renameProject(project.id, body.name)!,
+                    project: store.renameProject(
+                        project.id,
+                        body.name,
+                        expectedVersion,
+                        body.mutationId,
+                    )!,
                 });
             } catch (error) {
-                sendJson(response, 400, { error: errorToMessage(error) });
+                sendJson(response, 409, {
+                    error: errorToMessage(error),
+                    project: store.getProject(project.id),
+                });
             }
             return;
         }
@@ -672,8 +708,30 @@ async function handleRequest(
         }
         if (request.method === "PATCH") {
             const body = await readJson<unknown>(request);
-            if (!hasOnlyObjectKeys(body, ["name"]) || typeof body.name !== "string") {
+            if (
+                (!hasOnlyObjectKeys(body, ["name"]) &&
+                    !hasOnlyObjectKeys(body, ["mutationId", "name"])) ||
+                typeof body.name !== "string" ||
+                (body.mutationId !== undefined && typeof body.mutationId !== "string")
+            ) {
                 sendJson(response, 400, { error: "Workspace name must be text." });
+                return;
+            }
+            const completed =
+                body.mutationId === undefined
+                    ? undefined
+                    : store.globalEventQueue
+                          .list()
+                          ?.find(
+                              (entry) =>
+                                  entry.event.type === "workspace_updated" &&
+                                  entry.event.workspaceId === route.workspaceId &&
+                                  entry.event.data.mutationId === body.mutationId,
+                          );
+            if (completed !== undefined) {
+                sendJson<ProjectWorkspaceResponse>(response, 200, {
+                    workspace: store.getWorkspace(route.projectId, route.workspaceId)!,
+                });
                 return;
             }
             try {
@@ -687,6 +745,7 @@ async function handleRequest(
                     route.workspaceId,
                     body.name,
                     expectedVersion,
+                    body.mutationId,
                 );
                 if (renamed === undefined) {
                     sendJson(response, 404, { error: "Workspace not found" });
@@ -696,7 +755,10 @@ async function handleRequest(
                     workspace: renamed,
                 });
             } catch (error) {
-                sendJson(response, 409, { error: errorToMessage(error) });
+                sendJson(response, 409, {
+                    error: errorToMessage(error),
+                    workspace: store.getWorkspace(route.projectId, route.workspaceId),
+                });
             }
             return;
         }
@@ -891,19 +953,59 @@ async function handleRequest(
                 response,
                 globalEventQueue,
                 url.searchParams.get("after"),
-                () => [
-                    ...(runtimeConfig.gitStateTracker?.liveSnapshots() ?? []),
-                    ...store.remoteTerminals.groups().map((group) => ({
-                        createdAt: Date.now(),
-                        data: { terminals: group.terminals },
-                        id: createTerminalSnapshotEventId(),
-                        projectId: group.scope.projectId,
-                        type: "remote_terminals_changed" as const,
-                        ...(group.scope.workspaceId === undefined
-                            ? {}
-                            : { workspaceId: group.scope.workspaceId }),
-                    })),
-                ],
+                () => {
+                    const projects = store
+                        .listProjects()
+                        .filter((project) => project.archivedAt === undefined);
+                    const projectIds = new Set(projects.map((project) => project.id));
+                    const workspaces = store
+                        .listWorkspaces()
+                        .filter(
+                            (workspace) =>
+                                projectIds.has(workspace.projectId) &&
+                                workspace.archivedAt === undefined &&
+                                workspace.status !== "archived",
+                        );
+                    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+                    const sessions = store.listActive().filter((session) => !session.archived);
+                    return [
+                        ...(runtimeConfig.gitStateTracker?.liveSnapshots() ?? []).filter(
+                            (event) =>
+                                projectIds.has(event.projectId) &&
+                                (!("workspaceId" in event) ||
+                                    event.workspaceId === undefined ||
+                                    workspaceIds.has(event.workspaceId)),
+                        ),
+                        ...store.remoteTerminals.groups().flatMap((group) =>
+                            !projectIds.has(group.scope.projectId) ||
+                            (group.scope.workspaceId !== undefined &&
+                                !workspaceIds.has(group.scope.workspaceId))
+                                ? []
+                                : [
+                                      {
+                                          createdAt: Date.now(),
+                                          data: { terminals: group.terminals },
+                                          id: createTerminalSnapshotEventId(),
+                                          projectId: group.scope.projectId,
+                                          type: "remote_terminals_changed" as const,
+                                          ...(group.scope.workspaceId === undefined
+                                              ? {}
+                                              : { workspaceId: group.scope.workspaceId }),
+                                      },
+                                  ],
+                        ),
+                        ...sessions.map((session) => ({
+                            createdAt: Date.now(),
+                            data: { session },
+                            // The stream frame has its own fresh cursor; the
+                            // authoritative session version remains in
+                            // session.lastEventId for mutation preconditions.
+                            id: createSessionSnapshotEventId(),
+                            sessionId: session.id,
+                            type: "session_current" as const,
+                        })),
+                    ];
+                },
                 () => {
                     const sessions = store
                         .listActive()
@@ -911,26 +1013,39 @@ async function handleRequest(
                             sessionSummaryWithTerminalPresence(summary, sessionTerminals),
                         )
                         .filter((summary) => !summary.archived);
+                    const projects = store
+                        .listProjects()
+                        .filter((project) => project.archivedAt === undefined);
+                    const projectIds = new Set(projects.map((project) => project.id));
+                    const workspaces = store
+                        .listWorkspaces()
+                        .filter(
+                            (workspace) =>
+                                projectIds.has(workspace.projectId) &&
+                                workspace.archivedAt === undefined &&
+                                workspace.status !== "archived",
+                        );
+                    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
                     return {
-                        projects: store
-                            .listProjects()
-                            .filter((project) => project.archivedAt === undefined),
-                        terminalGroups: store.remoteTerminals.groups().map((group) => ({
-                            projectId: group.scope.projectId,
-                            terminals: group.terminals,
-                            ...(group.scope.workspaceId === undefined
-                                ? {}
-                                : { workspaceId: group.scope.workspaceId }),
-                        })),
+                        projects,
+                        terminalGroups: store.remoteTerminals.groups().flatMap((group) =>
+                            !projectIds.has(group.scope.projectId) ||
+                            (group.scope.workspaceId !== undefined &&
+                                !workspaceIds.has(group.scope.workspaceId))
+                                ? []
+                                : [
+                                      {
+                                          projectId: group.scope.projectId,
+                                          terminals: group.terminals,
+                                          ...(group.scope.workspaceId === undefined
+                                              ? {}
+                                              : { workspaceId: group.scope.workspaceId }),
+                                      },
+                                  ],
+                        ),
                         sessions,
                         sessionsComplete: true,
-                        workspaces: store
-                            .listWorkspaces()
-                            .filter(
-                                (workspace) =>
-                                    workspace.archivedAt === undefined &&
-                                    workspace.status !== "archived",
-                            ),
+                        workspaces,
                     };
                 },
             );
@@ -1193,7 +1308,23 @@ async function handleRequest(
          * running and queued sessions may be hidden, and every archived session remains readable
          * and resumable by ID. Repeating either action is intentionally idempotent.
          */
-        const archived = session.setArchived(route.name === "archive");
+        const mutationId = requestMutationId(request);
+        const completed =
+            mutationId === undefined
+                ? undefined
+                : session.events
+                      .since(undefined)
+                      ?.find(
+                          (event) =>
+                              event.type === "session_archived" &&
+                              event.data.mutationId === mutationId,
+                      );
+        if (completed !== undefined) {
+            sendJson<SessionArchiveResponse>(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const archived = session.setArchived(route.name === "archive", mutationId);
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
             store.unarchiveProject(archived.projectId);
@@ -1348,8 +1479,28 @@ async function handleRequest(
             sendJson(response, 400, { error: "Message text must be text." });
             return;
         }
+        if (body.clientSubmissionId !== undefined) {
+            const submitted = session.events.messageSubmission(body.clientSubmissionId);
+            if (submitted !== undefined) {
+                sendJson<SubmitMessageResponse>(response, 202, {
+                    eventId: submitted.id,
+                    runId: submitted.data.runId,
+                    sessionId: session.id,
+                });
+                return;
+            }
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         // A user working in an explicitly archived session makes it visible again.
-        sendJson<SubmitMessageResponse>(response, 202, session.submit(body));
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        sendJson<SubmitMessageResponse>(
+            response,
+            202,
+            session.submit({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        );
         return;
     }
 
@@ -1403,6 +1554,25 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "abort") {
+        const mutationId = requestMutationId(request);
+        const completed =
+            mutationId === undefined
+                ? undefined
+                : session.events
+                      .since(undefined)
+                      ?.find(
+                          (event) =>
+                              event.type === "abort_requested" &&
+                              event.data.mutationId === mutationId,
+                      );
+        if (completed !== undefined) {
+            sendJson<AbortRunResponse>(response, 200, {
+                aborted: true,
+                eventId: completed.id,
+            });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
             const expectedRunId = url.searchParams.get("expectedRunId") ?? undefined;
             const steeringMessageIds = url.searchParams.getAll("steeringMessageId");
@@ -1413,6 +1583,7 @@ async function handleRequest(
                     continuePendingSteering:
                         url.searchParams.get("continuePendingSteering") === "1",
                     ...(expectedRunId === undefined ? {} : { expectedRunId }),
+                    ...(mutationId === undefined ? {} : { mutationId }),
                     ...(steeringMessageIds.length === 0 ? {} : { steeringMessageIds }),
                 }),
             );
@@ -1522,7 +1693,35 @@ async function handleRequest(
 
     if (request.method === "PATCH" && route.name === "model") {
         const body = await readJson<ChangeModelRequest>(request);
-        sendJson(response, 200, { session: session.changeModel(body) });
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        const completed =
+            mutationId === undefined
+                ? undefined
+                : session.events
+                      .since(undefined)
+                      ?.find(
+                          (event) =>
+                              event.type === "session_configuration_changed" &&
+                              event.data.mutationId === mutationId,
+                      );
+        if (completed !== undefined) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        try {
+            sendJson(response, 200, {
+                session: session.changeModel({
+                    ...body,
+                    ...(mutationId === undefined ? {} : { mutationId }),
+                }),
+            });
+        } catch (error) {
+            sendJson(response, 409, {
+                error: errorToMessage(error),
+                session: session.snapshot(),
+            });
+        }
         return;
     }
 
@@ -2168,6 +2367,43 @@ function parseEntityVersion(value: string | readonly string[] | undefined): numb
     return Number.isSafeInteger(version) && version > 0 ? version : undefined;
 }
 
+function sessionMutationCanApply(
+    request: IncomingMessage,
+    response: ServerResponse,
+    session: Pick<SessionEventSource, "events" | "snapshot">,
+): boolean {
+    const header = request.headers["if-match"];
+    if (header === undefined) return true;
+    const expected = parseExpectedEventId(header);
+    if (expected === undefined) {
+        sendJson(response, 400, { error: "The session version is invalid." });
+        return false;
+    }
+    if (expected === session.events.lastEventId()) return true;
+    sendJson(response, 409, {
+        error: "The session changed before this action could be applied.",
+        session: session.snapshot(),
+    });
+    return false;
+}
+
+function parseExpectedEventId(value: string | readonly string[] | undefined): string | undefined {
+    const selected = Array.isArray(value) ? value.at(-1) : value;
+    if (selected === undefined) return undefined;
+    const trimmed = selected.trim();
+    const unquoted =
+        trimmed.startsWith('"') && trimmed.endsWith('"') ? trimmed.slice(1, -1) : trimmed;
+    return unquoted.length === 0 ? undefined : unquoted;
+}
+
+function requestMutationId(request: IncomingMessage): string | undefined {
+    const value = request.headers["x-rig-mutation-id"];
+    const selected = Array.isArray(value) ? value.at(-1) : value;
+    return selected === undefined || selected.length === 0 || selected.length > 256
+        ? undefined
+        : selected;
+}
+
 class InvalidJsonBodyError extends Error {}
 
 class RequestBodyTooLargeError extends Error {}
@@ -2236,7 +2472,8 @@ function streamEvents(
     // client attaching fresh. The window is cut on turn boundaries so a tool
     // result never arrives without the call it belongs to.
     const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
-    const full = resumed ? undefined : session.snapshot();
+    const currentSession = session.snapshot();
+    const full = resumed ? undefined : currentSession;
     // Materialise the durable log once. A long-running session may have many
     // events, and opening a stream must not allocate and walk three separate
     // copies merely to derive current side-state.
@@ -2254,9 +2491,25 @@ function streamEvents(
                   subagents,
                   snapshot: { ...full.snapshot, messages: transcript.messages },
               };
-    writeSseHello(response, {
+    const hello: SessionStreamHello = {
         activity: session.activity(),
         resumed,
+        ...(resumed
+            ? {
+                  current: {
+                      ...(currentSession.draft === undefined
+                          ? {}
+                          : { draft: currentSession.draft }),
+                      ...(currentSession.draftUpdatedAt === undefined
+                          ? {}
+                          : { draftUpdatedAt: currentSession.draftUpdatedAt }),
+                      ...(currentSession.git === undefined ? {} : { git: currentSession.git }),
+                      ...(currentSession.sessionTokenCount === undefined
+                          ? {}
+                          : { sessionTokenCount: currentSession.sessionTokenCount }),
+                  },
+              }
+            : {}),
         ...(full === undefined || usage === undefined
             ? {}
             : {
@@ -2278,11 +2531,15 @@ function streamEvents(
             : { session: snapshot, transcript }),
         ...(partial === undefined ? {} : { partial }),
         ...(lastEventId === undefined ? {} : { lastEventId }),
-    });
+    };
 
-    for (const event of catchup) {
-        writeSseEvent(response, event);
+    // A resumed client applies durable history first, then the current overlay.
+    // If the connection drops mid-catch-up, its cursor advances only through
+    // events it actually received, so the next attempt cannot skip anything.
+    if (resumed) {
+        for (const event of catchup) writeSseEvent(response, event);
     }
+    writeSseHello(response, hello);
 
     const heartbeat = setInterval(() => {
         response.write(": keepalive\n\n");

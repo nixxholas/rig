@@ -8,6 +8,7 @@
  */
 
 export type EventId = string;
+export type MutationId = string;
 
 export type SessionActivityKind =
     | "idle"
@@ -434,6 +435,17 @@ export interface GitChangeSnapshot {
     revision?: string;
     scannedAt: number;
     version: number;
+    /** Daemon wire facts; projected to top-level application fields by rig-connect. */
+    facts?: GitRepositoryFacts;
+}
+
+export interface GitRepositoryFacts {
+    ahead: number;
+    behind: number;
+    branch?: string;
+    detached: boolean;
+    head?: string;
+    upstream?: string;
 }
 
 /**
@@ -520,12 +532,20 @@ export interface SessionTranscriptWindow {
 
 export interface SessionStreamHello {
     activity: SessionActivity;
+    current?: SessionStreamCurrentState;
     usage?: SessionUsageSnapshot;
     session?: ProtocolSession;
     transcript?: SessionTranscriptWindow;
     partial?: SessionPartialMessage;
     lastEventId?: EventId;
     resumed: boolean;
+}
+
+export interface SessionStreamCurrentState {
+    draft?: string;
+    draftUpdatedAt?: number;
+    git?: GitChangeSnapshot;
+    sessionTokenCount?: SessionTokenCount;
 }
 
 export interface BaseSessionEvent<TType extends string, TData> {
@@ -545,11 +565,18 @@ export interface BaseSessionEvent<TType extends string, TData> {
  */
 export type InterpretedSessionEvent =
     | BaseSessionEvent<"session_activity_changed", { activity: SessionActivity }>
+    | BaseSessionEvent<"session_archived", { archived: boolean; mutationId?: MutationId }>
     | BaseSessionEvent<"session_git_changed", { git: GitChangeSnapshot }>
     | BaseSessionEvent<"session_context_changed", { sessionTokenCount: SessionTokenCount }>
     | BaseSessionEvent<
           "session_configuration_changed",
-          { effort?: string; modelId: string; providerId: string; serviceTier: string | null }
+          {
+              effort?: string;
+              modelId: string;
+              mutationId?: MutationId;
+              providerId: string;
+              serviceTier: string | null;
+          }
       >
     | BaseSessionEvent<
           "session_title_changed",
@@ -594,11 +621,13 @@ export type InterpretedSessionEvent =
               delivery?: "run" | "steer";
               displayText: string;
               message: UserMessage;
+              mutationId?: MutationId;
               runId: string;
               source?: "notification";
           }
       >
     | BaseSessionEvent<"run_started", { runId: string }>
+    | BaseSessionEvent<"abort_requested", { mutationId?: MutationId; runId?: string }>
     | BaseSessionEvent<"inference_retry", { attempt: number; reason: string; runId: string }>
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
@@ -799,6 +828,7 @@ export interface SessionSummary {
     createdAt: number;
     updatedAt: number;
     lastMessageAt?: number;
+    lastEventId?: EventId;
     unread?: object;
 }
 
@@ -836,11 +866,38 @@ export interface BaseGlobalEvent<TType extends string, TData> {
 }
 
 export type GlobalEvent =
-    | BaseGlobalEvent<"project_created", { project: Project }>
-    | BaseGlobalEvent<"project_updated", { project: Project }>
-    | BaseGlobalEvent<"workspace_created", { workspace: ProjectWorkspace }>
-    | BaseGlobalEvent<"workspace_updated", { workspace: ProjectWorkspace }>
+    | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>
+    | BaseGlobalEvent<"project_updated", { mutationId?: MutationId; project: Project }>
+    | BaseGlobalEvent<
+          "workspace_created",
+          { mutationId?: MutationId; workspace: ProjectWorkspace }
+      >
+    | BaseGlobalEvent<
+          "workspace_updated",
+          { mutationId?: MutationId; workspace: ProjectWorkspace }
+      >
     | BaseGlobalEvent<"project_git_changed", { git: GitChangeSnapshot }>
     | BaseGlobalEvent<"workspace_git_changed", { git: GitChangeSnapshot }>
     | BaseGlobalEvent<"remote_terminals_changed", { terminals: readonly RemoteTerminalSummary[] }>
+    | BaseSessionEvent<"session_current", { session: SessionSummary }>
     | SessionEvent;
+
+export interface MutationRequest {
+    mutationId: MutationId;
+}
+
+export interface SendMessageMutationRequest extends MutationRequest {
+    clientSubmissionId: MutationId;
+    content?: readonly ContentBlock[];
+    displayText?: string;
+    text: string;
+}
+
+export interface SwitchModelMutationRequest extends MutationRequest {
+    modelId: string;
+    providerId?: string;
+}
+
+export interface RenameGroupMutationRequest extends MutationRequest {
+    name: string;
+}

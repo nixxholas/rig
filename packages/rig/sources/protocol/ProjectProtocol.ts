@@ -1,5 +1,5 @@
 import type { EventId } from "./EventId.js";
-import type { SessionEvent, SessionSummary } from "./SessionProtocol.js";
+import type { BaseSessionEvent, SessionEvent, SessionSummary } from "./SessionProtocol.js";
 import type { RemoteTerminalSummary } from "../terminal/types.js";
 
 export type ProjectKind = "regular" | "home";
@@ -147,10 +147,12 @@ export interface ArchiveProjectWorkspaceRequest {
 }
 
 export interface RenameProjectRequest {
+    mutationId?: string;
     name: string;
 }
 
 export interface RenameProjectWorkspaceRequest {
+    mutationId?: string;
     name: string;
 }
 
@@ -215,12 +217,18 @@ export interface BaseProjectWorkspaceEvent<TType extends string, TData> {
 }
 
 export type ProjectEvent =
-    | BaseProjectEvent<"project_created", { project: Project }>
-    | BaseProjectEvent<"project_updated", { project: Project }>;
+    | BaseProjectEvent<"project_created", { mutationId?: string; project: Project }>
+    | BaseProjectEvent<"project_updated", { mutationId?: string; project: Project }>;
 
 export type ProjectWorkspaceEvent =
-    | BaseProjectWorkspaceEvent<"workspace_created", { workspace: ProjectWorkspace }>
-    | BaseProjectWorkspaceEvent<"workspace_updated", { workspace: ProjectWorkspace }>;
+    | BaseProjectWorkspaceEvent<
+          "workspace_created",
+          { mutationId?: string; workspace: ProjectWorkspace }
+      >
+    | BaseProjectWorkspaceEvent<
+          "workspace_updated",
+          { mutationId?: string; workspace: ProjectWorkspace }
+      >;
 
 /**
  * Git change snapshots, carrying the detail that is recomputed from disk on demand.
@@ -250,6 +258,8 @@ export type RemoteTerminalsChangedEvent =
           { terminals: readonly RemoteTerminalSummary[] }
       >;
 
+export type SessionCurrentEvent = BaseSessionEvent<"session_current", { session: SessionSummary }>;
+
 export interface RemoteTerminalGroupState {
     projectId: string;
     workspaceId?: string;
@@ -259,7 +269,9 @@ export interface RemoteTerminalGroupState {
 export type GlobalLiveEvent =
     | ProjectGitEvent
     | ProjectWorkspaceGitEvent
-    | RemoteTerminalsChangedEvent;
+    | RemoteTerminalsChangedEvent
+    | SessionCurrentEvent
+    | Extract<SessionEvent, { type: "session_context_changed" | "session_draft_changed" }>;
 
 export type GlobalEvent = SessionEvent | ProjectEvent | ProjectWorkspaceEvent | GlobalLiveEvent;
 
@@ -283,7 +295,10 @@ export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent 
     return (
         event.type === "project_git_changed" ||
         event.type === "workspace_git_changed" ||
-        event.type === "remote_terminals_changed"
+        event.type === "remote_terminals_changed" ||
+        event.type === "session_current" ||
+        event.type === "session_context_changed" ||
+        event.type === "session_draft_changed"
     );
 }
 

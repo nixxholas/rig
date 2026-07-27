@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { createEventIdFactory, type ModelCatalog } from "../protocol/index.js";
+import { createEventIdFactory, type ModelCatalog, type SessionEvent } from "../protocol/index.js";
 import { defineModel } from "@slopus/rig-execution";
 import {
     InMemorySession,
@@ -20,6 +20,7 @@ describe("InMemorySession rewind", () => {
             "user-1",
             "agent-1",
         ]);
+        expect(result.session.permissionReviews).toEqual([]);
         expect(deleteMessagesFrom).toHaveBeenCalledWith("session-1", 2);
         const rewound = session.events
             .since(undefined)
@@ -31,6 +32,8 @@ describe("InMemorySession rewind", () => {
             },
             type: "session_rewound",
         });
+        const restarted = createRestoredSession(vi.fn(), session.events.all());
+        expect(restarted.snapshot().permissionReviews).toEqual([]);
     });
 
     it("rejects a message that is not a visible user turn", () => {
@@ -45,7 +48,10 @@ describe("InMemorySession rewind", () => {
     });
 });
 
-function createRestoredSession(deleteMessagesFrom: (sessionId: string, position: number) => void) {
+function createRestoredSession(
+    deleteMessagesFrom: (sessionId: string, position: number) => void,
+    events?: readonly SessionEvent[],
+) {
     const model = defineModel({
         defaultThinkingLevel: "medium",
         id: "test/model",
@@ -71,7 +77,14 @@ function createRestoredSession(deleteMessagesFrom: (sessionId: string, position:
             role: "user" as const,
         },
         {
-            blocks: [{ text: "Later", type: "text" as const }],
+            blocks: [
+                {
+                    arguments: {},
+                    id: "removed-tool",
+                    name: "Read",
+                    type: "tool_call" as const,
+                },
+            ],
             id: "agent-2",
             role: "agent" as const,
         },
@@ -92,6 +105,16 @@ function createRestoredSession(deleteMessagesFrom: (sessionId: string, position:
         orderKey: "a0",
         nextTaskId: 1,
         permissionMode: "workspace_write",
+        permissionReviews: [
+            {
+                action: "Read file",
+                decision: "allow",
+                reason: "Requested",
+                risk: "low",
+                toolCallId: "removed-tool",
+                userAuthorization: "high",
+            },
+        ],
         providerId: "test",
         queuedRuns: [],
         status: "completed",
@@ -109,6 +132,7 @@ function createRestoredSession(deleteMessagesFrom: (sessionId: string, position:
     };
     return new InMemorySession({
         createEventId: createEventIdFactory(),
+        ...(events === undefined ? {} : { events }),
         modelCatalog,
         persistence,
         request: { cwd: restore.cwd },

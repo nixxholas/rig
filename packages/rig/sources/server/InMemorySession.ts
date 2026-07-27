@@ -261,6 +261,8 @@ export interface PersistedSessionState {
     sessionTokenCount?: SessionTokenCount;
     usage?: Usage;
     usageSummary?: SessionUsageSummary;
+    /** The newest session event included in `usageSummary`. */
+    usageSummaryEventId?: EventId;
     tools: readonly string[];
     externalToolCalls?: readonly ExternalToolCall[];
     durableUserInputs?: readonly DurableUserInputCall[];
@@ -736,19 +738,36 @@ export class InMemorySession {
                 this.#quotaContributionTracker.apply(event);
             }
         }
-        if (options.restore?.usageSummary === undefined) {
+        if (
+            options.restore?.usageSummary === undefined ||
+            options.restore.usageSummaryEventId === undefined
+        ) {
             this.#sessionTokenCount = aggregateSessionTokenCount(this.events.all());
             // Restore folds the durable log once while it is already hot; opening a
             // stream later reads the cached projection instead of rescanning history.
             this.usage(this.events.all());
         } else {
-            this.#usageSummaryCache = structuredClone(options.restore.usageSummary);
             this.#persistedUsageBase = structuredClone(options.restore.usageSummary);
-            this.#cachedUsageSummaryRevision = this.#usageSummaryRevision;
-            this.#cachedUsageEventRevision = this.events.usageRevision();
             this.#sessionTokenCount = structuredClone(
                 options.restore.usageSummary.sessionTokenCount,
             );
+            this.#usageEventsAfterBase = this.events
+                .all()
+                .filter(
+                    (event) =>
+                        event.id > (options.restore?.usageSummaryEventId ?? "") &&
+                        affectsSessionUsage(event),
+                );
+            for (const event of this.#usageEventsAfterBase) {
+                this.#sessionTokenCount =
+                    sessionTokenCountAfterEvent(this.#sessionTokenCount, event) ??
+                    this.#sessionTokenCount;
+            }
+            if (this.#usageEventsAfterBase.length === 0) {
+                this.#usageSummaryCache = structuredClone(options.restore.usageSummary);
+                this.#cachedUsageSummaryRevision = this.#usageSummaryRevision;
+                this.#cachedUsageEventRevision = this.events.usageRevision();
+            }
             this.#quotaContributionTracker.seed(
                 options.restore.usageSummary.observedQuota,
                 this.events.latestProviderQuotas(),
@@ -771,6 +790,7 @@ export class InMemorySession {
         options: {
             continuePendingSteering?: boolean;
             expectedRunId?: string;
+            mutationId?: string;
             stopDescendants?: boolean;
             steeringMessageIds?: readonly string[];
         } = {},
@@ -828,6 +848,7 @@ export class InMemorySession {
     async #performAbort(options: {
         continuePendingSteering?: boolean;
         expectedRunId?: string;
+        mutationId?: string;
         stopDescendants?: boolean;
         steeringMessageIds?: readonly string[];
     }): Promise<AbortRunResponse> {
@@ -917,7 +938,10 @@ export class InMemorySession {
         }
         this.#activeRun?.controller.abort();
         this.#restoredActiveRunId = undefined;
-        const event = this.#append("abort_requested", runId !== undefined ? { runId } : {});
+        const event = this.#append("abort_requested", {
+            ...(runId === undefined ? {} : { runId }),
+            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
+        });
         await Promise.all([
             this.#killRuntimeProcesses(),
             stopDescendants,
@@ -1303,11 +1327,14 @@ export class InMemorySession {
         if (this.#activeRun !== undefined || this.#queue.length > 0) {
             throw new Error("Wait for the active response to finish before changing models.");
         }
-        return this.#applyConfiguration({
-            ...(request.effort === undefined ? {} : { effort: request.effort }),
-            modelId: request.modelId,
-            ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
-        });
+        return this.#applyConfiguration(
+            {
+                ...(request.effort === undefined ? {} : { effort: request.effort }),
+                modelId: request.modelId,
+                ...(request.providerId === undefined ? {} : { providerId: request.providerId }),
+            },
+            request.mutationId === undefined ? {} : { mutationId: request.mutationId },
+        );
     }
 
     changeEffort(request: ChangeEffortRequest): ProtocolSession {
@@ -1338,7 +1365,7 @@ export class InMemorySession {
             providerId?: string;
             serviceTier?: ServiceTier | null;
         },
-        options: { excludeRunId?: string } = {},
+        options: { excludeRunId?: string; mutationId?: string } = {},
     ): ProtocolSession {
         const changed: SessionConfigurationField[] = [];
         const previousEffort = this.#effort;
@@ -1408,6 +1435,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             serviceTier: this.#serviceTier ?? null,
             snapshot: this.#agentSnapshot(),
+            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
         return this.snapshot();
     }
@@ -1609,13 +1637,16 @@ export class InMemorySession {
         };
     }
 
-    setArchived(archived: boolean): ProtocolSession {
+    setArchived(archived: boolean, mutationId?: string): ProtocolSession {
         if (!archived && this.#workspaceArchived) {
             throw new Error("A session archived with its workspace cannot be restored.");
         }
         if (this.#archived === archived) return this.snapshot();
         this.#archived = archived;
-        this.#append("session_archived", { archived });
+        this.#append("session_archived", {
+            archived,
+            ...(mutationId === undefined ? {} : { mutationId }),
+        });
         return this.snapshot();
     }
 
@@ -2397,6 +2428,7 @@ export class InMemorySession {
         this.#messages = this.#messages.filter((entry) => entry.position < target.position);
         this.#rebuildMessagePositionIndex();
         this.#rebuildTranscriptIndex();
+        this.#retainPermissionReviewsForMessages(this.#messages.map((entry) => entry.message));
         this.#submittedUserMessages = new Map(
             this.#messages.flatMap((entry) =>
                 entry.message.role === "user" && entry.runId !== undefined
@@ -2738,6 +2770,7 @@ export class InMemorySession {
     }
 
     summary(): SessionSummary {
+        const lastEventId = this.events.lastEventId();
         return {
             id: this.id,
             archived: this.#archived,
@@ -2767,6 +2800,7 @@ export class InMemorySession {
             createdAt: this.#createdAt,
             updatedAt: this.events.lastCreatedAt() ?? this.#now(),
             ...(this.#lastMessageAt !== undefined ? { lastMessageAt: this.#lastMessageAt } : {}),
+            ...(lastEventId === undefined ? {} : { lastEventId }),
             ...(this.#title !== undefined ? { title: this.#title } : {}),
             ...(this.#titleError !== undefined ? { titleError: this.#titleError } : {}),
             ...(this.#interruption !== undefined ? { interruption: this.#interruption } : {}),
@@ -2783,6 +2817,8 @@ export class InMemorySession {
                       ...runtimeSnapshot.contextMessages,
                       ...runtimeSnapshot.queue.map((queued) => queued.message),
                   ];
+        const usageSummary = structuredClone(this.usage());
+        const usageSummaryEventId = this.events.lastEventId();
         const state: PersistedSessionState = {
             ...(this.#activeSince === undefined ? {} : { activeSince: this.#activeSince }),
             agent: this.agentMetadata(),
@@ -2832,7 +2868,8 @@ export class InMemorySession {
             totalTokens: this.#totalTokens,
             sessionTokenCount: structuredClone(this.#sessionTokenCount),
             usage: structuredClone(this.#usage),
-            usageSummary: structuredClone(this.usage()),
+            usageSummary,
+            ...(usageSummaryEventId === undefined ? {} : { usageSummaryEventId }),
             tools: this.#tools,
             externalToolCalls: this.externalToolCalls(),
             durableUserInputs: [...this.#durableUserInputs.values()].map((call) =>
@@ -2976,6 +3013,7 @@ export class InMemorySession {
             displayText,
             message: visibleMessage,
             runId,
+            ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
             ...(options.source === undefined ? {} : { source: options.source }),
         });
         const debugLog = this.#debugLogFor(queued);
@@ -3062,6 +3100,7 @@ export class InMemorySession {
                 displayText,
                 message: userMessage,
                 runId: activeRun.runId,
+                ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
             });
             this.#append("steering_applied", {
                 messageIds: [userMessage.id],
@@ -4014,6 +4053,10 @@ export class InMemorySession {
             this.#permissionReviews.clear();
             return;
         }
+        if (event.type === "session_rewound") {
+            this.#retainPermissionReviewsForMessages(event.data.snapshot.messages);
+            return;
+        }
         if (event.type !== "agent_event" || event.data.event.type !== "permission_review") return;
         const review = event.data.event;
         this.#permissionReviews.set(review.toolCallId, {
@@ -4024,6 +4067,17 @@ export class InMemorySession {
             toolCallId: review.toolCallId,
             userAuthorization: review.userAuthorization,
         });
+    }
+
+    #retainPermissionReviewsForMessages(messages: readonly Message[]): void {
+        const retainedToolCallIds = new Set(
+            messages.flatMap((message) =>
+                message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
+            ),
+        );
+        for (const toolCallId of this.#permissionReviews.keys()) {
+            if (!retainedToolCallIds.has(toolCallId)) this.#permissionReviews.delete(toolCallId);
+        }
     }
 
     #reportInferenceRetry(event: SessionEvent): void {

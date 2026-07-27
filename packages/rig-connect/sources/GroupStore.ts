@@ -55,13 +55,20 @@ export class GroupStore {
 
     remoteTerminals(): readonly RemoteTerminalGroupState[] {
         return [
-            ...[...this.#projectTerminals].map(([projectId, terminals]) => ({
-                projectId,
-                terminals,
-            })),
+            ...[...this.#projectTerminals].flatMap(([projectId, terminals]) => {
+                const project = this.#projects.get(projectId);
+                return project === undefined || project.archivedAt !== undefined
+                    ? []
+                    : [{ projectId, terminals }];
+            }),
             ...[...this.#workspaceTerminals].flatMap(([workspaceId, terminals]) => {
                 const workspace = this.#workspaces.get(workspaceId);
-                return workspace === undefined
+                const project =
+                    workspace === undefined ? undefined : this.#projects.get(workspace.projectId);
+                return workspace === undefined ||
+                    isArchivedWorkspace(workspace) ||
+                    project === undefined ||
+                    project.archivedAt !== undefined
                     ? []
                     : [{ projectId: workspace.projectId, terminals, workspaceId }];
             }),
@@ -70,6 +77,120 @@ export class GroupStore {
 
     state(): GroupsState {
         return this.#state;
+    }
+
+    sessionSummary(sessionId: string): SessionSummary | undefined {
+        return this.#sessions.get(sessionId);
+    }
+
+    groupVersion(
+        target:
+            | { kind: "project"; projectId: string }
+            | { kind: "workspace"; projectId: string; workspaceId: string },
+    ): number | undefined {
+        return target.kind === "project"
+            ? this.#projects.get(target.projectId)?.version
+            : this.#workspaces.get(target.workspaceId)?.version;
+    }
+
+    /** Hides or restores one catalog row before the daemon round trip. */
+    applyOptimisticSessionArchived(
+        sessionId: string,
+        archived: boolean,
+    ): { deltas: readonly GroupDelta[]; undo: () => void } {
+        const known = this.#sessions.get(sessionId);
+        if (known === undefined || known.archived === archived) {
+            return { deltas: [], undo: () => undefined };
+        }
+        const previousTree = this.projects();
+        this.#sessions.set(sessionId, { ...known, archived });
+        this.#markDirty(known.projectId);
+        const projects = this.projects();
+        return {
+            deltas: [
+                ...(projects === previousTree
+                    ? []
+                    : ([{ projects, type: "projects_changed" }] as const)),
+                {
+                    sessionId,
+                    type: archived ? "session_removed" : "session_added",
+                },
+            ],
+            undo: () => {
+                this.#sessions.set(sessionId, known);
+                this.#markDirty(known.projectId);
+            },
+        };
+    }
+
+    /** Applies a scalar session-row prediction while preserving its authoritative cursor. */
+    applyOptimisticSessionPatch(
+        sessionId: string,
+        patch: Partial<SessionSummary>,
+    ): { deltas: readonly GroupDelta[]; undo: () => void } {
+        const known = this.#sessions.get(sessionId);
+        if (known === undefined) return { deltas: [], undo: () => undefined };
+        const updated = { ...known, ...patch };
+        if (sameSessionSummary(known, updated)) {
+            return { deltas: [], undo: () => undefined };
+        }
+        const previousTree = this.projects();
+        this.#sessions.set(sessionId, updated);
+        this.#markDirty(known.projectId);
+        const projects = this.projects();
+        return {
+            deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
+            undo: () => {
+                this.#sessions.set(sessionId, known);
+                this.#markDirty(known.projectId);
+            },
+        };
+    }
+
+    /** Applies a project or workspace name prediction without advancing its version. */
+    applyOptimisticGroupName(
+        target:
+            | { kind: "project"; projectId: string }
+            | { kind: "workspace"; projectId: string; workspaceId: string },
+        name: string,
+    ): { deltas: readonly GroupDelta[]; undo: () => void } {
+        const previousTree = this.projects();
+        if (target.kind === "project") {
+            const known = this.#projects.get(target.projectId);
+            if (known === undefined || known.name === name) {
+                return { deltas: [], undo: () => undefined };
+            }
+            this.#projects.set(target.projectId, { ...known, name, nameSource: "user" });
+            this.#markDirty(target.projectId);
+            const projects = this.projects();
+            return {
+                deltas:
+                    projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
+                undo: () => {
+                    this.#projects.set(target.projectId, known);
+                    this.#markDirty(target.projectId);
+                },
+            };
+        }
+
+        const known = this.#workspaces.get(target.workspaceId);
+        if (known === undefined || known.name === name) {
+            return { deltas: [], undo: () => undefined };
+        }
+        this.#workspaces.set(target.workspaceId, { ...known, name });
+        this.#workspaceGroups.delete(target.workspaceId);
+        this.#workspaceGroupSources.delete(target.workspaceId);
+        this.#markDirty(target.projectId);
+        const projects = this.projects();
+        return {
+            deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
+            undo: () => {
+                this.#workspaces.set(target.workspaceId, known);
+                this.#workspaceGroups.delete(target.workspaceId);
+                this.#workspaceGroupSources.delete(target.workspaceId);
+                this.#markDirty(target.projectId);
+            },
+        };
     }
 
     setConnection(connection: ConnectionState): readonly GroupDelta[] {
@@ -143,6 +264,17 @@ export class GroupStore {
             GlobalStreamHello["terminalGroups"][number]["terminals"]
         >();
         for (const group of hello.terminalGroups) {
+            const project = nextProjects.get(group.projectId);
+            const workspace =
+                group.workspaceId === undefined ? undefined : nextWorkspaces.get(group.workspaceId);
+            if (
+                project === undefined ||
+                project.archivedAt !== undefined ||
+                (group.workspaceId !== undefined &&
+                    (workspace === undefined || isArchivedWorkspace(workspace)))
+            ) {
+                continue;
+            }
             const known =
                 group.workspaceId === undefined
                     ? this.#projectTerminals.get(group.projectId)
@@ -198,6 +330,14 @@ export class GroupStore {
                 // never overwrite a newer one already applied.
                 if (known !== undefined && known.version >= project.version) return [];
                 this.#projects.set(project.id, project);
+                if (project.archivedAt !== undefined) {
+                    this.#projectTerminals.delete(project.id);
+                    for (const workspace of this.#workspaces.values()) {
+                        if (workspace.projectId === project.id) {
+                            this.#workspaceTerminals.delete(workspace.id);
+                        }
+                    }
+                }
                 this.#markDirty(project.id);
                 if (known === undefined)
                     deltas.push({ projectId: project.id, type: "project_added" });
@@ -209,6 +349,9 @@ export class GroupStore {
                 const known = this.#workspaces.get(workspace.id);
                 if (known !== undefined && known.version >= workspace.version) return [];
                 this.#workspaces.set(workspace.id, workspace);
+                if (isArchivedWorkspace(workspace)) {
+                    this.#workspaceTerminals.delete(workspace.id);
+                }
                 this.#markDirty(workspace.projectId);
                 if (known === undefined) {
                     deltas.push({
@@ -251,6 +394,20 @@ export class GroupStore {
                         ? this.#projectTerminals
                         : this.#workspaceTerminals;
                 const key = scope.workspaceId ?? scope.projectId;
+                const project = this.#projects.get(scope.projectId);
+                const workspace =
+                    scope.workspaceId === undefined
+                        ? undefined
+                        : this.#workspaces.get(scope.workspaceId);
+                if (
+                    project === undefined ||
+                    project.archivedAt !== undefined ||
+                    (scope.workspaceId !== undefined &&
+                        (workspace === undefined || isArchivedWorkspace(workspace)))
+                ) {
+                    into.delete(key);
+                    return [];
+                }
                 const known = into.get(key);
                 if (known !== undefined && sameProtocolValue(known, scope.data.terminals)) {
                     return [];
@@ -289,12 +446,26 @@ export class GroupStore {
         const seen = this.#sessionEventIds.get(sessionId);
         if (seen !== undefined && seen >= event.id) return false;
 
+        if (event.type === "session_current") {
+            const incoming = (event.data as { session: SessionSummary }).session;
+            const known = this.#sessions.get(sessionId);
+            if (incoming.lastEventId !== undefined) {
+                this.#sessionEventIds.set(sessionId, incoming.lastEventId);
+            }
+            this.#sessions.set(sessionId, known === undefined ? incoming : { ...known, ...incoming });
+            this.#markDirty(incoming.projectId);
+            if (known !== undefined && known.projectId !== incoming.projectId) {
+                this.#markDirty(known.projectId);
+            }
+            return true;
+        }
+
         if (event.type === "session_archived") {
             const { archived } = event.data as { archived: boolean };
             this.#sessionEventIds.set(sessionId, event.id);
             const known = this.#sessions.get(sessionId);
             if (known === undefined) return false;
-            this.#sessions.set(sessionId, { ...known, archived });
+            this.#sessions.set(sessionId, { ...known, archived, lastEventId: event.id });
             this.#markDirty(known.projectId);
             deltas.push({
                 sessionId,
@@ -312,7 +483,7 @@ export class GroupStore {
             const known = this.#sessions.get(sessionId);
             if (known === undefined) return false;
             this.#sessionEventIds.set(sessionId, event.id);
-            const updated = { ...known, ...patch.set };
+            const updated = { ...known, ...patch.set, lastEventId: event.id };
             for (const key of patch.clear ?? []) delete updated[key];
             this.#sessions.set(sessionId, updated);
             this.#markDirty(known.projectId);
@@ -325,7 +496,7 @@ export class GroupStore {
         this.#sessionEventIds.set(sessionId, event.id);
 
         const known = this.#sessions.get(incoming.id);
-        const merged = { ...known, ...incoming } as SessionSummary;
+        const merged = { ...known, ...incoming, lastEventId: event.id } as SessionSummary;
         if (merged.projectId === undefined || merged.orderKey === undefined) return false;
         this.#sessions.set(merged.id, merged);
         this.#markDirty(merged.projectId);
@@ -581,8 +752,11 @@ function isArchivedWorkspace(workspace: ProjectWorkspace): boolean {
 }
 
 function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
+    const { facts, ...snapshot } = git;
+    const branch = facts?.branch ?? snapshot.branch;
     return {
-        ...git,
+        ...snapshot,
+        ...(branch === undefined ? {} : { branch }),
         revision: `${git.generation}:${String(git.version)}:${String(git.scannedAt)}`,
     };
 }

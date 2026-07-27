@@ -1003,16 +1003,156 @@ describe("ChatStore", () => {
 
     it("does not duplicate a message that is replayed after a reconnect", () => {
         const store = new ChatStore("session-1");
-        store.applyHello(hello());
+        store.applyHello({
+            ...hello(),
+            usage: {
+                currentProviderId: "claude",
+                groups: [],
+                observedQuota: [],
+                quotas: [],
+                sessionTokenCount: { lastContextTokens: 0, totalTokens: 0 },
+            },
+        });
         store.apply(event("run_started", { runId: "run-1" }));
         const message = event("agent_message", {
-            message: { blocks: [{ text: "Once.", type: "text" }], id: "m1", role: "agent" },
+            message: {
+                blocks: [{ text: "Once.", type: "text" }],
+                id: "m1",
+                providerId: "claude",
+                requestedModelId: "sonnet-5",
+                role: "agent",
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    cost: {
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        input: 0,
+                        output: 0,
+                        total: 0,
+                    },
+                    input: 10,
+                    output: 2,
+                    totalTokens: 12,
+                },
+            },
             runId: "run-1",
         });
         store.apply(message);
         store.apply(message);
 
         expect(store.elements().filter((element) => element.kind === "agent_text")).toHaveLength(1);
+        expect(store.session().usage?.totalTokens).toBe(12);
+    });
+
+    it("restores a running tool from current activity", () => {
+        const store = new ChatStore("session-1");
+        const toolMessage = {
+            blocks: [
+                {
+                    arguments: { command: "pnpm test" },
+                    id: "tool-1",
+                    name: "Bash",
+                    type: "tool_call" as const,
+                },
+            ],
+            id: "agent-tool",
+            role: "agent" as const,
+        };
+
+        store.applyHello(
+            hello({
+                activity: {
+                    kind: "executing_tool_call",
+                    label: "Running Bash",
+                    since: 5,
+                    toolCalls: [
+                        {
+                            startedAt: 5,
+                            status: "Running tests",
+                            toolCallId: "tool-1",
+                            toolName: "Bash",
+                        },
+                    ],
+                },
+                session: {
+                    ...hello().session!,
+                    snapshot: { messages: [toolMessage] },
+                },
+                transcript: {
+                    complete: true,
+                    messages: [toolMessage],
+                    turns: [
+                        {
+                            messageIds: ["agent-tool"],
+                            runId: "run-1",
+                            startedAt: 1,
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(store.elements().find((element) => element.kind === "tool_call")).toMatchObject({
+            progress: "Running tests",
+            status: "running",
+            toolCallId: "tool-1",
+        });
+    });
+
+    it("rebuilds interleaved turns in their global message order", () => {
+        const store = new ChatStore("session-1");
+        const messages = [
+            { blocks: [{ text: "u1", type: "text" as const }], id: "u1", role: "user" as const },
+            { blocks: [{ text: "u2", type: "text" as const }], id: "u2", role: "user" as const },
+            { blocks: [{ text: "a1", type: "text" as const }], id: "a1", role: "agent" as const },
+            { blocks: [{ text: "a2", type: "text" as const }], id: "a2", role: "agent" as const },
+        ];
+        store.applyHello(
+            hello({
+                session: { ...hello().session!, snapshot: { messages } },
+                transcript: {
+                    complete: true,
+                    messageCreatedAt: { a1: 3, a2: 5, u1: 1, u2: 2 },
+                    messages,
+                    turns: [
+                        {
+                            endedAt: 4,
+                            messageIds: ["u1", "a1"],
+                            outcome: "success",
+                            runId: "run-1",
+                            startedAt: 1,
+                        },
+                        {
+                            endedAt: 6,
+                            messageIds: ["u2", "a2"],
+                            outcome: "success",
+                            runId: "run-2",
+                            startedAt: 2,
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(
+            store
+                .elements()
+                .filter(
+                    (element) =>
+                        element.kind === "user_message" ||
+                        element.kind === "agent_text" ||
+                        element.kind === "turn_end",
+                )
+                .map((element) => `${element.kind}:${element.turnId}`),
+        ).toEqual([
+            "user_message:run-1",
+            "user_message:run-2",
+            "agent_text:run-1",
+            "turn_end:run-1",
+            "agent_text:run-2",
+            "turn_end:run-2",
+        ]);
     });
 
     it("keeps the transcript untouched when a resume carries no session", () => {
@@ -1080,6 +1220,68 @@ describe("ChatStore", () => {
             tokens: { lastContextTokens: 42_000, totalTokens: 90_000 },
         });
         expect(store.session().git).toMatchObject({ branch: "main", changedFiles: 3 });
+    });
+
+    it("reconciles non-replayable session facts from a resumed hello", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(
+            hello({
+                session: {
+                    ...hello().session!,
+                    draft: "stale",
+                    git: {
+                        branch: "stale",
+                        changedFiles: 1,
+                        comparison: "ready",
+                        conflicted: false,
+                        countsExact: true,
+                        deletions: 0,
+                        files: [],
+                        filesTruncated: false,
+                        generation: "old",
+                        insertions: 1,
+                        scannedAt: 1,
+                        version: 1,
+                    },
+                    sessionTokenCount: { lastContextTokens: 1, totalTokens: 1 },
+                },
+            }),
+        );
+
+        store.applyHello({
+            activity: { kind: "idle", label: "Idle", since: 2 },
+            current: {
+                draftUpdatedAt: 2,
+                git: {
+                    changedFiles: 2,
+                    comparison: "ready",
+                    conflicted: false,
+                    countsExact: true,
+                    deletions: 1,
+                    facts: {
+                        ahead: 0,
+                        behind: 0,
+                        branch: "main",
+                        detached: false,
+                    },
+                    files: [],
+                    filesTruncated: false,
+                    generation: "new",
+                    insertions: 2,
+                    scannedAt: 2,
+                    version: 2,
+                },
+                sessionTokenCount: { lastContextTokens: 42, totalTokens: 90 },
+            },
+            resumed: true,
+        });
+
+        expect(store.session()).toMatchObject({
+            draftUpdatedAt: 2,
+            git: { branch: "main", changedFiles: 2 },
+            tokens: { lastContextTokens: 42, totalTokens: 90 },
+        });
+        expect(store.session().draft).toBeUndefined();
     });
 
     it("ignores an event it does not recognise", () => {
@@ -2100,14 +2302,18 @@ describe("durable status", () => {
         expect(context.map((delta) => delta.type)).toEqual(["session_changed"]);
     });
 
-    it("stays quiet when an event changes nothing", () => {
+    it("advances the authoritative cursor even when a visible value repeats", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
         store.apply(event("session_status_changed", { status: "running" }));
 
         const repeated = store.apply(event("session_status_changed", { status: "running" }));
 
-        expect(repeated).toEqual([]);
+        expect(repeated).toHaveLength(1);
+        expect(repeated[0]).toMatchObject({
+            session: { lastEventId: expect.any(String), status: "running" },
+            type: "session_changed",
+        });
     });
 
     it("follows archiving, which is its own flag", () => {
@@ -2385,6 +2591,21 @@ describe("recovering a connection", () => {
         store.failLoadingMore(started.anchor, "Stale request failed.");
 
         expect(store.session().loadingMore).toBe(false);
+    });
+
+    it("clears a stale load immediately when a fresh hello replaces the transcript", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(4, 6, false));
+        const token = store.session().loadMoreToken;
+        if (token === undefined) throw new Error("Expected a load-more token.");
+        expect(store.startLoadingMore(token)).toBeDefined();
+
+        store.applyHello(helloWith(5, 7, false));
+
+        expect(store.session().loadingMore).toBe(false);
+        const replacement = store.session().loadMoreToken;
+        if (replacement === undefined) throw new Error("Expected a replacement token.");
+        expect(store.startLoadingMore(replacement)).toBeDefined();
     });
 
     it("trusts a complete window to be the whole conversation", () => {

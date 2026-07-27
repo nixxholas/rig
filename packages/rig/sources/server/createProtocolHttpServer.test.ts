@@ -166,12 +166,16 @@ describe("createProtocolHttpServer", () => {
         try {
             const first = await client.createSession({ cwd: "/tmp/rig-project-api/one/project" });
             const second = await client.createSession({ cwd: "/tmp/rig-project-api/two/project" });
-            const firstProject = await client.renameProject(first.session.projectId, {
-                name: "Shared",
-            });
-            const secondProject = await client.renameProject(second.session.projectId, {
-                name: "Shared",
-            });
+            const firstProject = await client.renameProject(
+                first.session.projectId,
+                { name: "Shared" },
+                store.getProject(first.session.projectId)?.version ?? 1,
+            );
+            const secondProject = await client.renameProject(
+                second.session.projectId,
+                { name: "Shared" },
+                store.getProject(second.session.projectId)?.version ?? 1,
+            );
             expect(firstProject.project.name).toBe("Shared");
             expect(secondProject.project.name).toBe("Shared (2)");
             expect((await client.listProjects()).projects.map((project) => project.id)).toEqual([
@@ -1046,7 +1050,12 @@ describe("createProtocolHttpServer", () => {
                 void client.watchGlobalEvents({
                     after: secondCursor,
                     onEvent: (entry) => {
-                        if (!("sessionId" in entry.event)) return;
+                        if (
+                            !("sessionId" in entry.event) ||
+                            entry.event.type !== "session_configuration_changed"
+                        ) {
+                            return;
+                        }
                         controller.abort();
                         resolve(entry.event);
                     },
@@ -1752,17 +1761,22 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
-    it("omits the session from the stream hello when a client resumes", async () => {
+    it("omits the transcript but restores current non-replayable state when a client resumes", async () => {
         const { client, close, socketPath } = await startServer();
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
             const cursor = created.session.lastEventId;
             expect(cursor).toBeDefined();
+            await client.setSessionDraft(created.session.id, {
+                draft: "Changed while disconnected",
+                origin: "test",
+            });
             const hello = await readStreamHello(socketPath, created.session.id, cursor);
 
             expect(hello.resumed).toBe(true);
             expect(hello.session).toBeUndefined();
-            expect(hello.lastEventId).toBe(cursor);
+            expect(hello.lastEventId).toBeDefined();
+            expect(hello.current?.draft).toBe("Changed while disconnected");
         } finally {
             await close();
         }

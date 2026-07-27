@@ -130,6 +130,11 @@ export function sessionTranscriptWindow(
         earlier = groups.slice(0, index);
     }
     const kept = turnLimit >= earlier.length ? earlier : earlier.slice(-turnLimit);
+    const keptRunIds = new Set(kept.map((group) => group.runId));
+    const keptEntries = entries.filter((entry) => {
+        if (entry.message.internal === true) return false;
+        return keptRunIds.has(entry.runId ?? `orphan:${entry.message.id}`);
+    });
     const turns: SessionTranscriptTurn[] = kept.map((group) => {
         const facts = runFacts.get(group.runId);
         return {
@@ -147,24 +152,20 @@ export function sessionTranscriptWindow(
     });
 
     const messageCreatedAt = Object.fromEntries(
-        kept.flatMap((group) =>
-            group.entries.flatMap((entry) =>
-                entry.createdAt === undefined ? [] : [[entry.message.id, entry.createdAt]],
-            ),
+        keptEntries.flatMap((entry) =>
+            entry.createdAt === undefined ? [] : [[entry.message.id, entry.createdAt]],
         ),
     );
     const messageEventId = Object.fromEntries(
-        kept.flatMap((group) =>
-            group.entries.flatMap((entry) =>
-                entry.eventId === undefined ? [] : [[entry.message.id, entry.eventId]],
-            ),
+        keptEntries.flatMap((entry) =>
+            entry.eventId === undefined ? [] : [[entry.message.id, entry.eventId]],
         ),
     );
     return {
         complete: kept.length === earlier.length,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
-        messages: kept.flatMap((group) => group.entries.map((entry) => entry.message)),
+        messages: keptEntries.map((entry) => entry.message),
         turns,
     };
 }

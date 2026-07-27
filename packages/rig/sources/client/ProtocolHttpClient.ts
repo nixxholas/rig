@@ -506,8 +506,14 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", `/projects/${encodeURIComponent(projectId)}`);
     }
 
-    renameProject(projectId: string, request: RenameProjectRequest): Promise<ProjectResponse> {
-        return this.#requestJson("PATCH", `/projects/${encodeURIComponent(projectId)}`, request);
+    renameProject(
+        projectId: string,
+        request: RenameProjectRequest,
+        expectedVersion: number,
+    ): Promise<ProjectResponse> {
+        return this.#requestJson("PATCH", `/projects/${encodeURIComponent(projectId)}`, request, {
+            "if-match": `"${String(expectedVersion)}"`,
+        });
     }
 
     refreshProject(projectId: string): Promise<ProjectResponse> {

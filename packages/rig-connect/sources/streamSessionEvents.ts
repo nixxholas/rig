@@ -109,7 +109,7 @@ async function readStreamOnce(
         if (frame.name === "hello") {
             const hello = frame.data as SessionStreamHello;
             options.onHello(hello);
-            if (hello.lastEventId !== undefined) {
+            if (!hello.resumed && hello.lastEventId !== undefined) {
                 cursor = hello.lastEventId;
                 onCursor(cursor);
             }

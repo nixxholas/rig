@@ -1,4 +1,4 @@
-import type { ConnectionState } from "./ChatElement.js";
+import type { ConnectionState, MutationRejectedDelta } from "./ChatElement.js";
 import type {
     GitChangeSnapshot,
     RemoteTerminalSummary,
@@ -93,4 +93,5 @@ export type GroupDelta =
     | { type: "project_added"; projectId: string }
     | { type: "workspace_added"; projectId: string; workspaceId: string }
     | { type: "session_added"; sessionId: string }
-    | { type: "session_removed"; sessionId: string };
+    | { type: "session_removed"; sessionId: string }
+    | MutationRejectedDelta;

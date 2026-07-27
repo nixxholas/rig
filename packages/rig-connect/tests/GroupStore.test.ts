@@ -384,6 +384,38 @@ describe("GroupStore", () => {
         ]);
     });
 
+    it("drops terminal projections as soon as their parent is archived", () => {
+        const store = new GroupStore();
+        const terminal = {
+            cols: 100,
+            epoch: "epoch-1",
+            exitCode: null,
+            id: "terminal-1",
+            rows: 30,
+            status: "running" as const,
+        };
+        store.applyHello(
+            hello({
+                terminalGroups: [
+                    { projectId: "p1", terminals: [terminal] },
+                    { projectId: "p1", terminals: [terminal], workspaceId: "w1" },
+                ],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+
+        store.apply(
+            event(
+                "project_updated",
+                { project: project("p1", { archivedAt: 2, version: 2 }) },
+                { projectId: "p1" },
+            ),
+        );
+
+        expect(store.projects()).toEqual([]);
+        expect(store.remoteTerminals()).toEqual([]);
+    });
+
     it("moves a session when it changes worktree instead of showing it twice", () => {
         const store = new GroupStore();
         store.applyHello(

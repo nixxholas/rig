@@ -1,85 +1,36 @@
-import { GroupStore } from "./GroupStore.js";
-import { streamGlobalEvents } from "./streamGlobalEvents.js";
+import { connectRig, type RigGroupsConnection } from "./connectRig.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
-import type { RemoteTerminalGroupState } from "./protocol.js";
 
 export interface ConnectGroupsOptions {
-    /** Base URL of a Rig endpoint serving the protocol over HTTP. */
     endpoint: string;
-    /** Bearer token for the endpoint. Obtaining it is the caller's job. */
     token: string;
-    /** Receives the current project tree whenever anything in it changes. */
     onChange: (projects: readonly ProjectGroup[], state: GroupsState) => void;
-    /** Receives ordered deltas. Never called before `onChange`. */
     onDelta?: (delta: GroupDelta) => void;
-    /** Reports a failure that ended the connection for good. */
     onError?: (error: unknown) => void;
-    /** Test seam. Defaults to the global `fetch`. */
     fetch?: typeof globalThis.fetch;
 }
 
-export interface GroupsConnection {
-    /** The current project tree. Same identity until something changes. */
-    projects: () => readonly ProjectGroup[];
-    /** Open terminal tabs grouped by their project/workspace scope. */
-    remoteTerminals: () => readonly RemoteTerminalGroupState[];
-    state: () => GroupsState;
-    /** Releases every resource held by this connection. */
-    close: () => void;
-}
+export type GroupsConnection = RigGroupsConnection;
 
-/**
- * Subscribes to the live state of the group catalog.
- *
- * This is the companion to `connectSession`: it answers what projects,
- * worktrees, and sessions exist, while a session connection answers what is
- * happening inside one of them. It opens one stream and never issues a
- * follow-up request to interpret something it was just told.
- */
+/** Compatibility wrapper for callers that need only the catalog stream. */
 export function connectGroups(options: ConnectGroupsOptions): GroupsConnection {
-    const store = new GroupStore();
-    const controller = new AbortController();
-    let closed = false;
-
-    const publish = (deltas: readonly GroupDelta[]): void => {
-        if (closed || deltas.length === 0) return;
-        // The tree is handed over before the deltas, so a consumer reacting to a
-        // delta always reads state that already reflects it.
-        options.onChange(store.projects(), store.state());
-        for (const delta of deltas) options.onDelta?.(delta);
-    };
-
-    publish(store.setConnection("connecting"));
-
-    void streamGlobalEvents({
+    const rig = connectRig({
         endpoint: options.endpoint,
-        signal: controller.signal,
         token: options.token,
         ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
-        onHello: (hello) => {
-            const deltas = store.applyHello(hello);
-            publish([...store.setConnection("live"), ...deltas]);
-        },
-        onEvent: (event) => publish(store.apply(event)),
-        onDisconnected: () => publish(store.setConnection("reconnecting")),
-    })
-        .catch((error: unknown) => {
-            if (closed) return;
-            publish(store.setConnection("closed"));
-            options.onError?.(error);
-        })
-        .finally(() => {
-            if (!closed) publish(store.setConnection("closed"));
-        });
-
+    });
+    const subscription = rig.connectGroups({
+        onChange: options.onChange,
+        ...(options.onDelta === undefined ? {} : { onDelta: options.onDelta }),
+        ...(options.onError === undefined ? {} : { onError: options.onError }),
+    });
     return {
-        projects: () => store.projects(),
-        remoteTerminals: () => store.remoteTerminals(),
-        state: () => store.state(),
+        projects: subscription.projects,
+        remoteTerminals: subscription.remoteTerminals,
+        state: subscription.state,
         close: () => {
-            if (closed) return;
-            closed = true;
-            controller.abort();
+            subscription.close();
+            rig.close();
         },
     };
 }

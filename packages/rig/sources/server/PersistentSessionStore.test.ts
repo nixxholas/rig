@@ -18,6 +18,101 @@ import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
+    it("replays durable usage written after the persisted summary cursor", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            const session = store.create({ cwd: "/tmp/rig-usage-crash-boundary" });
+            const sessionId = session.id;
+            store.close();
+
+            const database = new DatabaseSync(databasePath);
+            const previous = database
+                .prepare("SELECT last_event_id FROM sessions WHERE id = ?")
+                .get(sessionId) as { last_event_id: string };
+            const eventId = createEventIdFactory({ after: previous.last_event_id })();
+            insertSessionEvent(database, sessionId, eventId, "agent_message", {
+                message: {
+                    blocks: [{ text: "Recovered usage", type: "text" }],
+                    id: "agent-after-summary",
+                    providerId: "codex",
+                    requestedModelId: session.snapshot().modelId,
+                    role: "agent",
+                    usage: {
+                        cacheRead: 3,
+                        cacheWrite: 4,
+                        cost: {
+                            cacheRead: 0,
+                            cacheWrite: 0,
+                            input: 0,
+                            output: 0,
+                            total: 0,
+                        },
+                        input: 10,
+                        output: 2,
+                        totalTokens: 19,
+                    },
+                },
+                runId: "run-after-summary",
+            });
+            database
+                .prepare("UPDATE sessions SET last_event_id = ? WHERE id = ?")
+                .run(eventId, sessionId);
+            database.close();
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                expect(restoredStore.get(sessionId)?.usage().groups).toEqual([
+                    expect.objectContaining({
+                        usage: expect.objectContaining({ totalTokens: 19 }),
+                    }),
+                ]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
+    it("rolls back a message when its turn projection cannot be written", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const initial = new PersistentSessionStore({ databasePath });
+            const state = sessionState();
+            initial.saveSession(state);
+            initial.close();
+            const database = new DatabaseSync(databasePath);
+            database.exec(`
+                CREATE TRIGGER reject_turn_projection
+                BEFORE INSERT ON session_turns
+                BEGIN
+                    SELECT RAISE(ABORT, 'projection failed');
+                END
+            `);
+            database.close();
+
+            const store = new PersistentSessionStore({ databasePath });
+            expect(() =>
+                store.upsertMessage(state.id, {
+                    isPartial: false,
+                    message: textUserMessage("message-1", "Do it"),
+                    position: 0,
+                    runId: "run-1",
+                }),
+            ).toThrow("projection failed");
+            store.close();
+
+            const check = new DatabaseSync(databasePath);
+            expect(
+                check.prepare("SELECT 1 FROM session_messages WHERE session_id = ?").get(state.id),
+            ).toBeUndefined();
+            check.close();
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("restores only a bounded resume tail for an old session", async () => {
         const directory = await mkdtemp(join(tmpdir(), "rig-bounded-events-"));
         const databasePath = join(directory, "sessions.sqlite");
@@ -2623,6 +2718,48 @@ describe("PersistentSessionStore", () => {
                     },
                 ]);
                 expect(restored?.snapshot().snapshot.messages).toEqual([]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
+    it("keeps older transcript paging reachable when a partial message is restored", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            const state = sessionState({ status: "running" });
+            store.saveSession(state);
+            for (let position = 0; position < 81; position += 1) {
+                store.upsertMessage(state.id, {
+                    isPartial: false,
+                    message: textUserMessage(`message-${String(position)}`, String(position)),
+                    position,
+                    runId: `run-${String(position)}`,
+                });
+            }
+            store.upsertMessage(state.id, {
+                isPartial: true,
+                message: {
+                    blocks: [{ text: "Still writing", type: "text" }],
+                    id: "partial-1",
+                    role: "agent",
+                },
+                position: 81,
+                runId: "run-80",
+            });
+            store.close();
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                const restored = restoredStore.get(state.id);
+                expect(restored?.transcriptWindow().complete).toBe(false);
+                expect(
+                    new Set(restored?.state().messages.map((entry) => entry.position)).size,
+                ).toBe(restored?.state().messages.length);
+                expect(restored?.transcriptPage(10, "run-1")?.turns[0]?.runId).toBe("run-0");
             } finally {
                 restoredStore.close();
             }

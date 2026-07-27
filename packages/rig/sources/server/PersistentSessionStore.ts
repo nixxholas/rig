@@ -2,13 +2,14 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { createEventIdFactory } from "../protocol/index.js";
+import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
 import type {
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    EventId,
     GitChangeSnapshot,
     GitRepositoryFacts,
     ModelCatalog,
@@ -251,26 +252,32 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     clearMessages(sessionId: string): void {
-        this.#database.prepare("DELETE FROM session_messages WHERE session_id = ?").run(sessionId);
-        this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
+        this.#transaction(() => {
+            this.#database
+                .prepare("DELETE FROM session_messages WHERE session_id = ?")
+                .run(sessionId);
+            this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
+        });
     }
 
     deleteMessagesFrom(sessionId: string, position: number): void {
-        this.#database
-            .prepare("DELETE FROM session_messages WHERE session_id = ? AND position >= ?")
-            .run(sessionId, position);
-        this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
-        this.#database
-            .prepare(
-                `
+        this.#transaction(() => {
+            this.#database
+                .prepare("DELETE FROM session_messages WHERE session_id = ? AND position >= ?")
+                .run(sessionId, position);
+            this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
+            this.#database
+                .prepare(
+                    `
                 INSERT INTO session_turns (session_id, run_id, first_position)
                 SELECT session_id, run_id, MIN(position)
                 FROM session_messages
                 WHERE session_id = ? AND run_id IS NOT NULL AND is_partial = 0
                 GROUP BY session_id, run_id
                 `,
-            )
-            .run(sessionId);
+                )
+                .run(sessionId);
+        });
     }
 
     close(): void {
@@ -604,7 +611,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         interruption_json,
                         created_at_ms,
                         updated_at_ms,
-                        last_message_at_ms
+                        last_message_at_ms,
+                        last_event_id
                     FROM sessions
                     WHERE parent_session_id IS NULL
                         ${activeOnly ? "AND archived = 0" : ""}
@@ -635,6 +643,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             const metadataUpdatedAt = readOptionalNumber(row, "metadata_updated_at_ms");
             const metadataRunId = readOptionalString(row, "metadata_run_id");
             const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
+            const lastEventId = readOptionalString(row, "last_event_id");
             const interruptionJson = readOptionalString(row, "interruption_json");
             const draft = readOptionalString(row, "draft");
             const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
@@ -676,6 +685,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 createdAt: readNumber(row, "created_at_ms"),
                 updatedAt: readNumber(row, "updated_at_ms"),
                 ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
+                ...(lastEventId !== undefined ? { lastEventId } : {}),
                 ...(title !== undefined ? { title } : {}),
                 ...(titleError !== undefined ? { titleError } : {}),
                 ...(recap !== undefined ? { recap } : {}),
@@ -830,8 +840,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#projects.listWorkspaces(projectId);
     }
 
-    renameProject(projectId: string, name: string): Project | undefined {
-        return this.#projects.renameProject(projectId, name);
+    renameProject(
+        projectId: string,
+        name: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined {
+        return this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
     }
 
     refreshProject(projectId: string): Project | undefined {
@@ -880,8 +895,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         workspaceId: string,
         name: string,
         expectedVersion?: number,
+        mutationId?: string,
     ): ProjectWorkspace | undefined {
-        return this.#projects.renameWorkspace(projectId, workspaceId, name, expectedVersion);
+        return this.#projects.renameWorkspace(
+            projectId,
+            workspaceId,
+            name,
+            expectedVersion,
+            mutationId,
+        );
     }
 
     createWorkspace(
@@ -909,11 +931,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         expectedVersion?: number,
     ): Promise<Project | undefined> {
         let project: Project | undefined;
-        let rootSessionIds: string[] = [];
+        let workspaces: {
+            cleanup: Promise<void>[];
+            workspaceId: string;
+        }[] = [];
         this.#transaction(() => {
             project = this.#projects.archiveProject(projectId, expectedVersion);
             if (project === undefined) return;
-            rootSessionIds = this.#database
+            const rootSessionIds = this.#database
                 .prepare(
                     `
                     SELECT id FROM sessions
@@ -922,15 +947,36 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 )
                 .all(projectId)
                 .map((row) => readString(row, "id"));
+            for (const sessionId of rootSessionIds) this.get(sessionId)?.setArchived(true);
+            workspaces = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
+                if (workspace.status === "archived" || workspace.status === "archiving") {
+                    return [];
+                }
+                const archiving = this.#projects.beginWorkspaceArchive(projectId, workspace.id);
+                if (archiving === undefined || archiving.status === "archived") return [];
+                return [
+                    {
+                        cleanup: this.#database
+                            .prepare("SELECT id FROM sessions WHERE workspace_id = ?")
+                            .all(workspace.id)
+                            .map((row) =>
+                                this.get(readString(row, "id"))?.archiveForWorkspace(workspace.id),
+                            )
+                            .filter((task): task is Promise<void> => task !== undefined),
+                        workspaceId: workspace.id,
+                    },
+                ];
+            });
         });
         if (project === undefined) return undefined;
+        // All logical state is committed before physical cleanup yields.
         await this.remoteTerminals.closeProject(projectId);
-        for (const sessionId of rootSessionIds) {
-            this.get(sessionId)?.setArchived(true);
-        }
-        for (const workspace of this.#projects.listWorkspaces(projectId)) {
-            if (workspace.status === "archived" || workspace.status === "archiving") continue;
-            await this.#archiveWorkspace(projectId, workspace.id);
+        for (const workspace of workspaces) {
+            await this.#completeWorkspaceArchive(
+                projectId,
+                workspace.workspaceId,
+                workspace.cleanup,
+            );
         }
         return this.getProject(projectId);
     }
@@ -966,6 +1012,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         if (workspace === undefined || workspace.status === "archived") return workspace;
         await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
+        return this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
+    }
+
+    async #completeWorkspaceArchive(
+        projectId: string,
+        workspaceId: string,
+        cleanup: readonly Promise<void>[],
+    ): Promise<ProjectWorkspace | undefined> {
         const results = await Promise.allSettled(cleanup);
         const failure = results.find(
             (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -1384,6 +1438,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                           ...(state.usageSummary === undefined
                               ? {}
                               : { summary: state.usageSummary }),
+                          ...(state.usageSummaryEventId === undefined
+                              ? {}
+                              : { throughEventId: state.usageSummaryEventId }),
                           permissionReviews: state.permissionReviews ?? [],
                       } satisfies PersistedUsageEnvelope),
                 state.permissionMode,
@@ -1416,9 +1473,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     upsertMessage(sessionId: string, message: PersistedSessionMessage): void {
-        this.#database
-            .prepare(
-                `
+        this.#transaction(() => {
+            this.#database
+                .prepare(
+                    `
                 INSERT INTO session_messages (
                     session_id,
                     position,
@@ -1438,29 +1496,30 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     message_json = excluded.message_json,
                     updated_at_ms = excluded.updated_at_ms
                 `,
-            )
-            .run(
-                sessionId,
-                message.position,
-                message.message.id,
-                message.message.role,
-                message.isPartial ? 1 : 0,
-                message.runId ?? null,
-                JSON.stringify(message.message),
-                this.#now(),
-            );
-        if (!message.isPartial && message.runId !== undefined) {
-            this.#database
-                .prepare(
-                    `
+                )
+                .run(
+                    sessionId,
+                    message.position,
+                    message.message.id,
+                    message.message.role,
+                    message.isPartial ? 1 : 0,
+                    message.runId ?? null,
+                    JSON.stringify(message.message),
+                    this.#now(),
+                );
+            if (!message.isPartial && message.runId !== undefined) {
+                this.#database
+                    .prepare(
+                        `
                     INSERT INTO session_turns (session_id, run_id, first_position)
                     VALUES (?, ?, ?)
                     ON CONFLICT(session_id, run_id) DO UPDATE SET
                         first_position = MIN(first_position, excluded.first_position)
                     `,
-                )
-                .run(sessionId, message.runId, message.position);
-        }
+                    )
+                    .run(sessionId, message.runId, message.position);
+            }
+        });
     }
 
     loadTranscriptPage(
@@ -1685,6 +1744,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     `,
                 )
                 .run(event.id, this.#now(), event.sessionId);
+            this.#publishGlobalEvent(event);
             this.#notifySessionEvent(event);
             return;
         }
@@ -1744,6 +1804,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #publishGlobalEvent(event: GlobalEvent): void {
+        if (isLiveGlobalEvent(event)) {
+            const queue = this.#globalEventQueue;
+            this.#afterTransactionCommit(() => {
+                queue.publishLive(event);
+            });
+            return;
+        }
         if (!shouldPublishGlobalEvent(event)) return;
         const queue = this.#globalEventQueue;
         if (!queue.durable) {
@@ -2033,16 +2100,32 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const usageJson = readOptionalString(row, "usage_json");
         const persistedUsage = parsePersistedUsage(usageJson);
         const transcriptMessages = this.#loadTranscriptMessagesPage(sessionId, 80) ?? [];
-        const messages = [
-            ...transcriptMessages,
-            ...this.#loadMessages(sessionId).filter((message) => message.isPartial),
-        ].sort((left, right) => left.position - right.position);
-        const messageCount = readNumber(
-            this.#database
-                .prepare("SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ?")
-                .get(sessionId) as Record<string, unknown>,
-            "count",
+        const messages = [...transcriptMessages, ...this.#loadPartialMessages(sessionId)].sort(
+            (left, right) => left.position - right.position,
         );
+        const earliestTranscriptPosition = transcriptMessages[0]?.position;
+        const hasEarlierTranscript =
+            this.#database
+                .prepare(
+                    earliestTranscriptPosition === undefined
+                        ? `
+                          SELECT 1
+                          FROM session_messages
+                          WHERE session_id = ? AND is_partial = 0
+                          LIMIT 1
+                          `
+                        : `
+                          SELECT 1
+                          FROM session_messages
+                          WHERE session_id = ? AND is_partial = 0 AND position < ?
+                          LIMIT 1
+                          `,
+                )
+                .get(
+                    ...(earliestTranscriptPosition === undefined
+                        ? [sessionId]
+                        : [sessionId, earliestTranscriptPosition]),
+                ) !== undefined;
         const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
         const modelId = readString(row, "model_id");
         const title = readOptionalString(row, "title");
@@ -2137,7 +2220,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
             ...(metadataRunId !== undefined ? { metadataRunId } : {}),
             titleStatus: readString(row, "title_status") as SessionTitleStatus,
-            transcriptHasEarlier: messageCount > messages.length,
+            transcriptHasEarlier: hasEarlierTranscript,
             totalTokens: readNumber(row, "total_tokens"),
             ...(sessionTokenCountJson === undefined
                 ? {}
@@ -2148,6 +2231,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(persistedUsage?.summary === undefined
                 ? {}
                 : { usageSummary: persistedUsage.summary }),
+            ...(persistedUsage?.throughEventId === undefined
+                ? {}
+                : { usageSummaryEventId: persistedUsage.throughEventId }),
             ...(persistedUsage?.permissionReviews === undefined
                 ? {}
                 : { permissionReviews: persistedUsage.permissionReviews }),
@@ -2301,7 +2387,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 `
                 SELECT position, is_partial, run_id, message_json
                 FROM session_messages
-                WHERE session_id = ? AND run_id IN (${placeholders})
+                WHERE session_id = ? AND is_partial = 0 AND run_id IN (${placeholders})
                 ORDER BY position ASC
                 `,
             )
@@ -2312,6 +2398,28 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 position: readNumber(row, "position"),
                 runId: readString(row, "run_id"),
             }));
+    }
+
+    #loadPartialMessages(sessionId: string): PersistedSessionMessage[] {
+        return this.#database
+            .prepare(
+                `
+                SELECT position, is_partial, run_id, message_json
+                FROM session_messages
+                WHERE session_id = ? AND is_partial = 1
+                ORDER BY position ASC
+                `,
+            )
+            .all(sessionId)
+            .map((row) => {
+                const runId = readOptionalString(row, "run_id");
+                return {
+                    isPartial: true,
+                    message: JSON.parse(readString(row, "message_json")) as Message,
+                    position: readNumber(row, "position"),
+                    ...(runId === undefined ? {} : { runId }),
+                };
+            });
     }
 
     #loadTranscriptEvents(
@@ -2518,6 +2626,7 @@ interface PersistedUsageEnvelope {
     committed: Usage;
     permissionReviews?: PersistedSessionState["permissionReviews"];
     summary?: SessionUsageSummary;
+    throughEventId?: EventId;
 }
 
 function sessionEventFacts(event: SessionEvent): {

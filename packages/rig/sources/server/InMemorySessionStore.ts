@@ -1,4 +1,4 @@
-import { createEventIdFactory } from "../protocol/index.js";
+import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
 import { DatabaseSync } from "node:sqlite";
 import type { Message } from "../agent/types.js";
 import type {
@@ -409,8 +409,13 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.listWorkspaces(projectId);
     }
 
-    renameProject(projectId: string, name: string): Project | undefined {
-        return this.#projects.renameProject(projectId, name);
+    renameProject(
+        projectId: string,
+        name: string,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined {
+        return this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
     }
 
     refreshProject(projectId: string): Project | undefined {
@@ -460,8 +465,15 @@ export class InMemorySessionStore implements SessionStore {
         workspaceId: string,
         name: string,
         expectedVersion?: number,
+        mutationId?: string,
     ): ProjectWorkspace | undefined {
-        return this.#projects.renameWorkspace(projectId, workspaceId, name, expectedVersion);
+        return this.#projects.renameWorkspace(
+            projectId,
+            workspaceId,
+            name,
+            expectedVersion,
+            mutationId,
+        );
     }
 
     createWorkspace(
@@ -479,18 +491,44 @@ export class InMemorySessionStore implements SessionStore {
         projectId: string,
         expectedVersion?: number,
     ): Promise<Project | undefined> {
-        const project = this.#projects.archiveProject(projectId, expectedVersion);
+        let project: Project | undefined;
+        let workspaces: { cleanup: Promise<void>[]; workspaceId: string }[] = [];
+        this.#transaction(() => {
+            project = this.#projects.archiveProject(projectId, expectedVersion);
+            if (project === undefined) return;
+            for (const session of this.#sessions.values()) {
+                if (session.isSubagent()) continue;
+                const snapshot = session.snapshot();
+                if (snapshot.projectId !== projectId || snapshot.workspaceId !== undefined) {
+                    continue;
+                }
+                session.setArchived(true);
+            }
+            workspaces = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
+                if (workspace.status === "archived" || workspace.status === "archiving") return [];
+                const archiving = this.#projects.beginWorkspaceArchive(projectId, workspace.id);
+                if (archiving === undefined || archiving.status === "archived") return [];
+                return [
+                    {
+                        cleanup: [...this.#sessions.values()]
+                            .filter((session) => session.snapshot().workspaceId === workspace.id)
+                            .map((session) => session.archiveForWorkspace(workspace.id)),
+                        workspaceId: workspace.id,
+                    },
+                ];
+            });
+        });
         if (project === undefined) return undefined;
+        // Every logical archive write above is complete before physical terminal
+        // and worktree cleanup yields, so a later unarchive can never be
+        // overtaken by stale child writes from this operation.
         await this.remoteTerminals.closeProject(projectId);
-        for (const session of this.#sessions.values()) {
-            if (session.isSubagent()) continue;
-            const snapshot = session.snapshot();
-            if (snapshot.projectId !== projectId || snapshot.workspaceId !== undefined) continue;
-            session.setArchived(true);
-        }
-        for (const workspace of this.#projects.listWorkspaces(projectId)) {
-            if (workspace.status === "archived" || workspace.status === "archiving") continue;
-            await this.archiveWorkspace(projectId, workspace.id);
+        for (const workspace of workspaces) {
+            await this.#completeWorkspaceArchive(
+                projectId,
+                workspace.workspaceId,
+                workspace.cleanup,
+            );
         }
         return this.getProject(projectId);
     }
@@ -510,10 +548,18 @@ export class InMemorySessionStore implements SessionStore {
             expectedVersion,
         );
         if (workspace === undefined || workspace.status === "archived") return workspace;
-        await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
         const cleanup = [...this.#sessions.values()]
             .filter((session) => session.snapshot().workspaceId === workspaceId)
             .map((session) => session.archiveForWorkspace(workspaceId));
+        await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
+        return this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
+    }
+
+    async #completeWorkspaceArchive(
+        projectId: string,
+        workspaceId: string,
+        cleanup: readonly Promise<void>[],
+    ): Promise<ProjectWorkspace | undefined> {
         const results = await Promise.allSettled(cleanup);
         const failure = results.find(
             (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -606,6 +652,12 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {
+        if (isLiveGlobalEvent(event)) {
+            this.#afterTransactionCommit(() => {
+                this.globalEventQueue.publishLive(event);
+            });
+            return;
+        }
         if (!shouldPublishGlobalEvent(event)) return;
         this.#afterTransactionCommit(() => {
             const entry = this.globalEventQueue.append(event);

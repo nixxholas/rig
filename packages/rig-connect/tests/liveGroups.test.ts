@@ -6,7 +6,10 @@ import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionSt
 import { PersistentSessionStore } from "../../rig/sources/server/PersistentSessionStore.js";
 import type { SessionStore } from "../../rig/sources/server/SessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
-import type { ProjectWorkspace as DaemonProjectWorkspace } from "../../rig/sources/protocol/index.js";
+import {
+    createEventIdFactory,
+    type ProjectWorkspace as DaemonProjectWorkspace,
+} from "../../rig/sources/protocol/index.js";
 import { connectGroups } from "@/connectGroups.js";
 import type { GroupsConnection } from "@/connectGroups.js";
 import type { GlobalStreamHello } from "@/protocol.js";
@@ -185,6 +188,45 @@ describe("rig-connect groups against a live daemon", () => {
         );
         await session.abort();
         await session.waitForRun(submitted.runId);
+    });
+
+    it("keeps persistent group drafts and usage live", async () => {
+        const persistent = new PersistentSessionStore({ databasePath: ":memory:" });
+        const { endpoint, store } = await startServer(persistent, () => persistent.close());
+        const session = store.create({ cwd: "/tmp/rig-live-group-facts" });
+        connection = connectGroups({
+            endpoint,
+            onChange: () => undefined,
+            token: "secret",
+        });
+        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+
+        session.setDraft({ draft: "Live draft", updatedAt: 2 });
+        const lastEventId = session.events.lastEventId();
+        session.events.append({
+            createdAt: 3,
+            data: { sessionTokenCount: { lastContextTokens: 10, totalTokens: 40 } },
+            id: createEventIdFactory(lastEventId === undefined ? {} : { after: lastEventId })(),
+            sessionId: session.id,
+            type: "session_context_changed",
+        });
+
+        await waitFor(
+            () =>
+                connection
+                    ?.projects()
+                    .flatMap((project) => project.sessions)
+                    .find((candidate) => candidate.id === session.id)?.draft === "Live draft",
+            "the draft to update",
+        );
+        await waitFor(
+            () =>
+                connection
+                    ?.projects()
+                    .find((project) => project.id === session.snapshot().projectId)?.usage
+                    .totalTokens === 40,
+            "the usage to update",
+        );
     });
 
     it("opens with every unarchived session, project, and workspace", async () => {

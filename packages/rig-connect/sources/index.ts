@@ -2,6 +2,18 @@ export { connectSession } from "./connectSession.js";
 export type { ConnectSessionOptions, SessionConnection } from "./connectSession.js";
 export { connectGroups } from "./connectGroups.js";
 export type { ConnectGroupsOptions, GroupsConnection } from "./connectGroups.js";
+export { connectRig } from "./connectRig.js";
+export type {
+    ConnectRigOptions,
+    GroupTarget,
+    ModelSelection,
+    RigConnection,
+    RigGroupsConnection,
+    RigGroupsSubscriptionOptions,
+    RigSessionConnection,
+    RigSessionSubscriptionOptions,
+    SendMessageInput,
+} from "./connectRig.js";
 export { ChatStore } from "./ChatStore.js";
 export { GroupStore } from "./GroupStore.js";
 export { groupToolCalls } from "./groupToolCalls.js";
@@ -25,6 +37,8 @@ export type {
     ChatElement,
     CompactionElement,
     ConnectionState,
+    MutationAction,
+    MutationRejectedDelta,
     RetryElement,
     SessionState,
     SessionUsage,
@@ -50,6 +64,7 @@ export type {
     GlobalStreamHello,
     InterpretedSessionEvent,
     ModelSummary,
+    MutationId,
     PendingSteeringMessage,
     PermissionReviewState,
     ProviderQuota,
