@@ -82,7 +82,7 @@ describe("projectToolPresentation", () => {
         });
     });
 
-    it("turns each exploration operation into a step with a label and a detail", () => {
+    it("keeps each exploration step in the terms the daemon reported", () => {
         const call: ToolCallPresentation = {
             operations: [
                 { kind: "list", target: "sources" },
@@ -92,27 +92,29 @@ describe("projectToolPresentation", () => {
             type: "exploration",
         };
 
+        // Wording belongs to the interface. Folding these into a phrase here
+        // would lose the query and the command a UI may want to show.
         expect(projectToolPresentation(call, undefined)).toEqual({
             kind: "exploration",
             steps: [
-                { detail: "sources", label: "List" },
-                { detail: "ChatStore.ts", label: "Read" },
-                { detail: "todo", label: "Search", path: "sources" },
+                { kind: "list", target: "sources" },
+                { kind: "read", name: "ChatStore.ts" },
+                { command: "rg todo sources", kind: "search", path: "sources", query: "todo" },
             ],
         });
     });
 
-    it("falls back through a search's fields to whatever it actually reported", () => {
+    it("keeps the command of a search that named neither query nor path", () => {
         const call: ToolCallPresentation = {
             operations: [{ command: "rg --files", kind: "search" }],
             type: "exploration",
         };
 
-        // A search may name a query, a path, or neither. The raw command is the
-        // last resort rather than an empty row.
+        // A consumer choosing what to show still has the command to fall back
+        // on, which a phrased summary would have discarded.
         expect(projectToolPresentation(call, undefined)).toEqual({
             kind: "exploration",
-            steps: [{ detail: "rg --files", label: "Search" }],
+            steps: [{ command: "rg --files", kind: "search" }],
         });
     });
 

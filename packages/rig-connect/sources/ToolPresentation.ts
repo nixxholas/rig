@@ -1,14 +1,23 @@
 import type { FileDiff, ToolCallPresentation, ToolResultPresentation } from "./protocol.js";
 
-/** One thing a tool looked at while exploring the workspace. */
-export interface ExplorationStep {
-    /** Ready to display: "List", "Read", or "Search". */
-    readonly label: string;
-    /** What the step acted on, already chosen from the fields the wire carries. */
-    readonly detail: string;
-    /** Present on a search that named the place it searched. */
-    readonly path?: string;
-}
+/**
+ * One thing a tool looked at while exploring the workspace.
+ *
+ * This keeps the daemon's own semantics rather than turning them into a phrase.
+ * Wording belongs to the interface: a sidebar, a transcript row, and a screen
+ * reader all describe the same search differently, and none of them can recover
+ * the query once it has been folded into a sentence.
+ */
+export type ExplorationStep =
+    | { readonly kind: "list"; readonly target: string }
+    | { readonly kind: "read"; readonly name: string }
+    | {
+          readonly kind: "search";
+          /** The command that ran, kept for a UI that shows the literal search. */
+          readonly command: string;
+          readonly path?: string;
+          readonly query?: string;
+      };
 
 /**
  * A command Rig ran, with its output as it arrives.
@@ -105,26 +114,11 @@ export function projectToolPresentation(
                 // so a UI does not swap one shape for another mid-flight.
                 return { command: call.command, kind: "command" };
             case "exploration":
-                return { kind: "exploration", steps: call.operations.map(explorationStep) };
+                // The operations are already application-shaped, so they pass
+                // through unchanged.
+                return { kind: "exploration", steps: call.operations };
         }
     }
 
     return undefined;
 }
-
-function explorationStep(operation: ExplorationOperationOf): ExplorationStep {
-    if (operation.kind === "list") return { detail: operation.target, label: "List" };
-    if (operation.kind === "read") return { detail: operation.name, label: "Read" };
-    return {
-        // A search reports a query, a path, or only the raw command; the first
-        // one present is what a reader is actually looking for.
-        detail: operation.query ?? operation.path ?? operation.command,
-        label: "Search",
-        ...(operation.path === undefined ? {} : { path: operation.path }),
-    };
-}
-
-type ExplorationOperationOf = Extract<
-    ToolCallPresentation,
-    { type: "exploration" }
->["operations"][number];

@@ -327,9 +327,9 @@ describe("ChatStore", () => {
             presentation: {
                 kind: "exploration",
                 steps: [
-                    { detail: "sources", label: "List" },
-                    { detail: "ChatStore.ts", label: "Read" },
-                    { detail: "todo", label: "Search", path: "sources" },
+                    { kind: "list", target: "sources" },
+                    { kind: "read", name: "ChatStore.ts" },
+                    { command: "rg todo", kind: "search", path: "sources", query: "todo" },
                 ],
             },
         });

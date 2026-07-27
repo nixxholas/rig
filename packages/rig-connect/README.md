@@ -88,17 +88,22 @@ instead of a column of unrelated rows.
 A tool call carries a `presentation`: what the call is doing and what it produced, as an ordinary
 application value. A consumer narrows on `kind` and never decodes Rig's wire format.
 
-| Kind             | What it is                                                |
-| ---------------- | --------------------------------------------------------- |
-| `command`        | A command Rig ran. Gains `output` when it finishes.       |
-| `exploration`    | Files and searches the tool looked at, as labelled steps. |
-| `file_edit`      | A diff of the files the tool changed.                     |
-| `terminal_input` | Input sent to a terminal that was already running.        |
+| Kind             | What it is                                                              |
+| ---------------- | ----------------------------------------------------------------------- |
+| `command`        | A command Rig ran. Gains `output` when it finishes.                     |
+| `exploration`    | Files and searches the tool looked at, as `list`/`read`/`search` steps. |
+| `file_edit`      | A diff of the files the tool changed.                                   |
+| `terminal_input` | Input sent to a terminal that was already running.                      |
 
 The projection is where the wire format stops. Rig describes a running command and a finished one
 as two unrelated shapes; both become one `command` that gains its output, so a UI does not swap one
 shape for another halfway through. Where a call and its result disagree, the result wins, being the
 later and fuller account.
+
+Exploration steps keep the daemon's own terms — `list`, `read`, `search`, with the target, name,
+query, path, and command each reports. Wording is left to the interface, because a sidebar, a
+transcript row, and a screen reader describe the same search differently, and none of them can
+recover the query once it has been folded into a phrase.
 
 A `kind` this library does not know projects to `undefined` rather than leaking a half-understood
 shape, and the call's plain `result` text remains the fallback. That is what lets a newer daemon
