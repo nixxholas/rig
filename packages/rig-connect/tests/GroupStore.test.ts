@@ -440,6 +440,37 @@ describe("GroupStore", () => {
         expect(store.projects()[0]?.sessions[0]?.status).toBe("completed");
     });
 
+    it("follows a model switch and a permission mode change", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(
+            event(
+                "session_configuration_changed",
+                { changed: ["modelId"], modelId: "opus-5", serviceTier: null },
+                { sessionId: "s1" },
+            ),
+        );
+        store.apply(
+            event("permission_mode_changed", { permissionMode: "plan" }, { sessionId: "s1" }),
+        );
+
+        // A sidebar names the model and the permission mode next to a session,
+        // so both have to follow the stream rather than stay at whatever the
+        // opening frame said.
+        expect(store.projects()[0]?.sessions[0]?.modelId).toBe("opus-5");
+        expect(store.projects()[0]?.sessions[0]?.permissionMode).toBe("plan");
+    });
+
+    it("shows a run that failed as an error rather than as idle", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(event("session_status_changed", { status: "error" }, { sessionId: "s1" }));
+
+        expect(store.projects()[0]?.sessions[0]?.status).toBe("error");
+    });
+
     it("follows the recap alongside the title, including clearing it", () => {
         const store = new GroupStore();
         store.applyHello(hello({ sessions: [session("s1", "p1")] }));

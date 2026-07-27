@@ -347,6 +347,17 @@ function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
             else set.recap = recap;
             return { clear, set };
         }
+        case "session_configuration_changed": {
+            // The sidebar names the model next to a session, so a switch has to
+            // reach it. Effort and service tier live on the session view, not on
+            // the summary a list draws.
+            const { modelId } = event.data as { modelId: string };
+            return { set: { modelId } };
+        }
+        case "permission_mode_changed": {
+            const { permissionMode } = event.data as { permissionMode: string };
+            return { set: { permissionMode } };
+        }
         case "session_status_changed":
             // The daemon decides the lifecycle status and announces it. Deriving
             // one from run boundaries instead would disagree with the session
