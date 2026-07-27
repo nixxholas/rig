@@ -165,6 +165,44 @@ describe("InMemorySession", () => {
         session.abort();
     });
 
+    it("wakes an idle session for an agent message", () => {
+        const session = new InMemorySessionStore().create({ cwd: "/tmp/rig-session-test" });
+
+        session.deliverAgentMessage({
+            agentSource: {
+                agentId: "sender-agent-id",
+                sessionId: "sender-session-id",
+                title: "Sender chat",
+            },
+            blocks: [{ text: "Wake up and handle this.", type: "text" }],
+            id: "agent-message-1",
+            provenance: "agent",
+            role: "user",
+        });
+
+        expect(session.summary().status).toBe("running");
+        expect(
+            session.events.since(undefined)?.find((event) => event.type === "message_submitted"),
+        ).toMatchObject({
+            data: {
+                delivery: "run",
+                message: {
+                    agentSource: {
+                        agentId: "sender-agent-id",
+                        sessionId: "sender-session-id",
+                        title: "Sender chat",
+                    },
+                    id: "agent-message-1",
+                    provenance: "agent",
+                },
+            },
+        });
+        expect(
+            session.events.since(undefined)?.filter((event) => event.type === "run_started"),
+        ).toHaveLength(1);
+        session.abort();
+    });
+
     it("queues later notifications as steering on the run woken by the first", () => {
         const session = new InMemorySessionStore().create({ cwd: "/tmp/rig-session-test" });
 

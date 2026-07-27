@@ -183,6 +183,7 @@ export interface PersistedQueuedRun {
 }
 
 interface SessionSubmitMessageRequest extends SubmitMessageRequest {
+    agentSource?: UserMessage["agentSource"];
     agentMessageTriggerTurn?: boolean;
     encryptedAgentMessage?: {
         author: string;
@@ -2567,6 +2568,7 @@ export class InMemorySession {
             role: "user",
             id: request.clientSubmissionId ?? createId(),
             blocks,
+            ...(request.agentSource === undefined ? {} : { agentSource: request.agentSource }),
             ...(options.source === "notification" || request.provenance === "agent"
                 ? { provenance: "agent" as const }
                 : {}),
@@ -2580,6 +2582,7 @@ export class InMemorySession {
         const visibleMessage: UserMessage = {
             role: "user",
             id: userMessage.id,
+            ...(request.agentSource === undefined ? {} : { agentSource: request.agentSource }),
             ...(options.source === "notification" || request.provenance === "agent"
                 ? { provenance: "agent" as const }
                 : {}),
@@ -2827,23 +2830,36 @@ export class InMemorySession {
         this.#assertAcceptingWork();
         const agent = this.#ensureRuntime().agent;
         const activeRun = this.#activeRun;
+        const displayText = message.blocks
+            .flatMap((block) => (block.type === "text" ? [block.text] : []))
+            .join("\n");
         if (activeRun !== undefined && agent.status === "running") {
             this.#pendingSteeringMessages.set(message.id, {
                 message,
                 runId: activeRun.runId,
             });
             agent.steerMessage(message);
+            this.#lastMessageAt = this.#now();
+            this.#append("message_submitted", {
+                delivery: "steer",
+                displayText,
+                message,
+                runId: activeRun.runId,
+            });
             return;
         }
-        agent.enqueueMessage(message);
-        this.#storeMessage(
-            this.#messages.length,
-            message,
-            false,
-            activeRun?.runId ?? this.#lastSessionRunId ?? `agent:${message.id}`,
-        );
-        this.#lastMessageAt = this.#now();
-        this.#saveSession();
+        this.submit({
+            ...(message.agentSource === undefined ? {} : { agentSource: message.agentSource }),
+            agentMessageTriggerTurn: true,
+            clientSubmissionId: message.id,
+            content: message.blocks,
+            displayText,
+            ...(message.encryptedAgentMessage === undefined
+                ? {}
+                : { encryptedAgentMessage: message.encryptedAgentMessage }),
+            provenance: "agent",
+            text: displayText,
+        });
     }
 
     subagentSummary(): SubagentSummary {
