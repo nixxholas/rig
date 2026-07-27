@@ -335,10 +335,17 @@ function isArchivedWorkspace(workspace: ProjectWorkspace): boolean {
 function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
     switch (event.type) {
         case "session_title_changed": {
-            const { title } = event.data as { title?: string };
-            // A title is cleared by omission, which is a different statement
-            // from setting it to an empty name.
-            return title === undefined ? { clear: ["title"] } : { set: { title } };
+            const { recap, title } = event.data as { recap?: string; title?: string };
+            // The title and the recap both ride on this event and are both
+            // cleared by omission, which is a different statement from setting
+            // either to an empty string.
+            const set: Partial<SessionSummary> = {};
+            const clear: (keyof SessionSummary)[] = [];
+            if (title === undefined) clear.push("title");
+            else set.title = title;
+            if (recap === undefined) clear.push("recap");
+            else set.recap = recap;
+            return { clear, set };
         }
         case "session_status_changed":
             // The daemon decides the lifecycle status and announces it. Deriving

@@ -440,6 +440,32 @@ describe("GroupStore", () => {
         expect(store.projects()[0]?.sessions[0]?.status).toBe("completed");
     });
 
+    it("follows the recap alongside the title, including clearing it", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(
+            event(
+                "session_title_changed",
+                { recap: "Fixed the parser", status: "ready", title: "Parser" },
+                { sessionId: "s1" },
+            ),
+        );
+        expect(store.projects()[0]?.sessions[0]?.recap).toBe("Fixed the parser");
+
+        // The recap rides on the same event as the title and is cleared the same
+        // way, by omission. A store that only read the title would leave a stale
+        // summary under a renamed session.
+        store.apply(
+            event(
+                "session_title_changed",
+                { status: "ready", title: "Parser" },
+                { sessionId: "s1" },
+            ),
+        );
+        expect(store.projects()[0]?.sessions[0]?.recap).toBeUndefined();
+    });
+
     it("shows a lifecycle status that no run boundary implies", () => {
         const store = new GroupStore();
         store.applyHello(hello({ sessions: [session("s1", "p1")] }));
