@@ -150,10 +150,12 @@ rig.setGoal(sessionId, "Ship the release");
 rig.sendMessage(sessionId, "Continue.");
 ```
 
-The same contract covers create and fork, model/effort/service-tier changes, structured answers,
-goals, secrets, shell commands, workflow stop, archive, reset, rewind, compaction, and run stop.
-`onMutationRejected` receives failures even when no view is currently subscribed to the affected
-entity. Loading earlier transcript turns remains the only operation with a loading state.
+The same contract covers create and fork, model/effort/service-tier changes, appended prompts,
+structured answers, goals, secrets, shell and background-process controls, external-call
+resolution, workflow stop, archive, reset, rewind, compaction, and run stop. Terminal clients can
+also maintain focus/presence through the shared transport. `onMutationRejected` receives failures
+even when no view is currently subscribed to the affected entity. Loading earlier transcript turns
+and process output remain the only operations with a loading state.
 
 ## The groups
 

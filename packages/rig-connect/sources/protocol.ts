@@ -396,6 +396,19 @@ export interface BackgroundProcess {
     status: "running";
 }
 
+export interface BackgroundProcessSnapshot {
+    command: string;
+    cwd: string;
+    exitCode: number | null;
+    sessionId: number;
+    status: "completed" | "killed" | "running";
+    stderr: string;
+    stderrDelta: string;
+    stdout: string;
+    stdoutDelta: string;
+    timedOut: boolean;
+}
+
 export interface PendingSteeringMessage {
     createdAt: number;
     message: UserMessage;
@@ -584,6 +597,7 @@ export interface ProtocolSession {
     agentId?: string;
     agent?: SessionAgentMetadata;
     archived: boolean;
+    appendSystemPrompt?: string;
     projectId: string;
     workspaceId?: string;
     orderKey: string;
@@ -618,6 +632,7 @@ export interface ProtocolSession {
     subagents?: readonly SubagentSummary[];
     backgroundProcesses?: readonly BackgroundProcess[];
     shellCommands?: readonly ShellCommandState[];
+    systemPrompt?: string;
     mcpServers?: readonly McpServerSummary[];
     workflowsEnabled?: boolean;
     workflows?: readonly WorkflowRun[];
@@ -705,6 +720,7 @@ export interface BaseSessionEvent<TType extends string, TData> {
  * client that has not learned it yet.
  */
 export type InterpretedSessionEvent =
+    | BaseSessionEvent<"session_updated", { mutationId?: MutationId; session: ProtocolSession }>
     | BaseSessionEvent<"session_activity_changed", { activity: SessionActivity }>
     | BaseSessionEvent<"session_archived", { archived: boolean; mutationId?: MutationId }>
     | BaseSessionEvent<"session_git_changed", { git: GitChangeSnapshot }>

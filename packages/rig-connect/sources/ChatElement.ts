@@ -173,6 +173,7 @@ export interface SessionState {
     status: SessionStatus;
     /** Whether the session has been archived out of the active list. */
     archived: boolean;
+    appendSystemPrompt?: string;
     sessionId: string;
     agentId?: string;
     agent?: SessionAgentMetadata;
@@ -208,6 +209,7 @@ export interface SessionState {
     subagents: readonly SubagentSummary[];
     backgroundProcesses: readonly BackgroundProcess[];
     shellCommands: readonly ShellCommandState[];
+    systemPrompt?: string;
     mcpServers: readonly McpServerSummary[];
     workflowsEnabled: boolean;
     workflows: readonly WorkflowRun[];
@@ -251,6 +253,7 @@ export type MutationAction =
     | "set_service_tier"
     | "set_permission_mode"
     | "set_draft"
+    | "set_append_system_prompt"
     | "answer_user_input"
     | "set_goal"
     | "set_goal_status"
@@ -261,6 +264,10 @@ export type MutationAction =
     | "attach_secret"
     | "detach_secret"
     | "run_shell_command"
+    | "stop_background_process"
+    | "stop_background_processes"
+    | "resolve_external_tool_call"
+    | "record_activity"
     | "stop_workflow"
     | "set_session_archived"
     | "rename_group";

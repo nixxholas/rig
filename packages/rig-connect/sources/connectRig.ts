@@ -11,6 +11,8 @@ import { GroupStore } from "./GroupStore.js";
 import { orderedUuidV7, type RandomValues } from "./orderedUuidV7.js";
 import type {
     ContentBlock,
+    BackgroundProcessSnapshot,
+    ExternalToolCallResolution,
     GlobalEvent,
     MutationId,
     Project,
@@ -116,6 +118,12 @@ export interface CreateSessionInput {
     workspaceId?: string;
 }
 
+export interface TerminalPresence {
+    connectionId: string;
+    close: () => Promise<void>;
+    setFocused: (focused: boolean) => Promise<void>;
+}
+
 export type GroupTarget =
     | { kind: "project"; projectId: string }
     | { kind: "workspace"; projectId: string; workspaceId: string };
@@ -139,6 +147,7 @@ export interface RigConnection {
     setServiceTier: (sessionId: string, serviceTier?: string) => MutationId;
     setPermissionMode: (sessionId: string, permissionMode: string) => MutationId;
     setDraft: (sessionId: string, update: string | DraftUpdate) => MutationId;
+    setAppendSystemPrompt: (sessionId: string, prompt: string | null) => MutationId;
     answerUserInput: (
         sessionId: string,
         requestId: string,
@@ -162,6 +171,23 @@ export interface RigConnection {
     rewindSession: (sessionId: string, messageId: string) => MutationId;
     runShellCommand: (sessionId: string, input: ShellCommandInput) => MutationId;
     stopWorkflow: (sessionId: string, runId: string) => MutationId;
+    stopBackgroundProcesses: (sessionId: string) => MutationId;
+    stopBackgroundProcess: (sessionId: string, processSessionId: number) => MutationId;
+    readBackgroundProcess: (
+        sessionId: string,
+        processSessionId: number,
+        options?: { signal?: AbortSignal; waitMs?: number },
+    ) => Promise<BackgroundProcessSnapshot | undefined>;
+    resolveExternalToolCall: (
+        sessionId: string,
+        callId: string,
+        resolution: ExternalToolCallResolution,
+    ) => MutationId;
+    recordActivity: (sessionId: string) => MutationId;
+    connectTerminalPresence: (
+        sessionId: string,
+        options: { focused?: boolean; targetPid: number },
+    ) => Promise<TerminalPresence>;
     setSessionArchived: (sessionId: string, archived: boolean) => MutationId;
     renameGroup: (target: GroupTarget, name: string) => MutationId;
     close: () => void;
@@ -245,6 +271,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const pendingOverlays: PendingMutation[] = [];
     const knownSessionCursors = new Map<string, string>();
     const knownGroupVersions = new Map<string, number>();
+    const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
     let closed = false;
 
@@ -1074,6 +1101,30 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
+    const requestJson = async (
+        path: string,
+        init: RequestInit = {},
+    ): Promise<{ data: unknown; status: number }> => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const headers = new Headers(init.headers);
+        headers.set("accept", "application/json");
+        headers.set("authorization", `Bearer ${options.token}`);
+        const response = await request(endpointUrl(options.endpoint, path), {
+            ...init,
+            headers,
+        });
+        const data = await readResponseBody(response);
+        if (!response.ok && response.status !== 404) {
+            throw new MutationHttpError(
+                response.status,
+                humanMutationError(data, response.status),
+                retryAfterMilliseconds(response.headers.get("retry-after"), now()),
+                data,
+            );
+        }
+        return { data, status: response.status };
+    };
+
     const enqueueSessionUpdate = (
         action: MutationAction,
         sessionId: string,
@@ -1111,7 +1162,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     method,
                     url: endpointUrl(
                         options.endpoint,
-                        `sessions/${encodeURIComponent(sessionId)}/${path}`,
+                        `sessions/${encodeURIComponent(sessionId)}${path.length === 0 ? "" : `/${path}`}`,
                     ),
                 };
             },
@@ -1407,6 +1458,17 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         );
     };
 
+    const setAppendSystemPrompt = (sessionId: string, prompt: string | null): MutationId =>
+        enqueueSessionUpdate(
+            "set_append_system_prompt",
+            sessionId,
+            "",
+            "PATCH",
+            { appendSystemPrompt: prompt },
+            prompt === null ? {} : { appendSystemPrompt: prompt },
+            prompt === null ? ["appendSystemPrompt"] : [],
+        );
+
     const answerUserInput = (
         sessionId: string,
         requestId: string,
@@ -1586,6 +1648,144 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         );
     };
 
+    const stopBackgroundProcesses = (sessionId: string): MutationId =>
+        enqueueSessionUpdate(
+            "stop_background_processes",
+            sessionId,
+            "background-processes/stop",
+            "POST",
+            {},
+            { backgroundProcesses: [] },
+        );
+
+    const stopBackgroundProcess = (sessionId: string, processSessionId: number): MutationId => {
+        const processes = sessionEntries.get(sessionId)?.store.session().backgroundProcesses ?? [];
+        return enqueueSessionUpdate(
+            "stop_background_process",
+            sessionId,
+            `background-processes/${encodeURIComponent(String(processSessionId))}`,
+            "DELETE",
+            {},
+            {
+                backgroundProcesses: processes.filter(
+                    (process) => process.sessionId !== processSessionId,
+                ),
+            },
+        );
+    };
+
+    const readBackgroundProcess = async (
+        sessionId: string,
+        processSessionId: number,
+        readOptions: { signal?: AbortSignal; waitMs?: number } = {},
+    ): Promise<BackgroundProcessSnapshot | undefined> => {
+        const query =
+            readOptions.waitMs === undefined
+                ? ""
+                : `?waitMs=${encodeURIComponent(String(readOptions.waitMs))}`;
+        const response = await requestJson(
+            `sessions/${encodeURIComponent(sessionId)}/background-processes/${encodeURIComponent(String(processSessionId))}${query}`,
+            readOptions.signal === undefined ? {} : { signal: readOptions.signal },
+        );
+        return response.status === 404 ? undefined : (response.data as BackgroundProcessSnapshot);
+    };
+
+    const resolveExternalToolCall = (
+        sessionId: string,
+        callId: string,
+        resolution: ExternalToolCallResolution,
+    ): MutationId => {
+        const pending =
+            sessionEntries.get(sessionId)?.store.session().pendingExternalToolCalls ?? [];
+        return enqueueSessionUpdate(
+            "resolve_external_tool_call",
+            sessionId,
+            `external-tool-calls/${encodeURIComponent(callId)}`,
+            "POST",
+            resolution,
+            { pendingExternalToolCalls: pending.filter((call) => call.id !== callId) },
+        );
+    };
+
+    const recordActivity = (sessionId: string): MutationId => {
+        const id = nextMutationId();
+        return enqueue({
+            acknowledged: false,
+            action: "record_activity",
+            applyOptimistic: () => () => undefined,
+            entityKey: sessionKey(sessionId),
+            id,
+            prepare: () => ({
+                headers: { "x-rig-mutation-id": id },
+                method: "POST",
+                url: endpointUrl(
+                    options.endpoint,
+                    `sessions/${encodeURIComponent(sessionId)}/activity`,
+                ),
+            }),
+            undo: () => undefined,
+        });
+    };
+
+    const connectTerminalPresence = async (
+        sessionId: string,
+        presenceOptions: { focused?: boolean; targetPid: number },
+    ): Promise<TerminalPresence> => {
+        const connectionId = nextMutationId();
+        let focused = presenceOptions.focused === true;
+        let presenceClosed = false;
+        let inFlight: Promise<void> | undefined;
+        const heartbeat = async (): Promise<void> => {
+            await requestJson(
+                `sessions/${encodeURIComponent(sessionId)}/terminal-connections/${encodeURIComponent(connectionId)}`,
+                {
+                    body: JSON.stringify({
+                        connectionId,
+                        focused,
+                        targetPid: presenceOptions.targetPid,
+                    }),
+                    headers: { "content-type": "application/json" },
+                    method: "PUT",
+                },
+            );
+        };
+        const sendHeartbeat = (): Promise<void> => {
+            if (presenceClosed) return Promise.resolve();
+            inFlight ??= heartbeat()
+                .catch(() => undefined)
+                .finally(() => {
+                    inFlight = undefined;
+                });
+            return inFlight;
+        };
+        await heartbeat();
+        const timer = setInterval(() => void sendHeartbeat(), 5_000);
+        const closeLocally = (): void => {
+            if (presenceClosed) return;
+            presenceClosed = true;
+            clearInterval(timer);
+            presenceClosers.delete(closeLocally);
+        };
+        presenceClosers.add(closeLocally);
+        return {
+            connectionId,
+            close: async () => {
+                if (presenceClosed) return;
+                closeLocally();
+                await inFlight;
+                await requestJson(
+                    `sessions/${encodeURIComponent(sessionId)}/terminal-connections/${encodeURIComponent(connectionId)}`,
+                    { method: "DELETE" },
+                ).then(() => undefined);
+            },
+            setFocused: async (nextFocused) => {
+                if (presenceClosed) return;
+                focused = nextFocused;
+                await sendHeartbeat();
+            },
+        };
+    };
+
     const setSessionArchived = (sessionId: string, archived: boolean): MutationId => {
         const id = nextMutationId();
         const key = sessionKey(sessionId);
@@ -1673,6 +1873,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     return {
         close: () => {
             if (closed) return;
+            for (const closePresence of [...presenceClosers]) closePresence();
             closed = true;
             rootController.abort();
             for (const mutation of [...pendingOverlays].reverse()) mutation.undo();
@@ -1697,15 +1898,20 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         compactSession,
         connectGroups,
         connectSession,
+        connectTerminalPresence,
         createSession,
         detachSecret,
         forkSession,
+        readBackgroundProcess,
+        recordActivity,
         renameGroup,
+        resolveExternalToolCall,
         resetSession,
         rewindSession,
         runShellCommand,
         sendMessage,
         setDraft,
+        setAppendSystemPrompt,
         setEffort,
         setPermissionMode,
         setServiceTier,
@@ -1713,6 +1919,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         setGoalStatus,
         setSessionArchived,
         stopRun,
+        stopBackgroundProcess,
+        stopBackgroundProcesses,
         stopWorkflow,
         switchModel,
     };

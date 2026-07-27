@@ -1589,7 +1589,10 @@ export class InMemorySession {
         this.#appendSystemPrompt = request.appendSystemPrompt ?? undefined;
         this.#runtime?.agent.setAppendSystemPrompt(this.#appendSystemPrompt);
         this.#interruption = undefined;
-        this.#append("session_updated", { session: this.snapshot() });
+        this.#append("session_updated", {
+            ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
+            session: this.snapshot(),
+        });
         return this.snapshot();
     }
 

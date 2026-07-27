@@ -108,6 +108,63 @@ const randomValues = (bytes: Uint8Array): Uint8Array => {
 };
 
 describe("connectRig mutations", () => {
+    it("supports loading process output and terminal presence through the shared transport", async () => {
+        const calls: { init?: RequestInit; url: URL }[] = [];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                calls.push({ ...(init === undefined ? {} : { init }), url });
+                return Promise.resolve(
+                    new Response(
+                        url.pathname.endsWith("/background-processes/12")
+                            ? JSON.stringify({
+                                  command: "pnpm test",
+                                  cwd: "/work",
+                                  exitCode: null,
+                                  sessionId: 12,
+                                  status: "running",
+                                  stderr: "",
+                                  stderrDelta: "",
+                                  stdout: "passing",
+                                  stdoutDelta: "passing",
+                                  timedOut: false,
+                              })
+                            : "{}",
+                        { status: 200 },
+                    ),
+                );
+            },
+            now: () => 1_700_000_000_000,
+            randomValues,
+            token: "secret",
+        });
+        try {
+            const process = await rig.readBackgroundProcess("session-1", 12, { waitMs: 50 });
+            expect(process?.stdout).toBe("passing");
+
+            const presence = await rig.connectTerminalPresence("session-1", {
+                focused: true,
+                targetPid: 42,
+            });
+            await presence.setFocused(false);
+            await presence.close();
+
+            expect(calls.map((call) => call.init?.method ?? "GET")).toEqual([
+                "GET",
+                "PUT",
+                "PUT",
+                "DELETE",
+            ]);
+            expect(JSON.parse(String(calls[2]?.init?.body))).toMatchObject({
+                focused: false,
+                targetPid: 42,
+            });
+        } finally {
+            rig.close();
+        }
+    });
+
     it("uses client-selected identities for retry-safe create and fork", async () => {
         const stream = streamResponse();
         const calls: { init?: RequestInit; url: URL }[] = [];
@@ -197,6 +254,8 @@ describe("connectRig mutations", () => {
             expect(connection.session().permissionMode).toBe("full_access");
             rig.setDraft("session-1", "unfinished thought");
             expect(connection.session().draft).toBe("unfinished thought");
+            rig.setAppendSystemPrompt("session-1", "Always verify.");
+            expect(connection.session().appendSystemPrompt).toBe("Always verify.");
             rig.answerUserInput("session-1", "question-1", { answers: {} });
             expect(connection.session().pendingUserInputs).toEqual([]);
             rig.setGoal("session-1", "Ship the connector");
@@ -207,6 +266,13 @@ describe("connectRig mutations", () => {
             expect(connection.session().shellCommands).toEqual([
                 { command: "pwd", commandId: "shell-1", status: "running" },
             ]);
+            rig.stopBackgroundProcesses("session-1");
+            rig.stopBackgroundProcess("session-1", 12);
+            rig.resolveExternalToolCall("session-1", "call-1", {
+                output: { accepted: true },
+                status: "completed",
+            });
+            rig.recordActivity("session-1");
 
             await settle();
             expect(
@@ -218,10 +284,15 @@ describe("connectRig mutations", () => {
                 "PATCH /sessions/session-1/service-tier",
                 "PATCH /sessions/session-1/permissions",
                 "PUT /sessions/session-1/draft",
+                "PATCH /sessions/session-1",
                 "POST /sessions/session-1/user-input/question-1",
                 "POST /sessions/session-1/goal",
                 "POST /sessions/session-1/secrets",
                 "POST /sessions/session-1/shell",
+                "POST /sessions/session-1/background-processes/stop",
+                "DELETE /sessions/session-1/background-processes/12",
+                "POST /sessions/session-1/external-tool-calls/call-1",
+                "POST /sessions/session-1/activity",
             ]);
         } finally {
             connection.close();

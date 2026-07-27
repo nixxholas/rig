@@ -489,6 +489,7 @@ export interface CreateSessionRequest {
 
 export interface UpdateSessionRequest {
     appendSystemPrompt: string | null;
+    mutationId?: string;
 }
 
 export interface ChangePermissionModeRequest {
@@ -875,7 +876,10 @@ export interface BaseSessionEvent<TType extends string, TData> {
 
 export type SessionCreatedEvent = BaseSessionEvent<"session_created", { session: ProtocolSession }>;
 
-export type SessionUpdatedEvent = BaseSessionEvent<"session_updated", { session: ProtocolSession }>;
+export type SessionUpdatedEvent = BaseSessionEvent<
+    "session_updated",
+    { mutationId?: string; session: ProtocolSession }
+>;
 
 export type SessionArchiveChangedEvent = BaseSessionEvent<
     "session_archived",

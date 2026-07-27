@@ -36,6 +36,7 @@ type _Git = Assignable<local.GitChangeSnapshot, daemon.GitChangeSnapshot>;
 type _TokenCount = Assignable<local.SessionTokenCount, daemon.SessionTokenCount>;
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
 type ApplicationReadEventType =
+    | "session_updated"
     | "session_activity_changed"
     | "session_git_changed"
     | "session_context_changed"

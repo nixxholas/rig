@@ -137,9 +137,16 @@ describe("ChatStore", () => {
             workflowsEnabled: true,
         };
         store.applyHello(opening);
+        store.apply(
+            event("session_updated", {
+                mutationId: "mutation-1",
+                session: { ...opening.session!, appendSystemPrompt: "Always verify." },
+            }),
+        );
 
         expect(store.session()).toMatchObject({
             agentId: "agent-1",
+            appendSystemPrompt: "Always verify.",
             environment: { type: "local" },
             mcpServers: [{ name: "docs", status: "connected", toolCount: 3 }],
             secretIds: ["project-secret"],

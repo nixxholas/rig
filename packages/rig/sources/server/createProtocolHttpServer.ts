@@ -1360,7 +1360,18 @@ async function handleRequest(
             });
             return;
         }
-        sendJson(response, 200, { session: session.update(body) });
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: session.update({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 

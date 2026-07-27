@@ -18,6 +18,7 @@ export type {
     SendMessageInput,
     SecretAttachmentScope,
     ShellCommandInput,
+    TerminalPresence,
     UserInputAnswers,
 } from "./connectRig.js";
 export { ChatStore } from "./ChatStore.js";
@@ -65,6 +66,7 @@ export type {
 } from "./GroupElement.js";
 export type {
     BackgroundProcess,
+    BackgroundProcessSnapshot,
     DaemonIdentity,
     DurableSkillDefinition,
     ExternalToolCall,

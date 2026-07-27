@@ -424,6 +424,7 @@ export class ChatStore {
                 "draftUpdatedAt",
                 "agent",
                 "agentId",
+                "appendSystemPrompt",
                 "environment",
                 "effort",
                 "goal",
@@ -435,6 +436,7 @@ export class ChatStore {
                 "title",
                 "titleError",
                 "tokens",
+                "systemPrompt",
                 "workspaceId",
             ]),
             archived: session.archived,
@@ -465,6 +467,9 @@ export class ChatStore {
             titleStatus: session.titleStatus ?? "idle",
             workflows: session.workflows ?? [],
             workflowsEnabled: session.workflowsEnabled ?? false,
+            ...(session.appendSystemPrompt === undefined
+                ? {}
+                : { appendSystemPrompt: session.appendSystemPrompt }),
             ...(session.agent === undefined ? {} : { agent: session.agent }),
             ...(session.agentId === undefined ? {} : { agentId: session.agentId }),
             ...(session.environment === undefined ? {} : { environment: session.environment }),
@@ -482,6 +487,7 @@ export class ChatStore {
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
+            ...(session.systemPrompt === undefined ? {} : { systemPrompt: session.systemPrompt }),
             ...(session.sessionTokenCount === undefined
                 ? {}
                 : { tokens: session.sessionTokenCount }),
@@ -599,6 +605,10 @@ export class ChatStore {
         const sessionBefore = this.#session;
         this.#session = { ...this.#session, lastEventId: event.id };
         switch (event.type) {
+            case "session_updated":
+                this.applySessionSnapshot((event.data as { session: ProtocolSession }).session);
+                this.#session = { ...this.#session, lastEventId: event.id };
+                break;
             case "session_status_changed": {
                 // A replayed or delayed event can restate the status the store
                 // already holds. Keeping the same session value means React
@@ -1079,6 +1089,7 @@ export class ChatStore {
             ...withoutKeys(this.#session, [
                 "agent",
                 "agentId",
+                "appendSystemPrompt",
                 "draft",
                 "draftUpdatedAt",
                 "environment",
@@ -1092,6 +1103,7 @@ export class ChatStore {
                 "title",
                 "titleError",
                 "tokens",
+                "systemPrompt",
                 "usage",
                 "workspaceId",
             ]),
@@ -1123,6 +1135,9 @@ export class ChatStore {
             titleStatus: session.titleStatus ?? "idle",
             workflows: session.workflows ?? [],
             workflowsEnabled: session.workflowsEnabled ?? false,
+            ...(session.appendSystemPrompt === undefined
+                ? {}
+                : { appendSystemPrompt: session.appendSystemPrompt }),
             ...(session.agent === undefined ? {} : { agent: session.agent }),
             ...(session.agentId === undefined ? {} : { agentId: session.agentId }),
             ...(session.environment === undefined ? {} : { environment: session.environment }),
@@ -1140,6 +1155,7 @@ export class ChatStore {
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
+            ...(session.systemPrompt === undefined ? {} : { systemPrompt: session.systemPrompt }),
             ...(session.sessionTokenCount === undefined
                 ? {}
                 : { tokens: session.sessionTokenCount }),
