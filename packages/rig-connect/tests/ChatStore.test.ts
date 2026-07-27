@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ChatStore } from "@/ChatStore.js";
 import type { ChatDelta, ChatElement, ToolCallElement } from "@/ChatElement.js";
-import type { AgentLoopEvent, SessionEvent, SessionStreamHello } from "@/protocol.js";
+import type { AgentLoopEvent, Message, SessionEvent, SessionStreamHello } from "@/protocol.js";
 
 let clock = 0;
 
@@ -1085,5 +1085,103 @@ describe("durable status", () => {
         store.apply(event("session_archived", { archived: true }));
 
         expect(store.session().archived).toBe(true);
+    });
+});
+
+describe("recovering a connection", () => {
+    function message(id: string, role: "user" | "agent") {
+        return { blocks: [{ text: id, type: "text" }], id, role } as never;
+    }
+
+    /** A window of whole turns, named `run-{first}` .. `run-{last}`. */
+    function windowOf(first: number, last: number, complete: boolean) {
+        const messages: Message[] = [];
+        const turns = [];
+        for (let index = first; index <= last; index += 1) {
+            messages.push(message(`u${index}`, "user"), message(`a${index}`, "agent"));
+            turns.push({
+                endedAt: index * 100 + 50,
+                messageIds: [`u${index}`, `a${index}`],
+                outcome: "success" as const,
+                runId: `run-${index}`,
+                startedAt: index * 100,
+            });
+        }
+        return { complete, messages, turns };
+    }
+
+    function helloWith(first: number, last: number, complete: boolean): SessionStreamHello {
+        const base = hello();
+        const transcript = windowOf(first, last, complete);
+        return {
+            ...base,
+            session: { ...base.session!, snapshot: { messages: transcript.messages } },
+            transcript,
+        };
+    }
+
+    it("keeps the turns it already loaded when a recovery brings a newer window", () => {
+        const store = new ChatStore("session-1");
+        // A reader has scrolled back and loaded turns 1 through 6.
+        store.applyHello(helloWith(1, 6, false));
+        const before = store.elements();
+        expect(before.length).toBeGreaterThan(0);
+
+        // The cursor expired, so the stream reconnects from scratch and the
+        // daemon answers with only the newest turns it bounds a hello to.
+        store.applyHello(helloWith(4, 6, false));
+
+        // Losing turns 1 through 3 here would delete rows off the top of a
+        // conversation somebody is reading.
+        const turnIds = store.elements().map((element) => element.turnId);
+        expect(turnIds).toContain("run-1");
+        expect(turnIds).toContain("run-6");
+    });
+
+    it("does not duplicate the turns that both windows describe", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(1, 6, false));
+
+        store.applyHello(helloWith(4, 6, false));
+
+        const ids = store.elements().map((element) => element.id);
+        expect(new Set(ids).size).toBe(ids.length);
+    });
+
+    it("keeps element identities across a recovery, so a reader holds their place", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(1, 6, false));
+        const before = store.elements().map((element) => element.id);
+
+        store.applyHello(helloWith(4, 6, false));
+
+        expect(store.elements().map((element) => element.id)).toEqual(before);
+    });
+
+    it("keeps the element a reader is positioned on, by reference", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(1, 6, false));
+        // A reader has scrolled up into the oldest page and is sitting on it.
+        const anchor = store.elements().find((element) => element.id === "message:u2");
+        expect(anchor).toBeDefined();
+
+        store.applyHello(helloWith(4, 6, false));
+
+        // A retained turn is not restated by the fresh window, so rebuilding its
+        // rows into new objects would move a reader off their scroll anchor even
+        // though the content is identical.
+        expect(store.elements().find((element) => element.id === "message:u2")).toBe(anchor);
+    });
+
+    it("trusts a complete window to be the whole conversation", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(1, 6, false));
+
+        // A window that says it is complete is the whole truth, so retaining
+        // anything older would resurrect turns the session no longer has.
+        store.applyHello(helloWith(5, 6, true));
+
+        const turnIds = new Set(store.elements().map((element) => element.turnId));
+        expect([...turnIds].sort()).toEqual(["run-5", "run-6"]);
     });
 });

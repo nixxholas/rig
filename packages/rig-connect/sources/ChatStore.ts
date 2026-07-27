@@ -31,6 +31,7 @@ import type {
     UserMessageElement,
 } from "./ChatElement.js";
 import { groupToolCalls } from "./groupToolCalls.js";
+import { mergeTranscriptWindow } from "./mergeTranscriptWindow.js";
 
 const IDLE_ACTIVITY: SessionActivity = { kind: "idle", label: "Idle", since: 0 };
 
@@ -78,6 +79,21 @@ export class ChatStore {
      * known. Entries are dropped as results land and cleared on reset.
      */
     #callPresentations = new Map<string, ToolCallPresentation>();
+    /**
+     * The transcript window the list was built from.
+     *
+     * A recovery that cannot resume is answered with the newest turns only, and
+     * this is what the older turns are kept in so they can be merged back in
+     * front of it.
+     */
+    #loadedTranscript: SessionTranscriptWindow | undefined;
+    /**
+     * Elements from before a rebuild, so identical rows keep their reference.
+     *
+     * Set only while a transcript is being rebuilt, which bounds the comparison
+     * to that work rather than paying for it on every append.
+     */
+    #priorElements: Map<string, ChatElement> | undefined;
 
     constructor(sessionId: string) {
         this.#session = {
@@ -113,12 +129,16 @@ export class ChatStore {
         const revisionBefore = this.#revision;
         const sessionBefore = this.#session;
         if (hello.session !== undefined) {
-            this.#resetFromSession(hello.session, hello.transcript);
+            const merged =
+                hello.transcript === undefined
+                    ? undefined
+                    : mergeTranscriptWindow(this.#loadedTranscript, hello.transcript);
+            this.#resetFromSession(hello.session, merged);
             // The opening frame carries a bounded window, so the caller is told
             // whether the conversation began before the first element it has.
             this.#session = {
                 ...this.#session,
-                transcriptComplete: hello.transcript?.complete ?? true,
+                transcriptComplete: this.#loadedTranscript?.complete ?? true,
             };
         }
         this.#setActivity(hello.activity, deltas);
@@ -337,6 +357,8 @@ export class ChatStore {
         transcript?: SessionTranscriptWindow,
     ): void {
         if (this.#elements.length > 0) this.#revision += 1;
+        // Copied, not aliased: the map this reads from is cleared just below.
+        this.#priorElements = new Map(this.#byId);
         this.#elements = [];
         this.#byId.clear();
         this.#indexById.clear();
@@ -349,16 +371,21 @@ export class ChatStore {
         this.#streamingMessageId = undefined;
         this.#turnId = undefined;
         this.#turnUsage = undefined;
-        if (transcript !== undefined && transcript.turns.length > 0) {
-            this.#rebuildTurns(messages, transcript, deltas);
-            return;
+        this.#loadedTranscript = transcript;
+        try {
+            if (transcript !== undefined && transcript.turns.length > 0) {
+                this.#rebuildTurns(transcript.messages, transcript, deltas);
+                return;
+            }
+            for (const message of messages) {
+                if (message.internal === true) continue;
+                this.#turnId = `history:${message.id}`;
+                this.#applyMessage(message, 0, deltas);
+            }
+            this.#turnId = undefined;
+        } finally {
+            this.#priorElements = undefined;
         }
-        for (const message of messages) {
-            if (message.internal === true) continue;
-            this.#turnId = `history:${message.id}`;
-            this.#applyMessage(message, 0, deltas);
-        }
-        this.#turnId = undefined;
     }
 
     /**
@@ -434,7 +461,10 @@ export class ChatStore {
         this.#append({
             createdAt: at,
             elapsedMs: Math.max(0, at - this.#turnStartedAt),
-            id: this.#nextId("turn"),
+            // Derived from the turn rather than a counter: a turn ends exactly
+            // once, and rebuilding the list after a recovery has to produce the
+            // same identity so a reader keeps their place.
+            id: `turn:${turnId}`,
             kind: "turn_end",
             outcome,
             turnId,
@@ -910,6 +940,13 @@ export class ChatStore {
             this.#update(element.id, element as Partial<ChatElement>);
             return;
         }
+        const kept = this.#priorElements?.get(element.id);
+        if (kept !== undefined && isSameElement(kept, element)) {
+            // A rebuild reproduces rows the list already had. Handing back the
+            // object a consumer is already holding keeps a reader's scroll
+            // anchor and spares React the re-render.
+            element = kept;
+        }
         this.#byId.set(element.id, element);
         this.#indexById.set(element.id, this.#elements.length);
         this.#elements = [...this.#elements, element];
@@ -1061,4 +1098,14 @@ function withoutKeys(session: SessionState, keys: readonly (keyof SessionState)[
     const next = { ...session };
     for (const key of keys) delete next[key];
     return next;
+}
+
+/**
+ * Whether a rebuilt element says exactly what the one before it said.
+ *
+ * These are plain value objects built by one code path, so a serialised
+ * comparison is both accurate and cheaper than walking them field by field.
+ */
+function isSameElement(left: ChatElement, right: ChatElement): boolean {
+    return left === right || JSON.stringify(left) === JSON.stringify(right);
 }
