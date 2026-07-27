@@ -323,6 +323,11 @@ export class InMemorySessionStore implements SessionStore {
         return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
     }
 
+    listActive(options: { limit?: number } = {}): readonly SessionSummary[] {
+        const sessions = this.list().filter((session) => !session.archived);
+        return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
+    }
+
     listExternalToolCalls(
         options: { limit?: number; status?: ExternalToolCall["status"] } = {},
     ): readonly ExternalToolCall[] {

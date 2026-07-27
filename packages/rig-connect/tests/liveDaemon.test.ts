@@ -81,8 +81,20 @@ describe("rig-connect against a live daemon", () => {
         await waitFor(() => connection?.session().connection === "live", "the stream to open");
         expect(changes).toBeGreaterThan(0);
         expect(connection.session()).toMatchObject({
+            archived: false,
+            backgroundProcesses: [],
             cwd: "/tmp/rig-connect-test",
+            modelLocked: false,
+            models: expect.any(Array),
+            orderKey: session.snapshot().orderKey,
+            pendingSteeringMessages: [],
+            pendingUserInputs: [],
+            permissionMode: session.snapshot().permissionMode,
+            projectId: session.snapshot().projectId,
             sessionId: session.id,
+            shellCommands: [],
+            subagents: [],
+            tasks: [],
         });
     });
 

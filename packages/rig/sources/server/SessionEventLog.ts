@@ -9,6 +9,7 @@ export class SessionEventLog {
     #firstEventId: EventId | undefined;
     #lastEventId: EventId | undefined;
     #listeners = new Set<SessionEventListener>();
+    #messageCreatedAt = new Map<string, number>();
     #messageSubmissions = new Map<string, SessionEvent & { type: "message_submitted" }>();
     #onAppend: SessionEventAppendHook | undefined;
 
@@ -26,6 +27,7 @@ export class SessionEventLog {
             if (event.type === "message_submitted") {
                 this.#messageSubmissions.set(event.data.message.id, event);
             }
+            this.#recordMessageTime(event);
         }
         this.#firstEventId = this.#events.at(0)?.id;
         this.#lastEventId = options.lastEventId ?? this.#events.at(-1)?.id;
@@ -40,6 +42,7 @@ export class SessionEventLog {
             if (event.type === "message_submitted") {
                 this.#messageSubmissions.set(event.data.message.id, event);
             }
+            this.#recordMessageTime(event);
         }
         this.#lastEventId = event.id;
         for (const listener of this.#listeners) {
@@ -75,6 +78,10 @@ export class SessionEventLog {
         return this.#messageSubmissions.get(messageId);
     }
 
+    messageCreatedAt(messageId: string): number | undefined {
+        return this.#messageCreatedAt.get(messageId);
+    }
+
     since(eventId: EventId | undefined): readonly SessionEvent[] | undefined {
         if (eventId === undefined || eventId.length === 0) {
             return [...this.#events];
@@ -100,5 +107,12 @@ export class SessionEventLog {
         return () => {
             this.#listeners.delete(listener);
         };
+    }
+
+    #recordMessageTime(event: SessionEvent): void {
+        if (event.type !== "message_submitted" && event.type !== "agent_message") return;
+        if (!this.#messageCreatedAt.has(event.data.message.id)) {
+            this.#messageCreatedAt.set(event.data.message.id, event.createdAt);
+        }
     }
 }

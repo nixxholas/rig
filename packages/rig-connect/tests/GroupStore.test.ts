@@ -62,6 +62,7 @@ function session(id: string, projectId: string, workspaceId?: string): SessionSu
         projectId,
         providerId: "claude",
         status: "idle",
+        titleStatus: "idle",
         updatedAt: 1,
         ...(workspaceId === undefined ? {} : { workspaceId }),
     };
@@ -96,6 +97,18 @@ describe("GroupStore", () => {
 
         const [group] = store.projects();
         // A client should not have to join three flat lists itself.
+        expect(group).toMatchObject({
+            id: "p1",
+            kind: "regular",
+            name: "p1",
+            path: "/work/p1",
+            usage: { totalTokens: 0 },
+        });
+        expect(group?.workspaces[0]).toMatchObject({
+            id: "w1",
+            name: "w1",
+            projectId: "p1",
+        });
         expect(group?.sessions.map((item) => item.id)).toEqual(["s1"]);
         expect(group?.workspaces[0]?.sessions.map((item) => item.id)).toEqual(["s2"]);
     });
@@ -116,6 +129,44 @@ describe("GroupStore", () => {
         expect(groups[0]?.sessions.map((item) => item.id)).toEqual(["s1", "s2"]);
     });
 
+    it("keeps project and workspace usage current from their session summaries", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                sessions: [
+                    {
+                        ...session("s1", "p1"),
+                        sessionTokenCount: { lastContextTokens: 10, totalTokens: 40 },
+                    },
+                    {
+                        ...session("s2", "p1", "w1"),
+                        sessionTokenCount: { lastContextTokens: 20, totalTokens: 60 },
+                    },
+                ],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+
+        expect(store.projects()[0]?.usage.totalTokens).toBe(100);
+        expect(store.projects()[0]?.workspaces[0]?.usage.totalTokens).toBe(60);
+
+        store.apply(
+            event(
+                "session_context_changed",
+                {
+                    sessionTokenCount: {
+                        lastContextTokens: 25,
+                        totalTokens: 90,
+                    },
+                },
+                { sessionId: "s2" },
+            ),
+        );
+
+        expect(store.projects()[0]?.usage.totalTokens).toBe(130);
+        expect(store.projects()[0]?.workspaces[0]?.usage.totalTokens).toBe(90);
+    });
+
     it("keeps the identity of branches that did not change", () => {
         const store = new GroupStore();
         store.applyHello(
@@ -133,6 +184,33 @@ describe("GroupStore", () => {
         expect(after).not.toBe(before);
         expect(after[0]).toBe(before[0]);
         expect(after[1]).not.toBe(before[1]);
+    });
+
+    it("keeps the whole tree and its entities by reference across an identical fresh hello", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [session("s1", "p1", "w1")],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+        const before = store.projects();
+        const beforeWorkspace = before[0]?.workspaces[0];
+        const beforeSession = beforeWorkspace?.sessions[0];
+
+        const deltas = store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [session("s1", "p1", "w1")],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+
+        expect(store.projects()).toBe(before);
+        expect(store.projects()[0]?.workspaces[0]).toBe(beforeWorkspace);
+        expect(store.projects()[0]?.workspaces[0]?.sessions[0]).toBe(beforeSession);
+        expect(deltas).toEqual([]);
     });
 
     it("adds a project the daemon reports after the opening frame", () => {
@@ -168,7 +246,28 @@ describe("GroupStore", () => {
             ),
         );
 
-        expect(store.projects()[0]?.project.name).toBe("Newer");
+        expect(store.projects()[0]?.name).toBe("Newer");
+        expect(deltas).toEqual([]);
+    });
+
+    it("does not let a stale fresh hello replace a newer streamed entity", () => {
+        const store = new GroupStore();
+        store.applyHello(hello());
+        store.apply(
+            event(
+                "project_updated",
+                { project: project("p1", { name: "Newer", version: 5 }) },
+                { projectId: "p1" },
+            ),
+        );
+        const before = store.projects();
+
+        const deltas = store.applyHello(
+            hello({ projects: [project("p1", { name: "Older", version: 2 })] }),
+        );
+
+        expect(store.projects()).toBe(before);
+        expect(store.projects()[0]?.name).toBe("Newer");
         expect(deltas).toEqual([]);
     });
 
@@ -408,7 +507,7 @@ describe("GroupStore", () => {
         expect(store.projects()[0]?.workspaces.map((item) => item.id)).toEqual(["w2"]);
     });
 
-    it("follows a session title as the daemon learns and clears it", () => {
+    it("preserves a session title while metadata refreshes and clears it when settled", () => {
         const store = new GroupStore();
         store.applyHello(hello({ sessions: [session("s1", "p1")] }));
 
@@ -423,7 +522,19 @@ describe("GroupStore", () => {
         );
         expect(store.projects()[0]?.sessions[0]?.title).toBe("Ship it");
 
-        store.apply(event("session_title_changed", { status: "pending" }, { sessionId: "s1" }));
+        store.apply(event("session_title_changed", { status: "generating" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.sessions[0]?.title).toBe("Ship it");
+
+        store.apply(
+            event(
+                "session_title_changed",
+                { errorMessage: "Could not refresh metadata.", status: "error" },
+                { sessionId: "s1" },
+            ),
+        );
+        expect(store.projects()[0]?.sessions[0]?.title).toBe("Ship it");
+
+        store.apply(event("session_title_changed", { status: "idle" }, { sessionId: "s1" }));
         expect(store.projects()[0]?.sessions[0]?.title).toBeUndefined();
     });
 
@@ -447,7 +558,19 @@ describe("GroupStore", () => {
         store.apply(
             event(
                 "session_configuration_changed",
-                { changed: ["modelId"], modelId: "opus-5", serviceTier: null },
+                {
+                    changed: ["modelId", "effort", "serviceTier"],
+                    effort: "high",
+                    modelId: "opus-5",
+                    serviceTier: "priority",
+                },
+                { sessionId: "s1" },
+            ),
+        );
+        store.apply(
+            event(
+                "session_draft_changed",
+                { draft: "Continue here", updatedAt: 22 },
                 { sessionId: "s1" },
             ),
         );
@@ -459,6 +582,10 @@ describe("GroupStore", () => {
         // so both have to follow the stream rather than stay at whatever the
         // opening frame said.
         expect(store.projects()[0]?.sessions[0]?.modelId).toBe("opus-5");
+        expect(store.projects()[0]?.sessions[0]?.effort).toBe("high");
+        expect(store.projects()[0]?.sessions[0]?.serviceTier).toBe("priority");
+        expect(store.projects()[0]?.sessions[0]?.draft).toBe("Continue here");
+        expect(store.projects()[0]?.sessions[0]?.draftUpdatedAt).toBe(22);
         expect(store.projects()[0]?.sessions[0]?.permissionMode).toBe("plan");
     });
 
@@ -484,9 +611,12 @@ describe("GroupStore", () => {
         );
         expect(store.projects()[0]?.sessions[0]?.recap).toBe("Fixed the parser");
 
+        store.apply(event("session_title_changed", { status: "generating" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.sessions[0]?.recap).toBe("Fixed the parser");
+
         // The recap rides on the same event as the title and is cleared the same
-        // way, by omission. A store that only read the title would leave a stale
-        // summary under a renamed session.
+        // way when metadata settles. A store that only read the title would leave
+        // a stale summary under a renamed session.
         store.apply(
             event(
                 "session_title_changed",

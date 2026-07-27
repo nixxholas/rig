@@ -1,4 +1,10 @@
-import type { GroupDelta, GroupsState, ProjectGroup, WorkspaceGroup } from "./GroupElement.js";
+import type {
+    GroupDelta,
+    GroupSession,
+    GroupsState,
+    ProjectGroup,
+    WorkspaceGroup,
+} from "./GroupElement.js";
 import type { ConnectionState } from "./ChatElement.js";
 import type {
     GitChangeSnapshot,
@@ -8,6 +14,7 @@ import type {
     ProjectWorkspace,
     SessionStatus,
     SessionSummary,
+    SessionTokenCount,
 } from "./protocol.js";
 
 /**
@@ -28,6 +35,8 @@ export class GroupStore {
     /** Cached branch per project, reused whenever nothing under it changed. */
     #groups = new Map<string, ProjectGroup>();
     #workspaceGroups = new Map<string, WorkspaceGroup>();
+    #workspaceGroupSources = new Map<string, ProjectWorkspace>();
+    #groupSessions = new Map<string, { source: SessionSummary; value: GroupSession }>();
     #dirty = new Set<string>();
     #tree: readonly ProjectGroup[] = [];
     #treeStale = true;
@@ -49,27 +58,76 @@ export class GroupStore {
     }
 
     applyHello(hello: GlobalStreamHello): readonly GroupDelta[] {
-        this.#projects.clear();
-        this.#workspaces.clear();
-        this.#sessions.clear();
-        this.#sessionEventIds.clear();
-        this.#groups.clear();
-        this.#workspaceGroups.clear();
-        this.#dirty.clear();
+        const previousTree = this.projects();
+        const nextProjects = new Map<string, Project>();
+        const nextWorkspaces = new Map<string, ProjectWorkspace>();
+        const nextSessions = new Map<string, SessionSummary>();
+        const changedProjectIds = new Set<string>();
+
+        for (const project of hello.projects) {
+            const known = this.#projects.get(project.id);
+            if (known !== undefined && known.version >= project.version) {
+                nextProjects.set(project.id, known);
+            } else {
+                nextProjects.set(project.id, project);
+                changedProjectIds.add(project.id);
+            }
+        }
+        for (const project of this.#projects.values()) {
+            if (nextProjects.has(project.id)) continue;
+            changedProjectIds.add(project.id);
+            this.#groups.delete(project.id);
+        }
+
+        for (const workspace of hello.workspaces) {
+            const known = this.#workspaces.get(workspace.id);
+            if (known !== undefined && known.version >= workspace.version) {
+                nextWorkspaces.set(workspace.id, known);
+            } else {
+                nextWorkspaces.set(workspace.id, workspace);
+                changedProjectIds.add(workspace.projectId);
+                if (known !== undefined) changedProjectIds.add(known.projectId);
+            }
+        }
+        for (const workspace of this.#workspaces.values()) {
+            if (nextWorkspaces.has(workspace.id)) continue;
+            changedProjectIds.add(workspace.projectId);
+            this.#workspaceGroups.delete(workspace.id);
+            this.#workspaceGroupSources.delete(workspace.id);
+        }
+
+        for (const session of hello.sessions) {
+            const known = this.#sessions.get(session.id);
+            if (known !== undefined && sameSessionSummary(known, session)) {
+                nextSessions.set(session.id, known);
+            } else {
+                nextSessions.set(session.id, session);
+                changedProjectIds.add(session.projectId);
+                if (known !== undefined) changedProjectIds.add(known.projectId);
+            }
+        }
+        for (const session of this.#sessions.values()) {
+            if (nextSessions.has(session.id)) continue;
+            changedProjectIds.add(session.projectId);
+            this.#sessionEventIds.delete(session.id);
+            this.#groupSessions.delete(session.id);
+        }
+
+        this.#projects = nextProjects;
+        this.#workspaces = nextWorkspaces;
+        this.#sessions = nextSessions;
+        for (const projectId of changedProjectIds) this.#markDirty(projectId);
         // Git snapshots survive: they are live-only, so the stream replays them
         // after this frame and dropping them here would blank a branch a client
         // is already showing.
-        for (const project of hello.projects) this.#projects.set(project.id, project);
-        for (const workspace of hello.workspaces) this.#workspaces.set(workspace.id, workspace);
-        for (const session of hello.sessions) this.#sessions.set(session.id, session);
-        this.#treeStale = true;
 
         const deltas: GroupDelta[] = [];
         if (this.#state.sessionsComplete !== hello.sessionsComplete) {
             this.#state = { ...this.#state, sessionsComplete: hello.sessionsComplete };
             deltas.push({ state: this.#state, type: "groups_state_changed" });
         }
-        deltas.push({ projects: this.projects(), type: "projects_changed" });
+        const projects = this.projects();
+        if (projects !== previousTree) deltas.push({ projects, type: "projects_changed" });
         return deltas;
     }
 
@@ -82,7 +140,7 @@ export class GroupStore {
                 const known = this.#projects.get(project.id);
                 // Streams and snapshots race, so an older copy of an entity must
                 // never overwrite a newer one already applied.
-                if (known !== undefined && known.version > project.version) return [];
+                if (known !== undefined && known.version >= project.version) return [];
                 this.#projects.set(project.id, project);
                 this.#markDirty(project.id);
                 if (known === undefined)
@@ -93,7 +151,7 @@ export class GroupStore {
             case "workspace_updated": {
                 const { workspace } = event.data as { workspace: ProjectWorkspace };
                 const known = this.#workspaces.get(workspace.id);
-                if (known !== undefined && known.version > workspace.version) return [];
+                if (known !== undefined && known.version >= workspace.version) return [];
                 this.#workspaces.set(workspace.id, workspace);
                 this.#markDirty(workspace.projectId);
                 if (known === undefined) {
@@ -213,7 +271,7 @@ export class GroupStore {
         ) {
             return false;
         }
-        into.set(key, git);
+        into.set(key, applicationGit(git));
         return true;
     }
 
@@ -225,15 +283,16 @@ export class GroupStore {
 
     #rebuild(): void {
         this.#treeStale = false;
-        const sessionsByProject = new Map<string, SessionSummary[]>();
-        const sessionsByWorkspace = new Map<string, SessionSummary[]>();
+        const sessionsByProject = new Map<string, GroupSession[]>();
+        const sessionsByWorkspace = new Map<string, GroupSession[]>();
         for (const session of this.#sessions.values()) {
             if (session.archived) continue;
+            const projected = this.#groupSession(session);
             const into =
                 session.workspaceId === undefined
                     ? mapList(sessionsByProject, session.projectId)
                     : mapList(sessionsByWorkspace, session.workspaceId);
-            into.push(session);
+            into.push(projected);
         }
         const workspacesByProject = new Map<string, ProjectWorkspace[]>();
         for (const workspace of this.#workspaces.values()) {
@@ -247,7 +306,7 @@ export class GroupStore {
             // with everything inside it.
             if (project.archivedAt !== undefined) continue;
             const cached = this.#groups.get(project.id);
-            if (cached !== undefined && cached.project === project) {
+            if (cached !== undefined) {
                 next.push(cached);
                 continue;
             }
@@ -255,9 +314,26 @@ export class GroupStore {
                 .sort(byOrderKey)
                 .map((workspace) => this.#workspaceGroup(workspace, sessionsByWorkspace));
             const group: ProjectGroup = {
+                ...(project.avatar === undefined
+                    ? {}
+                    : {
+                          avatar: {
+                              height: project.avatar.height,
+                              url: project.avatar.url,
+                              width: project.avatar.width,
+                          },
+                      }),
                 id: project.id,
-                project,
+                kind: project.kind,
+                name: project.name,
+                orderKey: project.orderKey,
+                path: project.path,
+                presence: project.presence,
                 sessions: (sessionsByProject.get(project.id) ?? []).sort(byOrderKey),
+                usage: usageOf([
+                    ...(sessionsByProject.get(project.id) ?? []),
+                    ...workspaces.flatMap((workspace) => workspace.sessions),
+                ]),
                 workspaces,
                 ...(this.#projectGit.has(project.id)
                     ? { git: this.#projectGit.get(project.id) as GitChangeSnapshot }
@@ -272,27 +348,70 @@ export class GroupStore {
 
     #workspaceGroup(
         workspace: ProjectWorkspace,
-        sessionsByWorkspace: Map<string, SessionSummary[]>,
+        sessionsByWorkspace: Map<string, GroupSession[]>,
     ): WorkspaceGroup {
         const cached = this.#workspaceGroups.get(workspace.id);
         const sessions = (sessionsByWorkspace.get(workspace.id) ?? []).sort(byOrderKey);
         if (
             cached !== undefined &&
-            cached.workspace === workspace &&
+            this.#workspaceGroupSources.get(workspace.id) === workspace &&
             sameSessions(cached.sessions, sessions)
         ) {
             return cached;
         }
         const group: WorkspaceGroup = {
             id: workspace.id,
+            name: workspace.name,
+            orderKey: workspace.orderKey,
+            path: workspace.path,
+            presence: workspace.presence,
+            projectId: workspace.projectId,
             sessions,
-            workspace,
+            status: workspace.status as WorkspaceGroup["status"],
+            ...(workspace.title === undefined ? {} : { title: workspace.title }),
+            usage: usageOf(sessions),
             ...(this.#workspaceGit.has(workspace.id)
                 ? { git: this.#workspaceGit.get(workspace.id) as GitChangeSnapshot }
                 : {}),
         };
         this.#workspaceGroups.set(workspace.id, group);
+        this.#workspaceGroupSources.set(workspace.id, workspace);
         return group;
+    }
+
+    #groupSession(session: SessionSummary): GroupSession {
+        const cached = this.#groupSessions.get(session.id);
+        if (cached?.source === session) return cached.value;
+        const value: GroupSession = {
+            archived: session.archived,
+            createdAt: session.createdAt,
+            cwd: session.cwd,
+            id: session.id,
+            modelId: session.modelId,
+            orderKey: session.orderKey,
+            permissionMode: session.permissionMode,
+            projectId: session.projectId,
+            providerId: session.providerId,
+            status: session.status,
+            updatedAt: session.updatedAt,
+            ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+            ...(session.draft === undefined ? {} : { draft: session.draft }),
+            ...(session.draftUpdatedAt === undefined
+                ? {}
+                : { draftUpdatedAt: session.draftUpdatedAt }),
+            ...(session.effort === undefined ? {} : { effort: session.effort }),
+            ...(session.lastMessageAt === undefined
+                ? {}
+                : { lastMessageAt: session.lastMessageAt }),
+            ...(session.recap === undefined ? {} : { recap: session.recap }),
+            ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
+            ...(session.sessionTokenCount === undefined
+                ? {}
+                : { sessionTokenCount: session.sessionTokenCount }),
+            ...(session.title === undefined ? {} : { title: session.title }),
+        };
+        this.#groupSessions.set(session.id, { source: session, value });
+        return value;
     }
 }
 
@@ -315,13 +434,73 @@ function byOrderKey(left: { orderKey: string }, right: { orderKey: string }): nu
  * was renamed or changed status, because the list looks unchanged by id while
  * the session it points at is a different object.
  */
-function sameSessions(left: readonly SessionSummary[], right: readonly SessionSummary[]): boolean {
+function sameSessions(left: readonly GroupSession[], right: readonly GroupSession[]): boolean {
     if (left.length !== right.length) return false;
     return left.every((item, index) => item === right[index]);
 }
 
+function usageOf(sessions: readonly GroupSession[]): { totalTokens: number } {
+    return {
+        totalTokens: sessions.reduce(
+            (total, session) => total + (session.sessionTokenCount?.totalTokens ?? 0),
+            0,
+        ),
+    };
+}
+
+function sameSessionSummary(left: SessionSummary, right: SessionSummary): boolean {
+    if (left === right) return true;
+    const leftRecord = left as unknown as Record<string, unknown>;
+    const rightRecord = right as unknown as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord);
+    const rightKeys = Object.keys(rightRecord);
+    return (
+        leftKeys.length === rightKeys.length &&
+        leftKeys.every(
+            (key) =>
+                Object.hasOwn(rightRecord, key) &&
+                sameProtocolValue(leftRecord[key], rightRecord[key]),
+        )
+    );
+}
+
+/** Equality for the bounded JSON values carried by one protocol entity. */
+function sameProtocolValue(left: unknown, right: unknown): boolean {
+    if (Object.is(left, right)) return true;
+    if (left === null || right === null || typeof left !== "object" || typeof right !== "object") {
+        return false;
+    }
+    if (Array.isArray(left) || Array.isArray(right)) {
+        return (
+            Array.isArray(left) &&
+            Array.isArray(right) &&
+            left.length === right.length &&
+            left.every((item, index) => sameProtocolValue(item, right[index]))
+        );
+    }
+    const leftRecord = left as Record<string, unknown>;
+    const rightRecord = right as Record<string, unknown>;
+    const leftKeys = Object.keys(leftRecord);
+    const rightKeys = Object.keys(rightRecord);
+    return (
+        leftKeys.length === rightKeys.length &&
+        leftKeys.every(
+            (key) =>
+                Object.hasOwn(rightRecord, key) &&
+                sameProtocolValue(leftRecord[key], rightRecord[key]),
+        )
+    );
+}
+
 function isArchivedWorkspace(workspace: ProjectWorkspace): boolean {
     return workspace.archivedAt !== undefined || workspace.status === "archived";
+}
+
+function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
+    return {
+        ...git,
+        revision: `${git.generation}:${String(git.version)}:${String(git.scannedAt)}`,
+    };
 }
 
 /**
@@ -335,25 +514,58 @@ function isArchivedWorkspace(workspace: ProjectWorkspace): boolean {
 function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
     switch (event.type) {
         case "session_title_changed": {
-            const { recap, title } = event.data as { recap?: string; title?: string };
-            // The title and the recap both ride on this event and are both
-            // cleared by omission, which is a different statement from setting
-            // either to an empty string.
-            const set: Partial<SessionSummary> = {};
+            const { recap, status, title } = event.data as {
+                recap?: string;
+                status: string;
+                title?: string;
+            };
+            // Generating and error events omit the title and recap even though
+            // the daemon retains them. Once metadata is idle or ready, omission
+            // is authoritative and clears the corresponding value.
+            const settled = status === "idle" || status === "ready";
+            const set: Partial<SessionSummary> = { titleStatus: status };
             const clear: (keyof SessionSummary)[] = [];
-            if (title === undefined) clear.push("title");
-            else set.title = title;
-            if (recap === undefined) clear.push("recap");
-            else set.recap = recap;
+            if (title !== undefined) set.title = title;
+            else if (settled) clear.push("title");
+            if (recap !== undefined) set.recap = recap;
+            else if (settled) clear.push("recap");
             return { clear, set };
         }
         case "session_configuration_changed": {
-            // The sidebar names the model next to a session, so a switch has to
-            // reach it. Effort and service tier live on the session view, not on
-            // the summary a list draws.
-            const { modelId } = event.data as { modelId: string };
-            return { set: { modelId } };
+            const { effort, modelId, serviceTier } = event.data as {
+                effort?: string;
+                modelId: string;
+                serviceTier: string | null;
+            };
+            return {
+                clear: [
+                    ...(effort === undefined ? (["effort"] as const) : []),
+                    ...(serviceTier === null ? (["serviceTier"] as const) : []),
+                ],
+                set: {
+                    modelId,
+                    ...(effort === undefined ? {} : { effort }),
+                    ...(serviceTier === null ? {} : { serviceTier }),
+                },
+            };
         }
+        case "session_draft_changed": {
+            const { draft, updatedAt } = event.data as { draft?: string; updatedAt: number };
+            return {
+                ...(draft === undefined ? { clear: ["draft"] } : {}),
+                set: {
+                    draftUpdatedAt: updatedAt,
+                    ...(draft === undefined ? {} : { draft }),
+                },
+            };
+        }
+        case "session_context_changed":
+            return {
+                set: {
+                    sessionTokenCount: (event.data as { sessionTokenCount: SessionTokenCount })
+                        .sessionTokenCount,
+                },
+            };
         case "permission_mode_changed": {
             const { permissionMode } = event.data as { permissionMode: string };
             return { set: { permissionMode } };

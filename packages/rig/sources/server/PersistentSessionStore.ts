@@ -525,6 +525,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {
+        return this.#listSessions(false, options);
+    }
+
+    listActive(options: { limit?: number } = {}): readonly SessionSummary[] {
+        return this.#listSessions(true, options);
+    }
+
+    #listSessions(activeOnly: boolean, options: { limit?: number }): readonly SessionSummary[] {
         const rows = this.#database
             .prepare(
                 `
@@ -564,6 +572,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         last_message_at_ms
                     FROM sessions
                     WHERE parent_session_id IS NULL
+                        ${activeOnly ? "AND archived = 0" : ""}
                 ) AS listed_sessions
                 JOIN projects ON projects.id = listed_sessions.project_id
                 LEFT JOIN project_workspaces
@@ -577,8 +586,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 LIMIT ?
                 `,
             )
-            // SQLite treats a negative LIMIT as unbounded.
-            .all(options.limit ?? -1);
+            // Active catalogs are complete by design. Historical listings keep
+            // their existing default bound unless a caller asks for another.
+            .all(options.limit ?? (activeOnly ? -1 : 500));
 
         return rows.map((row) => {
             const effort = readOptionalString(row, "effort");

@@ -88,6 +88,20 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[1]).toMatchObject({ errorMessage: "Boom", outcome: "error" });
     });
 
+    it("carries each message's own occurrence time", () => {
+        const entries = turn("run-1").map((entry, index) => ({
+            ...entry,
+            createdAt: 100 + index * 25,
+        }));
+
+        const window = newest(entries, new Map(), 20);
+
+        expect(window.messageCreatedAt).toEqual({
+            "run-1-a": 125,
+            "run-1-u": 100,
+        });
+    });
+
     it("leaves a still-running turn without an end", () => {
         const facts = new Map<string, TranscriptRunFacts>([["run-1", { startedAt: 10 }]]);
 

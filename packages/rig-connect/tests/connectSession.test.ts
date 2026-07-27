@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { connectSession } from "@/connectSession.js";
 import type { ChatDelta, ChatElement, SessionState } from "@/ChatElement.js";
-import type { SessionEvent, SessionStreamHello } from "@/protocol.js";
+import type {
+    Message,
+    SessionEvent,
+    SessionStreamHello,
+    SessionTranscriptWindow,
+} from "@/protocol.js";
 
 /** A stream the test feeds frame by frame, standing in for a live daemon. */
 function controllableStream() {
@@ -35,13 +40,76 @@ function helloFrame(): string {
         resumed: false,
         session: {
             activity: { kind: "idle", label: "Idle", since: 0 },
+            archived: false,
             cwd: "/work",
             id: "session-1",
+            modelLocked: false,
             modelId: "sonnet-5",
+            models: [],
+            orderKey: "a0",
+            pendingUserInputs: [],
+            permissionMode: "auto",
+            projectId: "project-1",
             providerId: "claude",
             snapshot: { messages: [] },
             status: "idle",
+            tasks: [],
         },
+    };
+    return `event: hello\ndata: ${JSON.stringify(hello)}\n\n`;
+}
+
+function transcriptWindow(run: number, complete: boolean): SessionTranscriptWindow {
+    const messages = [
+        {
+            blocks: [{ text: `User ${String(run)}`, type: "text" }],
+            id: `u${String(run)}`,
+            role: "user",
+        },
+        {
+            blocks: [{ text: `Agent ${String(run)}`, type: "text" }],
+            id: `a${String(run)}`,
+            role: "agent",
+        },
+    ] as Message[];
+    return {
+        complete,
+        messages,
+        turns: [
+            {
+                endedAt: run * 100 + 50,
+                messageIds: messages.map((message) => message.id),
+                outcome: "success",
+                runId: `run-${String(run)}`,
+                startedAt: run * 100,
+            },
+        ],
+    };
+}
+
+function pagedHelloFrame(): string {
+    const transcript = transcriptWindow(4, false);
+    const hello: SessionStreamHello = {
+        activity: { kind: "idle", label: "Idle", since: 0 },
+        resumed: false,
+        session: {
+            activity: { kind: "idle", label: "Idle", since: 0 },
+            archived: false,
+            cwd: "/work",
+            id: "session-1",
+            modelLocked: false,
+            modelId: "sonnet-5",
+            models: [],
+            orderKey: "a0",
+            pendingUserInputs: [],
+            permissionMode: "auto",
+            projectId: "project-1",
+            providerId: "claude",
+            snapshot: { messages: transcript.messages },
+            status: "idle",
+            tasks: [],
+        },
+        transcript,
     };
     return `event: hello\ndata: ${JSON.stringify(hello)}\n\n`;
 }
@@ -177,4 +245,57 @@ describe("connectSession", () => {
 
         expect(renders).toBe(before);
     });
+
+    it.each(["session_reset", "session_rewound"] as const)(
+        "discards an earlier page that arrives after %s",
+        async (type) => {
+            const stream = controllableStream();
+            let resolvePage: ((response: Response) => void) | undefined;
+            const page = new Promise<Response>((resolve) => {
+                resolvePage = resolve;
+            });
+            const connection = connectSession({
+                endpoint: "http://daemon.test",
+                fetch: (input) =>
+                    new URL(String(input)).pathname.endsWith("/transcript")
+                        ? page
+                        : stream.fetch(input),
+                onChange: () => undefined,
+                sessionId: "session-1",
+                token: "secret",
+            });
+
+            try {
+                stream.write(pagedHelloFrame());
+                await settle();
+                const loading = connection.loadEarlier();
+                await settle();
+
+                stream.write(
+                    frame({
+                        data: {
+                            ...(type === "session_rewound" ? { messageId: "u4" } : {}),
+                            snapshot: { messages: [] },
+                            transcript: { complete: true, messages: [], turns: [] },
+                        },
+                        id: "replacement",
+                        type,
+                    }),
+                );
+                await settle();
+                resolvePage?.(
+                    new Response(JSON.stringify(transcriptWindow(1, true)), { status: 200 }),
+                );
+                await loading;
+
+                expect(connection.elements()).toEqual([]);
+                expect(connection.session()).toMatchObject({
+                    loadingEarlier: false,
+                    transcriptComplete: true,
+                });
+            } finally {
+                connection.close();
+            }
+        },
+    );
 });

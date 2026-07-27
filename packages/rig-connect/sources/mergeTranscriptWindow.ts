@@ -37,11 +37,19 @@ export function mergeTranscriptWindow(
         known.add(message.id);
         messages.push(message);
     }
+    const messageCreatedAt = Object.fromEntries(
+        messages.flatMap((message) => {
+            const createdAt =
+                incoming.messageCreatedAt?.[message.id] ?? loaded.messageCreatedAt?.[message.id];
+            return createdAt === undefined ? [] : [[message.id, createdAt]];
+        }),
+    );
 
     return {
         // The retained turns reach back to where the earlier window started, so
         // the merged window is complete only if that one was.
         complete: loaded.complete,
+        ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         messages,
         turns: [...retained, ...incoming.turns],
     };

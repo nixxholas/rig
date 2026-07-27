@@ -50,6 +50,8 @@ export interface SessionStore {
     getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined>;
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined;
     list(options?: { limit?: number }): readonly SessionSummary[];
+    /** Every explicitly unarchived primary session, with no default limit. */
+    listActive(options?: { limit?: number }): readonly SessionSummary[];
     listExternalToolCalls(options?: {
         limit?: number;
         status?: ExternalToolCall["status"];

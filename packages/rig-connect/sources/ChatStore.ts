@@ -3,21 +3,30 @@ import type {
     AgentBlock,
     AgentLoopEvent,
     AgentMessage,
+    BackgroundProcess,
     ContentBlock,
+    GitChangeSnapshot,
     Message,
+    PendingSteeringMessage,
+    PermissionReviewState,
     ProtocolSession,
     SessionActivity,
+    SessionGoal,
     SessionStatus,
     SessionEvent,
+    SessionTask,
     SessionStreamHello,
     SessionTokenCount,
     SessionTranscriptWindow,
+    ShellCommandState,
+    SubagentSummary,
     ToolCallBlock,
     ToolCallPresentation,
     ToolResultBlock,
     ToolResultPresentation,
     Usage,
     UserMessage,
+    UserInputRequest,
 } from "./protocol.js";
 import type {
     AgentTextElement,
@@ -25,6 +34,7 @@ import type {
     ChatElement,
     ConnectionState,
     SessionState,
+    SystemNoticeElement,
     ThinkingElement,
     ToolCallElement,
     TurnEndElement,
@@ -87,6 +97,8 @@ export class ChatStore {
      * front of it.
      */
     #loadedTranscript: SessionTranscriptWindow | undefined;
+    /** Invalidates an earlier-page response whenever the transcript is replaced. */
+    #transcriptGeneration = 0;
     /**
      * Elements from before a rebuild, so identical rows keep their reference.
      *
@@ -99,13 +111,25 @@ export class ChatStore {
         this.#session = {
             activity: IDLE_ACTIVITY,
             archived: false,
+            backgroundProcesses: [],
             connection: "connecting",
             cwd: "",
+            modelLocked: false,
             modelId: "",
+            models: [],
+            orderKey: "",
+            pendingSteeringMessages: [],
+            pendingUserInputs: [],
+            permissionMode: "",
+            permissionReviews: [],
+            projectId: "",
             providerId: "",
             loadingEarlier: false,
             sessionId,
+            shellCommands: [],
             status: "idle",
+            subagents: [],
+            tasks: [],
             transcriptComplete: true,
         };
     }
@@ -117,6 +141,14 @@ export class ChatStore {
     earliestRunId(): string | undefined {
         if (this.#session.transcriptComplete) return undefined;
         return this.#loadedTranscript?.turns[0]?.runId;
+    }
+
+    /** The exact transcript state an earlier-page request is continuing from. */
+    earlierTranscriptAnchor(): { before: string; generation: number } | undefined {
+        const before = this.earliestRunId();
+        return before === undefined
+            ? undefined
+            : { before, generation: this.#transcriptGeneration };
     }
 
     /** Reports that earlier turns are being fetched, clearing any earlier failure. */
@@ -142,13 +174,32 @@ export class ChatStore {
      * The page is older than everything already loaded, so the existing rows keep
      * both their order and their identity and only the new turns are built.
      */
-    prependEarlier(page: SessionTranscriptWindow): readonly ChatDelta[] {
+    prependEarlier(
+        page: SessionTranscriptWindow,
+        anchor?: { before: string; generation: number },
+    ): readonly ChatDelta[] {
         const deltas: ChatDelta[] = [];
         const revisionBefore = this.#revision;
         const sessionBefore = this.#session;
+        if (
+            anchor !== undefined &&
+            (anchor.generation !== this.#transcriptGeneration ||
+                anchor.before !== this.earliestRunId())
+        ) {
+            this.#session = {
+                ...withoutKeys(this.#session, ["loadEarlierError"]),
+                loadingEarlier: false,
+            };
+            return this.#finish(deltas, revisionBefore, sessionBefore);
+        }
         const loaded = this.#loadedTranscript;
+        const messageCreatedAt = {
+            ...(page.messageCreatedAt ?? {}),
+            ...(loaded?.messageCreatedAt ?? {}),
+        };
         const merged: SessionTranscriptWindow = {
             complete: page.complete,
+            ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
             messages: [...page.messages, ...(loaded?.messages ?? [])],
             turns: [...page.turns, ...(loaded?.turns ?? [])],
         };
@@ -236,7 +287,10 @@ export class ChatStore {
                 this.#setActivity((event.data as { activity: SessionActivity }).activity, deltas);
                 break;
             case "session_git_changed":
-                this.#session = { ...this.#session, git: (event.data as { git: never }).git };
+                this.#session = {
+                    ...this.#session,
+                    git: applicationGit((event.data as { git: GitChangeSnapshot }).git),
+                };
                 break;
             case "session_context_changed":
                 this.#session = {
@@ -262,6 +316,21 @@ export class ChatStore {
                 };
                 break;
             }
+            case "session_draft_changed": {
+                const data = event.data as { draft?: string; updatedAt: number };
+                if (
+                    this.#session.draftUpdatedAt !== undefined &&
+                    data.updatedAt < this.#session.draftUpdatedAt
+                ) {
+                    break;
+                }
+                this.#session = {
+                    ...withoutKeys(this.#session, ["draft"]),
+                    draftUpdatedAt: data.updatedAt,
+                    ...(data.draft === undefined ? {} : { draft: data.draft }),
+                };
+                break;
+            }
             case "permission_mode_changed":
                 this.#session = {
                     ...this.#session,
@@ -269,16 +338,105 @@ export class ChatStore {
                 };
                 break;
             case "session_title_changed": {
-                const title = (event.data as { title?: string }).title;
-                // A title is cleared by omission, so an absent one removes it
-                // rather than leaving the previous title on screen.
+                const { recap, status, title } = event.data as {
+                    recap?: string;
+                    status: string;
+                    title?: string;
+                };
+                // Generating and error events report only metadata activity; the
+                // daemon deliberately omits the good metadata it still retains.
+                // A settled idle/ready event is authoritative and may clear it.
+                if (title !== undefined || recap !== undefined) {
+                    this.#session = {
+                        ...this.#session,
+                        ...(title === undefined ? {} : { title }),
+                        ...(recap === undefined ? {} : { recap }),
+                    };
+                }
+                if (status === "idle" || status === "ready") {
+                    const clear: ("recap" | "title")[] = [];
+                    if (title === undefined) clear.push("title");
+                    if (recap === undefined) clear.push("recap");
+                    this.#session = withoutKeys(this.#session, clear);
+                }
+                break;
+            }
+            case "user_input_requested": {
+                const request = event.data as UserInputRequest;
+                this.#session = {
+                    ...this.#session,
+                    pendingUserInputs: [
+                        ...this.#session.pendingUserInputs.filter(
+                            (pending) => pending.requestId !== request.requestId,
+                        ),
+                        request,
+                    ],
+                };
+                break;
+            }
+            case "user_input_resolved": {
+                const { requestId } = event.data as { requestId: string };
+                this.#session = {
+                    ...this.#session,
+                    pendingUserInputs: this.#session.pendingUserInputs.filter(
+                        (pending) => pending.requestId !== requestId,
+                    ),
+                };
+                break;
+            }
+            case "tasks_changed":
+                this.#session = {
+                    ...this.#session,
+                    tasks: (event.data as { tasks: readonly SessionTask[] }).tasks,
+                };
+                break;
+            case "goal_changed": {
+                const { goal } = event.data as { goal: SessionGoal | null };
                 this.#session =
-                    title === undefined
-                        ? withoutKeys(this.#session, ["title"])
-                        : { ...this.#session, title };
+                    goal === null
+                        ? withoutKeys(this.#session, ["goal"])
+                        : { ...this.#session, goal };
+                break;
+            }
+            case "subagent_changed": {
+                const { subagent } = event.data as { subagent: SubagentSummary };
+                this.#session = {
+                    ...this.#session,
+                    subagents: [
+                        ...this.#session.subagents.filter((known) => known.id !== subagent.id),
+                        subagent,
+                    ].sort((left, right) => left.createdAt - right.createdAt),
+                };
+                break;
+            }
+            case "shell_command_started": {
+                const command = event.data as {
+                    command: string;
+                    commandId: string;
+                    sessionId: number;
+                };
+                this.#setShellCommand({ ...command, status: "running" });
+                break;
+            }
+            case "shell_command_finished": {
+                const command = event.data as Omit<ShellCommandState, "status">;
+                this.#setShellCommand({ ...command, status: "finished" });
+                break;
+            }
+            case "steering_applied": {
+                const applied = new Set(
+                    (event.data as { messageIds: readonly string[] }).messageIds,
+                );
+                this.#session = {
+                    ...this.#session,
+                    pendingSteeringMessages: this.#session.pendingSteeringMessages.filter(
+                        (pending) => !applied.has(pending.message.id),
+                    ),
+                };
                 break;
             }
             case "message_submitted":
+                this.#trackPendingSteering(event);
                 this.#applySubmittedMessage(event, deltas);
                 break;
             case "run_started":
@@ -299,7 +457,12 @@ export class ChatStore {
                 );
                 break;
             case "run_finished": {
-                const data = event.data as { errorMessage?: string; stopReason: string };
+                const data = event.data as {
+                    errorMessage?: string;
+                    modelLocked: boolean;
+                    stopReason: string;
+                };
+                this.#session = { ...this.#session, modelLocked: data.modelLocked };
                 const outcome =
                     data.stopReason === "error"
                         ? "error"
@@ -310,6 +473,10 @@ export class ChatStore {
                 break;
             }
             case "run_error":
+                this.#session = {
+                    ...this.#session,
+                    modelLocked: (event.data as { modelLocked: boolean }).modelLocked,
+                };
                 this.#endTurn(
                     "error",
                     (event.data as { errorMessage: string }).errorMessage,
@@ -326,13 +493,16 @@ export class ChatStore {
                     snapshot: { messages: readonly Message[] };
                     transcript?: SessionTranscriptWindow;
                 };
-                this.#resetTranscript(
-                    data.snapshot.messages,
-                    deltas,
+                const transcript =
                     data.transcript === undefined
                         ? undefined
-                        : mergeTranscriptWindow(this.#loadedTranscript, data.transcript),
-                );
+                        : mergeTranscriptWindow(this.#loadedTranscript, data.transcript);
+                this.#resetTranscript(data.snapshot.messages, deltas, transcript);
+                this.#session = {
+                    ...withoutKeys(this.#session, ["loadEarlierError"]),
+                    loadingEarlier: false,
+                    transcriptComplete: transcript?.complete ?? true,
+                };
                 break;
             }
             default:
@@ -389,13 +559,45 @@ export class ChatStore {
 
     #resetFromSession(session: ProtocolSession, transcript?: SessionTranscriptWindow): void {
         this.#session = {
-            ...this.#session,
+            ...withoutKeys(this.#session, [
+                "draft",
+                "draftUpdatedAt",
+                "effort",
+                "goal",
+                "git",
+                "recap",
+                "serviceTier",
+                "title",
+                "tokens",
+                "workspaceId",
+            ]),
+            archived: session.archived,
+            backgroundProcesses: session.backgroundProcesses ?? [],
             cwd: session.cwd,
+            modelLocked: session.modelLocked,
             modelId: session.modelId,
+            models: session.models,
+            orderKey: session.orderKey,
+            pendingSteeringMessages: session.pendingSteeringMessages ?? [],
+            pendingUserInputs: session.pendingUserInputs,
+            permissionMode: session.permissionMode,
+            projectId: session.projectId,
             providerId: session.providerId,
             sessionId: session.id,
+            shellCommands: session.shellCommands ?? [],
             status: session.status,
-            ...(session.git === undefined ? {} : { git: session.git }),
+            subagents: session.subagents ?? [],
+            tasks: session.tasks,
+            ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+            ...(session.draft === undefined ? {} : { draft: session.draft }),
+            ...(session.draftUpdatedAt === undefined
+                ? {}
+                : { draftUpdatedAt: session.draftUpdatedAt }),
+            ...(session.effort === undefined ? {} : { effort: session.effort }),
+            ...(session.git === undefined ? {} : { git: applicationGit(session.git) }),
+            ...(session.goal === undefined ? {} : { goal: session.goal }),
+            ...(session.recap === undefined ? {} : { recap: session.recap }),
+            ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.sessionTokenCount === undefined
                 ? {}
@@ -418,6 +620,7 @@ export class ChatStore {
         deltas: ChatDelta[],
         transcript?: SessionTranscriptWindow,
     ): void {
+        this.#transcriptGeneration += 1;
         if (this.#elements.length > 0) this.#revision += 1;
         // Copied, not aliased: the map this reads from is cleared just below.
         this.#priorElements = new Map(this.#byId);
@@ -470,7 +673,11 @@ export class ChatStore {
             for (const messageId of turn.messageIds) {
                 const message = byId.get(messageId);
                 if (message === undefined) continue;
-                this.#applyMessage(message, turn.startedAt, deltas);
+                this.#applyMessage(
+                    message,
+                    transcript.messageCreatedAt?.[messageId] ?? turn.startedAt,
+                    deltas,
+                );
             }
             if (turn.endedAt === undefined) continue;
             this.#endTurn(turn.outcome ?? "success", turn.errorMessage, turn.endedAt, deltas);
@@ -574,6 +781,38 @@ export class ChatStore {
         this.#applyMessage(data.message, event.createdAt, deltas);
     }
 
+    #trackPendingSteering(event: SessionEvent): void {
+        const data = event.data as {
+            delivery?: "run" | "steer";
+            message: UserMessage;
+            runId: string;
+        };
+        if (data.delivery !== "steer") return;
+        const pending: PendingSteeringMessage = { message: data.message, runId: data.runId };
+        this.#session = {
+            ...this.#session,
+            pendingSteeringMessages: [
+                ...this.#session.pendingSteeringMessages.filter(
+                    (known) => known.message.id !== pending.message.id,
+                ),
+                pending,
+            ],
+        };
+    }
+
+    #setShellCommand(command: ShellCommandState): void {
+        const knownIndex = this.#session.shellCommands.findIndex(
+            (known) => known.commandId === command.commandId,
+        );
+        const shellCommands =
+            knownIndex === -1
+                ? [...this.#session.shellCommands, command].slice(-100)
+                : this.#session.shellCommands.map((known, index) =>
+                      index === knownIndex ? command : known,
+                  );
+        this.#session = { ...this.#session, shellCommands };
+    }
+
     /** Applies one committed message, expanding its blocks into elements. */
     #applyMessage(message: Message, at: number, deltas: ChatDelta[]): void {
         if (message.internal === true) return;
@@ -582,7 +821,17 @@ export class ChatStore {
             return;
         }
         this.#appliedMessageIds.add(message.id);
-        if (message.role === "system") return;
+        if (message.role === "system") {
+            const element: SystemNoticeElement = {
+                createdAt: at,
+                id: `message:${message.id}`,
+                kind: "system_notice",
+                text: textOf(message.blocks),
+                turnId: this.#turnId ?? `history:${message.id}`,
+            };
+            this.#append(element);
+            return;
+        }
         if (message.role === "user") {
             this.#appendUserMessage(message, at);
             return;
@@ -809,6 +1058,36 @@ export class ChatStore {
                 this.#compactionElementIds.delete(data.compactionId);
                 if (elementId !== undefined) this.#update(elementId, { status: data.status });
                 deltas.push({ type: "compaction_finished", compactionId: data.compactionId });
+                return;
+            }
+            case "background_processes_changed": {
+                const processes =
+                    (
+                        event as {
+                            processes?: readonly BackgroundProcess[];
+                        }
+                    ).processes ?? [];
+                this.#session = { ...this.#session, backgroundProcesses: processes };
+                return;
+            }
+            case "permission_review": {
+                const review = event as PermissionReviewState & { type: "permission_review" };
+                const next: PermissionReviewState = {
+                    action: review.action,
+                    decision: review.decision,
+                    reason: review.reason,
+                    risk: review.risk,
+                    toolCallId: review.toolCallId,
+                };
+                this.#session = {
+                    ...this.#session,
+                    permissionReviews: [
+                        ...this.#session.permissionReviews.filter(
+                            (known) => known.toolCallId !== next.toolCallId,
+                        ),
+                        next,
+                    ].slice(-100),
+                };
                 return;
             }
             default:
@@ -1140,6 +1419,13 @@ function addUsage(total: Usage | undefined, next: Usage): Usage {
         ...(total.reasoning === undefined && next.reasoning === undefined
             ? {}
             : { reasoning: (total.reasoning ?? 0) + (next.reasoning ?? 0) }),
+    };
+}
+
+function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
+    return {
+        ...git,
+        revision: `${git.generation}:${String(git.version)}:${String(git.scannedAt)}`,
     };
 }
 

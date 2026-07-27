@@ -27,12 +27,20 @@ function hello(overrides: Partial<SessionStreamHello> = {}): SessionStreamHello 
         resumed: false,
         session: {
             activity: { kind: "idle", label: "Idle", since: 0 },
+            archived: false,
             cwd: "/work",
             id: "session-1",
+            modelLocked: false,
             modelId: "sonnet-5",
+            models: [],
+            orderKey: "a0",
+            pendingUserInputs: [],
+            permissionMode: "auto",
+            projectId: "project-1",
             providerId: "claude",
             snapshot: { messages: [] },
             status: "idle",
+            tasks: [],
         },
         ...overrides,
     };
@@ -600,6 +608,33 @@ describe("ChatStore", () => {
         expect(store.elements()).toBe(before);
     });
 
+    it("renders a non-internal system message as a system notice", () => {
+        const store = new ChatStore("session-1");
+        const opening = hello();
+        store.applyHello({
+            ...opening,
+            session: {
+                ...opening.session!,
+                snapshot: {
+                    messages: [
+                        {
+                            blocks: [{ text: "The environment restarted.", type: "text" }],
+                            id: "system-1",
+                            role: "system",
+                        },
+                    ],
+                },
+            },
+        });
+
+        expect(store.elements()).toMatchObject([
+            {
+                kind: "system_notice",
+                text: "The environment restarted.",
+            },
+        ]);
+    });
+
     it("tracks live session facts without a follow-up request", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
@@ -636,15 +671,282 @@ describe("ChatStore", () => {
     });
 
     describe("live session facts", () => {
-        it("removes a title the daemon cleared", () => {
+        it("initializes the complete application state from the opening frame", () => {
+            const store = new ChatStore("session-1");
+            const opening = hello();
+            store.applyHello({
+                ...opening,
+                session: {
+                    ...opening.session!,
+                    archived: true,
+                    backgroundProcesses: [
+                        {
+                            command: "pnpm test",
+                            cwd: "/work",
+                            sessionId: 7,
+                            status: "running",
+                        },
+                    ],
+                    draft: "Keep this",
+                    draftUpdatedAt: 11,
+                    effort: "high",
+                    goal: {
+                        createdAt: 1,
+                        objective: "Ship it",
+                        status: "active",
+                        updatedAt: 2,
+                    },
+                    modelLocked: true,
+                    models: [
+                        {
+                            defaultThinkingLevel: "medium",
+                            id: "sonnet-5",
+                            name: "Sonnet 5",
+                            thinkingLevels: ["low", "medium", "high"],
+                        },
+                    ],
+                    orderKey: "b0",
+                    pendingSteeringMessages: [
+                        {
+                            message: {
+                                blocks: [{ text: "Also check this", type: "text" }],
+                                id: "steer-1",
+                                role: "user",
+                            },
+                            runId: "run-1",
+                        },
+                    ],
+                    pendingUserInputs: [
+                        {
+                            questions: [
+                                {
+                                    header: "Choice",
+                                    id: "choice",
+                                    multiSelect: false,
+                                    options: [{ description: "Use it", label: "Yes" }],
+                                    question: "Proceed?",
+                                },
+                            ],
+                            requestId: "input-1",
+                        },
+                    ],
+                    permissionMode: "read_only",
+                    projectId: "project-1",
+                    recap: "Ready to ship",
+                    serviceTier: "priority",
+                    subagents: [
+                        {
+                            agentId: "agent-2",
+                            createdAt: 1,
+                            depth: 1,
+                            description: "Review",
+                            id: "session-2",
+                            modelId: "sonnet-5",
+                            parentSessionId: "session-1",
+                            status: "idle",
+                            updatedAt: 2,
+                        },
+                    ],
+                    tasks: [
+                        {
+                            blockedBy: [],
+                            blocks: [],
+                            description: "Run tests",
+                            id: "task-1",
+                            status: "in_progress",
+                            subject: "Verify",
+                        },
+                    ],
+                    workspaceId: "workspace-1",
+                },
+            });
+
+            expect(store.session()).toMatchObject({
+                archived: true,
+                backgroundProcesses: [{ sessionId: 7 }],
+                draft: "Keep this",
+                draftUpdatedAt: 11,
+                effort: "high",
+                goal: { objective: "Ship it" },
+                modelLocked: true,
+                models: [{ id: "sonnet-5" }],
+                orderKey: "b0",
+                pendingSteeringMessages: [{ runId: "run-1" }],
+                pendingUserInputs: [{ requestId: "input-1" }],
+                permissionMode: "read_only",
+                projectId: "project-1",
+                recap: "Ready to ship",
+                serviceTier: "priority",
+                subagents: [{ id: "session-2" }],
+                tasks: [{ id: "task-1" }],
+                workspaceId: "workspace-1",
+            });
+        });
+
+        it("keeps application state current from complete live events", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello(hello());
+
+            store.apply(
+                event("session_draft_changed", {
+                    draft: "Draft",
+                    origin: "happy",
+                    updatedAt: 10,
+                }),
+            );
+            store.apply(
+                event("user_input_requested", {
+                    questions: [],
+                    requestId: "input-1",
+                }),
+            );
+            store.apply(
+                event("tasks_changed", {
+                    tasks: [
+                        {
+                            blockedBy: [],
+                            blocks: [],
+                            description: "Run tests",
+                            id: "task-1",
+                            status: "pending",
+                            subject: "Verify",
+                        },
+                    ],
+                }),
+            );
+            store.apply(
+                event("goal_changed", {
+                    goal: {
+                        createdAt: 1,
+                        objective: "Ship",
+                        status: "active",
+                        updatedAt: 1,
+                    },
+                }),
+            );
+            store.apply(
+                event("subagent_changed", {
+                    subagent: {
+                        agentId: "agent-2",
+                        createdAt: 1,
+                        depth: 1,
+                        description: "Review",
+                        id: "session-2",
+                        modelId: "sonnet-5",
+                        parentSessionId: "session-1",
+                        status: "running",
+                        updatedAt: 2,
+                    },
+                }),
+            );
+            store.apply(
+                event("shell_command_started", {
+                    command: "pnpm test",
+                    commandId: "command-1",
+                    sessionId: 8,
+                }),
+            );
+            store.apply(
+                event("message_submitted", {
+                    delivery: "steer",
+                    displayText: "Check this",
+                    message: {
+                        blocks: [{ text: "Check this", type: "text" }],
+                        id: "steer-1",
+                        role: "user",
+                    },
+                    runId: "run-1",
+                }),
+            );
+            store.apply(
+                agentEvent({
+                    processes: [
+                        {
+                            command: "pnpm dev",
+                            cwd: "/work",
+                            sessionId: 9,
+                            status: "running",
+                        },
+                    ],
+                    running: 1,
+                    type: "background_processes_changed",
+                }),
+            );
+            store.apply(
+                agentEvent({
+                    action: "Run tests",
+                    decision: "allow",
+                    reason: "The user asked for verification.",
+                    risk: "low",
+                    toolCallId: "call-1",
+                    type: "permission_review",
+                }),
+            );
+
+            expect(store.session()).toMatchObject({
+                backgroundProcesses: [{ sessionId: 9 }],
+                draft: "Draft",
+                draftUpdatedAt: 10,
+                goal: { objective: "Ship" },
+                pendingSteeringMessages: [{ message: { id: "steer-1" } }],
+                pendingUserInputs: [{ requestId: "input-1" }],
+                permissionReviews: [{ toolCallId: "call-1" }],
+                shellCommands: [{ commandId: "command-1", status: "running" }],
+                subagents: [{ id: "session-2", status: "running" }],
+                tasks: [{ id: "task-1" }],
+            });
+
+            store.apply(
+                event("shell_command_finished", {
+                    command: "pnpm test",
+                    commandId: "command-1",
+                    exitCode: 0,
+                    output: "passed",
+                    sessionId: 8,
+                    timedOut: false,
+                }),
+            );
+            store.apply(event("steering_applied", { messageIds: ["steer-1"], runId: "run-1" }));
+            store.apply(
+                event("user_input_resolved", {
+                    requestId: "input-1",
+                    status: "cancelled",
+                }),
+            );
+            store.apply(event("goal_changed", { goal: null }));
+
+            expect(store.session().shellCommands).toMatchObject([
+                { commandId: "command-1", status: "finished" },
+            ]);
+            expect(store.session().pendingSteeringMessages).toEqual([]);
+            expect(store.session().pendingUserInputs).toEqual([]);
+            expect(store.session().goal).toBeUndefined();
+        });
+
+        it("preserves a title while metadata is generating or reports an error", () => {
             const store = new ChatStore("session-1");
             store.applyHello(hello());
             store.apply(event("session_title_changed", { status: "ready", title: "Ship it" }));
 
-            store.apply(event("session_title_changed", { status: "pending" }));
+            store.apply(event("session_title_changed", { status: "generating" }));
+            expect(store.session().title).toBe("Ship it");
 
-            // A title is cleared by omission. Leaving the old one on screen
-            // would show a name the session no longer has.
+            store.apply(
+                event("session_title_changed", {
+                    errorMessage: "Could not refresh metadata.",
+                    status: "error",
+                }),
+            );
+            expect(store.session().title).toBe("Ship it");
+        });
+
+        it("removes a title when the daemon settles without one", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello(hello());
+            store.apply(event("session_title_changed", { status: "ready", title: "Ship it" }));
+
+            store.apply(event("session_title_changed", { status: "idle" }));
+
             expect(store.session().title).toBeUndefined();
         });
 
@@ -879,6 +1181,32 @@ describe("ChatStore", () => {
                 "run-2",
                 "run-2",
                 "run-2",
+            ]);
+        });
+
+        it("keeps each historical message's own occurrence time", () => {
+            const store = new ChatStore("session-1");
+            const opening = withTurns();
+            store.applyHello({
+                ...opening,
+                transcript: {
+                    ...opening.transcript!,
+                    messageCreatedAt: {
+                        a1: 1_400,
+                        a2: 2_700,
+                        u1: 1_050,
+                        u2: 2_100,
+                    },
+                },
+            });
+
+            const messages = store
+                .elements()
+                .filter(
+                    (element) => element.kind === "user_message" || element.kind === "agent_text",
+                );
+            expect(messages.map((element) => element.createdAt)).toEqual([
+                1_050, 1_400, 2_100, 2_700,
             ]);
         });
 
@@ -1216,17 +1544,48 @@ describe("recovering a connection", () => {
         const store = new ChatStore("session-1");
         store.applyHello(helloWith(4, 6, false));
         const anchor = store.elements().find((element) => element.id === "message:u4");
+        const earlier = windowOf(1, 3, true);
 
-        store.prependEarlier(windowOf(1, 3, true));
+        store.prependEarlier({
+            ...earlier,
+            messageCreatedAt: { a1: 140, u1: 110 },
+        });
 
         const turnIds = store.elements().map((element) => element.turnId);
         expect(turnIds.indexOf("run-1")).toBeLessThan(turnIds.indexOf("run-4"));
         // A reader's scroll anchor is a row they are looking at. Rebuilding it
         // while adding history above would jump the viewport.
         expect(store.elements().find((element) => element.id === "message:u4")).toBe(anchor);
+        expect(store.elements().find((element) => element.id === "message:u1")?.createdAt).toBe(
+            110,
+        );
         expect(store.session().transcriptComplete).toBe(true);
         expect(store.session().loadingEarlier).toBe(false);
     });
+
+    it.each(["session_reset", "session_rewound"] as const)(
+        "does not resurrect turns when an earlier page arrives after %s",
+        (type) => {
+            const store = new ChatStore("session-1");
+            store.applyHello(helloWith(4, 6, false));
+            const anchor = store.earlierTranscriptAnchor();
+            if (anchor === undefined) throw new Error("Expected an earlier transcript anchor.");
+            store.startLoadingEarlier();
+
+            store.apply(
+                event(type, {
+                    ...(type === "session_rewound" ? { messageId: "u4" } : {}),
+                    snapshot: { messages: [] },
+                    transcript: { complete: true, messages: [], turns: [] },
+                }),
+            );
+            store.prependEarlier(windowOf(1, 3, true), anchor);
+
+            expect(store.elements()).toEqual([]);
+            expect(store.session().loadingEarlier).toBe(false);
+            expect(store.session().transcriptComplete).toBe(true);
+        },
+    );
 
     it("knows which run to ask from, and stops asking at the beginning", () => {
         const store = new ChatStore("session-1");

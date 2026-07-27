@@ -18,7 +18,7 @@ import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
-    it("lists every session when no limit is requested", () => {
+    it("lists every active session without materializing archived history", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         try {
             for (let index = 0; index < 501; index += 1) {
@@ -26,9 +26,14 @@ describe("PersistentSessionStore", () => {
                     cwd: "/tmp/rig-complete-session-list",
                 });
             }
+            const archived = store.createWithId("archived-session", {
+                cwd: "/tmp/rig-complete-session-list",
+            });
+            archived.setArchived(true);
 
-            expect(store.list()).toHaveLength(501);
+            expect(store.listActive()).toHaveLength(501);
             expect(store.list({ limit: 500 })).toHaveLength(500);
+            expect(store.listActive().map((session) => session.id)).not.toContain(archived.id);
         } finally {
             store.close();
         }

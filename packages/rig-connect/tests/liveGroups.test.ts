@@ -3,6 +3,8 @@ import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionStore.js";
+import { PersistentSessionStore } from "../../rig/sources/server/PersistentSessionStore.js";
+import type { SessionStore } from "../../rig/sources/server/SessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
 import type { ProjectWorkspace as DaemonProjectWorkspace } from "../../rig/sources/protocol/index.js";
 import { connectGroups } from "@/connectGroups.js";
@@ -24,11 +26,21 @@ afterEach(async () => {
 
 async function startDaemon() {
     const store = new InMemorySessionStore();
+    return startServer(store);
+}
+
+async function startServer<TStore extends SessionStore>(
+    store: TStore,
+    closeStore?: () => void,
+): Promise<{ endpoint: string; store: TStore }> {
     const server = createProtocolHttpServer({ store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const { port } = server.address() as AddressInfo;
     started.push({
-        close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+        close: async () => {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            closeStore?.();
+        },
     });
     return { endpoint: `http://127.0.0.1:${port}`, store };
 }
@@ -130,45 +142,35 @@ describe("rig-connect groups against a live daemon", () => {
         );
 
         const submitted = session.submit({ text: "Say hello." });
-        await session.waitForRun(submitted.runId);
-
-        // The daemon settles this session at the status it decides on. Deriving
-        // one from run events instead would put a different word in the sidebar
-        // than the one the session actually holds.
         await waitFor(
-            () => listedStatus(connection, session.id) === session.snapshot().status,
-            `the listed status to match the daemon's ${session.snapshot().status}`,
+            () =>
+                session.snapshot().status === "running" &&
+                listedStatus(connection, session.id) === session.snapshot().status,
+            "the listed status to match the daemon while the run is active",
         );
+        await session.abort();
+        await session.waitForRun(submitted.runId);
     });
 
     it("opens with every unarchived session, project, and workspace", async () => {
-        const { endpoint, store } = await startDaemon();
-        const templateSession = store.create({ cwd: "/tmp/rig-all-active" });
-        const templateSummary = store.list()[0]!;
-        const active = Array.from({ length: 501 }, (_, index) => ({
-            ...templateSummary,
-            id: `active-${String(index)}`,
-        }));
-        const archivedSession = {
-            ...templateSummary,
-            archived: true,
-            id: "archived-session",
-        };
-        const listed = [...active, archivedSession];
-        store.list = (options = {}) =>
-            options.limit === undefined ? listed : listed.slice(0, options.limit);
-
-        const activeProject = store.listProjects()[0]!;
-        const archivedProject = {
-            ...activeProject,
-            archivedAt: 1,
-            id: "archived-project",
-        };
-        store.listProjects = () => [activeProject, archivedProject];
+        const persistent = new PersistentSessionStore({ databasePath: ":memory:" });
+        const { endpoint, store } = await startServer(persistent, () => persistent.close());
+        const active = Array.from({ length: 501 }, (_, index) =>
+            store.createWithId(`active-${String(index)}`, { cwd: "/tmp/rig-all-active" }),
+        );
+        const archivedSession = store.createWithId("archived-session", {
+            cwd: "/tmp/rig-all-active",
+        });
+        archivedSession.setArchived(true);
+        const archivedProjectSession = store.createWithId("archived-project-session", {
+            cwd: "/tmp/rig-archived-project",
+        });
+        const archivedProjectId = archivedProjectSession.snapshot().projectId;
+        await store.archiveProject(archivedProjectId);
 
         // An archived workspace remains durable after its worktree is removed.
         // Injecting the summary avoids making this sync test build a Git worktree.
-        const activeProjectId = templateSession.snapshot().projectId;
+        const activeProjectId = active[0]!.snapshot().projectId;
         const archivedWorkspace: DaemonProjectWorkspace = {
             archivedAt: 1,
             createdAt: 1,
@@ -198,11 +200,23 @@ describe("rig-connect groups against a live daemon", () => {
         expect(sessionIds).toHaveLength(active.length);
         expect(sessionIds).toEqual(expect.arrayContaining(active.map((session) => session.id)));
         expect(sessionIds).not.toContain(archivedSession.id);
-        expect(hello.projects.map((project) => project.id)).not.toContain(archivedProject.id);
+        expect(sessionIds).not.toContain(archivedProjectSession.id);
+        expect(hello.projects.map((project) => project.id)).not.toContain(archivedProjectId);
         expect(hello.workspaces.map((workspace) => workspace.id)).not.toContain(
             archivedWorkspace.id,
         );
         expect(hello.sessionsComplete).toBe(true);
+
+        connection = connectGroups({
+            endpoint,
+            onChange: () => undefined,
+            token: "secret",
+        });
+        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+        expect(listedSessionIds(connection)).toEqual(
+            expect.arrayContaining(active.map((session) => session.id)),
+        );
+        expect(listedSessionIds(connection)).toHaveLength(active.length);
     });
 
     it("keeps a session listed when it is unarchived rather than dropping it", async () => {

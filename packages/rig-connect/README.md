@@ -57,14 +57,15 @@ The chat state is a flat, time-ordered list of elements. There is one element pe
 block, and per tool call — a tool call is its own element rather than something nested inside the
 message that produced it, so a consumer renders the list in order and never walks a tree.
 
-| Kind           | What it is                                                                    |
-| -------------- | ----------------------------------------------------------------------------- |
-| `user_message` | Something the user sent, with any attachments.                                |
-| `agent_text`   | A block of the model's reply. `complete` is false while it is still arriving. |
-| `thinking`     | Model reasoning, when the provider exposes it.                                |
-| `tool_call`    | One tool invocation, from streamed arguments through to its result.           |
-| `compaction`   | A conversation compaction, reflecting its current state.                      |
-| `turn_end`     | The final element of a turn.                                                  |
+| Kind            | What it is                                                                    |
+| --------------- | ----------------------------------------------------------------------------- |
+| `user_message`  | Something the user sent, with any attachments.                                |
+| `system_notice` | A non-internal notice Rig intends the person to read.                         |
+| `agent_text`    | A block of the model's reply. `complete` is false while it is still arriving. |
+| `thinking`      | Model reasoning, when the provider exposes it.                                |
+| `tool_call`     | One tool invocation, from streamed arguments through to its result.           |
+| `compaction`    | A conversation compaction, reflecting its current state.                      |
+| `turn_end`      | The final element of a turn.                                                  |
 
 Every element carries a `turnId`, and every turn ends with a `turn_end` element stating whether it
 finished in `success`, `error`, or `stopped`. That is a guarantee the library makes rather than
@@ -124,10 +125,13 @@ const { activity, git, modelId, tokens, title } = connection.session();
 `stopped`, or `error`, and `activity.label` is ready to display. A status line renders from this
 without walking the list.
 
-The session state also carries the live facts a UI shows next to a conversation — the current
-model, the context size, the Git state and changed files, and the title — each tracked continuously
-rather than fetched on demand. `connection` is `connecting`, `live`, `reconnecting`, or `closed`,
-so an interruption is a state the subscriber can see rather than a silent stall.
+The session state also carries the live facts a complete conversation surface renders: project and
+worktree identity, model catalog and locking, effort and service tier, permission mode, composer
+draft, recap, pending steering and input requests, tasks, goal, subagents, background processes,
+shell commands, permission reviews, context size, and Git changes. Each is initialized by the
+opening frame and tracked continuously rather than fetched on demand. `connection` is `connecting`,
+`live`, `reconnecting`, or `closed`, so an interruption is a state the subscriber can see rather
+than a silent stall.
 
 ## The groups
 
@@ -151,12 +155,17 @@ client repeats that work:
 
 ```ts
 for (const group of groups.projects()) {
-    group.project.name; // the project itself
+    group.name; // application-shaped project fields, not a wire object
+    group.usage.totalTokens; // aggregate usage across the project's sessions
     group.git?.changedFiles; // live Git state, when the daemon is watching it
     group.sessions; // sessions in the project root
     group.workspaces; // worktrees, each with its own sessions and Git state
 }
 ```
+
+The opening frame contains every unarchived session, project, and worktree. Catalog sessions are
+not paged; only transcript history is. Archived session history is filtered by the storage query
+before the opening snapshot is projected.
 
 The tree is referentially stable in the same way the element list is: a project whose subtree did
 not change comes back as the same object, so a React consumer re-renders only the branch that

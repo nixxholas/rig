@@ -1,10 +1,19 @@
 import type { ToolPresentation } from "./ToolPresentation.js";
 import type {
+    BackgroundProcess,
     GitChangeSnapshot,
+    ModelSummary,
+    PendingSteeringMessage,
+    PermissionReviewState,
     SessionActivity,
+    SessionGoal,
     SessionStatus,
+    SessionTask,
     SessionTokenCount,
+    ShellCommandState,
+    SubagentSummary,
     Usage,
+    UserInputRequest,
 } from "./protocol.js";
 
 /**
@@ -16,6 +25,7 @@ import type {
  */
 export type ChatElement =
     | UserMessageElement
+    | SystemNoticeElement
     | AgentTextElement
     | ThinkingElement
     | ToolCallElement
@@ -36,6 +46,12 @@ export interface UserMessageElement extends BaseChatElement {
     text: string;
     /** Images and other non-text content the user sent. */
     attachments?: readonly { data: string; mediaType: string }[];
+}
+
+/** A non-internal system message intended for the person reading the transcript. */
+export interface SystemNoticeElement extends BaseChatElement {
+    kind: "system_notice";
+    text: string;
 }
 
 export interface AgentTextElement extends BaseChatElement {
@@ -114,16 +130,31 @@ export interface SessionState {
     /** Whether the session has been archived out of the active list. */
     archived: boolean;
     sessionId: string;
+    projectId: string;
+    workspaceId?: string;
+    orderKey: string;
     cwd: string;
+    draft?: string;
+    draftUpdatedAt?: number;
     modelId: string;
     providerId: string;
     title?: string;
+    recap?: string;
     /** How hard the model is asked to think, when the provider offers a choice. */
     effort?: string;
     serviceTier?: string;
-    permissionMode?: string;
+    permissionMode: string;
     /** True when the session is pinned to its model and cannot switch. */
-    modelLocked?: boolean;
+    modelLocked: boolean;
+    models: readonly ModelSummary[];
+    pendingUserInputs: readonly UserInputRequest[];
+    pendingSteeringMessages: readonly PendingSteeringMessage[];
+    tasks: readonly SessionTask[];
+    goal?: SessionGoal;
+    subagents: readonly SubagentSummary[];
+    backgroundProcesses: readonly BackgroundProcess[];
+    shellCommands: readonly ShellCommandState[];
+    permissionReviews: readonly PermissionReviewState[];
     git?: GitChangeSnapshot;
     tokens?: SessionTokenCount;
     /** Whether the library currently has a live connection to the daemon. */

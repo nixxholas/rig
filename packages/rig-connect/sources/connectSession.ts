@@ -91,17 +91,17 @@ export function connectSession(options: ConnectSessionOptions): SessionConnectio
     let loading: Promise<void> | undefined;
 
     const loadEarlier = async (): Promise<void> => {
-        const before = store.earliestRunId();
-        if (closed || before === undefined) return;
+        const anchor = store.earlierTranscriptAnchor();
+        if (closed || anchor === undefined) return;
         // Concurrent callers share one request. A virtual list can ask again
         // while a page is still arriving, and two requests from the same anchor
         // would fetch the same turns twice.
         loading ??= (async () => {
             try {
                 publish(store.startLoadingEarlier());
-                const page = await fetchEarlier(options, before, controller.signal);
+                const page = await fetchEarlier(options, anchor.before, controller.signal);
                 if (closed) return;
-                publish(store.prependEarlier(page));
+                publish(store.prependEarlier(page, anchor));
             } catch (error: unknown) {
                 if (closed) return;
                 publish(store.failLoadingEarlier(describeLoadFailure(error)));

@@ -64,6 +64,7 @@ import type {
     SteerMessageResponse,
     StopBackgroundProcessResponse,
     StopWorkflowResponse,
+    SubagentSummary,
     SubmitMessageResponse,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
@@ -890,7 +891,7 @@ async function handleRequest(
                 () => runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
                 () => {
                     const sessions = store
-                        .list()
+                        .listActive()
                         .map((summary) =>
                             sessionSummaryWithTerminalPresence(summary, sessionTerminals),
                         )
@@ -1677,6 +1678,7 @@ async function handleRequest(
             url.searchParams.get("after") ?? undefined,
             sessionEventStreamLeases,
             parseTurnLimit(url.searchParams.get("turns")),
+            store.listSubagents(sessionId),
         );
         return;
     }
@@ -2182,6 +2184,7 @@ function streamEvents(
     after: string | undefined,
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     turnLimit: number | undefined,
+    subagents: readonly SubagentSummary[],
 ): void {
     const cursor = request.headers["last-event-id"];
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
@@ -2216,6 +2219,8 @@ function streamEvents(
             ? undefined
             : {
                   ...full,
+                  shellCommands: shellCommandStates(session.events.since(undefined) ?? []),
+                  subagents,
                   snapshot: { ...full.snapshot, messages: transcript.messages },
               };
     writeSseHello(response, {
@@ -2257,6 +2262,20 @@ interface SessionEventSource {
     partialMessage: () => SessionPartialMessage | undefined;
     snapshot: () => ProtocolSession;
     transcriptWindow: (turnLimit?: number) => SessionTranscriptWindow;
+}
+
+function shellCommandStates(
+    events: readonly SessionEvent[],
+): NonNullable<ProtocolSession["shellCommands"]> {
+    const commands = new Map<string, NonNullable<ProtocolSession["shellCommands"]>[number]>();
+    for (const event of events) {
+        if (event.type === "shell_command_started") {
+            commands.set(event.data.commandId, { ...event.data, status: "running" });
+        } else if (event.type === "shell_command_finished") {
+            commands.set(event.data.commandId, { ...event.data, status: "finished" });
+        }
+    }
+    return [...commands.values()].slice(-100);
 }
 
 interface SessionEventStreamLease {

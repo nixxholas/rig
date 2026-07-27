@@ -20,6 +20,7 @@ import type * as local from "@/protocol.js";
 
 /** Compiles only when `TValue` is assignable to `TExpected`. */
 type Assignable<TExpected, TValue extends TExpected> = TValue;
+type EventOf<TEvent, TType extends string> = Extract<TEvent, { type: TType }>;
 
 type _Activity = Assignable<local.SessionActivity, daemon.SessionActivity>;
 type _ActivityKind = Assignable<local.SessionActivityKind, daemon.SessionActivityKind>;
@@ -34,6 +35,35 @@ type _PartialMessage = Assignable<local.SessionPartialMessage, daemon.SessionPar
 type _Git = Assignable<local.GitChangeSnapshot, daemon.GitChangeSnapshot>;
 type _TokenCount = Assignable<local.SessionTokenCount, daemon.SessionTokenCount>;
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
+type ApplicationReadEventType =
+    | "session_activity_changed"
+    | "session_git_changed"
+    | "session_context_changed"
+    | "session_configuration_changed"
+    | "session_title_changed"
+    | "session_draft_changed"
+    | "user_input_requested"
+    | "user_input_resolved"
+    | "tasks_changed"
+    | "goal_changed"
+    | "subagent_changed"
+    | "shell_command_started"
+    | "shell_command_finished"
+    | "steering_applied"
+    | "message_submitted"
+    | "run_started"
+    | "agent_message"
+    | "agent_event"
+    | "run_finished"
+    | "run_error"
+    | "session_reset"
+    | "session_rewound";
+type _ApplicationReadEvents = {
+    [TType in ApplicationReadEventType]: Assignable<
+        EventOf<local.InterpretedSessionEvent, TType>,
+        EventOf<daemon.SessionEvent, TType>
+    >;
+};
 type _Session = Assignable<local.ProtocolSession, daemon.ProtocolSession>;
 type _TranscriptWindow = Assignable<local.SessionTranscriptWindow, daemon.SessionTranscriptWindow>;
 type _TranscriptTurn = Assignable<local.SessionTranscriptTurn, daemon.SessionTranscriptTurn>;

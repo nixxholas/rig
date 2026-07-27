@@ -203,6 +203,11 @@ export interface UpdateDaemonConfigRequest {
 
 export type UpdateDaemonConfigResponse = GetDaemonConfigResponse;
 
+export interface PendingSteeringMessage {
+    message: UserMessage;
+    runId: string;
+}
+
 export interface ProtocolSession {
     id: string;
     /** What the session is doing at this moment. */
@@ -244,6 +249,9 @@ export interface ProtocolSession {
     agent: SessionAgentMetadata;
     snapshot: AgentSnapshot;
     pendingUserInputs: readonly UserInputRequest[];
+    pendingSteeringMessages?: readonly PendingSteeringMessage[];
+    subagents?: readonly SubagentSummary[];
+    shellCommands?: readonly ShellCommandState[];
     mcpServers: readonly McpServerSummary[];
     tasks: readonly SessionTask[];
     workflowsEnabled?: boolean;
@@ -299,6 +307,8 @@ export interface SessionTranscriptTurn {
  */
 export interface SessionTranscriptWindow {
     messages: readonly Message[];
+    /** Durable occurrence time of each retained message, keyed by message ID. */
+    messageCreatedAt?: Readonly<Record<string, number>>;
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
@@ -681,6 +691,15 @@ export interface RunShellCommandResult {
     sessionId?: number;
     timedOut: boolean;
 }
+
+export type ShellCommandState =
+    | {
+          command: string;
+          commandId: string;
+          sessionId: number;
+          status: "running";
+      }
+    | (RunShellCommandResult & { status: "finished" });
 
 export interface RunningShellCommandResponse {
     command: string;

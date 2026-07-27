@@ -73,7 +73,11 @@ import type {
     SessionTranscriptWindow,
 } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH, SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
-import { sessionTranscriptWindow, type TranscriptRunFacts } from "./sessionTranscriptWindow.js";
+import {
+    sessionTranscriptWindow,
+    type TranscriptEntry,
+    type TranscriptRunFacts,
+} from "./sessionTranscriptWindow.js";
 import { clampSessionDraftTimestamp } from "./clampSessionDraftTimestamp.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { sessionUnreadStateAfterEvent } from "./sessionUnreadStateAfterEvent.js";
@@ -2387,10 +2391,14 @@ export class InMemorySession {
         return sessionTranscriptWindow(
             this.#messages
                 .filter((entry) => !entry.isPartial)
-                .map((entry) => ({
-                    message: entry.message,
-                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
-                })),
+                .map((entry): TranscriptEntry => {
+                    const createdAt = this.events.messageCreatedAt(entry.message.id);
+                    return {
+                        ...(createdAt === undefined ? {} : { createdAt }),
+                        message: entry.message,
+                        ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                    };
+                }),
             this.#runFacts,
             turnLimit,
             before,
@@ -2483,6 +2491,10 @@ export class InMemorySession {
                     ].map((request) => [request.requestId, request]),
                 ).values(),
             ],
+            pendingSteeringMessages: [...this.#pendingSteeringMessages.values()].map((pending) => ({
+                message: structuredClone(pending.message),
+                runId: pending.runId,
+            })),
             mcpServers: this.#mcpServers,
             tasks: this.listTasks(),
             workflowsEnabled: this.#workflowsEnabled,

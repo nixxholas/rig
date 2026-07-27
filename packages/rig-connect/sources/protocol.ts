@@ -239,6 +239,106 @@ export interface SessionTokenCount {
     totalTokens: number;
 }
 
+export interface ModelSummary {
+    autoCompactWindow?: number;
+    contextWindow?: number;
+    defaultThinkingLevel: string;
+    id: string;
+    name: string;
+    thinkingLevels: readonly string[];
+}
+
+export interface UserInputOption {
+    description: string;
+    label: string;
+}
+
+export interface UserInputQuestion {
+    header: string;
+    id: string;
+    multiSelect: boolean;
+    options: readonly UserInputOption[];
+    question: string;
+    required?: boolean;
+}
+
+export interface UserInputRequest {
+    autoResolutionMs?: number;
+    questions: readonly UserInputQuestion[];
+    requestId: string;
+}
+
+export interface SessionTask {
+    activeForm?: string;
+    blockedBy: readonly string[];
+    blocks: readonly string[];
+    description: string;
+    id: string;
+    metadata?: Readonly<Record<string, unknown>>;
+    owner?: string;
+    status: "pending" | "in_progress" | "completed";
+    subject: string;
+}
+
+export interface SessionGoal {
+    createdAt: number;
+    objective: string;
+    status: "active" | "blocked" | "complete" | "paused";
+    updatedAt: number;
+}
+
+export interface SubagentSummary {
+    activeSince?: number;
+    agentId: string;
+    createdAt: number;
+    depth: number;
+    description: string;
+    elapsedMs?: number;
+    id: string;
+    latestText?: string;
+    modelId: string;
+    parentSessionId: string;
+    parentToolCallId?: string;
+    prompt?: string;
+    status: SessionStatus;
+    taskName?: string;
+    totalTokens?: number;
+    sessionTokenCount?: SessionTokenCount;
+    updatedAt: number;
+    usage?: Usage;
+}
+
+export interface BackgroundProcess {
+    command: string;
+    cwd: string;
+    sessionId: number;
+    status: "running";
+}
+
+export interface PendingSteeringMessage {
+    message: UserMessage;
+    runId: string;
+}
+
+export interface ShellCommandState {
+    command: string;
+    commandId: string;
+    errorMessage?: string;
+    exitCode?: number | null;
+    output?: string;
+    sessionId?: number;
+    status: "running" | "finished";
+    timedOut?: boolean;
+}
+
+export interface PermissionReviewState {
+    action: string;
+    decision: "allow" | "deny";
+    reason: string;
+    risk: "low" | "medium" | "high" | "critical";
+    toolCallId: string;
+}
+
 export interface GitFileChange {
     binary: boolean;
     deletions?: number;
@@ -263,6 +363,8 @@ export interface GitChangeSnapshot {
     filesTruncated: boolean;
     generation: string;
     insertions: number;
+    /** Stable application revision for consumers that cache file projections. */
+    revision?: string;
     scannedAt: number;
     version: number;
 }
@@ -285,14 +387,33 @@ export type SessionStatus =
 export interface ProtocolSession {
     id: string;
     activity: SessionActivity;
+    archived: boolean;
+    projectId: string;
+    workspaceId?: string;
+    orderKey: string;
     cwd: string;
+    draft?: string;
+    draftUpdatedAt?: number;
     git?: GitChangeSnapshot;
     lastEventId?: EventId;
     modelId: string;
     providerId: string;
+    permissionMode: string;
+    effort?: string;
+    serviceTier?: string;
+    modelLocked: boolean;
+    models: readonly ModelSummary[];
     snapshot: { messages: readonly Message[] };
     status: SessionStatus;
     title?: string;
+    recap?: string;
+    pendingUserInputs: readonly UserInputRequest[];
+    pendingSteeringMessages?: readonly PendingSteeringMessage[];
+    tasks: readonly SessionTask[];
+    goal?: SessionGoal;
+    subagents?: readonly SubagentSummary[];
+    backgroundProcesses?: readonly BackgroundProcess[];
+    shellCommands?: readonly ShellCommandState[];
     sessionTokenCount?: SessionTokenCount;
 }
 
@@ -312,6 +433,7 @@ export interface SessionTranscriptTurn {
 
 export interface SessionTranscriptWindow {
     messages: readonly Message[];
+    messageCreatedAt?: Readonly<Record<string, number>>;
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
@@ -341,21 +463,69 @@ export interface BaseSessionEvent<TType extends string, TData> {
  * the rest and then ignored, so a daemon that gained an event does not break a
  * client that has not learned it yet.
  */
-export type SessionEvent =
+export type InterpretedSessionEvent =
     | BaseSessionEvent<"session_activity_changed", { activity: SessionActivity }>
     | BaseSessionEvent<"session_git_changed", { git: GitChangeSnapshot }>
     | BaseSessionEvent<"session_context_changed", { sessionTokenCount: SessionTokenCount }>
-    | BaseSessionEvent<"session_configuration_changed", { effort?: string; modelId: string }>
-    | BaseSessionEvent<"session_title_changed", { status: string; title?: string }>
+    | BaseSessionEvent<
+          "session_configuration_changed",
+          { effort?: string; modelId: string; serviceTier: string | null }
+      >
+    | BaseSessionEvent<
+          "session_title_changed",
+          { errorMessage?: string; recap?: string; status: string; title?: string }
+      >
+    | BaseSessionEvent<
+          "session_draft_changed",
+          { draft?: string; origin?: string; updatedAt: number }
+      >
+    | BaseSessionEvent<"user_input_requested", UserInputRequest>
+    | BaseSessionEvent<
+          "user_input_resolved",
+          {
+              answers?: Readonly<Record<string, readonly string[]>>;
+              requestId: string;
+              status: string;
+          }
+      >
+    | BaseSessionEvent<"tasks_changed", { tasks: readonly SessionTask[] }>
+    | BaseSessionEvent<"goal_changed", { goal: SessionGoal | null }>
+    | BaseSessionEvent<"subagent_changed", { subagent: SubagentSummary }>
+    | BaseSessionEvent<
+          "shell_command_started",
+          { command: string; commandId: string; sessionId: number }
+      >
+    | BaseSessionEvent<
+          "shell_command_finished",
+          {
+              command: string;
+              commandId: string;
+              errorMessage?: string;
+              exitCode: number | null;
+              output: string;
+              sessionId?: number;
+              timedOut: boolean;
+          }
+      >
+    | BaseSessionEvent<"steering_applied", { messageIds: readonly string[]; runId: string }>
     | BaseSessionEvent<
           "message_submitted",
-          { displayText: string; message: UserMessage; runId: string }
+          {
+              delivery?: "run" | "steer";
+              displayText: string;
+              message: UserMessage;
+              runId: string;
+              source?: "notification";
+          }
       >
     | BaseSessionEvent<"run_started", { runId: string }>
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
-    | BaseSessionEvent<"run_finished", { errorMessage?: string; runId: string; stopReason: string }>
-    | BaseSessionEvent<"run_error", { errorMessage: string; runId: string }>
+    | BaseSessionEvent<
+          "run_finished",
+          { errorMessage?: string; modelLocked: boolean; runId: string; stopReason: string }
+      >
+    | BaseSessionEvent<"run_error", { errorMessage: string; modelLocked: boolean; runId: string }>
     | BaseSessionEvent<
           "session_reset",
           { snapshot: { messages: readonly Message[] }; transcript: SessionTranscriptWindow }
@@ -367,8 +537,9 @@ export type SessionEvent =
               snapshot: { messages: readonly Message[] };
               transcript: SessionTranscriptWindow;
           }
-      >
-    | BaseSessionEvent<string, unknown>;
+      >;
+
+export type SessionEvent = InterpretedSessionEvent | BaseSessionEvent<string, unknown>;
 
 /** The streaming and tool events carried inside `agent_event`. */
 export type AgentLoopEvent =
@@ -421,13 +592,33 @@ export type AgentLoopEvent =
           elapsedMs: number;
           status: "cancelled" | "completed" | "failed";
       }
+    | {
+          type: "permission_review";
+          action: string;
+          decision: "allow" | "deny";
+          reason: string;
+          risk: "low" | "medium" | "high" | "critical";
+          toolCallId: string;
+      }
+    | {
+          type: "background_processes_changed";
+          processes?: readonly BackgroundProcess[];
+          running: number;
+      }
     | { type: "retrying"; attempt: number; reason: string }
     | { type: string };
 
 /** A folder or repository Rig has sessions in. */
 export interface Project {
     archivedAt?: number;
-    avatar?: object;
+    avatar?: {
+        hash: string;
+        height: number;
+        mediaType: "image/webp";
+        source: string;
+        url: string;
+        width: number;
+    };
     avatarBuiltin?: "home";
     createdAt: number;
     git?: GitRepositoryFacts;
@@ -478,14 +669,21 @@ export interface SessionSummary {
     workspaceId?: string;
     cwd: string;
     draft?: string;
+    draftUpdatedAt?: number;
     providerId: string;
     modelId: string;
     orderKey: string;
     permissionMode: string;
+    effort?: string;
+    serviceTier?: string;
     status: SessionStatus;
     title?: string;
+    titleError?: string;
+    titleStatus: string;
     recap?: string;
     sessionTokenCount?: SessionTokenCount;
+    metadataUpdatedAt?: number;
+    metadataRunId?: string;
     createdAt: number;
     updatedAt: number;
     lastMessageAt?: number;

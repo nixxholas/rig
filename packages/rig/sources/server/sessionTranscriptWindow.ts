@@ -10,6 +10,7 @@ export interface TranscriptRunFacts {
 }
 
 export interface TranscriptEntry {
+    createdAt?: number;
     message: Message;
     runId?: string;
 }
@@ -36,15 +37,15 @@ export function sessionTranscriptWindow(
      */
     before?: string,
 ): SessionTranscriptWindow | undefined {
-    const groups: { runId: string; messages: Message[] }[] = [];
+    const groups: { runId: string; entries: TranscriptEntry[] }[] = [];
     // Messages arrive in order, so a run's messages are contiguous and a change
     // of run id is a turn boundary.
     for (const entry of entries) {
         if (entry.message.internal === true) continue;
         const runId = entry.runId ?? `orphan:${entry.message.id}`;
         const open = groups.at(-1);
-        if (open !== undefined && open.runId === runId) open.messages.push(entry.message);
-        else groups.push({ messages: [entry.message], runId });
+        if (open !== undefined && open.runId === runId) open.entries.push(entry);
+        else groups.push({ entries: [entry], runId });
     }
 
     // Everything from the requested run onwards is already held by whoever asked
@@ -62,7 +63,7 @@ export function sessionTranscriptWindow(
     const turns: SessionTranscriptTurn[] = kept.map((group) => {
         const facts = runFacts.get(group.runId);
         return {
-            messageIds: group.messages.map((message) => message.id),
+            messageIds: group.entries.map((entry) => entry.message.id),
             runId: group.runId,
             // Messages carry no time of their own, so a turn whose run predates
             // the retained event log reports 0 rather than inventing one. A
@@ -74,9 +75,17 @@ export function sessionTranscriptWindow(
         };
     });
 
+    const messageCreatedAt = Object.fromEntries(
+        kept.flatMap((group) =>
+            group.entries.flatMap((entry) =>
+                entry.createdAt === undefined ? [] : [[entry.message.id, entry.createdAt]],
+            ),
+        ),
+    );
     return {
         complete: kept.length === earlier.length,
-        messages: kept.flatMap((group) => group.messages),
+        ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
+        messages: kept.flatMap((group) => group.entries.map((entry) => entry.message)),
         turns,
     };
 }
