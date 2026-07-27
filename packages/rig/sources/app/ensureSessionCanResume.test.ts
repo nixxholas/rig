@@ -13,6 +13,7 @@ describe("ensureSessionCanResume", () => {
 
 function subagentSession(): ProtocolSession {
     return {
+        activity: { kind: "idle", label: "Idle", since: 0 },
         agent: {
             depth: 1,
             description: "Inspect the code",

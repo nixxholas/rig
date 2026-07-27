@@ -4,7 +4,7 @@ import type {
     AgentSnapshot,
     ContentBlock,
 } from "../agent/index.js";
-import type { Message, UserMessage } from "../agent/types.js";
+import type { AgentMessage, Message, UserMessage } from "../agent/types.js";
 import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import type { ProviderModelCompatibilityType, ProviderQuota } from "@slopus/rig-providers";
 import type { PermissionMode } from "../permissions/index.js";
@@ -14,6 +14,7 @@ import type { SessionTask } from "../tasks/index.js";
 import type { WorkflowRun, WorkflowRunUpdate } from "../workflows/index.js";
 import type { ChangeGoalStatusRequest, CreateGoalRequest, SessionGoal } from "../goals/index.js";
 import type { EventId } from "./EventId.js";
+import type { GitChangeSnapshot } from "./ProjectProtocol.js";
 import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.js";
 import type { SessionExecutionEnvironment } from "../execution/SessionExecutionEnvironment.js";
 import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
@@ -41,6 +42,61 @@ export type SessionStatus =
     | "archived";
 
 export type SessionSummaryStatus = SessionStatus;
+
+/**
+ * What a session is doing at this moment.
+ *
+ * `SessionStatus` answers whether a session is busy; this answers what the busy
+ * work is, so a client can render a status line without replaying the event log
+ * and tracking which streaming blocks are still open.
+ */
+export type SessionActivityKind =
+    | "idle"
+    | "queued"
+    | "thinking"
+    | "generating_message"
+    | "generating_tool_call"
+    | "executing_tool_call"
+    | "awaiting_input"
+    | "compacting"
+    | "retrying"
+    | "stopped"
+    | "error";
+
+export interface SessionActivityToolCall {
+    startedAt: number;
+    /** Latest short label the tool reported about its own progress. */
+    status?: string;
+    toolCallId: string;
+    toolName: string;
+}
+
+export interface SessionActivityCompaction {
+    compactionId: string;
+    estimatedTokensBefore: number;
+    reason: "context_window" | "manual" | "threshold";
+    startedAt: number;
+}
+
+export interface SessionActivityRetry {
+    attempt: number;
+    reason: string;
+}
+
+export interface SessionActivity {
+    /** Ready-to-display description of the current work, such as `Running Bash`. */
+    label: string;
+    kind: SessionActivityKind;
+    runId?: string;
+    /** When the session entered this activity, in milliseconds since the epoch. */
+    since: number;
+    compaction?: SessionActivityCompaction;
+    /** Requests the session is blocked on, including permission approvals. */
+    pendingInputRequestIds?: readonly string[];
+    retry?: SessionActivityRetry;
+    /** Tool calls that have started and not yet reported a result. */
+    toolCalls?: readonly SessionActivityToolCall[];
+}
 
 export type SessionUnreadReason = "attention_needed" | "turn_finished";
 
@@ -149,7 +205,11 @@ export type UpdateDaemonConfigResponse = GetDaemonConfigResponse;
 
 export interface ProtocolSession {
     id: string;
+    /** What the session is doing at this moment. */
+    activity: SessionActivity;
     agentId: string;
+    /** Git state of the session's directory, when it is inside a repository. */
+    git?: GitChangeSnapshot;
     archived: boolean;
     projectId: string;
     workspaceId?: string;
@@ -197,6 +257,92 @@ export interface ProtocolSession {
     pendingExternalToolCalls?: readonly ExternalToolCall[];
     systemPrompt?: string;
 }
+
+/**
+ * An assistant message the model is still producing.
+ *
+ * Committed transcripts never contain it, so without this a client that attaches
+ * mid-turn shows nothing until the message completes.
+ */
+export interface SessionPartialMessage {
+    message: AgentMessage;
+    runId: string;
+}
+
+/**
+ * One turn of the transcript carried in a stream's opening frame.
+ *
+ * The messages alone do not say where a turn began, how it ended, or how long it
+ * took, so a client given only messages has to guess. This states it, which is
+ * what lets a client honour the guarantee that every turn ends in a final
+ * element even for history it never watched happen.
+ */
+export interface SessionTranscriptTurn {
+    /** Identifies the run, and is the turn identity a client renders against. */
+    runId: string;
+    /** Messages belonging to this turn, in order, by id. */
+    messageIds: readonly string[];
+    startedAt: number;
+    /** Absent while the turn is still running. */
+    endedAt?: number;
+    /** Absent while the turn is still running. */
+    outcome?: "success" | "error" | "stopped";
+    errorMessage?: string;
+}
+
+/**
+ * The transcript window carried in a stream's opening frame.
+ *
+ * The window is measured in whole turns, never in messages. A turn is the unit a
+ * conversation is read in, and half a turn is not a smaller answer but a broken
+ * one: a tool result whose call was cut away renders as an orphan.
+ */
+export interface SessionTranscriptWindow {
+    messages: readonly Message[];
+    turns: readonly SessionTranscriptTurn[];
+    /** False when the conversation began before the first turn in this window. */
+    complete: boolean;
+}
+
+/**
+ * The first frame of a session event stream.
+ *
+ * It exists so attaching is a single request. A client connecting without a
+ * cursor gets the session here and never issues a follow-up call; a client
+ * resuming already has the transcript and gets back only the state that cannot
+ * be replayed from the durable log.
+ */
+export interface SessionStreamHello {
+    activity: SessionActivity;
+    /**
+     * Present only when the client attached without a cursor. Its transcript
+     * holds the most recent `SESSION_STREAM_TURN_LIMIT` complete turns, so the
+     * cost of attaching is bounded by recent activity rather than by the age of
+     * the session.
+     */
+    session?: ProtocolSession;
+    /** Turn boundaries and outcomes for the transcript in `session`. */
+    transcript?: SessionTranscriptWindow;
+    /** The assistant message currently being generated, when a run is mid-message. */
+    partial?: SessionPartialMessage;
+    /** The newest event id at the moment the stream opened. */
+    lastEventId?: EventId;
+    /** True when the client attached with a cursor and is resuming. */
+    resumed: boolean;
+}
+
+/**
+ * How many recent turns the stream's opening frame carries.
+ *
+ * A turn is delivered whole or not at all, so this bounds the window without
+ * ever splitting one. The number of messages behind it varies: a turn may be a
+ * single reply or a long run of tool calls, and both arrive intact.
+ *
+ * The snapshot already reflects every event up to `lastEventId`, so a client
+ * that attaches without a cursor receives this window and nothing else; the
+ * event log is never replayed on top of it.
+ */
+export const SESSION_STREAM_TURN_LIMIT = 20;
 
 export interface SubagentSummary {
     activeSince?: number;
@@ -607,6 +753,9 @@ export type SessionEvent =
     | SessionResetEvent
     | SessionRewoundEvent
     | SessionTitleChangedEvent
+    | SessionActivityChangedEvent
+    | SessionContextChangedEvent
+    | SessionGitChangedEvent
     | SessionConfigurationChangedEvent
     | PermissionModeChangedEvent
     | SessionDraftChangedEvent
@@ -764,6 +913,41 @@ export type SessionTitleChangedEvent = BaseSessionEvent<
         status: SessionTitleStatus;
         title?: string;
     }
+>;
+
+/**
+ * The session started doing something different.
+ *
+ * The payload is the complete current activity rather than a description of the
+ * change, so a client that just attached can render its status line from the
+ * first one of these it sees.
+ */
+export type SessionActivityChangedEvent = BaseSessionEvent<
+    "session_activity_changed",
+    { activity: SessionActivity }
+>;
+
+/**
+ * How much of the context window the conversation now occupies.
+ *
+ * Rig recomputes this as messages land, so it is reported rather than left for a
+ * client to ask about on a timer.
+ */
+export type SessionContextChangedEvent = BaseSessionEvent<
+    "session_context_changed",
+    { sessionTokenCount: SessionTokenCount }
+>;
+
+/**
+ * The Git state of the directory this session runs in.
+ *
+ * A UI shows the branch and the changed files next to the conversation, so the
+ * session stream carries them rather than making a client open the project
+ * stream as well and correlate the two.
+ */
+export type SessionGitChangedEvent = BaseSessionEvent<
+    "session_git_changed",
+    { git: GitChangeSnapshot }
 >;
 
 /** Which parts of the agent configuration one change actually altered. */

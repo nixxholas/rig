@@ -270,6 +270,36 @@ export interface ListGlobalEventsResponse {
     events: readonly GlobalEventQueueEntry[];
 }
 
+/**
+ * The first frame of the global event stream.
+ *
+ * It carries the group state a client needs to render immediately — the
+ * projects, the workspaces inside them, and the sessions they contain — so
+ * attaching is one request rather than a snapshot call followed by a stream.
+ *
+ * Git snapshots are deliberately absent. They are live-only and the stream
+ * already replays the current one for every watched entity right after
+ * subscribing, so repeating them here would double the attach payload without
+ * telling a client anything new.
+ */
+export interface GlobalStreamHello {
+    /** The queue position this frame reflects; events after it follow on the stream. */
+    cursor: string;
+    projects: readonly Project[];
+    workspaces: readonly ProjectWorkspace[];
+    sessions: readonly SessionSummary[];
+    /** False when the daemon holds more sessions than this frame carried. */
+    sessionsComplete: boolean;
+}
+
+/**
+ * How many sessions the global stream's opening frame carries.
+ *
+ * A machine that has accumulated thousands of sessions must still be cheap to
+ * attach to, and a client shows the most recent ones first regardless.
+ */
+export const GLOBAL_STREAM_SESSION_LIMIT = 500;
+
 export interface TrimGlobalEventsRequest {
     through: string;
 }

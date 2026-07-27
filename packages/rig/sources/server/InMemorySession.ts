@@ -50,8 +50,11 @@ import type {
     RunShellCommandRequest,
     RunShellCommandResponse,
     RunShellCommandResult,
+    GitChangeSnapshot,
     SessionEvent,
+    SessionActivity,
     SessionAgentMetadata,
+    SessionPartialMessage,
     SessionInterruption,
     SessionStatus,
     SessionSummary,
@@ -67,11 +70,14 @@ import type {
     SteerMessageRequest,
     SteerMessageResponse,
     UpdateSessionRequest,
+    SessionTranscriptWindow,
 } from "../protocol/index.js";
-import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
+import { SESSION_DRAFT_MAX_LENGTH, SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
+import { sessionTranscriptWindow, type TranscriptRunFacts } from "./sessionTranscriptWindow.js";
 import { clampSessionDraftTimestamp } from "./clampSessionDraftTimestamp.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { sessionUnreadStateAfterEvent } from "./sessionUnreadStateAfterEvent.js";
+import { IDLE_SESSION_ACTIVITY, sessionActivityAfterEvent } from "./sessionActivityAfterEvent.js";
 import { aggregateSessionTokenCount } from "../sessionTokenCount/aggregateSessionTokenCount.js";
 import { sessionTokenCountAfterEvent } from "../sessionTokenCount/sessionTokenCountAfterEvent.js";
 import type { Model, Provider, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
@@ -425,6 +431,13 @@ export class InMemorySession {
     #metadataRunId: string | undefined;
     #metadataUpdatedAt: number | undefined;
     #messages: PersistedSessionMessage[] = [];
+    /**
+     * When each run began and how it ended.
+     *
+     * Kept as the events arrive so building a transcript window never rescans
+     * the log, and bounded to the runs the window can reach.
+     */
+    #runFacts = new Map<string, TranscriptRunFacts>();
     #submittedUserMessages = new Map<string, PersistedSessionMessage>();
     #mcpLoaded = false;
     #mcpServers: readonly McpServerSummary[] = [];
@@ -453,6 +466,9 @@ export class InMemorySession {
     #executor: Executor | undefined;
     #secrets: SessionSecretContext;
     #status: SessionStatus = "idle";
+    #activity: SessionActivity = IDLE_SESSION_ACTIVITY;
+    #reportingActivity = false;
+    #git: GitChangeSnapshot | undefined;
     #unread: SessionUnreadState | undefined;
     #suspendedRunIds = new Set<string>();
     #systemPrompt: string | undefined;
@@ -2329,12 +2345,76 @@ export class InMemorySession {
         return this.#ensureRuntime().context;
     }
 
+    /** What the session is doing at this moment. */
+    activity(): SessionActivity {
+        return structuredClone(this.#activity);
+    }
+
+    /**
+     * The most recent turns of the transcript, cut on turn boundaries.
+     *
+     * This is what a client attaching without a cursor receives, so the cost of
+     * opening a stream follows recent activity rather than the age of the
+     * session.
+     */
+    transcriptWindow(turnLimit: number = SESSION_STREAM_TURN_LIMIT): SessionTranscriptWindow {
+        return sessionTranscriptWindow(
+            this.#messages
+                .filter((entry) => !entry.isPartial)
+                .map((entry) => ({
+                    message: entry.message,
+                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                })),
+            this.#runFacts,
+            turnLimit,
+        );
+    }
+
+    /**
+     * Records the Git state of the session's directory and reports it to
+     * attached clients.
+     *
+     * The snapshot is versioned by the tracker, so an older or repeated delivery
+     * is dropped rather than published as news.
+     */
+    recordGitState(git: GitChangeSnapshot): void {
+        // Versions are monotonic only within one daemon generation, so a snapshot
+        // from a different generation always wins.
+        if (
+            this.#git !== undefined &&
+            this.#git.generation === git.generation &&
+            this.#git.version >= git.version
+        ) {
+            return;
+        }
+        this.#git = git;
+        this.#append("session_git_changed", { git });
+    }
+
+    /**
+     * The assistant message currently being generated, if any.
+     *
+     * Committed transcripts exclude partial messages, so this is the only way a
+     * client attaching mid-turn can render the text already produced.
+     */
+    partialMessage(): SessionPartialMessage | undefined {
+        const active = this.#activePartial;
+        if (active?.position === undefined) return undefined;
+        const entry = this.#messages.find(
+            (candidate) => candidate.isPartial && candidate.position === active.position,
+        );
+        if (entry === undefined || entry.message.role !== "agent") return undefined;
+        return { message: structuredClone(entry.message), runId: active.runId };
+    }
+
     snapshot(): ProtocolSession {
         const snapshot = this.#agentSnapshot();
         const lastEventId = this.events.lastEventId();
         return {
             id: this.id,
+            activity: this.activity(),
             agentId: this.#agentId,
+            ...(this.#git === undefined ? {} : { git: structuredClone(this.#git) }),
             archived: this.#archived,
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
@@ -3566,7 +3646,99 @@ export class InMemorySession {
             throw error;
         }
         this.#saveSession();
+        this.#recordRunFacts(event);
+        this.#reportContextSize(previousSessionTokenCount);
+        this.#reportActivity(event);
         return event;
+    }
+
+    /**
+     * Publishes the context size when the event just appended changed it.
+     *
+     * Rig already recomputes this on every event, so reporting it costs nothing
+     * and saves every client a polling loop.
+     */
+    #reportContextSize(previous: SessionTokenCount): void {
+        if (this.#reportingActivity) return;
+        if (this.#sessionTokenCount.lastContextTokens === previous.lastContextTokens) return;
+        this.#reportingActivity = true;
+        try {
+            this.#append("session_context_changed", {
+                sessionTokenCount: { ...this.#sessionTokenCount },
+            });
+        } finally {
+            this.#reportingActivity = false;
+        }
+    }
+
+    /**
+     * Publishes the session's current activity when the event just appended
+     * changed it.
+     *
+     * The activity event is derived from other events, so it is appended after
+     * the event that caused it and never feeds back into the derivation.
+     */
+    #recordRunFacts(event: SessionEvent): void {
+        if (event.type === "run_started") {
+            this.#runFacts.set(event.data.runId, { startedAt: event.createdAt });
+            this.#forgetUnreachableRunFacts();
+            return;
+        }
+        if (event.type === "run_finished") {
+            const started = this.#runFacts.get(event.data.runId);
+            this.#runFacts.set(event.data.runId, {
+                ...(started ?? { startedAt: event.createdAt }),
+                endedAt: event.createdAt,
+                outcome:
+                    event.data.stopReason === "error"
+                        ? "error"
+                        : event.data.stopReason === "aborted"
+                          ? "stopped"
+                          : "success",
+                ...(event.data.errorMessage === undefined
+                    ? {}
+                    : { errorMessage: event.data.errorMessage }),
+            });
+            return;
+        }
+        if (event.type === "run_error") {
+            const started = this.#runFacts.get(event.data.runId);
+            this.#runFacts.set(event.data.runId, {
+                ...(started ?? { startedAt: event.createdAt }),
+                endedAt: event.createdAt,
+                errorMessage: event.data.errorMessage,
+                outcome: "error",
+            });
+        }
+    }
+
+    /**
+     * Drops facts for runs no transcript window can still show.
+     *
+     * Without this the map is the one structure that grows for the lifetime of
+     * a session, which is exactly the unbounded growth the window exists to
+     * avoid. A margin above the window keeps a resuming client covered.
+     */
+    #forgetUnreachableRunFacts(): void {
+        const retained = SESSION_STREAM_TURN_LIMIT * 4;
+        if (this.#runFacts.size <= retained) return;
+        const live = new Set(this.#messages.map((entry) => entry.runId));
+        for (const runId of [...this.#runFacts.keys()].slice(0, this.#runFacts.size - retained)) {
+            if (!live.has(runId)) this.#runFacts.delete(runId);
+        }
+    }
+
+    #reportActivity(event: SessionEvent): void {
+        if (this.#reportingActivity || event.type === "session_activity_changed") return;
+        const activity = sessionActivityAfterEvent(this.#activity, event);
+        if (activity === this.#activity) return;
+        this.#activity = activity;
+        this.#reportingActivity = true;
+        try {
+            this.#append("session_activity_changed", { activity });
+        } finally {
+            this.#reportingActivity = false;
+        }
     }
 
     #recordWorkflowUpdate(update: WorkflowRunUpdate): void {

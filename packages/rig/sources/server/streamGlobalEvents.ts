@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { GlobalLiveEvent } from "../protocol/index.js";
+import type { GlobalLiveEvent, GlobalStreamHello } from "../protocol/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { parseGlobalEventCursor } from "./parseGlobalEventCursor.js";
 import { sendJson } from "./sendJson.js";
@@ -13,6 +13,8 @@ export function streamGlobalEvents(
     afterValue: string | null,
     /** Current live snapshots, replayed on subscribe because live events are never stored. */
     liveSnapshots?: () => readonly GlobalLiveEvent[],
+    /** Current group state, sent to a client attaching without a cursor. */
+    groupState?: () => Omit<GlobalStreamHello, "cursor">,
 ): void {
     const lastEventId = request.headers["last-event-id"];
     const cursorValue = Array.isArray(lastEventId) ? lastEventId.at(-1) : lastEventId;
@@ -23,9 +25,23 @@ export function streamGlobalEvents(
         return;
     }
 
+    // A client attaching without a cursor is brought up to date by the hello
+    // frame instead, so the log is replayed only from the position that frame
+    // reflects. Replaying it from the beginning would send the same state twice.
+    //
+    // The cursor is read before the state, never after: an event landing in
+    // between is then replayed on top of state that already contains it, which
+    // is harmless because these events carry whole objects. Reading the state
+    // first would let that event fall into the gap and be lost.
+    const hello =
+        after === undefined && groupState !== undefined
+            ? { cursor: queue.cursor(), ...groupState() }
+            : undefined;
+    const resumeFrom = after ?? hello?.cursor;
+
     const catchupLimit = 1_000;
     let catchup = queue.list({
-        ...(after === undefined ? {} : { after }),
+        ...(resumeFrom === undefined ? {} : { after: resumeFrom }),
         limit: catchupLimit,
     });
     if (catchup === undefined) {
@@ -40,6 +56,10 @@ export function streamGlobalEvents(
         "x-accel-buffering": "no",
     });
     response.write(": connected\n\n");
+    if (hello !== undefined) {
+        response.write("event: hello\n");
+        response.write(`data: ${JSON.stringify(hello)}\n\n`);
+    }
 
     let overwhelmed = false;
     for (;;) {

@@ -19,6 +19,7 @@ export type {
     GlobalLiveEvent,
     GlobalLiveEventDelivery,
     GlobalStateResponse,
+    GlobalStreamHello,
     ListGlobalEventsResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
@@ -60,7 +61,7 @@ export type {
 export type { GoalStatus, SessionGoal } from "../goals/index.js";
 export type { DurableSkillDefinition } from "../external-skills/index.js";
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
-export { isLiveGlobalEvent } from "./ProjectProtocol.js";
+export { GLOBAL_STREAM_SESSION_LIMIT, isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
     createEventIdFactory,
     eventIdsShareScope,
@@ -139,14 +140,26 @@ export type {
     SessionProviderQuota,
     SessionQuotaContribution,
     SessionQuotaWindowContribution,
+    SessionActivity,
+    SessionActivityChangedEvent,
+    SessionContextChangedEvent,
+    SessionActivityCompaction,
+    SessionActivityKind,
+    SessionActivityRetry,
+    SessionActivityToolCall,
     SessionAgentMetadata,
     SessionAgentType,
     SessionArchiveChangedEvent,
     SessionArchiveResponse,
     SessionDraftChangedEvent,
     SessionEvent,
+    SessionGitChangedEvent,
     SessionInterruption,
     SessionInterruptionReason,
+    SessionPartialMessage,
+    SessionStreamHello,
+    SessionTranscriptTurn,
+    SessionTranscriptWindow,
     SessionResetEvent,
     SessionRewoundEvent,
     SessionStatus,
@@ -185,4 +198,8 @@ export type {
     UserInputResolvedEvent,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
-export { SESSION_DRAFT_MAX_CLOCK_SKEW_MS, SESSION_DRAFT_MAX_LENGTH } from "./SessionProtocol.js";
+export {
+    SESSION_DRAFT_MAX_CLOCK_SKEW_MS,
+    SESSION_DRAFT_MAX_LENGTH,
+    SESSION_STREAM_TURN_LIMIT,
+} from "./SessionProtocol.js";

@@ -49,8 +49,13 @@ import type {
     RegisterSecretResponse,
     SearchFilesResponse,
     SecretSessionResponse,
+    ProtocolSession,
     SessionEvent,
+    SessionActivity,
     SessionArchiveResponse,
+    SessionPartialMessage,
+    SessionStreamHello,
+    SessionTranscriptWindow,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
     SetGoalRequest,
@@ -68,7 +73,7 @@ import type {
     SetSessionDraftRequest,
     UpdateSessionRequest,
 } from "../protocol/index.js";
-import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
+import { GLOBAL_STREAM_SESSION_LIMIT, SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { InMemorySessionStore } from "./InMemorySessionStore.js";
@@ -882,6 +887,19 @@ async function handleRequest(
                 globalEventQueue,
                 url.searchParams.get("after"),
                 () => runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
+                () => {
+                    const listed = store.list({ limit: GLOBAL_STREAM_SESSION_LIMIT + 1 });
+                    return {
+                        projects: store.listProjects(),
+                        sessions: listed
+                            .slice(0, GLOBAL_STREAM_SESSION_LIMIT)
+                            .map((summary) =>
+                                sessionSummaryWithTerminalPresence(summary, sessionTerminals),
+                            ),
+                        sessionsComplete: listed.length <= GLOBAL_STREAM_SESSION_LIMIT,
+                        workspaces: store.listWorkspaces(),
+                    };
+                },
             );
             return;
         }
@@ -2138,7 +2156,13 @@ function streamEvents(
 ): void {
     const cursor = request.headers["last-event-id"];
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
-    const catchup = session.events.since(eventId ?? after);
+    const resumeFrom = eventId ?? after;
+    const resumed = resumeFrom !== undefined;
+    const lastEventId = session.events.lastEventId();
+    // A client attaching without a cursor is already caught up by the snapshot
+    // in the hello frame, which reflects every event through `lastEventId`.
+    // Replaying the log on top of it would send the conversation twice.
+    const catchup = resumed ? session.events.since(resumeFrom) : [];
     if (catchup === undefined) {
         sendJson(response, 409, { error: "Event cursor not found" });
         return;
@@ -2150,7 +2174,30 @@ function streamEvents(
         "content-type": "text/event-stream; charset=utf-8",
         "x-accel-buffering": "no",
     });
-    response.write(": connected\n\n");
+    // The hello frame is written before the catch-up batch so a client can apply
+    // everything that follows without asking the daemon anything else.
+    const partial = session.partialMessage();
+    // A resuming client already holds the transcript, so it is sent only to a
+    // client attaching fresh. The window is cut on turn boundaries so a tool
+    // result never arrives without the call it belongs to.
+    const transcript = resumed ? undefined : session.transcriptWindow();
+    const full = resumed ? undefined : session.snapshot();
+    const snapshot =
+        full === undefined || transcript === undefined
+            ? undefined
+            : {
+                  ...full,
+                  snapshot: { ...full.snapshot, messages: transcript.messages },
+              };
+    writeSseHello(response, {
+        activity: session.activity(),
+        resumed,
+        ...(snapshot === undefined || transcript === undefined
+            ? {}
+            : { session: snapshot, transcript }),
+        ...(partial === undefined ? {} : { partial }),
+        ...(lastEventId === undefined ? {} : { lastEventId }),
+    });
 
     for (const event of catchup) {
         writeSseEvent(response, event);
@@ -2177,10 +2224,19 @@ function streamEvents(
 
 interface SessionEventSource {
     readonly events: SessionEventLog;
+    activity: () => SessionActivity;
+    partialMessage: () => SessionPartialMessage | undefined;
+    snapshot: () => ProtocolSession;
+    transcriptWindow: () => SessionTranscriptWindow;
 }
 
 interface SessionEventStreamLease {
     readonly session: SessionEventSource;
+}
+
+function writeSseHello(response: ServerResponse, hello: SessionStreamHello): void {
+    response.write("event: hello\n");
+    response.write(`data: ${JSON.stringify(hello)}\n\n`);
 }
 
 function writeSseEvent(response: ServerResponse, event: SessionEvent): void {

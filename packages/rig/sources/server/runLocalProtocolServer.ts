@@ -264,16 +264,18 @@ export async function runLocalProtocolServer(
                 );
             },
             onSnapshot: (entity, snapshot) => {
+                const target = {
+                    projectId: entity.projectId,
+                    ...(entity.workspaceId === undefined
+                        ? {}
+                        : { workspaceId: entity.workspaceId }),
+                };
+                // Sessions carry Git state on their own stream, so a client
+                // watching a conversation never has to open the project stream
+                // as well to see which files changed.
+                store?.applyGitSnapshot(target, snapshot);
                 if (snapshot.comparison !== "ready") return;
-                store?.applyGitFacts(
-                    {
-                        projectId: entity.projectId,
-                        ...(entity.workspaceId === undefined
-                            ? {}
-                            : { workspaceId: entity.workspaceId }),
-                    },
-                    snapshot.facts,
-                );
+                store?.applyGitFacts(target, snapshot.facts);
             },
             taskDrain,
         });

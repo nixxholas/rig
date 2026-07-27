@@ -2226,6 +2226,7 @@ describe("CodingAssistantApp", () => {
             tools: [],
         };
         const session: ProtocolSession = {
+            activity: { kind: "idle", label: "Idle", since: 0 },
             agent: {
                 depth: 0,
                 rootSessionId: "session-1",
@@ -2334,6 +2335,7 @@ describe("CodingAssistantApp", () => {
             tools: [],
         };
         const session: ProtocolSession = {
+            activity: { kind: "idle", label: "Idle", since: 0 },
             agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
             agentId: snapshot.id,
             archived: false,
@@ -2434,6 +2436,7 @@ describe("CodingAssistantApp", () => {
             tools: [],
         };
         const session: ProtocolSession = {
+            activity: { kind: "idle", label: "Idle", since: 0 },
             agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
             agentId: snapshot.id,
             archived: false,
@@ -2779,6 +2782,7 @@ describe("CodingAssistantApp", () => {
             tools: [],
         };
         const session: ProtocolSession = {
+            activity: { kind: "idle", label: "Idle", since: 0 },
             agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
             agentId: snapshot.id,
             archived: false,

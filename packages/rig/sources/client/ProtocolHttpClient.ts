@@ -60,6 +60,7 @@ import type {
     SearchFilesResponse,
     SecretSessionResponse,
     SessionEvent,
+    SessionStreamHello,
     SessionArchiveResponse,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
@@ -107,6 +108,8 @@ export interface WatchSessionEventsOptions {
     signal?: AbortSignal;
     sessionId: string;
     onEvent: (event: SessionEvent) => void | Promise<void>;
+    /** Receives the opening frame of every connection, including reconnects. */
+    onHello?: (hello: SessionStreamHello) => void | Promise<void>;
 }
 
 export interface WatchGlobalEventsOptions {
@@ -984,10 +987,23 @@ export class ProtocolHttpClient {
                             }
                             const rawEvent = buffer.slice(0, boundary);
                             buffer = buffer.slice(boundary + 2);
-                            const event = parseSseEvent(rawEvent);
-                            if (event === undefined) {
+                            const frame = parseSseFrame(rawEvent);
+                            if (frame === undefined) {
                                 continue;
                             }
+                            // The opening frame describes current state rather
+                            // than a logged event, so it never advances the
+                            // cursor a reconnect resumes from.
+                            if (frame.name === "hello") {
+                                const hello = frame.data as SessionStreamHello;
+                                application = application.then(() => options.onHello?.(hello));
+                                void application.catch((error: unknown) => {
+                                    response.destroy();
+                                    settle(error);
+                                });
+                                continue;
+                            }
+                            const event = frame.data as SessionEvent;
                             application = application.then(async () => {
                                 await waitForGymSessionEventBarrier(event, options.signal);
                                 await options.onEvent(event);
@@ -1100,20 +1116,25 @@ export class ProtocolHttpClient {
     }
 }
 
-function parseSseEvent(raw: string): SessionEvent | undefined {
+/** One parsed SSE frame, keeping the event name so callers can tell frames apart. */
+function parseSseFrame(raw: string): { data: unknown; name: string | undefined } | undefined {
     if (raw.startsWith(":")) {
         return undefined;
     }
 
-    const dataLines = raw
-        .split("\n")
+    const lines = raw.split("\n");
+    const dataLines = lines
         .filter((line) => line.startsWith("data:"))
         .map((line) => line.slice("data:".length).trimStart());
     if (dataLines.length === 0) {
         return undefined;
     }
+    const name = lines
+        .find((line) => line.startsWith("event:"))
+        ?.slice("event:".length)
+        .trim();
 
-    return JSON.parse(dataLines.join("\n")) as SessionEvent;
+    return { data: JSON.parse(dataLines.join("\n")), name };
 }
 
 function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {

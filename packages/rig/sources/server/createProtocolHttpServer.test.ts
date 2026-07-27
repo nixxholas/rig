@@ -9,7 +9,12 @@ import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 
 import { ProtocolHttpClient } from "../client/ProtocolHttpClient.js";
-import { createEventIdFactory, type SessionEvent, type SessionSummary } from "../protocol/index.js";
+import {
+    createEventIdFactory,
+    type SessionEvent,
+    type SessionStreamHello,
+    type SessionSummary,
+} from "../protocol/index.js";
 import { modelOpenaiGpt55, modelOpenaiGpt56Sol } from "@slopus/rig-execution";
 import { InMemorySessionStore } from "./InMemorySessionStore.js";
 import type { PersistedSessionState } from "./InMemorySession.js";
@@ -1733,6 +1738,36 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("opens a session stream with the session, so no follow-up request is needed", async () => {
+        const { client, close, socketPath } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
+            const hello = await readStreamHello(socketPath, created.session.id);
+
+            expect(hello.resumed).toBe(false);
+            expect(hello.session?.id).toBe(created.session.id);
+            expect(hello.activity).toEqual({ kind: "idle", label: "Idle", since: 0 });
+        } finally {
+            await close();
+        }
+    });
+
+    it("omits the session from the stream hello when a client resumes", async () => {
+        const { client, close, socketPath } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
+            const cursor = created.session.lastEventId;
+            expect(cursor).toBeDefined();
+            const hello = await readStreamHello(socketPath, created.session.id, cursor);
+
+            expect(hello.resumed).toBe(true);
+            expect(hello.session).toBeUndefined();
+            expect(hello.lastEventId).toBe(cursor);
+        } finally {
+            await close();
+        }
+    });
+
     it("streams a composer draft to the other clients watching the session", async () => {
         const { client, close } = await startServer();
         try {
@@ -2282,6 +2317,49 @@ async function startServer(
             await rm(directory, { recursive: true, force: true });
         },
     };
+}
+
+/** Reads the first frame of a session event stream and stops there. */
+async function readStreamHello(
+    socketPath: string,
+    sessionId: string,
+    after?: string,
+): Promise<SessionStreamHello> {
+    const query = after === undefined ? "" : `?after=${encodeURIComponent(after)}`;
+    return new Promise((resolve, reject) => {
+        const request = httpRequest(
+            {
+                headers: { accept: "text/event-stream", authorization: "Bearer secret" },
+                method: "GET",
+                path: `/sessions/${encodeURIComponent(sessionId)}/stream${query}`,
+                socketPath,
+            },
+            (response) => {
+                let buffer = "";
+                response.setEncoding("utf8");
+                if (response.statusCode !== 200) {
+                    request.destroy();
+                    reject(new Error(`The stream was refused with ${response.statusCode}.`));
+                    return;
+                }
+                response.on("data", (chunk: string) => {
+                    buffer += chunk;
+                    // The trailing segment is whatever has not been terminated
+                    // yet, so only the segments before it are complete frames.
+                    const frames = buffer.split("\n\n").slice(0, -1);
+                    const hello = frames.find((frame) => frame.startsWith("event: hello\n"));
+                    if (hello === undefined) return;
+                    request.destroy();
+                    resolve(JSON.parse(hello.slice(hello.indexOf("data: ") + "data: ".length)));
+                });
+                response.on("end", () => reject(new Error("The stream ended without a hello.")));
+            },
+        );
+        request.on("error", (error) => {
+            if (!request.destroyed) reject(error);
+        });
+        request.end();
+    });
 }
 
 async function requestRawJson(

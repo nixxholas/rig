@@ -817,6 +817,7 @@ describe("RemoteAgent", () => {
 
 function protocolSession(model: ReturnType<typeof defineModel>): ProtocolSession {
     return {
+        activity: { kind: "idle", label: "Idle", since: 0 },
         agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
         agentId: "agent-1",
         archived: false,

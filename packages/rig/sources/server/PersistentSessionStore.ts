@@ -9,6 +9,7 @@ import type {
     ChangeServiceTierRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    GitChangeSnapshot,
     GitRepositoryFacts,
     ModelCatalog,
     Project,
@@ -750,6 +751,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         facts: GitRepositoryFacts,
     ): void {
         this.#projects.applyGitFacts(target, facts);
+    }
+
+    /**
+     * Reports a Git change to the live sessions running in that directory.
+     *
+     * Only cached sessions are told: a session nobody is holding has no attached
+     * client to inform, and reads current Git state when it is next loaded.
+     */
+    applyGitSnapshot(
+        target: { projectId: string; workspaceId?: string },
+        git: GitChangeSnapshot,
+    ): void {
+        for (const session of this.#cachedSessions()) {
+            const identity = session.projectIdentity();
+            if (identity.projectId !== target.projectId) continue;
+            if (identity.workspaceId !== target.workspaceId) continue;
+            session.recordGitState(git);
+        }
     }
 
     listProjects(): readonly Project[] {
