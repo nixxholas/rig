@@ -53,6 +53,8 @@ export type {
     PendingSteeringMessage,
     PermissionReviewState,
     ProviderQuota,
+    RemoteTerminalGroupState,
+    RemoteTerminalSummary,
     Project,
     ProjectWorkspace,
     SessionGoal,

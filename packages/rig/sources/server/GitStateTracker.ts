@@ -11,6 +11,11 @@ import { scanGitRepository } from "./scanGitRepository.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import { watchGitRepositoryChanges } from "./watchGitRepositoryChanges.js";
 
+type GitLiveEvent = Extract<
+    GlobalLiveEvent,
+    { type: "project_git_changed" | "workspace_git_changed" }
+>;
+
 const WATCH_TTL_MS = 5 * 60 * 1000;
 const TRACKED_LIMIT = 32;
 const SCAN_CONCURRENCY = 4;
@@ -38,7 +43,7 @@ export interface GitStateTrackerOptions {
     now?: () => number;
     /** Receives each published snapshot as a ready-to-deliver live event. */
     /** Returns false when the event did not reach every subscriber. */
-    onLiveEvent?: (event: GlobalLiveEvent) => boolean;
+    onLiveEvent?: (event: GitLiveEvent) => boolean;
     /** Reports an observer failure so it can be logged instead of vanishing. */
     onObserverError?: (error: unknown, entity: GitTrackedEntity) => void;
     onSnapshot?: (entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void;
@@ -94,7 +99,7 @@ export class GitStateTracker {
     readonly #createEventId = createEventIdFactory();
     readonly #generation = createId();
     readonly #now: () => number;
-    readonly #onLiveEvent: ((event: GlobalLiveEvent) => boolean) | undefined;
+    readonly #onLiveEvent: ((event: GitLiveEvent) => boolean) | undefined;
     readonly #onObserverError: ((error: unknown, entity: GitTrackedEntity) => void) | undefined;
     readonly #onSnapshot:
         | ((entity: GitTrackedEntity, snapshot: GitChangeSnapshot) => void)
@@ -196,8 +201,8 @@ export class GitStateTracker {
      * Current snapshots as live events. Replayed to a new subscriber because live events are never
      * stored, so a client that reconnects with a valid cursor would otherwise show stale counts.
      */
-    liveSnapshots(): readonly GlobalLiveEvent[] {
-        const events: GlobalLiveEvent[] = [];
+    liveSnapshots(): readonly GitLiveEvent[] {
+        const events: GitLiveEvent[] = [];
         for (const tracker of this.#trackers.values()) {
             if (tracker.snapshot === undefined) continue;
             events.push(this.#createLiveEvent(tracker.entity, tracker.snapshot));
@@ -205,7 +210,7 @@ export class GitStateTracker {
         return events;
     }
 
-    #createLiveEvent(entity: GitTrackedEntity, git: GitChangeSnapshot): GlobalLiveEvent {
+    #createLiveEvent(entity: GitTrackedEntity, git: GitChangeSnapshot): GitLiveEvent {
         const base = {
             createdAt: this.#now(),
             id: this.#createEventId(),

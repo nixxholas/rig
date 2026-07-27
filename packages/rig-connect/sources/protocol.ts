@@ -511,6 +511,8 @@ export interface SessionTranscriptRetry {
 export interface SessionTranscriptWindow {
     messages: readonly Message[];
     messageCreatedAt?: Readonly<Record<string, number>>;
+    messageEventId?: Readonly<Record<string, EventId>>;
+    permissionReviews?: readonly PermissionReviewState[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
@@ -609,6 +611,10 @@ export type InterpretedSessionEvent =
               quota: ProviderQuota;
               runId: string;
           }
+      >
+    | BaseSessionEvent<
+          "session_quota_contribution_changed",
+          { observedQuota: readonly SessionQuotaContribution[] }
       >
     | BaseSessionEvent<
           "run_finished",
@@ -796,9 +802,25 @@ export interface SessionSummary {
     unread?: object;
 }
 
+export interface RemoteTerminalSummary {
+    cols: number;
+    epoch: string;
+    exitCode: number | null;
+    id: string;
+    rows: number;
+    status: "exited" | "running";
+}
+
+export interface RemoteTerminalGroupState {
+    projectId: string;
+    workspaceId?: string;
+    terminals: readonly RemoteTerminalSummary[];
+}
+
 export interface GlobalStreamHello {
     cursor: string;
     projects: readonly Project[];
+    terminalGroups: readonly RemoteTerminalGroupState[];
     workspaces: readonly ProjectWorkspace[];
     sessions: readonly SessionSummary[];
     sessionsComplete: boolean;
@@ -820,4 +842,5 @@ export type GlobalEvent =
     | BaseGlobalEvent<"workspace_updated", { workspace: ProjectWorkspace }>
     | BaseGlobalEvent<"project_git_changed", { git: GitChangeSnapshot }>
     | BaseGlobalEvent<"workspace_git_changed", { git: GitChangeSnapshot }>
+    | BaseGlobalEvent<"remote_terminals_changed", { terminals: readonly RemoteTerminalSummary[] }>
     | SessionEvent;

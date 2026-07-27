@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../agent/index.js";
 import { NativeProcessManager } from "../processes/index.js";
@@ -171,8 +171,10 @@ describe("InMemorySession transcript window", () => {
 
         // The cost of attaching has to follow recent activity, not the age of
         // the session, which is the whole reason the window exists.
+        const messageTime = vi.spyOn(session.events, "messageCreatedAt");
         const window = session.transcriptWindow(2);
         expect(window.turns).toHaveLength(2);
+        expect(messageTime).toHaveBeenCalledTimes(window.messages.length);
         expect(JSON.stringify(window).length).toBeLessThan(
             JSON.stringify(session.transcriptWindow(6)).length,
         );

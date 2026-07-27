@@ -1,6 +1,7 @@
 import type { RemoteTerminalProcessFactory } from "./RemoteTerminalProcess.js";
 import { RemoteTerminal } from "./RemoteTerminal.js";
 import type { CreateRemoteTerminalRequest } from "./types.js";
+import type { RemoteTerminalSummary } from "./types.js";
 
 const DEFAULT_COLS = 80;
 const DEFAULT_ROWS = 24;
@@ -13,6 +14,7 @@ const MAX_TERMINALS = 32;
 export class RemoteTerminalManager {
     readonly #cwd: string;
     readonly #processFactory: RemoteTerminalProcessFactory;
+    readonly #onChange: (terminals: readonly RemoteTerminalSummary[]) => void;
     readonly #resolveCwd: (root: string, requested: string | undefined) => string;
     readonly #terminals = new Map<string, RemoteTerminal>();
 
@@ -20,15 +22,18 @@ export class RemoteTerminalManager {
         cwd: string;
         processFactory: RemoteTerminalProcessFactory;
         resolveCwd: (root: string, requested: string | undefined) => string;
+        onChange?: (terminals: readonly RemoteTerminalSummary[]) => void;
     }) {
         this.#cwd = options.cwd;
         this.#processFactory = options.processFactory;
         this.#resolveCwd = options.resolveCwd;
+        this.#onChange = options.onChange ?? (() => undefined);
     }
 
     async close(): Promise<void> {
         await Promise.all([...this.#terminals.values()].map((terminal) => terminal.dispose()));
         this.#terminals.clear();
+        this.#changed();
     }
 
     async create(request: CreateRemoteTerminalRequest): Promise<RemoteTerminal> {
@@ -73,8 +78,10 @@ export class RemoteTerminalManager {
             processFactory: this.#processFactory,
             processOptions,
             rows,
+            onChange: () => this.#changed(),
         });
         this.#terminals.set(terminal.id, terminal);
+        this.#changed();
         return terminal;
     }
 
@@ -84,6 +91,10 @@ export class RemoteTerminalManager {
 
     list(): readonly RemoteTerminal[] {
         return [...this.#terminals.values()];
+    }
+
+    #changed(): void {
+        this.#onChange([...this.#terminals.values()].map((terminal) => terminal.summary()));
     }
 }
 

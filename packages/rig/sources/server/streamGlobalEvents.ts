@@ -157,5 +157,7 @@ export function streamGlobalEvents(
 const SUBSCRIBER_BUFFER_LIMIT = 1024 * 1024;
 
 function liveEventKey(event: GlobalLiveEvent): string {
-    return "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;
+    const scope =
+        "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;
+    return `${event.type}:${scope}`;
 }

@@ -2,7 +2,11 @@ import type { DockerExecutionConfig } from "../execution/index.js";
 import { createRemoteTerminalManager } from "./createRemoteTerminalManager.js";
 import type { RemoteTerminal } from "./RemoteTerminal.js";
 import type { RemoteTerminalManager } from "./RemoteTerminalManager.js";
-import type { CreateRemoteTerminalRequest, RemoteTerminalScope } from "./types.js";
+import type {
+    CreateRemoteTerminalRequest,
+    RemoteTerminalScope,
+    RemoteTerminalSummary,
+} from "./types.js";
 
 export interface ProjectRemoteTerminalContext {
     cwd: string;
@@ -20,10 +24,15 @@ export class ProjectRemoteTerminalStore {
     readonly #createManager: (
         context: ProjectRemoteTerminalContext,
         ownerId: string,
+        onChange: (terminals: readonly RemoteTerminalSummary[]) => void,
     ) => RemoteTerminalManager;
     #closed = false;
     readonly #projectClosures = new Map<string, Promise<void>>();
     readonly #resolveContext: (scope: RemoteTerminalScope) => ProjectRemoteTerminalContext;
+    readonly #onChange: (
+        scope: RemoteTerminalScope,
+        terminals: readonly RemoteTerminalSummary[],
+    ) => void;
     readonly #scopes = new Map<string, ScopedRemoteTerminalManager>();
     readonly #workspaceClosures = new Map<string, Promise<void>>();
 
@@ -31,17 +40,24 @@ export class ProjectRemoteTerminalStore {
         createManager?: (
             context: ProjectRemoteTerminalContext,
             ownerId: string,
+            onChange: (terminals: readonly RemoteTerminalSummary[]) => void,
         ) => RemoteTerminalManager;
+        onChange?: (
+            scope: RemoteTerminalScope,
+            terminals: readonly RemoteTerminalSummary[],
+        ) => void;
         resolveContext: (scope: RemoteTerminalScope) => ProjectRemoteTerminalContext;
     }) {
         this.#createManager =
             options.createManager ??
-            ((context, ownerId) =>
+            ((context, ownerId, onChange) =>
                 createRemoteTerminalManager({
                     cwd: context.cwd,
                     ownerId,
+                    onChange,
                     ...(context.docker === undefined ? {} : { docker: context.docker }),
                 }));
+        this.#onChange = options.onChange ?? (() => undefined);
         this.#resolveContext = options.resolveContext;
     }
 
@@ -112,6 +128,16 @@ export class ProjectRemoteTerminalStore {
         return this.#scopes.get(scopeKey(scope))?.manager.list() ?? [];
     }
 
+    groups(): readonly {
+        scope: RemoteTerminalScope;
+        terminals: readonly RemoteTerminalSummary[];
+    }[] {
+        return [...this.#scopes.values()].map((scoped) => ({
+            scope: { ...scoped.scope },
+            terminals: scoped.manager.list().map((terminal) => terminal.summary()),
+        }));
+    }
+
     #closeMatching(predicate: (scope: RemoteTerminalScope) => boolean): Promise<void> {
         const closures: Promise<void>[] = [];
         for (const scoped of this.#scopes.values()) {
@@ -138,7 +164,9 @@ export class ProjectRemoteTerminalStore {
         if (existing !== undefined) return existing;
         const context = this.#resolveContext(scope);
         const scoped = {
-            manager: this.#createManager(context, key),
+            manager: this.#createManager(context, key, (terminals) =>
+                this.#onChange(scope, terminals),
+            ),
             pendingCreates: new Set<Promise<RemoteTerminal>>(),
             scope: { ...scope },
         };

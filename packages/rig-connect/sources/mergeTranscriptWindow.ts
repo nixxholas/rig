@@ -44,12 +44,29 @@ export function mergeTranscriptWindow(
             return createdAt === undefined ? [] : [[message.id, createdAt]];
         }),
     );
+    const messageEventId = Object.fromEntries(
+        messages.flatMap((message) => {
+            const eventId =
+                incoming.messageEventId?.[message.id] ?? loaded.messageEventId?.[message.id];
+            return eventId === undefined ? [] : [[message.id, eventId]];
+        }),
+    );
+    const permissionReviews = [
+        ...(loaded.permissionReviews ?? []),
+        ...(incoming.permissionReviews ?? []),
+    ].filter(
+        (review, index, reviews) =>
+            reviews.findLastIndex((candidate) => candidate.toolCallId === review.toolCallId) ===
+            index,
+    );
 
     return {
         // The retained turns reach back to where the earlier window started, so
         // the merged window is complete only if that one was.
         complete: loaded.complete,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
+        ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
+        ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         messages,
         turns: [...retained, ...incoming.turns],
     };

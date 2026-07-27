@@ -56,6 +56,7 @@ type ApplicationReadEventType =
     | "agent_message"
     | "agent_event"
     | "provider_quota_observed"
+    | "session_quota_contribution_changed"
     | "run_finished"
     | "run_error"
     | "session_reset"

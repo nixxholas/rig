@@ -291,7 +291,10 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 event_id TEXT NOT NULL UNIQUE,
                 type TEXT NOT NULL,
                 created_at_ms INTEGER NOT NULL,
-                data_json TEXT NOT NULL
+                data_json TEXT NOT NULL,
+                run_id TEXT,
+                message_id TEXT,
+                tool_call_id TEXT
             );
 
             CREATE TABLE IF NOT EXISTS session_messages (
@@ -305,6 +308,15 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 updated_at_ms INTEGER NOT NULL,
                 PRIMARY KEY (session_id, position)
             );
+
+            CREATE TABLE IF NOT EXISTS session_turns (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                run_id TEXT NOT NULL,
+                first_position INTEGER NOT NULL,
+                PRIMARY KEY (session_id, run_id)
+            );
+            CREATE INDEX IF NOT EXISTS session_turns_order
+                ON session_turns(session_id, first_position);
 
             CREATE TABLE IF NOT EXISTS queued_runs (
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -401,6 +413,23 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             );
         `);
 
+        const turnCount = Number(
+            (
+                database.prepare("SELECT COUNT(*) AS count FROM session_turns").get() as {
+                    count: number;
+                }
+            ).count,
+        );
+        if (turnCount === 0) {
+            database.exec(`
+                INSERT OR IGNORE INTO session_turns (session_id, run_id, first_position)
+                SELECT session_id, run_id, MIN(position)
+                FROM session_messages
+                WHERE run_id IS NOT NULL AND is_partial = 0
+                GROUP BY session_id, run_id
+            `);
+        }
+
         ensureColumn(database, "projects", "order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''");
         ensureColumn(database, "projects", "archived_at_ms", "INTEGER");
         ensureColumn(
@@ -411,6 +440,30 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         );
         ensureColumn(database, "external_tool_calls", "provider_tool_call_id", "TEXT");
         ensureColumn(database, "durable_user_inputs", "provider_tool_call_id", "TEXT");
+        const backfillEventFacts = !hasColumn(database, "session_events", "run_id");
+        ensureColumn(database, "session_events", "run_id", "TEXT");
+        ensureColumn(database, "session_events", "message_id", "TEXT");
+        ensureColumn(database, "session_events", "tool_call_id", "TEXT");
+        database.exec(`
+            CREATE INDEX IF NOT EXISTS session_events_run_id
+                ON session_events(session_id, run_id, seq);
+            CREATE INDEX IF NOT EXISTS session_events_message_id
+                ON session_events(session_id, message_id, seq);
+            CREATE INDEX IF NOT EXISTS session_events_tool_call_id
+                ON session_events(session_id, tool_call_id, seq);
+        `);
+        if (backfillEventFacts) {
+            database.exec(`
+                UPDATE session_events
+                SET
+                    run_id = CASE WHEN json_valid(data_json)
+                        THEN json_extract(data_json, '$.runId') END,
+                    message_id = CASE WHEN json_valid(data_json)
+                        THEN json_extract(data_json, '$.message.id') END,
+                    tool_call_id = CASE WHEN json_valid(data_json)
+                        THEN json_extract(data_json, '$.event.toolCallId') END
+            `);
+        }
 
         if (legacyGlobalEventTable) {
             const streamId = createId();

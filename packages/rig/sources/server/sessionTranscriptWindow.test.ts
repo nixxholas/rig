@@ -141,6 +141,7 @@ describe("sessionTranscriptWindow", () => {
         const entries = turn("run-1").map((entry, index) => ({
             ...entry,
             createdAt: 100 + index * 25,
+            eventId: `event-${String(index)}`,
         }));
 
         const window = newest(entries, new Map(), 20);
@@ -148,6 +149,10 @@ describe("sessionTranscriptWindow", () => {
         expect(window.messageCreatedAt).toEqual({
             "run-1-a": 125,
             "run-1-u": 100,
+        });
+        expect(window.messageEventId).toEqual({
+            "run-1-a": "event-1",
+            "run-1-u": "event-0",
         });
     });
 

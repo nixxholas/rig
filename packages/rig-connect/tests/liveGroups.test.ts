@@ -80,6 +80,41 @@ describe("rig-connect groups against a live daemon", () => {
         );
     });
 
+    it("keeps open terminal tabs in the live group stream", async () => {
+        const { endpoint, store } = await startDaemon();
+        const session = store.create({ cwd: "/tmp/rig-terminal-groups" });
+        const { projectId } = session.projectIdentity();
+
+        connection = connectGroups({
+            endpoint,
+            onChange: () => undefined,
+            token: "secret",
+        });
+        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+
+        const response = await fetch(`${endpoint}/projects/${projectId}/terminals`, {
+            body: JSON.stringify({ shell: "/bin/sh" }),
+            headers: {
+                authorization: "Bearer secret",
+                "content-type": "application/json",
+            },
+            method: "POST",
+        });
+        expect(response.status).toBe(201);
+        const created = (await response.json()) as { terminal: { id: string } };
+        await waitFor(
+            () =>
+                connection
+                    ?.remoteTerminals()
+                    .some(
+                        (group) =>
+                            group.projectId === projectId &&
+                            group.terminals.some((terminal) => terminal.id === created.terminal.id),
+                    ) === true,
+            "the terminal tab to appear",
+        );
+    });
+
     it("adds a session created after the client attached", async () => {
         const { endpoint, store } = await startDaemon();
         connection = connectGroups({

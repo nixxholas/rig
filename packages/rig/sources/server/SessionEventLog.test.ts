@@ -10,6 +10,15 @@ const OTHER_SESSION = "018bcfe5-6800-7002-8000-00000000bbbb";
 const FUTURE = "018bcfe5-6800-7005-8000-00000000aaaa";
 
 describe("SessionEventLog", () => {
+    it("offers reducers one allocation-free read-only view of a long log", () => {
+        const log = new SessionEventLog();
+        const view = log.all();
+        log.append(event("event-1"));
+
+        expect(log.all()).toBe(view);
+        expect(view.map((entry) => entry.id)).toEqual(["event-1"]);
+    });
+
     it("isolates subscriber failures from durable event delivery", () => {
         const delivered: SessionEvent[] = [];
         const log = new SessionEventLog();
@@ -79,6 +88,28 @@ describe("SessionEventLog", () => {
         expect(log.messageSubmission("restored-message")).toEqual(restored);
         expect(log.messageSubmission("appended-message")).toEqual(appended);
         expect(log.messageSubmission("missing-message")).toBeUndefined();
+    });
+
+    it("forgets submission idempotency entries when their retained event expires", () => {
+        const submission = messageSubmittedEvent(FIRST, "expired-message");
+        const log = new SessionEventLog({ retentionLimit: 1 });
+
+        log.append(submission);
+        log.append(event(DURABLE));
+
+        expect(log.messageSubmission("expired-message")).toBeUndefined();
+    });
+
+    it("indexes historical permission reviews for transcript pages", () => {
+        const log = new SessionEventLog({
+            events: [permissionReviewEvent(FIRST, "tool-old")],
+        });
+        log.append(permissionReviewEvent(DURABLE, "tool-new"));
+
+        expect(log.permissionReviews(new Set(["tool-old", "tool-new", "missing"]))).toEqual([
+            expect.objectContaining({ toolCallId: "tool-old" }),
+            expect.objectContaining({ toolCallId: "tool-new" }),
+        ]);
     });
 
     it("retains the oldest durable message time independently of earlier session events", () => {
@@ -158,6 +189,27 @@ function messageSubmittedEvent(
         id,
         sessionId: "session-1",
         type: "message_submitted",
+    };
+}
+
+function permissionReviewEvent(id: string, toolCallId: string): SessionEvent {
+    return {
+        createdAt: 1_700_000_000_000,
+        data: {
+            event: {
+                action: "Run command",
+                decision: "allow",
+                reason: "Requested",
+                risk: "low",
+                toolCallId,
+                type: "permission_review",
+                userAuthorization: "high",
+            },
+            runId: "run-1",
+        },
+        id,
+        sessionId: "session-1",
+        type: "agent_event",
     };
 }
 

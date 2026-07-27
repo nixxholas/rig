@@ -74,11 +74,11 @@ import type {
     SetSessionDraftRequest,
     UpdateSessionRequest,
 } from "../protocol/index.js";
+import { createEventIdFactory } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { InMemorySessionStore } from "./InMemorySessionStore.js";
-import { latestObservedProviderQuotas } from "./latestObservedProviderQuotas.js";
 import type { SessionUsageSummary } from "./sessionUsage/index.js";
 import { createModelCatalog } from "./createModelCatalog.js";
 import { FileSearchService, type FileSearchServiceContract } from "./FileSearchService.js";
@@ -116,6 +116,8 @@ import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "./SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminalPresence.js";
+
+const createTerminalSnapshotEventId = createEventIdFactory();
 
 export interface ProtocolHttpServerOptions {
     defaultDocker?: DockerExecutionConfig;
@@ -889,7 +891,19 @@ async function handleRequest(
                 response,
                 globalEventQueue,
                 url.searchParams.get("after"),
-                () => runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
+                () => [
+                    ...(runtimeConfig.gitStateTracker?.liveSnapshots() ?? []),
+                    ...store.remoteTerminals.groups().map((group) => ({
+                        createdAt: Date.now(),
+                        data: { terminals: group.terminals },
+                        id: createTerminalSnapshotEventId(),
+                        projectId: group.scope.projectId,
+                        type: "remote_terminals_changed" as const,
+                        ...(group.scope.workspaceId === undefined
+                            ? {}
+                            : { workspaceId: group.scope.workspaceId }),
+                    })),
+                ],
                 () => {
                     const sessions = store
                         .listActive()
@@ -901,6 +915,13 @@ async function handleRequest(
                         projects: store
                             .listProjects()
                             .filter((project) => project.archivedAt === undefined),
+                        terminalGroups: store.remoteTerminals.groups().map((group) => ({
+                            projectId: group.scope.projectId,
+                            terminals: group.terminals,
+                            ...(group.scope.workspaceId === undefined
+                                ? {}
+                                : { workspaceId: group.scope.workspaceId }),
+                        })),
                         sessions,
                         sessionsComplete: true,
                         workspaces: store
@@ -1224,7 +1245,8 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "usage") {
-        const usage = session.usage();
+        const sessionEvents = session.events.all();
+        const usage = session.usage(sessionEvents);
         const currentProviderId = session.snapshot().providerId;
         const providerIds = [
             ...new Set([
@@ -1235,7 +1257,7 @@ async function handleRequest(
                 currentProviderId,
             ]),
         ];
-        const observedQuotas = latestObservedProviderQuotas(session.events.since(undefined) ?? []);
+        const observedQuotas = session.events.latestProviderQuotas();
         const quotas = (
             await Promise.all(
                 providerIds.map(async (providerId) => {
@@ -2215,13 +2237,20 @@ function streamEvents(
     // result never arrives without the call it belongs to.
     const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
     const full = resumed ? undefined : session.snapshot();
-    const usage = full === undefined ? undefined : session.usage();
+    // Materialise the durable log once. A long-running session may have many
+    // events, and opening a stream must not allocate and walk three separate
+    // copies merely to derive current side-state.
+    const durableEvents = full === undefined ? undefined : session.events.all();
+    const usage =
+        full === undefined || durableEvents === undefined
+            ? undefined
+            : session.usage(durableEvents);
     const snapshot =
         full === undefined || transcript === undefined
             ? undefined
             : {
                   ...full,
-                  shellCommands: shellCommandStates(session.events.since(undefined) ?? []),
+                  shellCommands: session.events.shellCommandStates(),
                   subagents,
                   snapshot: { ...full.snapshot, messages: transcript.messages },
               };
@@ -2235,11 +2264,9 @@ function streamEvents(
                       currentProviderId: full.providerId,
                       groups: usage.groups,
                       observedQuota: usage.observedQuota,
-                      quotas: [
-                          ...latestObservedProviderQuotas(
-                              session.events.since(undefined) ?? [],
-                          ).entries(),
-                      ].map(([providerId, quota]) => ({ providerId, quota })),
+                      quotas: [...session.events.latestProviderQuotas().entries()].map(
+                          ([providerId, quota]) => ({ providerId, quota }),
+                      ),
                       sessionTokenCount: usage.sessionTokenCount,
                       ...(usage.currentContext === undefined
                           ? {}
@@ -2282,21 +2309,7 @@ interface SessionEventSource {
     partialMessage: () => SessionPartialMessage | undefined;
     snapshot: () => ProtocolSession;
     transcriptWindow: (turnLimit?: number) => SessionTranscriptWindow;
-    usage: () => SessionUsageSummary;
-}
-
-function shellCommandStates(
-    events: readonly SessionEvent[],
-): NonNullable<ProtocolSession["shellCommands"]> {
-    const commands = new Map<string, NonNullable<ProtocolSession["shellCommands"]>[number]>();
-    for (const event of events) {
-        if (event.type === "shell_command_started") {
-            commands.set(event.data.commandId, { ...event.data, status: "running" });
-        } else if (event.type === "shell_command_finished") {
-            commands.set(event.data.commandId, { ...event.data, status: "finished" });
-        }
-    }
-    return [...commands.values()].slice(-100);
+    usage: (events?: readonly SessionEvent[]) => SessionUsageSummary;
 }
 
 interface SessionEventStreamLease {

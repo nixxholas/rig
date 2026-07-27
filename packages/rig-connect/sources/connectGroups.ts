@@ -1,6 +1,7 @@
 import { GroupStore } from "./GroupStore.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
+import type { RemoteTerminalGroupState } from "./protocol.js";
 
 export interface ConnectGroupsOptions {
     /** Base URL of a Rig endpoint serving the protocol over HTTP. */
@@ -20,6 +21,8 @@ export interface ConnectGroupsOptions {
 export interface GroupsConnection {
     /** The current project tree. Same identity until something changes. */
     projects: () => readonly ProjectGroup[];
+    /** Open terminal tabs grouped by their project/workspace scope. */
+    remoteTerminals: () => readonly RemoteTerminalGroupState[];
     state: () => GroupsState;
     /** Releases every resource held by this connection. */
     close: () => void;
@@ -71,6 +74,7 @@ export function connectGroups(options: ConnectGroupsOptions): GroupsConnection {
 
     return {
         projects: () => store.projects(),
+        remoteTerminals: () => store.remoteTerminals(),
         state: () => store.state(),
         close: () => {
             if (closed) return;

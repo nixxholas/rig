@@ -37,7 +37,9 @@ export async function streamGlobalEvents(options: GlobalStreamOptions): Promise<
 
     while (!options.signal.aborted) {
         try {
-            cursor = await readStreamOnce(fetchImpl, cursor, options);
+            cursor = await readStreamOnce(fetchImpl, cursor, options, (accepted) => {
+                cursor = accepted;
+            });
             retryDelay = options.retryDelayMs ?? INITIAL_RETRY_MS;
             if (options.signal.aborted) return;
             options.onDisconnected(new Error("The group stream closed."));
@@ -58,6 +60,7 @@ async function readStreamOnce(
     fetchImpl: typeof globalThis.fetch,
     after: string | undefined,
     options: GlobalStreamOptions,
+    onCursor: (cursor: string) => void,
 ): Promise<string | undefined> {
     const url = new URL("events/stream", endpointBase(options.endpoint));
     if (after !== undefined) url.searchParams.set("after", after);
@@ -80,12 +83,16 @@ async function readStreamOnce(
             // The frame's cursor is where the log resumes, so a reconnect picks
             // up exactly where this snapshot ended.
             cursor = hello.cursor;
+            onCursor(cursor);
             continue;
         }
         options.onEvent(frame.data as GlobalEvent);
         // Live events carry no id, and taking one as a cursor would make a
         // reconnect skip the stored events after it.
-        if (frame.id !== undefined) cursor = frame.id;
+        if (frame.id !== undefined) {
+            cursor = frame.id;
+            onCursor(cursor);
+        }
     }
     return cursor;
 }

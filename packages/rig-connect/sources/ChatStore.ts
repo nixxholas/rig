@@ -63,6 +63,8 @@ export class ChatStore {
     #elements: readonly ChatElement[] = [];
     /** Authoritative insertion order before pending steering is pinned to the tail. */
     #chronologicalElementIds: string[] = [];
+    /** Avoids an order scan on the overwhelmingly common no-pending fast path. */
+    #hasPinnedSteering = false;
     #session: SessionState;
     #turnId: string | undefined;
     #turnStartedAt = new Map<string, number>();
@@ -71,6 +73,7 @@ export class ChatStore {
     #byId = new Map<string, ChatElement>();
     /** In-flight tool calls by the daemon's tool-call id. */
     #toolCallElementIds = new Map<string, string>();
+    #permissionReviewsByToolCallId = new Map<string, PermissionReviewState>();
     /** Streaming blocks of the message being generated, keyed by content index. */
     #streamingElementIds = new Map<number, string>();
     #streamingMessageId: string | undefined;
@@ -105,6 +108,7 @@ export class ChatStore {
     #loadedTranscript: SessionTranscriptWindow | undefined;
     /** Invalidates an earlier-page response whenever the transcript is replaced. */
     #transcriptGeneration = 0;
+    #activeLoadMoreAnchor: { before: string; generation: number } | undefined;
     /**
      * Elements from before a rebuild, so identical rows keep their reference.
      *
@@ -175,8 +179,10 @@ export class ChatStore {
             ...withoutKeys(this.#session, ["loadMoreError"]),
             loadingMore: true,
         };
+        const anchor = { before, generation: this.#transcriptGeneration };
+        this.#activeLoadMoreAnchor = anchor;
         return {
-            anchor: { before, generation: this.#transcriptGeneration },
+            anchor,
             deltas: this.#finish([], this.#revision, sessionBefore),
         };
     }
@@ -190,9 +196,14 @@ export class ChatStore {
             anchor.generation !== this.#transcriptGeneration ||
             anchor.before !== this.earliestRunId()
         ) {
-            return [];
+            if (this.#activeLoadMoreAnchor !== anchor) return [];
+            const before = this.#session;
+            this.#activeLoadMoreAnchor = undefined;
+            this.#session = { ...this.#session, loadingMore: false };
+            return this.#finish([], this.#revision, before);
         }
         const before = this.#session;
+        this.#activeLoadMoreAnchor = undefined;
         this.#session = { ...this.#session, loadMoreError: message, loadingMore: false };
         return this.#finish([], this.#revision, before);
     }
@@ -215,6 +226,8 @@ export class ChatStore {
             (anchor.generation !== this.#transcriptGeneration ||
                 anchor.before !== this.earliestRunId())
         ) {
+            if (this.#activeLoadMoreAnchor !== anchor) return [];
+            this.#activeLoadMoreAnchor = undefined;
             this.#session = {
                 ...withoutKeys(this.#session, ["loadMoreError"]),
                 loadingMore: false,
@@ -226,13 +239,31 @@ export class ChatStore {
             ...(page.messageCreatedAt ?? {}),
             ...(loaded?.messageCreatedAt ?? {}),
         };
+        const messageEventId = {
+            ...(page.messageEventId ?? {}),
+            ...(loaded?.messageEventId ?? {}),
+        };
+        const permissionReviews = [
+            ...new Map(
+                [...(loaded?.permissionReviews ?? []), ...(page.permissionReviews ?? [])].map(
+                    (review) => [review.toolCallId, review],
+                ),
+            ).values(),
+        ];
         const merged: SessionTranscriptWindow = {
             complete: page.complete,
             ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
+            ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
+            ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
             messages: [...page.messages, ...(loaded?.messages ?? [])],
             turns: [...page.turns, ...(loaded?.turns ?? [])],
         };
-        this.#resetTranscript(merged.messages, deltas, merged, this.#session.activeTurn);
+        this.#prependTranscriptPage(page);
+        for (const review of page.permissionReviews ?? []) {
+            this.#permissionReviewsByToolCallId.set(review.toolCallId, review);
+        }
+        this.#loadedTranscript = merged;
+        this.#activeLoadMoreAnchor = undefined;
         const loadMoreToken = merged.complete ? undefined : historyToken(merged);
         this.#session = {
             ...withoutKeys(this.#session, ["loadMoreError", "loadMoreToken"]),
@@ -241,6 +272,44 @@ export class ChatStore {
             transcriptComplete: merged.complete,
         };
         return this.#finish(deltas, revisionBefore, sessionBefore);
+    }
+
+    /**
+     * Builds only the older page and inserts it ahead of the current list.
+     *
+     * Rebuilding from `#loadedTranscript` is incorrect while a page is in flight:
+     * committed messages, streaming blocks, retries, and steering can all arrive
+     * after the request anchor. A detached store projects the bounded old page,
+     * then those immutable rows are prepended without touching the live tail.
+     */
+    #prependTranscriptPage(page: SessionTranscriptWindow): void {
+        const older = new ChatStore(this.#session.sessionId);
+        older.#permissionReviewsByToolCallId = new Map([
+            ...this.#permissionReviewsByToolCallId,
+            ...(page.permissionReviews ?? []).map((review) => [review.toolCallId, review] as const),
+        ]);
+        older.#resetTranscript(page.messages, [], page);
+        const additions = older.#elements.filter((element) => !this.#byId.has(element.id));
+        if (additions.length === 0) return;
+
+        for (const element of additions) this.#byId.set(element.id, element);
+        for (const messageId of older.#appliedMessageIds) this.#appliedMessageIds.add(messageId);
+        for (const [runId, startedAt] of older.#turnStartedAt) {
+            if (!this.#turnStartedAt.has(runId)) this.#turnStartedAt.set(runId, startedAt);
+        }
+        const additionIds = additions.map((element) => element.id);
+        const additionIdSet = new Set(additionIds);
+        this.#chronologicalElementIds = [
+            ...additionIds,
+            ...this.#chronologicalElementIds.filter((id) => !additionIdSet.has(id)),
+        ];
+        this.#elements = [...additions, ...this.#elements];
+        this.#reindex();
+        this.#revision += 1;
+        if (additions.some((element) => element.kind === "tool_call")) {
+            this.#groupingDirty = true;
+        }
+        this.#presentPendingSteeringAtTail();
     }
 
     elements(): readonly ChatElement[] {
@@ -349,6 +418,9 @@ export class ChatStore {
                     serviceTier: string | null;
                 };
                 const providerId = data.providerId ?? this.#session.providerId;
+                const modelChanged =
+                    data.modelId !== this.#session.modelId ||
+                    providerId !== this.#session.providerId;
                 // Effort and service tier are cleared by omission and by null
                 // respectively, so both are written every time rather than
                 // merged, or a cleared value would linger.
@@ -359,10 +431,15 @@ export class ChatStore {
                     ...(this.#session.usage === undefined
                         ? {}
                         : {
-                              usage: {
-                                  ...this.#session.usage,
-                                  currentProviderId: providerId,
-                              },
+                              usage: modelChanged
+                                  ? {
+                                        ...withoutUsageContext(this.#session.usage),
+                                        currentProviderId: providerId,
+                                    }
+                                  : {
+                                        ...this.#session.usage,
+                                        currentProviderId: providerId,
+                                    },
                           }),
                     ...(data.effort === undefined ? {} : { effort: data.effort }),
                     ...(data.serviceTier === null ? {} : { serviceTier: data.serviceTier }),
@@ -528,6 +605,23 @@ export class ChatStore {
                 this.#recordProviderQuota(data.providerId, data.quota);
                 break;
             }
+            case "session_quota_contribution_changed": {
+                const usage = this.#session.usage;
+                if (usage !== undefined) {
+                    this.#session = {
+                        ...this.#session,
+                        usage: {
+                            ...usage,
+                            observedQuota: (
+                                event.data as {
+                                    observedQuota: SessionUsageSnapshot["observedQuota"];
+                                }
+                            ).observedQuota,
+                        },
+                    };
+                }
+                break;
+            }
             case "agent_event":
                 this.#applyAgentEvent(
                     (event.data as { event: AgentLoopEvent }).event,
@@ -610,6 +704,9 @@ export class ChatStore {
                             }
                           : { usage: withoutUsageContext(usage) }),
                 };
+                if (event.type === "session_reset") {
+                    this.#permissionReviewsByToolCallId.clear();
+                }
                 break;
             }
             default:
@@ -717,6 +814,11 @@ export class ChatStore {
                 : { tokens: session.sessionTokenCount }),
             ...(usage === undefined ? {} : { usage: applicationUsage(usage) }),
         };
+        this.#permissionReviewsByToolCallId = new Map(
+            [...(session.permissionReviews ?? []), ...(transcript?.permissionReviews ?? [])].map(
+                (review) => [review.toolCallId, review],
+            ),
+        );
         this.#resetTranscript(
             session.snapshot.messages,
             [],
@@ -726,6 +828,12 @@ export class ChatStore {
                 : { startedAt: session.activeTurn.startedAt, turnId: session.activeTurn.runId },
             true,
         );
+        for (const review of session.permissionReviews ?? []) {
+            const elementId = `tool:${review.toolCallId}`;
+            if (this.#byId.get(elementId)?.kind === "tool_call") {
+                this.#update(elementId, { permissionReview: review });
+            }
+        }
         for (const pending of session.pendingSteeringMessages ?? []) {
             this.#applyMessage(
                 pending.message,
@@ -760,6 +868,7 @@ export class ChatStore {
         this.#priorElements = new Map(this.#byId);
         this.#elements = [];
         this.#chronologicalElementIds = [];
+        this.#hasPinnedSteering = false;
         this.#byId.clear();
         this.#indexById.clear();
         this.#groupingDirty = true;
@@ -822,6 +931,7 @@ export class ChatStore {
                         : [
                               {
                                   at: transcript.messageCreatedAt?.[messageId] ?? turn.startedAt,
+                                  eventId: transcript.messageEventId?.[messageId],
                                   kind: "message" as const,
                                   message,
                                   order,
@@ -830,11 +940,17 @@ export class ChatStore {
                 }),
                 ...(turn.retries ?? []).map((retry, order) => ({
                     at: retry.createdAt,
+                    eventId: retry.id,
                     kind: "retry" as const,
                     order: turn.messageIds.length + order,
                     retry,
                 })),
-            ].sort((left, right) => left.at - right.at || left.order - right.order);
+            ].sort(
+                (left, right) =>
+                    left.at - right.at ||
+                    compareEventOrder(left.eventId, right.eventId) ||
+                    left.order - right.order,
+            );
             for (const item of timeline) {
                 if (item.kind === "message") {
                     this.#applyMessage(item.message, item.at, deltas, turn.runId);
@@ -1144,7 +1260,10 @@ export class ChatStore {
             ...usage.quotas.filter((entry) => entry.providerId !== providerId),
             { providerId, quota },
         ];
-        this.#session = { ...this.#session, usage: { ...usage, quotas } };
+        this.#session = {
+            ...this.#session,
+            usage: { ...usage, quotas },
+        };
     }
 
     /** Applies one committed message, expanding its blocks into elements. */
@@ -1447,6 +1566,7 @@ export class ChatStore {
                     toolCallId: review.toolCallId,
                     userAuthorization: review.userAuthorization,
                 };
+                this.#permissionReviewsByToolCallId.set(next.toolCallId, next);
                 const elementId = this.#toolCallElementIds.get(next.toolCallId);
                 if (elementId !== undefined) {
                     this.#update(elementId, { permissionReview: next });
@@ -1596,6 +1716,13 @@ export class ChatStore {
             status: "pending",
             toolCallId: block.id,
             turnId,
+            ...(this.#permissionReviewsByToolCallId.get(block.id) === undefined
+                ? {}
+                : {
+                      permissionReview: this.#permissionReviewsByToolCallId.get(
+                          block.id,
+                      ) as PermissionReviewState,
+                  }),
             ...presentationOf(projectToolPresentation(block.presentation, undefined)),
         };
         this.#append(element);
@@ -1730,6 +1857,8 @@ export class ChatStore {
         const pendingIds = this.#session.pendingSteeringMessages
             .map((pending) => `message:${pending.message.id}`)
             .filter((id) => this.#byId.get(id)?.kind === "user_message");
+        if (pendingIds.length === 0 && !this.#hasPinnedSteering) return;
+        this.#hasPinnedSteering = pendingIds.length > 0;
         const pending = new Set(pendingIds);
         const orderedIds = [
             ...this.#chronologicalElementIds.filter((id) => this.#byId.has(id) && !pending.has(id)),
@@ -1768,6 +1897,11 @@ function streamKey(kind: string, index: number): number {
     // independently by the provider, so the kind has to be part of the key.
     const offset = kind === "agent_text" ? 0 : kind === "thinking" ? 1_000_000 : 2_000_000;
     return offset + index;
+}
+
+function compareEventOrder(left: string | undefined, right: string | undefined): number {
+    if (left === undefined || right === undefined || left === right) return 0;
+    return left < right ? -1 : 1;
 }
 
 function toolStatus(result: {

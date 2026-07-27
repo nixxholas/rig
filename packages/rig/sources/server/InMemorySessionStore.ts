@@ -56,6 +56,7 @@ export class InMemorySessionStore implements SessionStore {
     #mcpToolProvider: McpToolProvider | undefined;
     #projectSecretIds = new Map<string, Set<string>>();
     #database = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
+    readonly #createTerminalEventId = createEventIdFactory();
     readonly #projects: ProjectRepository;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
     readonly remoteTerminals: ProjectRemoteTerminalStore;
@@ -77,6 +78,16 @@ export class InMemorySessionStore implements SessionStore {
             transaction: (body) => this.#transaction(body),
         });
         this.remoteTerminals = new ProjectRemoteTerminalStore({
+            onChange: (scope, terminals) => {
+                this.globalEventQueue.publishLive({
+                    createdAt: Date.now(),
+                    data: { terminals },
+                    id: this.#createTerminalEventId(),
+                    projectId: scope.projectId,
+                    type: "remote_terminals_changed",
+                    ...(scope.workspaceId === undefined ? {} : { workspaceId: scope.workspaceId }),
+                });
+            },
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
         this.#secrets = new SecretRegistry(options.secrets);

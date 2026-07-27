@@ -18,6 +18,77 @@ import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
+    it("restores only a bounded resume tail for an old session", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-bounded-events-"));
+        const databasePath = join(directory, "sessions.sqlite");
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            const session = store.create({ cwd: "/tmp/rig-bounded-events" });
+            const sessionId = session.id;
+            store.close();
+
+            const database = new DatabaseSync(databasePath);
+            const previous = database
+                .prepare("SELECT last_event_id FROM sessions WHERE id = ?")
+                .get(sessionId) as { last_event_id: string };
+            const createId = createEventIdFactory({ after: previous.last_event_id });
+            const oldMessage = textUserMessage("old-message", "Old history");
+            database
+                .prepare(
+                    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 0, ?, 'user', 0, 'run-old', ?, ?)",
+                )
+                .run(sessionId, oldMessage.id, JSON.stringify(oldMessage), 1_700_000_000_000);
+            database
+                .prepare(
+                    "INSERT INTO session_turns (session_id, run_id, first_position) VALUES (?, 'run-old', 0)",
+                )
+                .run(sessionId);
+            insertSessionEvent(database, sessionId, createId(), "message_submitted", {
+                delivery: "run",
+                displayText: "Old history",
+                message: oldMessage,
+                runId: "run-old",
+            });
+            insertSessionEvent(database, sessionId, createId(), "run_finished", {
+                modelLocked: false,
+                runId: "run-old",
+                stopReason: "stop",
+            });
+            const insert = database.prepare(
+                "INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json) VALUES (?, ?, 'session_updated', ?, ?)",
+            );
+            let lastEventId = previous.last_event_id;
+            database.exec("BEGIN");
+            for (let index = 0; index < 5_000; index += 1) {
+                lastEventId = createId();
+                insert.run(sessionId, lastEventId, 1_700_000_000_000 + index, "{}");
+            }
+            database
+                .prepare("UPDATE sessions SET last_event_id = ? WHERE id = ?")
+                .run(lastEventId, sessionId);
+            database.exec("COMMIT");
+            database.close();
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                const restored = restoredStore.get(sessionId);
+                expect(restored?.events.all()).toHaveLength(4_096);
+                expect(restored?.events.lastEventId()).toBe(lastEventId);
+                expect(restored?.transcriptWindow().turns).toEqual([
+                    expect.objectContaining({
+                        outcome: "success",
+                        runId: "run-old",
+                        startedAt: 1_700_000_000_000,
+                    }),
+                ]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
     it("lists every active session without materializing archived history", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         try {
@@ -3100,14 +3171,29 @@ function insertSessionEvent(
     type: SessionEvent["type"],
     data: unknown,
 ): void {
+    const record = data as Record<string, unknown>;
+    const message = record.message as { id?: unknown } | undefined;
+    const inner = record.event as { toolCallId?: unknown } | undefined;
     database
         .prepare(
             `
-            INSERT INTO session_events (session_id, event_id, type, created_at_ms, data_json)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO session_events (
+                session_id, event_id, type, created_at_ms, data_json,
+                run_id, message_id, tool_call_id
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `,
         )
-        .run(sessionId, id, type, 1_700_000_000_000, JSON.stringify(data));
+        .run(
+            sessionId,
+            id,
+            type,
+            1_700_000_000_000,
+            JSON.stringify(data),
+            typeof record.runId === "string" ? record.runId : null,
+            typeof message?.id === "string" ? message.id : null,
+            typeof inner?.toolCallId === "string" ? inner.toolCallId : null,
+        );
 }
 
 function insertEvent<TType extends import("../protocol/index.js").SessionEvent["type"]>(

@@ -43,7 +43,9 @@ export async function streamSessionEvents(options: SessionStreamOptions): Promis
 
     while (!options.signal.aborted) {
         try {
-            cursor = await readStreamOnce(fetchImpl, cursor, options);
+            cursor = await readStreamOnce(fetchImpl, cursor, options, (accepted) => {
+                cursor = accepted;
+            });
             retryDelay = options.retryDelayMs ?? INITIAL_RETRY_MS;
             if (options.signal.aborted) return;
             // A stream that ends without an error is a closed connection rather
@@ -80,6 +82,7 @@ async function readStreamOnce(
     fetchImpl: typeof globalThis.fetch,
     after: EventId | undefined,
     options: SessionStreamOptions,
+    onCursor: (cursor: EventId) => void,
 ): Promise<EventId | undefined> {
     const url = new URL(
         `sessions/${encodeURIComponent(options.sessionId)}/stream`,
@@ -104,14 +107,18 @@ async function readStreamOnce(
     let cursor = after;
     for await (const frame of readSseFrames(response.body)) {
         if (frame.name === "hello") {
-            // The opening frame is current state, not a logged event, so it
-            // never becomes the cursor a reconnect resumes from.
-            options.onHello(frame.data as SessionStreamHello);
+            const hello = frame.data as SessionStreamHello;
+            options.onHello(hello);
+            if (hello.lastEventId !== undefined) {
+                cursor = hello.lastEventId;
+                onCursor(cursor);
+            }
             continue;
         }
         const event = frame.data as SessionEvent;
         options.onEvent(event);
         cursor = event.id;
+        onCursor(cursor);
     }
     return cursor;
 }

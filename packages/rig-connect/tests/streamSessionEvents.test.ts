@@ -13,9 +13,10 @@ function sse(frames: readonly string[]): ReadableStream<Uint8Array> {
     });
 }
 
-function helloFrame(resumed: boolean): string {
+function helloFrame(resumed: boolean, lastEventId?: string): string {
     const hello: SessionStreamHello = {
         activity: { kind: "idle", label: "Idle", since: 0 },
+        ...(lastEventId === undefined ? {} : { lastEventId }),
         resumed,
     };
     return `event: hello\ndata: ${JSON.stringify(hello)}\n\n`;
@@ -108,7 +109,7 @@ describe("streamSessionEvents", () => {
         expect(attempts).toEqual([{ after: null }, { after: "event-1" }]);
     });
 
-    it("does not let the hello frame move the resume cursor", async () => {
+    it("resumes a quiet stream from the cursor covered by its hello frame", async () => {
         const controller = new AbortController();
         const attempts: Attempt[] = [];
         let connections = 0;
@@ -118,7 +119,10 @@ describe("streamSessionEvents", () => {
             sessionId: "session-1",
             signal: controller.signal,
             token: "secret",
-            fetch: scriptedFetch([[helloFrame(false)], [helloFrame(true)]], attempts),
+            fetch: scriptedFetch(
+                [[helloFrame(false, "event-in-hello")], [helloFrame(true)]],
+                attempts,
+            ),
             onHello: () => {
                 connections += 1;
                 if (connections === 2) controller.abort();
@@ -128,7 +132,7 @@ describe("streamSessionEvents", () => {
             wait: () => Promise.resolve(),
         });
 
-        expect(attempts).toEqual([{ after: null }, { after: null }]);
+        expect(attempts).toEqual([{ after: null }, { after: "event-in-hello" }]);
     });
 
     it("reports every disconnection to the subscriber", async () => {

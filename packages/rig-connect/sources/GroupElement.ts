@@ -1,5 +1,10 @@
 import type { ConnectionState } from "./ChatElement.js";
-import type { GitChangeSnapshot, SessionStatus, SessionTokenCount } from "./protocol.js";
+import type {
+    GitChangeSnapshot,
+    RemoteTerminalSummary,
+    SessionStatus,
+    SessionTokenCount,
+} from "./protocol.js";
 
 export interface GroupUsage {
     readonly totalTokens: number;
@@ -50,6 +55,8 @@ export interface ProjectGroup {
     readonly usage: GroupUsage;
     /** Live Git state, present once the daemon is watching this project. */
     readonly git?: GitChangeSnapshot;
+    /** Interactive terminals currently open for this project directory. */
+    readonly terminals: readonly RemoteTerminalSummary[];
     /** Worktrees of this project, ordered. */
     readonly workspaces: readonly WorkspaceGroup[];
     /** Sessions belonging to the project itself rather than to a worktree. */
@@ -67,6 +74,8 @@ export interface WorkspaceGroup {
     readonly title?: string;
     readonly usage: GroupUsage;
     readonly git?: GitChangeSnapshot;
+    /** Interactive terminals currently open for this workspace directory. */
+    readonly terminals: readonly RemoteTerminalSummary[];
     readonly sessions: readonly GroupSession[];
 }
 

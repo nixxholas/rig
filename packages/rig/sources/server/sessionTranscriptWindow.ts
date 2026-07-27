@@ -1,9 +1,11 @@
 import type { Message } from "../agent/types.js";
 import type {
+    EventId,
     SessionTranscriptRetry,
     SessionTranscriptTurn,
     SessionTranscriptWindow,
 } from "../protocol/index.js";
+import type { SessionEvent } from "../protocol/index.js";
 
 /** When a run began, ended, and how, gathered from the durable event log. */
 export interface TranscriptRunFacts {
@@ -16,8 +18,63 @@ export interface TranscriptRunFacts {
 
 export interface TranscriptEntry {
     createdAt?: number;
+    eventId?: EventId;
     message: Message;
     runId?: string;
+}
+
+export function transcriptRunFacts(
+    events: readonly SessionEvent[],
+): ReadonlyMap<string, TranscriptRunFacts> {
+    const facts = new Map<string, TranscriptRunFacts>();
+    for (const event of events) {
+        if (
+            (event.type === "message_submitted" && event.data.delivery === "run") ||
+            event.type === "run_started"
+        ) {
+            if (!facts.has(event.data.runId)) {
+                facts.set(event.data.runId, { startedAt: event.createdAt });
+            }
+        } else if (event.type === "inference_retry") {
+            const known = facts.get(event.data.runId) ?? { startedAt: event.createdAt };
+            facts.set(event.data.runId, {
+                ...known,
+                retries: [
+                    ...(known.retries ?? []),
+                    {
+                        attempt: event.data.attempt,
+                        createdAt: event.createdAt,
+                        id: event.id,
+                        reason: event.data.reason,
+                    },
+                ],
+            });
+        } else if (event.type === "run_finished") {
+            const known = facts.get(event.data.runId);
+            facts.set(event.data.runId, {
+                ...(known ?? { startedAt: event.createdAt }),
+                endedAt: event.createdAt,
+                outcome:
+                    event.data.stopReason === "error"
+                        ? "error"
+                        : event.data.stopReason === "aborted"
+                          ? "stopped"
+                          : "success",
+                ...(event.data.errorMessage === undefined
+                    ? {}
+                    : { errorMessage: event.data.errorMessage }),
+            });
+        } else if (event.type === "run_error") {
+            const known = facts.get(event.data.runId);
+            facts.set(event.data.runId, {
+                ...(known ?? { startedAt: event.createdAt }),
+                endedAt: event.createdAt,
+                errorMessage: event.data.errorMessage,
+                outcome: "error",
+            });
+        }
+    }
+    return facts;
 }
 
 /**
@@ -96,9 +153,17 @@ export function sessionTranscriptWindow(
             ),
         ),
     );
+    const messageEventId = Object.fromEntries(
+        kept.flatMap((group) =>
+            group.entries.flatMap((entry) =>
+                entry.eventId === undefined ? [] : [[entry.message.id, entry.eventId]],
+            ),
+        ),
+    );
     return {
         complete: kept.length === earlier.length,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
+        ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
         messages: kept.flatMap((group) => group.entries.map((entry) => entry.message)),
         turns,
     };

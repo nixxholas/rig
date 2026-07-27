@@ -7,8 +7,8 @@ we build later — should get the live state of a session by embedding one small
 library and subscribing to one thing. That library is `rig-connect`.
 
 Today a client that wants to show a conversation has to do the work itself: open
-the session stream, learn from an event that *something* changed, then issue more
-HTTP requests to find out *what* changed, and finally reassemble a transcript.
+the session stream, learn from an event that _something_ changed, then issue more
+HTTP requests to find out _what_ changed, and finally reassemble a transcript.
 The events are notifications, not data. Every UI ends up reimplementing the same
 fragile reconstruction, and every UI pays for it in latency, requests, and bugs.
 
@@ -159,6 +159,9 @@ is the design constraint, not an optimization.
   is no repeated "get the difference" call, no polling loop, no fan-out of
   requests after each notification. Whoever implements the protocol today makes
   far too many requests, and that is exactly the outcome we are removing.
+- **Groups are complete.** The opening frame always carries every unarchived
+  project, workspace, and session. These lists are not paged and never need a
+  load-more action.
 - **Difference is a recovery path.** Asking for a difference exists only for the
   case where a client has genuinely lost its state and Rig can no longer produce
   a delta from memory. It is the exception, and it should be rare enough to

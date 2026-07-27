@@ -22,6 +22,7 @@ import type {
     SessionAgentMetadata,
     SessionInterruption,
     SessionSummary,
+    SessionTranscriptWindow,
     SessionTokenCount,
     SessionUnreadReason,
     SubagentSummary,
@@ -49,6 +50,7 @@ import type { McpToolProvider } from "../mcp/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { summarizeDockerExecution } from "../execution/index.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
+import type { SessionUsageSummary } from "./sessionUsage/index.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
@@ -71,6 +73,15 @@ import {
     type ProjectRemoteTerminalContext,
     type RemoteTerminalScope,
 } from "../terminal/index.js";
+import { SessionEventLog } from "./SessionEventLog.js";
+import {
+    sessionTranscriptWindow,
+    transcriptRunFacts,
+    type TranscriptEntry,
+} from "./sessionTranscriptWindow.js";
+
+const RESTORED_SESSION_EVENT_LIMIT = 4_096;
+const RESTORED_SESSION_MESSAGE_LIMIT = 256;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -91,6 +102,7 @@ export interface PersistentSessionStoreOptions {
 export class PersistentSessionStore implements SessionStore, InMemorySessionPersistence {
     #agentManager: AgentSessionManager;
     #createRuntime: InMemorySessionOptions["createRuntime"];
+    readonly #createTerminalEventId = createEventIdFactory();
     #database: DatabaseSync;
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
@@ -153,6 +165,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                   : { stateDirectory: dirname(options.databasePath) }),
         });
         this.remoteTerminals = new ProjectRemoteTerminalStore({
+            onChange: (scope, terminals) => {
+                this.#globalEventQueue.publishLive({
+                    createdAt: this.#now(),
+                    data: { terminals },
+                    id: this.#createTerminalEventId(),
+                    projectId: scope.projectId,
+                    type: "remote_terminals_changed",
+                    ...(scope.workspaceId === undefined ? {} : { workspaceId: scope.workspaceId }),
+                });
+            },
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
         this.#agentManager = new AgentSessionManager({
@@ -230,12 +252,25 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     clearMessages(sessionId: string): void {
         this.#database.prepare("DELETE FROM session_messages WHERE session_id = ?").run(sessionId);
+        this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
     }
 
     deleteMessagesFrom(sessionId: string, position: number): void {
         this.#database
             .prepare("DELETE FROM session_messages WHERE session_id = ? AND position >= ?")
             .run(sessionId, position);
+        this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
+        this.#database
+            .prepare(
+                `
+                INSERT INTO session_turns (session_id, run_id, first_position)
+                SELECT session_id, run_id, MIN(position)
+                FROM session_messages
+                WHERE session_id = ? AND run_id IS NOT NULL AND is_partial = 0
+                GROUP BY session_id, run_id
+                `,
+            )
+            .run(sessionId);
     }
 
     close(): void {
@@ -722,6 +757,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 const activeSince = readOptionalNumber(row, "active_since_ms");
                 const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
                 const usageJson = readOptionalString(row, "usage_json");
+                const persistedUsage = parsePersistedUsage(usageJson);
                 return {
                     ...(activeSince === undefined ? {} : { activeSince }),
                     agentId: readString(row, "agent_id"),
@@ -744,7 +780,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                               ) as SessionTokenCount,
                           }),
                     updatedAt: readNumber(row, "updated_at_ms"),
-                    ...(usageJson === undefined ? {} : { usage: JSON.parse(usageJson) as Usage }),
+                    ...(persistedUsage === undefined ? {} : { usage: persistedUsage.committed }),
                 };
             });
     }
@@ -1341,7 +1377,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 state.sessionTokenCount === undefined
                     ? null
                     : JSON.stringify(state.sessionTokenCount),
-                state.usage === undefined ? null : JSON.stringify(state.usage),
+                state.usage === undefined
+                    ? null
+                    : JSON.stringify({
+                          committed: state.usage,
+                          ...(state.usageSummary === undefined
+                              ? {}
+                              : { summary: state.usageSummary }),
+                          permissionReviews: state.permissionReviews ?? [],
+                      } satisfies PersistedUsageEnvelope),
                 state.permissionMode,
                 state.contextMessages === undefined ? null : JSON.stringify(state.contextMessages),
                 JSON.stringify(state.models),
@@ -1405,6 +1449,76 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 JSON.stringify(message.message),
                 this.#now(),
             );
+        if (!message.isPartial && message.runId !== undefined) {
+            this.#database
+                .prepare(
+                    `
+                    INSERT INTO session_turns (session_id, run_id, first_position)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(session_id, run_id) DO UPDATE SET
+                        first_position = MIN(first_position, excluded.first_position)
+                    `,
+                )
+                .run(sessionId, message.runId, message.position);
+        }
+    }
+
+    loadTranscriptPage(
+        sessionId: string,
+        turnLimit: number,
+        before?: string,
+    ): SessionTranscriptWindow | undefined {
+        const messages = this.#loadTranscriptMessagesPage(sessionId, turnLimit, before);
+        if (messages === undefined) return undefined;
+        const events = this.#loadTranscriptEvents(sessionId, messages);
+        const eventLog = new SessionEventLog({
+            events,
+            retentionLimit: Number.MAX_SAFE_INTEGER,
+        });
+        const entries = messages
+            .filter((entry) => !entry.isPartial)
+            .map((entry): TranscriptEntry => {
+                const createdAt = eventLog.messageCreatedAt(entry.message.id);
+                const eventId = eventLog.messageEventId(entry.message.id);
+                return {
+                    ...(createdAt === undefined ? {} : { createdAt }),
+                    ...(eventId === undefined ? {} : { eventId }),
+                    message: entry.message,
+                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                };
+            });
+        const window = sessionTranscriptWindow(
+            entries,
+            transcriptRunFacts(events),
+            turnLimit,
+            undefined,
+        );
+        if (window === undefined) return undefined;
+        const toolCallIds = new Set(
+            window.messages.flatMap((message) =>
+                message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
+            ),
+        );
+        const permissionReviews = eventLog.permissionReviews(toolCallIds);
+        const firstPosition = messages[0]?.position;
+        const hasEarlier =
+            firstPosition !== undefined &&
+            this.#database
+                .prepare(
+                    `
+                    SELECT 1
+                    FROM session_messages
+                    WHERE session_id = ? AND position < ? AND is_partial = 0
+                      AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
+                    LIMIT 1
+                    `,
+                )
+                .get(sessionId, firstPosition) !== undefined;
+        return {
+            ...window,
+            complete: !hasEarlier,
+            ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
+        };
     }
 
     upsertExternalToolCall(call: ExternalToolCall): void {
@@ -1574,6 +1688,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.#notifySessionEvent(event);
             return;
         }
+        const eventFacts = sessionEventFacts(event);
         let globalEntry: ReturnType<GlobalEventQueue["append"]>;
         this.#transaction(() => {
             this.#database
@@ -1584,9 +1699,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         event_id,
                         type,
                         created_at_ms,
-                        data_json
+                        data_json,
+                        run_id,
+                        message_id,
+                        tool_call_id
                     )
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     `,
                 )
                 .run(
@@ -1595,6 +1713,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     event.type,
                     event.createdAt,
                     JSON.stringify(event.data),
+                    eventFacts.runId ?? null,
+                    eventFacts.messageId ?? null,
+                    eventFacts.toolCallId ?? null,
                 );
             if (this.#globalEventQueue.durable) {
                 globalEntry = this.#globalEventQueue.append(event);
@@ -1688,17 +1809,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
     }
 
-    #loadEvents(sessionId: string): SessionEvent[] {
+    #loadEvents(sessionId: string, bounded = true): SessionEvent[] {
         const rows = this.#database
             .prepare(
+                bounded
+                    ? `
+                SELECT event_id, type, created_at_ms, data_json
+                FROM (
+                    SELECT seq, event_id, type, created_at_ms, data_json
+                    FROM session_events
+                    WHERE session_id = ?
+                    ORDER BY seq DESC
+                    LIMIT ?
+                )
+                ORDER BY seq ASC
                 `
+                    : `
                 SELECT event_id, type, created_at_ms, data_json
                 FROM session_events
                 WHERE session_id = ?
                 ORDER BY seq ASC
                 `,
             )
-            .iterate(sessionId);
+            .iterate(...(bounded ? [sessionId, RESTORED_SESSION_EVENT_LIMIT] : [sessionId]));
         const events: SessionEvent[] = [];
         for (const row of rows) {
             const event = {
@@ -1713,17 +1846,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return events;
     }
 
-    #loadMessages(sessionId: string): PersistedSessionMessage[] {
+    #loadMessages(sessionId: string, bounded = true): PersistedSessionMessage[] {
         return this.#database
             .prepare(
+                bounded
+                    ? `
+                SELECT position, is_partial, run_id, message_json
+                FROM (
+                    SELECT position, is_partial, run_id, message_json
+                    FROM session_messages
+                    WHERE session_id = ?
+                    ORDER BY position DESC
+                    LIMIT ?
+                )
+                ORDER BY position ASC
                 `
+                    : `
                 SELECT position, is_partial, run_id, message_json
                 FROM session_messages
                 WHERE session_id = ?
                 ORDER BY position ASC
                 `,
             )
-            .all(sessionId)
+            .all(...(bounded ? [sessionId, RESTORED_SESSION_MESSAGE_LIMIT] : [sessionId]))
             .map((row) => {
                 const runId = readOptionalString(row, "run_id");
                 const message: PersistedSessionMessage = {
@@ -1886,6 +2031,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const interruptionJson = readOptionalString(row, "interruption_json");
         const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
         const usageJson = readOptionalString(row, "usage_json");
+        const persistedUsage = parsePersistedUsage(usageJson);
+        const transcriptMessages = this.#loadTranscriptMessagesPage(sessionId, 80) ?? [];
+        const messages = [
+            ...transcriptMessages,
+            ...this.#loadMessages(sessionId).filter((message) => message.isPartial),
+        ].sort((left, right) => left.position - right.position);
+        const messageCount = readNumber(
+            this.#database
+                .prepare("SELECT COUNT(*) AS count FROM session_messages WHERE session_id = ?")
+                .get(sessionId) as Record<string, unknown>,
+            "count",
+        );
         const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
         const modelId = readString(row, "model_id");
         const title = readOptionalString(row, "title");
@@ -1933,6 +2090,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : {}),
             ...(appendSystemPrompt !== undefined ? { appendSystemPrompt } : {}),
             ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+            createdAt: readNumber(row, "created_at_ms"),
             cwd: readString(row, "cwd"),
             ...(draft === undefined ? {} : { draft }),
             ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
@@ -1952,7 +2110,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ? { interruption: JSON.parse(interruptionJson) as SessionInterruption }
                 : {}),
             ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
-            messages: this.#loadMessages(sessionId),
+            messages,
             durableUserInputs: this.#loadDurableUserInputs(sessionId),
             externalToolCalls: this.#loadExternalToolCalls(sessionId),
             externalTools: JSON.parse(
@@ -1979,13 +2137,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
             ...(metadataRunId !== undefined ? { metadataRunId } : {}),
             titleStatus: readString(row, "title_status") as SessionTitleStatus,
+            transcriptHasEarlier: messageCount > messages.length,
             totalTokens: readNumber(row, "total_tokens"),
             ...(sessionTokenCountJson === undefined
                 ? {}
                 : {
                       sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount,
                   }),
-            ...(usageJson === undefined ? {} : { usage: JSON.parse(usageJson) as Usage }),
+            ...(persistedUsage === undefined ? {} : { usage: persistedUsage.committed }),
+            ...(persistedUsage?.summary === undefined
+                ? {}
+                : { usageSummary: persistedUsage.summary }),
+            ...(persistedUsage?.permissionReviews === undefined
+                ? {}
+                : { permissionReviews: persistedUsage.permissionReviews }),
             tools: JSON.parse(readString(row, "tools_json")) as string[],
         };
         if (activeRunId !== undefined) {
@@ -2094,6 +2259,101 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             id: readString(row, "id"),
             orderKey: readString(row, "order_key"),
         }));
+    }
+
+    #loadTranscriptMessagesPage(
+        sessionId: string,
+        turnLimit: number,
+        before?: string,
+    ): PersistedSessionMessage[] | undefined {
+        const runRows = this.#database
+            .prepare(
+                `
+                WITH ordered_runs AS (
+                    SELECT run_id, first_position
+                    FROM session_turns
+                    WHERE session_id = ?
+                ),
+                anchor AS (
+                    SELECT first_position FROM ordered_runs WHERE run_id = ?
+                )
+                SELECT run_id
+                FROM ordered_runs
+                WHERE ? IS NULL OR first_position < (SELECT first_position FROM anchor)
+                ORDER BY first_position DESC
+                LIMIT ?
+                `,
+            )
+            .all(sessionId, before ?? null, before ?? null, turnLimit) as Record<string, unknown>[];
+        if (before !== undefined && runRows.length === 0) {
+            const known = this.#database
+                .prepare(
+                    "SELECT 1 FROM session_messages WHERE session_id = ? AND run_id = ? LIMIT 1",
+                )
+                .get(sessionId, before);
+            if (known === undefined) return undefined;
+        }
+        const runIds = runRows.map((row) => readString(row, "run_id")).reverse();
+        if (runIds.length === 0) return [];
+        const placeholders = runIds.map(() => "?").join(", ");
+        return this.#database
+            .prepare(
+                `
+                SELECT position, is_partial, run_id, message_json
+                FROM session_messages
+                WHERE session_id = ? AND run_id IN (${placeholders})
+                ORDER BY position ASC
+                `,
+            )
+            .all(sessionId, ...runIds)
+            .map((row) => ({
+                isPartial: readNumber(row, "is_partial") !== 0,
+                message: JSON.parse(readString(row, "message_json")) as Message,
+                position: readNumber(row, "position"),
+                runId: readString(row, "run_id"),
+            }));
+    }
+
+    #loadTranscriptEvents(
+        sessionId: string,
+        messages: readonly PersistedSessionMessage[],
+    ): SessionEvent[] {
+        const runIds = [...new Set(messages.flatMap((entry) => entry.runId ?? []))];
+        const messageIds = messages.map((entry) => entry.message.id);
+        const toolCallIds = messages.flatMap((entry) =>
+            entry.message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
+        );
+        const clauses: string[] = [];
+        const values: string[] = [];
+        const addClause = (column: string, candidates: readonly string[]): void => {
+            if (candidates.length === 0) return;
+            clauses.push(`${column} IN (${candidates.map(() => "?").join(", ")})`);
+            values.push(...candidates);
+        };
+        addClause("run_id", runIds);
+        addClause("message_id", messageIds);
+        addClause("tool_call_id", toolCallIds);
+        if (clauses.length === 0) return [];
+        const rows = this.#database
+            .prepare(
+                `
+                SELECT event_id, type, created_at_ms, data_json
+                FROM session_events
+                WHERE session_id = ? AND (${clauses.join(" OR ")})
+                ORDER BY seq ASC
+                `,
+            )
+            .all(sessionId, ...values);
+        return rows.map(
+            (row) =>
+                ({
+                    createdAt: readNumber(row, "created_at_ms"),
+                    data: JSON.parse(readString(row, "data_json")) as SessionEvent["data"],
+                    id: readString(row, "event_id"),
+                    sessionId,
+                    type: readString(row, "type") as SessionEvent["type"],
+                }) as SessionEvent,
+        );
     }
 
     #remoteTerminalContext(scope: RemoteTerminalScope): ProjectRemoteTerminalContext {
@@ -2252,6 +2512,39 @@ function readOptionalNumber(row: Record<string, unknown>, key: string): number |
         return undefined;
     }
     return readNumber(row, key);
+}
+
+interface PersistedUsageEnvelope {
+    committed: Usage;
+    permissionReviews?: PersistedSessionState["permissionReviews"];
+    summary?: SessionUsageSummary;
+}
+
+function sessionEventFacts(event: SessionEvent): {
+    messageId?: string;
+    runId?: string;
+    toolCallId?: string;
+} {
+    const data = event.data as unknown as Record<string, unknown>;
+    const message =
+        typeof data.message === "object" && data.message !== null
+            ? (data.message as Record<string, unknown>)
+            : undefined;
+    const inner =
+        typeof data.event === "object" && data.event !== null
+            ? (data.event as Record<string, unknown>)
+            : undefined;
+    return {
+        ...(typeof message?.id === "string" ? { messageId: message.id } : {}),
+        ...(typeof data.runId === "string" ? { runId: data.runId } : {}),
+        ...(typeof inner?.toolCallId === "string" ? { toolCallId: inner.toolCallId } : {}),
+    };
+}
+
+function parsePersistedUsage(value: string | undefined): PersistedUsageEnvelope | undefined {
+    if (value === undefined) return undefined;
+    const parsed = JSON.parse(value) as Usage | PersistedUsageEnvelope;
+    return "committed" in parsed ? parsed : { committed: parsed };
 }
 
 function readString(row: Record<string, unknown>, key: string): string {

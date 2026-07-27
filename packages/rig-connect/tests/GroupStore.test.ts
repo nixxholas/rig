@@ -74,6 +74,7 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
         projects: [project("p1")],
         sessions: [session("s1", "p1")],
         sessionsComplete: true,
+        terminalGroups: [],
         workspaces: [],
         ...overrides,
     };
@@ -349,6 +350,38 @@ describe("GroupStore", () => {
         // Git state is live-only and is replayed after the frame, but blanking it
         // here would flicker a branch the user is already looking at.
         expect(store.projects()[0]?.git).toMatchObject({ changedFiles: 2 });
+    });
+
+    it("opens with existing terminals and follows their live scope state", () => {
+        const store = new GroupStore();
+        const terminal = {
+            cols: 100,
+            epoch: "epoch-1",
+            exitCode: null,
+            id: "terminal-1",
+            rows: 30,
+            status: "running" as const,
+        };
+        store.applyHello(
+            hello({
+                terminalGroups: [{ projectId: "p1", terminals: [terminal] }],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+        expect(store.projects()[0]?.terminals).toEqual([terminal]);
+        expect(store.projects()[0]?.workspaces[0]?.terminals).toEqual([]);
+
+        store.apply(
+            event(
+                "remote_terminals_changed",
+                { terminals: [{ ...terminal, cols: 120 }] },
+                { projectId: "p1", workspaceId: "w1" },
+            ),
+        );
+
+        expect(store.projects()[0]?.workspaces[0]?.terminals).toMatchObject([
+            { cols: 120, id: "terminal-1" },
+        ]);
     });
 
     it("moves a session when it changes worktree instead of showing it twice", () => {

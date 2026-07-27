@@ -12,6 +12,7 @@ import type {
     GlobalStreamHello,
     Project,
     ProjectWorkspace,
+    RemoteTerminalGroupState,
     SessionStatus,
     SessionSummary,
     SessionTokenCount,
@@ -32,6 +33,11 @@ export class GroupStore {
     #sessionEventIds = new Map<string, string>();
     #projectGit = new Map<string, GitChangeSnapshot>();
     #workspaceGit = new Map<string, GitChangeSnapshot>();
+    #projectTerminals = new Map<string, GlobalStreamHello["terminalGroups"][number]["terminals"]>();
+    #workspaceTerminals = new Map<
+        string,
+        GlobalStreamHello["terminalGroups"][number]["terminals"]
+    >();
     /** Cached branch per project, reused whenever nothing under it changed. */
     #groups = new Map<string, ProjectGroup>();
     #workspaceGroups = new Map<string, WorkspaceGroup>();
@@ -45,6 +51,21 @@ export class GroupStore {
     projects(): readonly ProjectGroup[] {
         if (this.#treeStale) this.#rebuild();
         return this.#tree;
+    }
+
+    remoteTerminals(): readonly RemoteTerminalGroupState[] {
+        return [
+            ...[...this.#projectTerminals].map(([projectId, terminals]) => ({
+                projectId,
+                terminals,
+            })),
+            ...[...this.#workspaceTerminals].flatMap(([workspaceId, terminals]) => {
+                const workspace = this.#workspaces.get(workspaceId);
+                return workspace === undefined
+                    ? []
+                    : [{ projectId: workspace.projectId, terminals, workspaceId }];
+            }),
+        ];
     }
 
     state(): GroupsState {
@@ -113,9 +134,44 @@ export class GroupStore {
             this.#groupSessions.delete(session.id);
         }
 
+        const nextProjectTerminals = new Map<
+            string,
+            GlobalStreamHello["terminalGroups"][number]["terminals"]
+        >();
+        const nextWorkspaceTerminals = new Map<
+            string,
+            GlobalStreamHello["terminalGroups"][number]["terminals"]
+        >();
+        for (const group of hello.terminalGroups) {
+            const known =
+                group.workspaceId === undefined
+                    ? this.#projectTerminals.get(group.projectId)
+                    : this.#workspaceTerminals.get(group.workspaceId);
+            const terminals =
+                known !== undefined && sameProtocolValue(known, group.terminals)
+                    ? known
+                    : group.terminals;
+            if (terminals !== known) changedProjectIds.add(group.projectId);
+            if (group.workspaceId === undefined) {
+                nextProjectTerminals.set(group.projectId, terminals);
+            } else {
+                nextWorkspaceTerminals.set(group.workspaceId, terminals);
+            }
+        }
+        for (const projectId of this.#projectTerminals.keys()) {
+            if (!nextProjectTerminals.has(projectId)) changedProjectIds.add(projectId);
+        }
+        for (const [workspaceId, terminals] of this.#workspaceTerminals) {
+            if (nextWorkspaceTerminals.has(workspaceId) || terminals.length === 0) continue;
+            const workspace = this.#workspaces.get(workspaceId);
+            if (workspace !== undefined) changedProjectIds.add(workspace.projectId);
+        }
+
         this.#projects = nextProjects;
         this.#workspaces = nextWorkspaces;
         this.#sessions = nextSessions;
+        this.#projectTerminals = nextProjectTerminals;
+        this.#workspaceTerminals = nextWorkspaceTerminals;
         for (const projectId of changedProjectIds) this.#markDirty(projectId);
         // Git snapshots survive: they are live-only, so the stream replays them
         // after this frame and dropping them here would blank a branch a client
@@ -179,6 +235,30 @@ export class GroupStore {
                 if (workspaceId === undefined) return [];
                 if (!this.#acceptGit(this.#workspaceGit, workspaceId, scope.data.git)) return [];
                 this.#workspaceGroups.delete(workspaceId);
+                this.#markDirty(scope.projectId);
+                break;
+            }
+            case "remote_terminals_changed": {
+                const scope = event as {
+                    projectId: string;
+                    workspaceId?: string;
+                    data: {
+                        terminals: GlobalStreamHello["terminalGroups"][number]["terminals"];
+                    };
+                };
+                const into =
+                    scope.workspaceId === undefined
+                        ? this.#projectTerminals
+                        : this.#workspaceTerminals;
+                const key = scope.workspaceId ?? scope.projectId;
+                const known = into.get(key);
+                if (known !== undefined && sameProtocolValue(known, scope.data.terminals)) {
+                    return [];
+                }
+                into.set(key, scope.data.terminals);
+                if (scope.workspaceId !== undefined) {
+                    this.#workspaceGroups.delete(scope.workspaceId);
+                }
                 this.#markDirty(scope.projectId);
                 break;
             }
@@ -330,6 +410,7 @@ export class GroupStore {
                 path: project.path,
                 presence: project.presence,
                 sessions: (sessionsByProject.get(project.id) ?? []).sort(byOrderKey),
+                terminals: this.#projectTerminals.get(project.id) ?? [],
                 usage: usageOf([
                     ...(sessionsByProject.get(project.id) ?? []),
                     ...workspaces.flatMap((workspace) => workspace.sessions),
@@ -352,10 +433,12 @@ export class GroupStore {
     ): WorkspaceGroup {
         const cached = this.#workspaceGroups.get(workspace.id);
         const sessions = (sessionsByWorkspace.get(workspace.id) ?? []).sort(byOrderKey);
+        const terminals = this.#workspaceTerminals.get(workspace.id) ?? [];
         if (
             cached !== undefined &&
             this.#workspaceGroupSources.get(workspace.id) === workspace &&
-            sameSessions(cached.sessions, sessions)
+            sameSessions(cached.sessions, sessions) &&
+            cached.terminals === terminals
         ) {
             return cached;
         }
@@ -367,6 +450,7 @@ export class GroupStore {
             presence: workspace.presence,
             projectId: workspace.projectId,
             sessions,
+            terminals,
             status: workspace.status as WorkspaceGroup["status"],
             ...(workspace.title === undefined ? {} : { title: workspace.title }),
             usage: usageOf(sessions),

@@ -61,7 +61,10 @@ describe("InMemorySession quota observations", () => {
         expect(observations?.[0]?.data.observationId).toBe(observations?.[1]?.data.observationId);
         expect(quota).toHaveBeenNthCalledWith(1, { fresh: true });
         expect(quota).toHaveBeenNthCalledWith(2, { fresh: true });
-        expect(session.usage().observedQuota).toEqual([
+        const authoritative = session.events
+            .all()
+            .filter((event) => event.type === "session_quota_contribution_changed");
+        expect(authoritative.at(-1)?.data.observedQuota).toEqual([
             {
                 providerId: "codex",
                 windows: {
@@ -70,6 +73,19 @@ describe("InMemorySession quota observations", () => {
                 },
             },
         ]);
+        const usage = session.usage();
+        expect(usage.observedQuota).toEqual([
+            {
+                providerId: "codex",
+                windows: {
+                    fiveHour: { observedUsedPercent: 3 },
+                    weekly: { observedUsedPercent: 1 },
+                },
+            },
+        ]);
+        // Repeated hello frames and usage-panel reads share the already reduced
+        // snapshot until a usage-bearing event invalidates it.
+        expect(session.usage()).toBe(usage);
     });
 });
 

@@ -335,6 +335,10 @@ export interface SessionTranscriptWindow {
     messages: readonly Message[];
     /** Durable occurrence time of each retained message, keyed by message ID. */
     messageCreatedAt?: Readonly<Record<string, number>>;
+    /** Durable event order for messages sharing the same millisecond. */
+    messageEventId?: Readonly<Record<string, EventId>>;
+    /** Resolved permission facts for tool calls contained in this page. */
+    permissionReviews?: readonly SessionPermissionReview[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
     complete: boolean;
@@ -796,6 +800,7 @@ export type SessionEvent =
     | AgentMessageEvent
     | RunFinishedEvent
     | ProviderQuotaObservedEvent
+    | SessionQuotaContributionChangedEvent
     | RunErrorEvent
     | AbortRequestedEvent
     | SessionResetEvent
@@ -907,6 +912,11 @@ export type ProviderQuotaObservedEvent = BaseSessionEvent<
         quota: ProviderQuota;
         runId: string;
     }
+>;
+
+export type SessionQuotaContributionChangedEvent = BaseSessionEvent<
+    "session_quota_contribution_changed",
+    { observedQuota: readonly SessionQuotaContribution[] }
 >;
 
 export type RunErrorEvent = BaseSessionEvent<

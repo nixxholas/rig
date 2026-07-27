@@ -159,9 +159,7 @@ describe("projects", () => {
             (value) => value.status === "ready" || value.status === "failed",
         );
         expect(ready.status).toBe("ready");
-        expect(await git(ready.path, ["branch", "--show-current"])).toBe(
-            "worktree/feature-work",
-        );
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/feature-work");
         expect(await git(repository, ["rev-parse", "worktree/feature-work"])).toBe(
             ready.baseCommit,
         );

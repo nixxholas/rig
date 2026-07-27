@@ -299,7 +299,7 @@ describe("ChatStore", () => {
             role: "agent" as const,
         };
         const store = new ChatStore("session-1");
-        const recovered = {
+        const recovered: SessionStreamHello = {
             ...opening,
             session: {
                 ...opening.session!,
@@ -347,6 +347,110 @@ describe("ChatStore", () => {
         const pendingBeforeReconnect = store.elements().at(-1);
         store.applyHello(recovered);
         expect(store.elements().at(-1)).toBe(pendingBeforeReconnect);
+    });
+
+    it("attaches restored permission reviews to their historical tool calls", () => {
+        const opening = hello();
+        const message = {
+            blocks: [
+                {
+                    arguments: { command: "pnpm test" },
+                    id: "reviewed-call",
+                    name: "exec_command",
+                    type: "tool_call" as const,
+                },
+            ],
+            id: "agent-reviewed",
+            role: "agent" as const,
+        };
+        const store = new ChatStore("session-1");
+        const recovered: SessionStreamHello = {
+            ...opening,
+            session: {
+                ...opening.session!,
+                permissionReviews: [
+                    {
+                        action: "Run tests",
+                        decision: "allow",
+                        reason: "Requested",
+                        risk: "low",
+                        toolCallId: "reviewed-call",
+                        userAuthorization: "high",
+                    },
+                ],
+                snapshot: { messages: [message] },
+            },
+            transcript: {
+                complete: true,
+                messages: [message],
+                turns: [
+                    {
+                        messageIds: [message.id],
+                        runId: "run-reviewed",
+                        startedAt: 1,
+                    },
+                ],
+            },
+        };
+        store.applyHello(recovered);
+
+        expect(
+            store.elements().find((element) => element.id === "tool:reviewed-call"),
+        ).toMatchObject({
+            permissionReview: {
+                decision: "allow",
+                toolCallId: "reviewed-call",
+                userAuthorization: "high",
+            },
+        });
+        const reviewedBeforeRecovery = store
+            .elements()
+            .find((element) => element.id === "tool:reviewed-call");
+        store.applyHello(recovered);
+        expect(store.elements().find((element) => element.id === "tool:reviewed-call")).toBe(
+            reviewedBeforeRecovery,
+        );
+        const pagedMessage: Message = {
+            blocks: [
+                {
+                    arguments: { path: "README.md" },
+                    id: "paged-reviewed-call",
+                    name: "read",
+                    type: "tool_call",
+                },
+            ],
+            id: "agent-paged-reviewed",
+            role: "agent",
+        };
+        store.prependEarlier({
+            complete: true,
+            messages: [pagedMessage],
+            permissionReviews: [
+                {
+                    action: "Read history",
+                    decision: "allow",
+                    reason: "Requested",
+                    risk: "low",
+                    toolCallId: "paged-reviewed-call",
+                    userAuthorization: "high",
+                },
+            ],
+            turns: [
+                {
+                    messageIds: [pagedMessage.id],
+                    runId: "run-paged-reviewed",
+                    startedAt: 0,
+                },
+            ],
+        });
+        expect(
+            store.elements().find((element) => element.id === "tool:paged-reviewed-call"),
+        ).toMatchObject({
+            permissionReview: {
+                decision: "allow",
+                toolCallId: "paged-reviewed-call",
+            },
+        });
     });
 
     it("atomically hands authoritative timing to a queued turn and records both wall clocks", () => {
@@ -1414,6 +1518,26 @@ describe("ChatStore", () => {
             store.apply(
                 event("provider_quota_observed", {
                     observationId: "quota-1",
+                    phase: "before",
+                    providerId: "claude",
+                    quota: {
+                        capturedAt: 9,
+                        source: "claude",
+                        windows: {
+                            fiveHour: {
+                                capturedAt: 9,
+                                resetsAt: 20,
+                                status: "available",
+                                usedPercent: 20,
+                            },
+                        },
+                    },
+                    runId: "run-1",
+                }),
+            );
+            store.apply(
+                event("provider_quota_observed", {
+                    observationId: "quota-1",
                     phase: "after",
                     providerId: "claude",
                     quota: {
@@ -1431,14 +1555,62 @@ describe("ChatStore", () => {
                     runId: "run-1",
                 }),
             );
+            store.apply(
+                event("session_quota_contribution_changed", {
+                    observedQuota: [
+                        {
+                            providerId: "claude",
+                            windows: { fiveHour: { observedUsedPercent: 5 } },
+                        },
+                    ],
+                }),
+            );
 
             expect(store.session().usage).toMatchObject({
                 context: { approximate: false, totalTokens: 230 },
                 currentProviderId: "claude",
+                observedQuota: [
+                    {
+                        providerId: "claude",
+                        windows: { fiveHour: { observedUsedPercent: 5 } },
+                    },
+                ],
                 quotas: [{ providerId: "claude", quota: { capturedAt: 10 } }],
                 totalCost: 0.75,
                 totalTokens: 230,
             });
+        });
+
+        it("clears context attribution immediately when the model changes", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello({
+                ...hello(),
+                usage: {
+                    context: {
+                        approximate: false,
+                        modelId: "sonnet-5",
+                        providerId: "claude",
+                        requestedModelId: "sonnet-5",
+                        totalTokens: 100,
+                    },
+                    currentProviderId: "claude",
+                    groups: [],
+                    observedQuota: [],
+                    quotas: [],
+                    sessionTokenCount: { lastContextTokens: 100, totalTokens: 100 },
+                },
+            });
+
+            store.apply(
+                event("session_configuration_changed", {
+                    changed: ["model"],
+                    modelId: "opus-5",
+                    providerId: "claude",
+                    serviceTier: null,
+                }),
+            );
+
+            expect(store.session().usage?.context).toBeUndefined();
         });
 
         it("reports the usage of the turn on the element that ends it", () => {
@@ -1668,7 +1840,10 @@ describe("ChatStore", () => {
                 ...opening,
                 transcript: {
                     ...opening.transcript!,
-                    messageCreatedAt: { a1: 1_400, a2: 2_700, u1: 1_050, u2: 2_100 },
+                    messageCreatedAt: { a1: 1_200, a2: 2_700, u1: 1_050, u2: 2_100 },
+                    messageEventId: {
+                        a1: "018bcfe5-6800-7002-8000-00000000aaaa",
+                    },
                     turns: [
                         {
                             ...opening.transcript!.turns[0]!,
@@ -1676,7 +1851,7 @@ describe("ChatStore", () => {
                                 {
                                     attempt: 1,
                                     createdAt: 1_200,
-                                    id: "retry-1",
+                                    id: "018bcfe5-6800-7001-8000-00000000aaaa",
                                     reason: "Connection lost",
                                 },
                             ],
@@ -2093,6 +2268,48 @@ describe("recovering a connection", () => {
         expect(store.session().loadingMore).toBe(false);
     });
 
+    it("does not erase live output or pending steering when an older page lands", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(4, 6, false));
+        const token = store.session().loadMoreToken;
+        if (token === undefined) throw new Error("Expected a load-more token.");
+        const started = store.startLoadingMore(token);
+        if (started === undefined) throw new Error("Expected loading to start.");
+
+        store.apply(
+            agentEvent({
+                contentIndex: 0,
+                delta: "Arrived while paging",
+                messageId: "agent-live-during-page",
+                type: "text_delta",
+            }),
+        );
+        store.apply(
+            event("message_submitted", {
+                delivery: "steer",
+                displayText: "Also do this",
+                message: {
+                    blocks: [{ text: "Also do this", type: "text" }],
+                    id: "steer-during-page",
+                    role: "user",
+                },
+                runId: "run-6",
+            }),
+        );
+        store.prependEarlier(windowOf(1, 3, true), started.anchor);
+
+        expect(store.elements().some((element) => element.id === "message:u1")).toBe(true);
+        expect(
+            store
+                .elements()
+                .some((element) => element.id === "agent-live-during-page:agent_text:0"),
+        ).toBe(true);
+        expect(store.elements().at(-1)).toMatchObject({
+            delivery: "pending_steering",
+            messageId: "steer-during-page",
+        });
+    });
+
     it.each(["session_reset", "session_rewound"] as const)(
         "does not resurrect turns when an earlier page arrives after %s",
         (type) => {
@@ -2149,6 +2366,25 @@ describe("recovering a connection", () => {
         // A retry starts from a clean slate, so a stale message is not shown
         // next to a request that is currently in flight.
         expect(store.session().loadMoreError).toBeUndefined();
+    });
+
+    it("clears a stale load when the transcript is rebuilt before its request fails", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(4, 6, false));
+        const token = store.session().loadMoreToken;
+        if (token === undefined) throw new Error("Expected a load-more token.");
+        const started = store.startLoadingMore(token);
+        if (started === undefined) throw new Error("Expected loading to start.");
+
+        store.apply(
+            event("session_reset", {
+                snapshot: { messages: [] },
+                transcript: { complete: true, messages: [], turns: [] },
+            }),
+        );
+        store.failLoadingMore(started.anchor, "Stale request failed.");
+
+        expect(store.session().loadingMore).toBe(false);
     });
 
     it("trusts a complete window to be the whole conversation", () => {

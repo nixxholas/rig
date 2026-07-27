@@ -75,6 +75,8 @@ import type {
     SessionTranscriptWindow,
 } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH, SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
+
+const RETAINED_SESSION_MESSAGE_LIMIT = 512;
 import {
     sessionTranscriptWindow,
     type TranscriptEntry,
@@ -136,6 +138,8 @@ import { getProviderIdsForModel } from "./getProviderIdsForModel.js";
 import { resolveInitialModelSelection } from "./resolveInitialModelSelection.js";
 import { resolveSteeringContinuationMessageIds } from "./resolveSteeringContinuationMessageIds.js";
 import { SessionEventLog } from "./SessionEventLog.js";
+import { isTransientInferenceSessionEvent } from "./isTransientInferenceSessionEvent.js";
+import { affectsSessionUsage } from "./affectsSessionUsage.js";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { summarizeDockerExecution } from "../execution/index.js";
@@ -143,6 +147,8 @@ import type { TaskDrain } from "./TrackedTaskDrain.js";
 import {
     addUsage,
     aggregateSessionUsage,
+    type SessionUsageGroup,
+    SessionQuotaContributionTracker,
     type SessionUsageSummary,
     zeroUsage,
 } from "./sessionUsage/index.js";
@@ -222,6 +228,7 @@ export interface PersistedSessionState {
     draftUpdatedAt?: number;
     elapsedMs?: number;
     contextMessages?: readonly Message[];
+    createdAt?: number;
     effort?: string;
     serviceTier?: ServiceTier;
     id: string;
@@ -237,6 +244,7 @@ export interface PersistedSessionState {
     orderKey: string;
     providerId: string;
     permissionMode: PermissionMode;
+    permissionReviews?: readonly SessionPermissionReview[];
     projectId?: string;
     workspaceId?: string;
     secretIds?: readonly string[];
@@ -248,9 +256,11 @@ export interface PersistedSessionState {
     title?: string;
     titleError?: string;
     titleStatus: SessionTitleStatus;
+    transcriptHasEarlier?: boolean;
     totalTokens?: number;
     sessionTokenCount?: SessionTokenCount;
     usage?: Usage;
+    usageSummary?: SessionUsageSummary;
     tools: readonly string[];
     externalToolCalls?: readonly ExternalToolCall[];
     durableUserInputs?: readonly DurableUserInputCall[];
@@ -280,6 +290,11 @@ export interface InMemorySessionPersistence {
         permissionCall: DurableUserInputCall,
     ): void;
     insertQueuedRun(sessionId: string, run: PersistedQueuedRun): void;
+    loadTranscriptPage?(
+        sessionId: string,
+        turnLimit: number,
+        before?: string,
+    ): SessionTranscriptWindow | undefined;
     pruneExternalToolCalls?(sessionId: string, retain: number): void;
     pruneDurableUserInputs?(sessionId: string, retain: number): void;
     saveSession(state: PersistedSessionState): void;
@@ -403,6 +418,7 @@ export class InMemorySession {
     #agentMetadata: SessionAgentMetadata;
     #agentId: string;
     #createEventId: () => EventId;
+    #createdAt: number;
     #createRuntime: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
     #compactionController: AbortController | undefined;
     #contextMessages: Message[] | undefined;
@@ -438,6 +454,12 @@ export class InMemorySession {
     #metadataRunId: string | undefined;
     #metadataUpdatedAt: number | undefined;
     #messages: PersistedSessionMessage[] = [];
+    #messageIndexByPosition = new Map<number, number>();
+    #transcriptRuns = new Map<string, PersistedSessionMessage[]>();
+    #transcriptRunOrder: string[] = [];
+    #transcriptRunIndexes = new Map<string, number>();
+    #transcriptPositionRun = new Map<number, string>();
+    #transcriptHasEarlier = false;
     /**
      * When each run began and how it ended.
      *
@@ -496,6 +518,14 @@ export class InMemorySession {
     #totalTokens = 0;
     #sessionTokenCount: SessionTokenCount = { lastContextTokens: 0, totalTokens: 0 };
     #usage: Usage = zeroUsage();
+    #quotaContributionTracker = new SessionQuotaContributionTracker();
+    #usageSummaryCache: SessionUsageSummary | undefined;
+    #usageSummaryRevision = 0;
+    #cachedUsageSummaryRevision = -1;
+    #cachedUsageEventRevision = -1;
+    #ownedUsageEventRevision = 0;
+    #persistedUsageBase: SessionUsageSummary | undefined;
+    #usageEventsAfterBase: SessionEvent[] = [];
     #tools: readonly string[] = [];
     #workflowRuns = new Map<string, InternalWorkflowRun>();
     #workflowsEnabled: boolean;
@@ -504,6 +534,7 @@ export class InMemorySession {
     constructor(options: InMemorySessionOptions) {
         this.#agentManager = options.agentManager;
         this.#createEventId = options.createEventId;
+        this.#createdAt = options.restore?.createdAt ?? (options.now ?? Date.now)();
         this.#createRuntime = options.createRuntime ?? createCodingAssistantAgent;
         this.#now = options.now ?? Date.now;
         this.#onInitialTitle = options.onInitialTitle;
@@ -642,6 +673,9 @@ export class InMemorySession {
         this.#messages = [...(options.restore?.messages ?? [])].sort(
             (left, right) => left.position - right.position,
         );
+        this.#transcriptHasEarlier = options.restore?.transcriptHasEarlier === true;
+        this.#rebuildMessagePositionIndex();
+        this.#rebuildTranscriptIndex();
         this.#usage =
             options.restore?.usage === undefined
                 ? this.#sumCommittedUsage()
@@ -691,11 +725,35 @@ export class InMemorySession {
         if (options.lastEventId !== undefined) eventLogOptions.lastEventId = options.lastEventId;
         if (options.onAppendEvent !== undefined) eventLogOptions.onAppend = options.onAppendEvent;
         this.events = new SessionEventLog(eventLogOptions);
-        for (const event of this.events.since(undefined) ?? []) {
+        this.#ownedUsageEventRevision = this.events.usageRevision();
+        for (const review of options.restore?.permissionReviews ?? []) {
+            this.#permissionReviews.set(review.toolCallId, { ...review });
+        }
+        for (const event of this.events.all()) {
             this.#recordRunFacts(event);
             this.#recordPermissionReview(event);
+            if (options.restore?.usageSummary === undefined) {
+                this.#quotaContributionTracker.apply(event);
+            }
         }
-        this.#sessionTokenCount = aggregateSessionTokenCount(this.events.since(undefined) ?? []);
+        if (options.restore?.usageSummary === undefined) {
+            this.#sessionTokenCount = aggregateSessionTokenCount(this.events.all());
+            // Restore folds the durable log once while it is already hot; opening a
+            // stream later reads the cached projection instead of rescanning history.
+            this.usage(this.events.all());
+        } else {
+            this.#usageSummaryCache = structuredClone(options.restore.usageSummary);
+            this.#persistedUsageBase = structuredClone(options.restore.usageSummary);
+            this.#cachedUsageSummaryRevision = this.#usageSummaryRevision;
+            this.#cachedUsageEventRevision = this.events.usageRevision();
+            this.#sessionTokenCount = structuredClone(
+                options.restore.usageSummary.sessionTokenCount,
+            );
+            this.#quotaContributionTracker.seed(
+                options.restore.usageSummary.observedQuota,
+                this.events.latestProviderQuotas(),
+            );
+        }
 
         this.#ensureKnownModel(this.#modelId, this.#providerId);
         this.#saveSession();
@@ -1029,7 +1087,7 @@ export class InMemorySession {
             runtime.agent.enqueueMessage(contextMessage);
         }
         this.#storeMessage(
-            this.#messages.length,
+            this.#nextMessagePosition(),
             contextMessage,
             false,
             `shell:${result.commandId}`,
@@ -1090,10 +1148,109 @@ export class InMemorySession {
         return { ...this.#agentMetadata };
     }
 
-    usage(): SessionUsageSummary {
-        return aggregateSessionUsage(this.events.since(undefined) ?? [], {
+    usage(events?: readonly SessionEvent[]): SessionUsageSummary {
+        const eventRevision = this.events.usageRevision();
+        if (
+            this.#usageSummaryCache !== undefined &&
+            this.#cachedUsageSummaryRevision === this.#usageSummaryRevision &&
+            this.#cachedUsageEventRevision === eventRevision
+        ) {
+            return this.#usageSummaryCache;
+        }
+        const externallyAppended = this.#ownedUsageEventRevision !== eventRevision;
+        const summary =
+            this.#persistedUsageBase === undefined || externallyAppended
+                ? aggregateSessionUsage(events ?? this.events.all(), {
+                      type: this.#agentMetadata.type,
+                  })
+                : this.#mergePersistedUsage();
+        this.#persistedUsageBase = summary;
+        this.#usageSummaryCache = summary;
+        this.#cachedUsageSummaryRevision = this.#usageSummaryRevision;
+        this.#cachedUsageEventRevision = eventRevision;
+        this.#ownedUsageEventRevision = eventRevision;
+        return summary;
+    }
+
+    #mergePersistedUsage(): SessionUsageSummary {
+        const base = this.#persistedUsageBase as SessionUsageSummary;
+        const latestReset = this.#usageEventsAfterBase.findLastIndex(
+            (event) => event.type === "session_reset",
+        );
+        if (latestReset >= 0) {
+            const reset = aggregateSessionUsage(this.#usageEventsAfterBase.slice(latestReset), {
+                type: this.#agentMetadata.type,
+            });
+            const summary = {
+                ...reset,
+                observedQuota: this.#quotaContributionTracker.snapshot(),
+                sessionTokenCount: { ...this.#sessionTokenCount },
+            };
+            this.#persistedUsageBase = summary;
+            this.#usageEventsAfterBase = [];
+            return summary;
+        }
+
+        const delta = aggregateSessionUsage(this.#usageEventsAfterBase, {
             type: this.#agentMetadata.type,
         });
+        const groups = [...base.groups];
+        for (const incoming of delta.groups) {
+            const key = usageGroupKey(incoming);
+            const index = groups.findIndex((known) => usageGroupKey(known) === key);
+            if (index === -1) groups.push(incoming);
+            else {
+                const known = groups[index] as SessionUsageGroup;
+                groups[index] = { ...known, usage: addUsage(known.usage, incoming.usage) };
+            }
+        }
+        let currentContext = base.currentContext;
+        for (const event of this.#usageEventsAfterBase) {
+            if (
+                event.type === "session_rewound" ||
+                (event.type === "session_configuration_changed" &&
+                    event.data.changed.includes("model"))
+            ) {
+                currentContext = undefined;
+            } else if (
+                event.type === "agent_message" &&
+                event.data.message.role === "agent" &&
+                event.data.message.usage !== undefined &&
+                event.data.message.providerId !== undefined &&
+                event.data.message.requestedModelId !== undefined
+            ) {
+                currentContext = {
+                    approximate: false,
+                    modelId:
+                        event.data.message.responseModel ?? event.data.message.requestedModelId,
+                    providerId: event.data.message.providerId,
+                    requestedModelId: event.data.message.requestedModelId,
+                    ...(event.data.message.responseModel === undefined
+                        ? {}
+                        : { responseModel: event.data.message.responseModel }),
+                    totalTokens: event.data.message.usage.totalTokens,
+                };
+            } else if (
+                event.type === "agent_event" &&
+                event.data.event.type === "context_compacted" &&
+                currentContext !== undefined
+            ) {
+                currentContext = {
+                    ...currentContext,
+                    approximate: true,
+                    totalTokens: event.data.event.estimatedTokensAfter,
+                };
+            }
+        }
+        const summary: SessionUsageSummary = {
+            ...(currentContext === undefined ? {} : { currentContext }),
+            groups,
+            observedQuota: this.#quotaContributionTracker.snapshot(),
+            sessionTokenCount: { ...this.#sessionTokenCount },
+        };
+        this.#persistedUsageBase = summary;
+        this.#usageEventsAfterBase = [];
+        return summary;
     }
 
     providerQuota(options?: { fresh?: boolean }): Promise<ProviderQuota | undefined> {
@@ -2155,7 +2312,7 @@ export class InMemorySession {
             role: "user",
         };
         this.#separateModelContextFromVisibleTranscript();
-        this.#storeMessage(this.#messages.length, message, false, runId);
+        this.#storeMessage(this.#nextMessagePosition(), message, false, runId);
         this.#contextMessages?.push(message);
         this.#lastMessageAt = this.#now();
         this.#append("message_submitted", {
@@ -2189,6 +2346,8 @@ export class InMemorySession {
         this.#restoredActiveRunId = undefined;
         this.#lastSessionRunId = undefined;
         this.#messages = [];
+        this.#rebuildMessagePositionIndex();
+        this.#rebuildTranscriptIndex();
         this.#usage = zeroUsage();
         this.#submittedUserMessages.clear();
         this.#contextMessages = undefined;
@@ -2236,6 +2395,8 @@ export class InMemorySession {
         this.#mcpToolNames.clear();
         this.#tools = [];
         this.#messages = this.#messages.filter((entry) => entry.position < target.position);
+        this.#rebuildMessagePositionIndex();
+        this.#rebuildTranscriptIndex();
         this.#submittedUserMessages = new Map(
             this.#messages.flatMap((entry) =>
                 entry.message.role === "user" && entry.runId !== undefined
@@ -2397,21 +2558,58 @@ export class InMemorySession {
         turnLimit: number = SESSION_STREAM_TURN_LIMIT,
         before?: string,
     ): SessionTranscriptWindow | undefined {
-        return sessionTranscriptWindow(
-            this.#messages
-                .filter((entry) => !entry.isPartial)
-                .map((entry): TranscriptEntry => {
-                    const createdAt = this.events.messageCreatedAt(entry.message.id);
-                    return {
-                        ...(createdAt === undefined ? {} : { createdAt }),
-                        message: entry.message,
-                        ...(entry.runId === undefined ? {} : { runId: entry.runId }),
-                    };
-                }),
-            this.#runFacts,
-            turnLimit,
-            before,
+        const earlierCount =
+            before === undefined
+                ? this.#transcriptRunOrder.length
+                : this.#transcriptRunIndexes.get(before);
+        if (earlierCount === undefined || (earlierCount === 0 && this.#transcriptHasEarlier)) {
+            return this.#persistence?.loadTranscriptPage?.(this.id, turnLimit, before);
+        }
+        const first = Math.max(0, earlierCount - turnLimit);
+        const keptRunIds = this.#transcriptRunOrder.slice(first, earlierCount);
+        const keptMessages = keptRunIds.flatMap((runId) => this.#transcriptRuns.get(runId) ?? []);
+        if (
+            this.#persistence?.loadTranscriptPage !== undefined &&
+            (keptRunIds.some((runId) => !this.#runFacts.has(runId)) ||
+                keptMessages.some(
+                    (entry) =>
+                        this.events.messageCreatedAt(entry.message.id) === undefined ||
+                        this.events.messageEventId(entry.message.id) === undefined,
+                ))
+        ) {
+            return this.#persistence.loadTranscriptPage(this.id, turnLimit, before);
+        }
+        const entries = keptRunIds.flatMap((runId) =>
+            (this.#transcriptRuns.get(runId) ?? []).map((entry): TranscriptEntry => {
+                const createdAt = this.events.messageCreatedAt(entry.message.id);
+                const eventId = this.events.messageEventId(entry.message.id);
+                return {
+                    ...(createdAt === undefined ? {} : { createdAt }),
+                    ...(eventId === undefined ? {} : { eventId }),
+                    message: entry.message,
+                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                };
+            }),
         );
+        const window = sessionTranscriptWindow(entries, this.#runFacts, keptRunIds.length);
+        const toolCallIds = new Set(
+            entries.flatMap((entry) =>
+                entry.message.blocks.flatMap((block) =>
+                    block.type === "tool_call" ? [block.id] : [],
+                ),
+            ),
+        );
+        const permissionReviews = [...toolCallIds].flatMap((toolCallId) => {
+            const review = this.#permissionReviews.get(toolCallId);
+            return review === undefined ? [] : [review];
+        });
+        return window === undefined
+            ? undefined
+            : {
+                  ...window,
+                  complete: !this.#transcriptHasEarlier && keptRunIds.length === earlierCount,
+                  ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
+              };
     }
 
     /**
@@ -2566,7 +2764,7 @@ export class InMemorySession {
                 ? { metadataUpdatedAt: this.#metadataUpdatedAt }
                 : {}),
             ...(this.#metadataRunId !== undefined ? { metadataRunId: this.#metadataRunId } : {}),
-            createdAt: this.events.firstCreatedAt() ?? this.#now(),
+            createdAt: this.#createdAt,
             updatedAt: this.events.lastCreatedAt() ?? this.#now(),
             ...(this.#lastMessageAt !== undefined ? { lastMessageAt: this.#lastMessageAt } : {}),
             ...(this.#title !== undefined ? { title: this.#title } : {}),
@@ -2619,6 +2817,7 @@ export class InMemorySession {
             orderKey: this.#orderKey,
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
+            permissionReviews: [...this.#permissionReviews.values()],
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
             secretIds: this.#secrets.sessionIds(),
@@ -2633,6 +2832,7 @@ export class InMemorySession {
             totalTokens: this.#totalTokens,
             sessionTokenCount: structuredClone(this.#sessionTokenCount),
             usage: structuredClone(this.#usage),
+            usageSummary: structuredClone(this.usage()),
             tools: this.#tools,
             externalToolCalls: this.externalToolCalls(),
             durableUserInputs: [...this.#durableUserInputs.values()].map((call) =>
@@ -2770,7 +2970,7 @@ export class InMemorySession {
         this.#status = this.#activeRun === undefined ? "queued" : "running";
         this.#lastMessageAt = this.#now();
         this.#separateModelContextFromVisibleTranscript();
-        this.#storeMessage(this.#messages.length, visibleMessage, false, runId);
+        this.#storeMessage(this.#nextMessagePosition(), visibleMessage, false, runId);
         const event = this.#append("message_submitted", {
             delivery: "run",
             displayText,
@@ -2854,7 +3054,7 @@ export class InMemorySession {
         const continuation = this.#pendingSteeringContinuations.get(activeRun.runId);
         if (continuation !== undefined && !continuation.cancelled) {
             agent.enqueueMessage(userMessage);
-            this.#storeMessage(this.#messages.length, userMessage, false, activeRun.runId);
+            this.#storeMessage(this.#nextMessagePosition(), userMessage, false, activeRun.runId);
             this.#interruption = undefined;
             this.#lastMessageAt = this.#now();
             const event = this.#append("message_submitted", {
@@ -2885,7 +3085,7 @@ export class InMemorySession {
             agent.steerMessage(userMessage);
         } else {
             agent.enqueueMessage(userMessage);
-            this.#storeMessage(this.#messages.length, userMessage, false, activeRun.runId);
+            this.#storeMessage(this.#nextMessagePosition(), userMessage, false, activeRun.runId);
         }
         this.#interruption = undefined;
         this.#lastMessageAt = this.#now();
@@ -2944,7 +3144,7 @@ export class InMemorySession {
             agent.steerMessage(userMessage);
         } else {
             agent.enqueueMessage(userMessage);
-            this.#storeMessage(this.#messages.length, visibleMessage, false, activeRun.runId);
+            this.#storeMessage(this.#nextMessagePosition(), visibleMessage, false, activeRun.runId);
         }
         this.#interruption = undefined;
         const event = this.#append("message_submitted", {
@@ -3019,7 +3219,7 @@ export class InMemorySession {
         return {
             ...(this.#activeSince === undefined ? {} : { activeSince: this.#activeSince }),
             agentId: this.#agentId,
-            createdAt: this.events.firstCreatedAt() ?? this.#now(),
+            createdAt: this.#createdAt,
             depth: this.#agentMetadata.depth,
             description: this.#agentMetadata.description ?? "Delegated task",
             elapsedMs: this.#elapsedMs,
@@ -3211,7 +3411,7 @@ export class InMemorySession {
                 id: createId(),
                 role: "agent",
             };
-            this.#storeMessage(this.#messages.length, resultMessage, false, runId);
+            this.#storeMessage(this.#nextMessagePosition(), resultMessage, false, runId);
             for (const entry of batch) {
                 entry.call.consumed = true;
                 if (entry.kind === "external") {
@@ -3708,7 +3908,13 @@ export class InMemorySession {
             this.#sessionTokenCount = previousSessionTokenCount;
             throw error;
         }
-        this.#saveSession();
+        if (affectsSessionUsage(event)) {
+            this.#usageSummaryRevision += 1;
+            if (this.#persistedUsageBase !== undefined) this.#usageEventsAfterBase.push(event);
+            this.#ownedUsageEventRevision = this.events.usageRevision();
+        }
+        this.#quotaContributionTracker.apply(event);
+        if (!isTransientInferenceSessionEvent(event)) this.#saveSession();
         this.#recordRunFacts(event);
         this.#recordPermissionReview(event);
         this.#reportContextSize(previousSessionTokenCount);
@@ -3818,11 +4024,6 @@ export class InMemorySession {
             toolCallId: review.toolCallId,
             userAuthorization: review.userAuthorization,
         });
-        while (this.#permissionReviews.size > 100) {
-            const oldest = this.#permissionReviews.keys().next().value as string | undefined;
-            if (oldest === undefined) break;
-            this.#permissionReviews.delete(oldest);
-        }
     }
 
     #reportInferenceRetry(event: SessionEvent): void {
@@ -3889,7 +4090,7 @@ export class InMemorySession {
             for (const messageId of event.messageIds) {
                 const pending = this.#pendingSteeringMessages.get(messageId);
                 if (pending === undefined || pending.runId !== runId) continue;
-                this.#storeMessage(this.#messages.length, pending.message, false, runId);
+                this.#storeMessage(this.#nextMessagePosition(), pending.message, false, runId);
                 this.#pendingSteeringMessages.delete(messageId);
             }
             this.#append("steering_applied", { messageIds: event.messageIds, runId });
@@ -3936,7 +4137,7 @@ export class InMemorySession {
                 ? this.#activePartial.position
                 : undefined;
         this.#storeMessage(
-            existingPosition ?? partialPosition ?? this.#messages.length,
+            existingPosition ?? partialPosition ?? this.#nextMessagePosition(),
             message,
             false,
             runId,
@@ -4035,6 +4236,7 @@ export class InMemorySession {
             });
             this.#restartMetadataSettlement();
             this.#agentManager?.recordChanged(this);
+            this.#trimRetainedMessages();
             return "error";
         }
         this.#append("run_finished", {
@@ -4049,6 +4251,7 @@ export class InMemorySession {
         }
         this.#restartMetadataSettlement();
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
+        this.#trimRetainedMessages();
         return stopReason === "aborted" ? "aborted" : "completed";
     }
 
@@ -4067,6 +4270,9 @@ export class InMemorySession {
                 providerId: provider.id,
                 quota,
                 runId,
+            });
+            this.#append("session_quota_contribution_changed", {
+                observedQuota: this.#quotaContributionTracker.snapshot(),
             });
         } catch {
             // Quota observation must never fail or replay an otherwise completed agent run.
@@ -4139,9 +4345,7 @@ export class InMemorySession {
                     this.requestUserInput(request, requestOptions),
             },
             sessionId: this.#agentMetadata.rootSessionId,
-            startDate: toLocalDate(
-                this.events.firstMessageCreatedAt() ?? this.events.firstCreatedAt() ?? this.#now(),
-            ),
+            startDate: toLocalDate(this.events.firstMessageCreatedAt() ?? this.#createdAt),
             ...(this.#systemPrompt !== undefined ? { systemPrompt: this.#systemPrompt } : {}),
             ...(this.#durableSkillDefinitions.length === 0
                 ? {}
@@ -4542,11 +4746,7 @@ export class InMemorySession {
                 provider: this.#ensureRuntime().executor,
                 sessionId: this.id,
                 signal: controller.signal,
-                startDate: toLocalDate(
-                    this.events.firstMessageCreatedAt() ??
-                        this.events.firstCreatedAt() ??
-                        this.#now(),
-                ),
+                startDate: toLocalDate(this.events.firstMessageCreatedAt() ?? this.#createdAt),
                 transcript,
             });
             if (controller.signal.aborted || revision !== this.#metadataRevision || this.#closing) {
@@ -4928,8 +5128,134 @@ export class InMemorySession {
         this.#append("goal_changed", { goal: { ...this.#goal } });
     }
 
+    #rebuildTranscriptIndex(): void {
+        this.#transcriptRuns.clear();
+        this.#transcriptRunOrder = [];
+        this.#transcriptRunIndexes.clear();
+        this.#transcriptPositionRun.clear();
+        for (const entry of this.#messages) this.#indexTranscriptMessage(entry, true);
+        this.#reindexTranscriptRuns();
+    }
+
+    #rebuildMessagePositionIndex(from = 0): void {
+        if (from === 0) this.#messageIndexByPosition.clear();
+        for (let index = from; index < this.#messages.length; index += 1) {
+            const entry = this.#messages[index];
+            if (entry !== undefined) this.#messageIndexByPosition.set(entry.position, index);
+        }
+    }
+
+    #nextMessagePosition(): number {
+        return (this.#messages.at(-1)?.position ?? -1) + 1;
+    }
+
+    #trimRetainedMessages(): void {
+        if (this.#messages.length <= RETAINED_SESSION_MESSAGE_LIMIT) return;
+        const retainedRuns = new Set<string>();
+        let retainedMessages = 0;
+        for (let index = this.#transcriptRunOrder.length - 1; index >= 0; index -= 1) {
+            const runId = this.#transcriptRunOrder[index];
+            if (runId === undefined) continue;
+            retainedRuns.add(runId);
+            retainedMessages += this.#transcriptRuns.get(runId)?.length ?? 0;
+            if (retainedMessages >= RETAINED_SESSION_MESSAGE_LIMIT) break;
+        }
+        const removed = this.#messages.filter((entry) => {
+            const runId = entry.runId ?? `orphan:${entry.message.id}`;
+            return !retainedRuns.has(runId);
+        });
+        if (removed.length === 0) return;
+        this.#messages = this.#messages.filter((entry) => {
+            const runId = entry.runId ?? `orphan:${entry.message.id}`;
+            return retainedRuns.has(runId);
+        });
+        for (const entry of removed) {
+            if (entry.message.role === "user") {
+                this.#submittedUserMessages.delete(entry.message.id);
+            }
+            for (const block of entry.message.blocks) {
+                if (block.type === "tool_call") this.#permissionReviews.delete(block.id);
+            }
+        }
+        this.#transcriptHasEarlier = true;
+        this.#rebuildMessagePositionIndex();
+        this.#rebuildTranscriptIndex();
+    }
+
+    #indexTranscriptMessage(entry: PersistedSessionMessage, rebuilding = false): void {
+        let orderChanged = false;
+        const previousRunId = this.#transcriptPositionRun.get(entry.position);
+        if (previousRunId !== undefined) {
+            const remaining = (this.#transcriptRuns.get(previousRunId) ?? []).filter(
+                (known) => known.position !== entry.position,
+            );
+            if (remaining.length === 0) {
+                this.#transcriptRuns.delete(previousRunId);
+                const removedIndex = this.#transcriptRunIndexes.get(previousRunId);
+                if (removedIndex !== undefined) {
+                    this.#transcriptRunOrder.splice(removedIndex, 1);
+                    this.#transcriptRunIndexes.delete(previousRunId);
+                }
+                orderChanged = true;
+            } else {
+                this.#transcriptRuns.set(previousRunId, remaining);
+            }
+            this.#transcriptPositionRun.delete(entry.position);
+        }
+        if (entry.isPartial || entry.message.internal === true) {
+            if (!rebuilding && orderChanged) this.#reindexTranscriptRuns();
+            return;
+        }
+
+        const runId = entry.runId ?? `orphan:${entry.message.id}`;
+        const known = this.#transcriptRuns.get(runId);
+        if (known === undefined) {
+            orderChanged = true;
+            this.#transcriptRuns.set(runId, [entry]);
+            if (rebuilding) {
+                this.#transcriptRunOrder.push(runId);
+            } else {
+                const lastRunId = this.#transcriptRunOrder.at(-1);
+                const append =
+                    lastRunId === undefined ||
+                    (this.#transcriptRuns.get(lastRunId)?.[0]?.position ??
+                        Number.MAX_SAFE_INTEGER) <= entry.position;
+                const insertion = append
+                    ? -1
+                    : this.#transcriptRunOrder.findIndex(
+                          (otherRunId) =>
+                              (this.#transcriptRuns.get(otherRunId)?.[0]?.position ??
+                                  Number.MAX_SAFE_INTEGER) > entry.position,
+                      );
+                if (insertion === -1) {
+                    this.#transcriptRunOrder.push(runId);
+                    this.#transcriptRunIndexes.set(runId, this.#transcriptRunOrder.length - 1);
+                    orderChanged = false;
+                } else {
+                    this.#transcriptRunOrder.splice(insertion, 0, runId);
+                    this.#reindexTranscriptRuns(insertion);
+                    orderChanged = false;
+                }
+            }
+        } else {
+            known.push(entry);
+            known.sort((left, right) => left.position - right.position);
+        }
+        this.#transcriptPositionRun.set(entry.position, runId);
+        if (!rebuilding && orderChanged) this.#reindexTranscriptRuns();
+    }
+
+    #reindexTranscriptRuns(from = 0): void {
+        if (from === 0) this.#transcriptRunIndexes.clear();
+        for (let index = from; index < this.#transcriptRunOrder.length; index += 1) {
+            const runId = this.#transcriptRunOrder[index];
+            if (runId !== undefined) this.#transcriptRunIndexes.set(runId, index);
+        }
+    }
+
     #storeMessage(position: number, message: Message, isPartial: boolean, runId: string): void {
-        const replaced = this.#messages.find((candidate) => candidate.position === position);
+        const replacedIndex = this.#messageIndexByPosition.get(position);
+        const replaced = replacedIndex === undefined ? undefined : this.#messages[replacedIndex];
         if (replaced?.message.role === "user") {
             this.#submittedUserMessages.delete(replaced.message.id);
         }
@@ -4939,10 +5265,26 @@ export class InMemorySession {
             position,
             runId,
         };
-        this.#messages = [
-            ...this.#messages.filter((candidate) => candidate.position !== position),
-            entry,
-        ].sort((left, right) => left.position - right.position);
+        if (replacedIndex !== undefined) {
+            this.#messages[replacedIndex] = entry;
+        } else {
+            const last = this.#messages.at(-1);
+            if (last === undefined || last.position < position) {
+                this.#messageIndexByPosition.set(position, this.#messages.length);
+                this.#messages.push(entry);
+            } else {
+                let low = 0;
+                let high = this.#messages.length;
+                while (low < high) {
+                    const middle = Math.floor((low + high) / 2);
+                    if ((this.#messages[middle]?.position ?? position) < position) low = middle + 1;
+                    else high = middle;
+                }
+                this.#messages.splice(low, 0, entry);
+                this.#rebuildMessagePositionIndex(low);
+            }
+        }
+        this.#indexTranscriptMessage(entry);
         if (isPartial) {
             this.#partialPositions.add(position);
         } else {
@@ -4965,7 +5307,7 @@ export class InMemorySession {
                       position: undefined,
                       runId,
                   };
-        const position = activePartial.position ?? this.#messages.length;
+        const position = activePartial.position ?? this.#nextMessagePosition();
         this.#activePartial = {
             ...activePartial,
             position,
@@ -4983,6 +5325,11 @@ function cloneWorkflowRun(run: WorkflowRun): WorkflowRun {
         ...run,
         logs: [...run.logs],
     };
+}
+
+function usageGroupKey(group: SessionUsageGroup): string {
+    const { usage: _usage, ...identity } = group;
+    return JSON.stringify(identity);
 }
 
 function cloneExternalToolCall(call: ExternalToolCall): ExternalToolCall {

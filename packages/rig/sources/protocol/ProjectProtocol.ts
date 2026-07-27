@@ -1,5 +1,6 @@
 import type { EventId } from "./EventId.js";
 import type { SessionEvent, SessionSummary } from "./SessionProtocol.js";
+import type { RemoteTerminalSummary } from "../terminal/types.js";
 
 export type ProjectKind = "regular" | "home";
 export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
@@ -242,7 +243,23 @@ export interface GitChangeSnapshot extends GitChangeState {
     version: number;
 }
 
-export type GlobalLiveEvent = ProjectGitEvent | ProjectWorkspaceGitEvent;
+export type RemoteTerminalsChangedEvent =
+    | BaseProjectEvent<"remote_terminals_changed", { terminals: readonly RemoteTerminalSummary[] }>
+    | BaseProjectWorkspaceEvent<
+          "remote_terminals_changed",
+          { terminals: readonly RemoteTerminalSummary[] }
+      >;
+
+export interface RemoteTerminalGroupState {
+    projectId: string;
+    workspaceId?: string;
+    terminals: readonly RemoteTerminalSummary[];
+}
+
+export type GlobalLiveEvent =
+    | ProjectGitEvent
+    | ProjectWorkspaceGitEvent
+    | RemoteTerminalsChangedEvent;
 
 export type GlobalEvent = SessionEvent | ProjectEvent | ProjectWorkspaceEvent | GlobalLiveEvent;
 
@@ -263,7 +280,11 @@ export interface GlobalLiveEventDelivery {
 export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDelivery;
 
 export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
-    return event.type === "project_git_changed" || event.type === "workspace_git_changed";
+    return (
+        event.type === "project_git_changed" ||
+        event.type === "workspace_git_changed" ||
+        event.type === "remote_terminals_changed"
+    );
 }
 
 export interface ListGlobalEventsResponse {
@@ -286,6 +307,7 @@ export interface GlobalStreamHello {
     /** The queue position this frame reflects; events after it follow on the stream. */
     cursor: string;
     projects: readonly Project[];
+    terminalGroups: readonly RemoteTerminalGroupState[];
     workspaces: readonly ProjectWorkspace[];
     sessions: readonly SessionSummary[];
     /** False when the daemon holds more sessions than this frame carried. */

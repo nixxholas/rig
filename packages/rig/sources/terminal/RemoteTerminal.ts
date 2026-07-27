@@ -26,6 +26,7 @@ export class RemoteTerminal {
     readonly #exited: Promise<void>;
     readonly #process: RemoteTerminalProcess;
     readonly #protocol: RemoteTerminalProtocolServer;
+    readonly #onChange: (summary: RemoteTerminalSummary) => void;
     #status: "exited" | "running" = "running";
     readonly #state: GhosttyWebTerminal;
     readonly #unsubscribeData: () => void;
@@ -34,11 +35,13 @@ export class RemoteTerminal {
         state: GhosttyWebTerminal,
         process: RemoteTerminalProcess,
         created: ReturnType<typeof createGhosttyRemoteTerminalServer>,
+        onChange: (summary: RemoteTerminalSummary) => void,
     ) {
         this.#state = state;
         this.#process = process;
         this.#driver = created.driver;
         this.#protocol = created.protocol;
+        this.#onChange = onChange;
         this.#unsubscribeData = process.onData((data) => {
             void this.#driver.publishOutput(data).catch(() => process.kill());
         });
@@ -47,6 +50,7 @@ export class RemoteTerminal {
             this.#status = "exited";
             this.#unsubscribeData();
             await this.#driver.publishExit(exitCode).catch(() => undefined);
+            this.#onChange(this.summary());
         });
     }
 
@@ -56,6 +60,7 @@ export class RemoteTerminal {
         processFactory: RemoteTerminalProcessFactory;
         processOptions: RemoteTerminalProcessOptions;
         rows: number;
+        onChange?: (summary: RemoteTerminalSummary) => void;
     }): Promise<RemoteTerminal> {
         const state = await GhosttyWebTerminal.create(options);
         let process: RemoteTerminalProcess | undefined;
@@ -86,7 +91,12 @@ export class RemoteTerminal {
                 ...ghosttySnapshotToGrid(state.snapshot(), options.cols),
                 coversOutputOffset: 0,
             });
-            const terminal = new RemoteTerminal(state, process, created);
+            const terminal = new RemoteTerminal(
+                state,
+                process,
+                created,
+                options.onChange ?? (() => undefined),
+            );
             return terminal;
         } catch (error) {
             await process?.kill();
@@ -112,7 +122,9 @@ export class RemoteTerminal {
     async resize(cols: number, rows: number): Promise<RemoteTerminalSummary> {
         validateSize(cols, rows);
         await this.#protocol.resize(cols, rows);
-        return this.summary();
+        const summary = this.summary();
+        this.#onChange(summary);
+        return summary;
     }
 
     async stop(): Promise<RemoteTerminalSummary> {
