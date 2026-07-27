@@ -6360,7 +6360,7 @@ describe("CodingAssistantApp", () => {
         expect(modelContext).not.toContain("output truncated");
     });
 
-    it("renders a persisted tool-call presentation without a live execution event", () => {
+    it("renders persisted exploration and failed Bash call presentations", () => {
         const model = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -6402,6 +6402,28 @@ describe("CodingAssistantApp", () => {
                             },
                             type: "tool_call",
                         },
+                        {
+                            arguments: { command: "pnpm test" },
+                            id: "failed-bash",
+                            name: "Bash",
+                            presentation: {
+                                command: "pnpm test",
+                                type: "exec_command",
+                            },
+                            type: "tool_call",
+                        },
+                        {
+                            display: "Command exited with code 1.",
+                            failure: {
+                                kind: "execution_failed",
+                                message: "Command exited with code 1.",
+                            },
+                            isError: true,
+                            rendered: [{ text: "Command exited with code 1.", type: "text" }],
+                            toolCallId: "failed-bash",
+                            toolName: "Bash",
+                            type: "tool_result",
+                        },
                     ],
                     id: "agent-message",
                     role: "agent",
@@ -6416,6 +6438,9 @@ describe("CodingAssistantApp", () => {
         const rendered = stripAnsi(app.render(80).join("\n"));
         expect(rendered).toContain("• Explored");
         expect(rendered).toContain("└ Read example.ts");
+        expect(rendered).toContain("• Failed pnpm test");
+        expect(rendered).toContain("Command exited with code 1.");
+        expect(rendered).not.toContain("Failed Bash");
     });
 
     it("renders structured MCP calls, replayed results, errors, and approval detail", () => {

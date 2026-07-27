@@ -17,23 +17,37 @@ describe("tool call presentations", () => {
     const present = (tool: AnyDefinedTool, args: Record<string, unknown>) =>
         tool.toCallPresentation?.(args as never, context);
 
-    it("defines shell exploration on each provider's shell tool", () => {
-        const expected = {
-            type: "exploration",
-            operations: [
-                { command: "rg needle src", kind: "search", path: "src", query: "needle" },
-            ],
-        };
+    it("presents every Claude Bash call as the command that will execute", () => {
+        expect(present(claudeBashTool, { command: "pnpm test" })).toEqual({
+            command: "pnpm test",
+            type: "exec_command",
+        });
+        expect(
+            present(claudeBashTool, {
+                command: "pnpm dev",
+                run_in_background: true,
+            }),
+        ).toEqual({
+            command: "pnpm dev",
+            type: "exec_command",
+        });
+    });
 
-        expect(present(codexExecCommandTool, { cmd: "rg needle src" })).toEqual(expected);
-        expect(present(claudeBashTool, { command: "rg needle src" })).toEqual(expected);
+    it("presents every provider shell call as the command that will execute", () => {
+        expect(present(codexExecCommandTool, { cmd: "rg needle src" })).toEqual({
+            command: "rg needle src",
+            type: "exec_command",
+        });
         expect(
             present(grokRunTerminalCommandTool, {
                 background: false,
                 command: "rg needle src",
                 description: "Search source",
             }),
-        ).toEqual(expected);
+        ).toEqual({
+            command: "rg needle src",
+            type: "exec_command",
+        });
     });
 
     it("defines native read, list, and search exploration without tool-name inference", () => {

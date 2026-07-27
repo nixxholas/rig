@@ -72,6 +72,46 @@ describe("mapSessionEventToHappyMessages", () => {
 
         expect(mapSessionEventToHappyMessages(event)).toEqual([]);
     });
+
+    it("maps a Bash call as the concrete command even when its result failed", () => {
+        const event = sessionEvent("agent_message", {
+            message: {
+                blocks: [
+                    {
+                        arguments: { command: "pnpm test" },
+                        id: "call-bash",
+                        name: "Bash",
+                        presentation: {
+                            command: "pnpm test",
+                            type: "exec_command",
+                        },
+                        type: "tool_call",
+                    },
+                    {
+                        display: "Command exited with code 1.",
+                        isError: true,
+                        rendered: [{ text: "Command exited with code 1.", type: "text" }],
+                        toolCallId: "call-bash",
+                        toolName: "Bash",
+                        type: "tool_result",
+                    },
+                ],
+                id: "agent-1",
+                role: "agent",
+            },
+            runId: "run-1",
+        });
+
+        expect(mapSessionEventToHappyMessages(event)[0]?.content.ev).toMatchObject({
+            call: "call-bash",
+            name: "Bash",
+            presentation: {
+                command: "pnpm test",
+                type: "exec_command",
+            },
+            t: "tool-call-start",
+        });
+    });
 });
 
 function sessionEvent(type: SessionEvent["type"], data: unknown): SessionEvent {

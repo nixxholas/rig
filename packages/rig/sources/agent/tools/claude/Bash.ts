@@ -12,7 +12,6 @@ import {
     shellToolOutputSchema,
     summarizeShellOutput,
 } from "../../../tools/utils/index.js";
-import { parseShellExplorationPresentation } from "../../../tools/utils/parseShellExplorationPresentation.js";
 
 export const claudeBashTool = defineTool({
     name: "Bash",
@@ -102,8 +101,10 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
         if (execution.signal !== undefined) options.signal = execution.signal;
         return runShellCommand(command, options, context);
     },
-    toCallPresentation: ({ command, run_in_background }) =>
-        run_in_background === true ? undefined : parseShellExplorationPresentation(command),
+    toCallPresentation: ({ command }) => ({
+        command,
+        type: "exec_command",
+    }),
     toPresentation: (result, { command }) => {
         const sessionId = parseOptionalTerminalSessionId(result.backgroundTaskId);
         return {

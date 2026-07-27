@@ -3415,6 +3415,16 @@ export class CodingAssistantApp implements Component, Focusable {
             const entry = this.#entries.find((candidate) => candidate.id === event.toolCall.id);
             if (entry !== undefined && event.toolCall.presentation?.type === "exploration") {
                 entry.exploration = event.toolCall.presentation;
+                delete entry.execCommand;
+            } else if (
+                entry !== undefined &&
+                event.toolCall.presentation?.type === "exec_command"
+            ) {
+                entry.execCommand = {
+                    ...event.toolCall.presentation,
+                    output: "",
+                };
+                delete entry.exploration;
             }
             this.#refreshToolActivityStatus();
         } else if (event.type === "tool_execution_end") {
@@ -3607,11 +3617,16 @@ export class CodingAssistantApp implements Component, Focusable {
                 const mcpToolCall = this.#createMcpToolCall(block.name, block.arguments);
                 const exploration =
                     block.presentation?.type === "exploration" ? block.presentation : undefined;
+                const execCommand =
+                    block.presentation?.type === "exec_command"
+                        ? { ...block.presentation, output: "" }
+                        : undefined;
                 this.#appendEntry({
                     id: block.id,
                     role: "tool",
                     title: this.#toolDisplayName(block.name),
                     text: this.#formatToolCall(block.name, block.arguments, block.id),
+                    ...(execCommand === undefined ? {} : { execCommand }),
                     ...(exploration === undefined ? {} : { exploration }),
                     ...(mcpToolCall === undefined ? {} : { mcpToolCall }),
                 });
@@ -5083,7 +5098,6 @@ export class CodingAssistantApp implements Component, Focusable {
                 return;
             } else if (block.isError === true) {
                 delete existing.backgroundTerminalInteraction;
-                delete existing.execCommand;
                 delete existing.fileDiffs;
                 delete existing.omittedFileDiffs;
             } else if (block.presentation?.type === "background_terminal_interaction") {

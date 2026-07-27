@@ -13,4 +13,11 @@ export interface ExplorationToolCallPresentation {
     readonly operations: readonly ExplorationOperation[];
 }
 
-export type ToolCallPresentation = ExplorationToolCallPresentation;
+export interface ExecCommandToolCallPresentation {
+    readonly command: string;
+    readonly type: "exec_command";
+}
+
+export type ToolCallPresentation =
+    | ExecCommandToolCallPresentation
+    | ExplorationToolCallPresentation;

@@ -42,6 +42,7 @@ export type {
     UserMessage,
 } from "./types.js";
 export type {
+    ExecCommandToolCallPresentation,
     ExplorationOperation,
     ExplorationToolCallPresentation,
     ToolCallPresentation,

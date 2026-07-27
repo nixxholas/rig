@@ -8,7 +8,6 @@ import {
     summarizeTextOutput,
     toTextBlocks,
 } from "../utils/index.js";
-import { parseShellExplorationPresentation } from "../utils/parseShellExplorationPresentation.js";
 
 export const grokRunTerminalCommandTool = defineTool({
     name: "run_terminal_command",
@@ -91,8 +90,10 @@ Usage notes:
         }
         return { text };
     },
-    toCallPresentation: ({ background, command }) =>
-        background ? undefined : parseShellExplorationPresentation(command),
+    toCallPresentation: ({ command }) => ({
+        command,
+        type: "exec_command",
+    }),
     toPresentation: (result, { background, command }) => {
         const sessionId = parseOptionalTerminalSessionId(result.task_id);
         return {
