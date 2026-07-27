@@ -1777,6 +1777,15 @@ describe("createProtocolHttpServer", () => {
             expect(hello.session).toBeUndefined();
             expect(hello.lastEventId).toBeDefined();
             expect(hello.current?.draft).toBe("Changed while disconnected");
+            expect(hello.current).toMatchObject({
+                mcpServers: [],
+                projectSecretIds: [],
+                secretIds: [],
+                sessionSecretIds: [],
+                titleStatus: "idle",
+                workflows: [],
+                workflowsEnabled: true,
+            });
         } finally {
             await close();
         }

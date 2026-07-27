@@ -1,5 +1,11 @@
 import type { EventId } from "./EventId.js";
-import type { BaseSessionEvent, SessionEvent, SessionSummary } from "./SessionProtocol.js";
+import type {
+    BaseSessionEvent,
+    DaemonIdentity,
+    ModelCatalog,
+    SessionEvent,
+    SessionSummary,
+} from "./SessionProtocol.js";
 import type { RemoteTerminalSummary } from "../terminal/types.js";
 
 export type ProjectKind = "regular" | "home";
@@ -321,6 +327,8 @@ export interface ListGlobalEventsResponse {
 export interface GlobalStreamHello {
     /** The queue position this frame reflects; events after it follow on the stream. */
     cursor: string;
+    catalog?: ModelCatalog;
+    identity?: DaemonIdentity;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];
     workspaces: readonly ProjectWorkspace[];

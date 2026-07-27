@@ -108,6 +108,122 @@ function runOneTurn(store: ChatStore): ChatDelta[] {
 }
 
 describe("ChatStore", () => {
+    it("projects complete application state and keeps it current from events", () => {
+        const store = new ChatStore("session-1");
+        const opening = hello();
+        opening.session = {
+            ...opening.session!,
+            agent: { depth: 0, rootSessionId: "session-1", type: "primary" },
+            agentId: "agent-1",
+            environment: { type: "local" },
+            mcpServers: [{ name: "docs", status: "connected", toolCount: 3 }],
+            projectSecretIds: ["project-secret"],
+            secretIds: ["project-secret"],
+            sessionSecretIds: [],
+            titleStatus: "generating",
+            workflows: [
+                {
+                    agentCount: 1,
+                    code: "print('hi')",
+                    description: "Run it",
+                    logs: [],
+                    name: "demo",
+                    runId: "workflow-1",
+                    startedAt: 10,
+                    status: "running",
+                    taskId: "task-1",
+                },
+            ],
+            workflowsEnabled: true,
+        };
+        store.applyHello(opening);
+
+        expect(store.session()).toMatchObject({
+            agentId: "agent-1",
+            environment: { type: "local" },
+            mcpServers: [{ name: "docs", status: "connected", toolCount: 3 }],
+            secretIds: ["project-secret"],
+            titleStatus: "generating",
+            workflowsEnabled: true,
+        });
+
+        store.apply(
+            event("secrets_changed", {
+                projectSecretIds: ["project-secret"],
+                secretIds: ["project-secret", "session-secret"],
+                sessionSecretIds: ["session-secret"],
+            }),
+        );
+        store.apply(
+            event("workflow_changed", {
+                update: { log: "halfway", runId: "workflow-1", phase: "Verify" },
+            }),
+        );
+        store.apply(
+            event("mcp_servers_changed", {
+                servers: [{ name: "docs", status: "failed", toolCount: 0 }],
+            }),
+        );
+        store.apply(
+            event("session_title_changed", {
+                errorMessage: "Could not generate a title.",
+                status: "error",
+            }),
+        );
+
+        expect(store.session()).toMatchObject({
+            mcpServers: [{ name: "docs", status: "failed", toolCount: 0 }],
+            secretIds: ["project-secret", "session-secret"],
+            sessionSecretIds: ["session-secret"],
+            titleError: "Could not generate a title.",
+            titleStatus: "error",
+            workflows: [expect.objectContaining({ logs: ["halfway"], phase: "Verify" })],
+        });
+    });
+
+    it("reconciles restart-only current state on a resumed stream", () => {
+        const store = new ChatStore("session-1");
+        const opening = hello();
+        opening.session = {
+            ...opening.session!,
+            interruption: {
+                interruptedAt: 10,
+                message: "The daemon stopped.",
+                reason: "shutdown",
+            },
+            mcpServers: [{ name: "old", status: "connected", toolCount: 1 }],
+            projectSecretIds: [],
+            secretIds: [],
+            sessionSecretIds: [],
+            titleError: "old error",
+            titleStatus: "error",
+            workflows: [],
+        };
+        store.applyHello(opening);
+
+        store.applyHello({
+            activity: { kind: "idle", label: "Idle", since: 20 },
+            current: {
+                mcpServers: [],
+                projectSecretIds: [],
+                secretIds: [],
+                sessionSecretIds: [],
+                titleStatus: "ready",
+                workflows: [],
+                workflowsEnabled: true,
+            },
+            resumed: true,
+        });
+
+        expect(store.session()).toMatchObject({
+            mcpServers: [],
+            titleStatus: "ready",
+            workflowsEnabled: true,
+        });
+        expect(store.session().interruption).toBeUndefined();
+        expect(store.session().titleError).toBeUndefined();
+    });
+
     it("builds a flat, time-ordered list with one element per message, block, and tool call", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());

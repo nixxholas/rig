@@ -39,6 +39,8 @@ export interface ConnectRigOptions {
     /** Test seam. Production uses Web Crypto. */
     randomValues?: RandomValues;
     mutationRetryDelayMs?: number;
+    /** Receives rejected actions even when their entity has no active subscriber. */
+    onMutationRejected?: (delta: MutationRejectedDelta) => void;
 }
 
 export interface RigSessionSubscriptionOptions {
@@ -80,6 +82,40 @@ export interface ModelSelection {
     providerId?: string;
 }
 
+export interface DraftUpdate {
+    draft: string | null;
+    origin?: string;
+    updatedAt?: number;
+}
+
+export interface UserInputAnswers {
+    answers: Readonly<Record<string, readonly string[]>>;
+}
+
+export type GoalStatus = "active" | "blocked" | "complete" | "paused";
+export type SecretAttachmentScope = "project" | "session";
+
+export interface ShellCommandInput {
+    command: string;
+    commandId: string;
+}
+
+export interface CreateSessionInput {
+    appendSystemPrompt?: string;
+    archiveOnIdle?: boolean;
+    cwd: string;
+    effort?: string;
+    local?: boolean;
+    modelId?: string;
+    permissionMode?: string;
+    providerId?: string;
+    secretIds?: readonly string[];
+    serviceTier?: string;
+    trackUnread?: boolean;
+    workflowsEnabled?: boolean;
+    workspaceId?: string;
+}
+
 export type GroupTarget =
     | { kind: "project"; projectId: string }
     | { kind: "workspace"; projectId: string; workspaceId: string };
@@ -94,9 +130,38 @@ export type GroupTarget =
 export interface RigConnection {
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
+    createSession: (input: CreateSessionInput) => MutationId;
+    forkSession: (sessionId: string) => MutationId;
     sendMessage: (sessionId: string, message: string | SendMessageInput) => MutationId;
     stopRun: (sessionId: string) => MutationId;
     switchModel: (sessionId: string, selection: string | ModelSelection) => MutationId;
+    setEffort: (sessionId: string, effort?: string) => MutationId;
+    setServiceTier: (sessionId: string, serviceTier?: string) => MutationId;
+    setPermissionMode: (sessionId: string, permissionMode: string) => MutationId;
+    setDraft: (sessionId: string, update: string | DraftUpdate) => MutationId;
+    answerUserInput: (
+        sessionId: string,
+        requestId: string,
+        response: UserInputAnswers,
+    ) => MutationId;
+    setGoal: (sessionId: string, objective: string) => MutationId;
+    setGoalStatus: (sessionId: string, status: GoalStatus) => MutationId;
+    clearGoal: (sessionId: string) => MutationId;
+    attachSecret: (
+        sessionId: string,
+        secretId: string,
+        scope?: SecretAttachmentScope,
+    ) => MutationId;
+    detachSecret: (
+        sessionId: string,
+        secretId: string,
+        scope?: SecretAttachmentScope,
+    ) => MutationId;
+    compactSession: (sessionId: string) => MutationId;
+    resetSession: (sessionId: string) => MutationId;
+    rewindSession: (sessionId: string, messageId: string) => MutationId;
+    runShellCommand: (sessionId: string, input: ShellCommandInput) => MutationId;
+    stopWorkflow: (sessionId: string, runId: string) => MutationId;
     setSessionArchived: (sessionId: string, archived: boolean) => MutationId;
     renameGroup: (target: GroupTarget, name: string) => MutationId;
     close: () => void;
@@ -130,7 +195,7 @@ interface GroupEntry {
 interface MutationRequest {
     body?: unknown;
     headers?: Readonly<Record<string, string>>;
-    method: "PATCH" | "POST";
+    method: "DELETE" | "PATCH" | "POST" | "PUT";
     url: string;
 }
 
@@ -143,8 +208,11 @@ interface PendingMutation {
     id: MutationId;
     matchesAuthoritative?: (data: unknown) => boolean;
     prepare: () => MutationRequest;
+    replacesTranscript?: boolean;
+    retryOnConflict?: boolean;
     sessionId?: string;
     undo: () => void;
+    versionSessionId?: string;
 }
 
 interface ReconcileOutput {
@@ -343,14 +411,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             session?: { lastEventId?: unknown };
             workspace?: { version?: unknown };
         };
-        if (mutation.sessionId !== undefined) {
+        const versionSessionId = mutation.versionSessionId ?? mutation.sessionId;
+        if (versionSessionId !== undefined) {
             const cursor =
                 typeof value.session?.lastEventId === "string"
                     ? value.session.lastEventId
                     : typeof value.eventId === "string"
                       ? value.eventId
                       : undefined;
-            if (cursor !== undefined) rememberSessionCursor(mutation.sessionId, cursor);
+            if (cursor !== undefined) rememberSessionCursor(versionSessionId, cursor);
         }
         const version = value.project?.version ?? value.workspace?.version;
         if (typeof version === "number") rememberGroupVersion(mutation.entityKey, version);
@@ -427,9 +496,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     sessionDeltas: new Map([
                         [
                             mutation.sessionId as string,
-                            sessionEntries
-                                .get(mutation.sessionId as string)
-                                ?.store.applySessionSnapshot(session) ?? [],
+                            (mutation.replacesTranscript
+                                ? sessionEntries
+                                      .get(mutation.sessionId as string)
+                                      ?.store.applySessionReplacement(session)
+                                : sessionEntries
+                                      .get(mutation.sessionId as string)
+                                      ?.store.applySessionSnapshot(session)) ?? [],
                         ],
                     ]),
                 }),
@@ -548,6 +621,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             mutationId: mutation.id,
             type: "mutation_rejected",
         };
+        options.onMutationRejected?.(rejection);
         for (const capture of captures.values()) {
             const deltas: ChatDelta[] = [
                 ...(authoritative.sessionDeltas?.get(capture.entry.store.session().sessionId) ??
@@ -658,6 +732,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         acknowledge(mutation.id);
                         queue.shift();
                         retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+                        continue;
+                    }
+                    if (
+                        error instanceof MutationHttpError &&
+                        error.status === 409 &&
+                        mutation.retryOnConflict === true
+                    ) {
+                        recordAcceptedResponse(mutation, error.data);
                         continue;
                     }
                     if (isRetryableMutationError(error)) {
@@ -992,6 +1074,110 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
+    const enqueueSessionUpdate = (
+        action: MutationAction,
+        sessionId: string,
+        path: string,
+        method: MutationRequest["method"],
+        body: object,
+        patch: Partial<SessionState>,
+        clear: readonly (keyof SessionState)[] = [],
+        replacesTranscript = false,
+    ): MutationId => {
+        const id = nextMutationId();
+        const key = sessionKey(sessionId);
+        const mutation: PendingMutation = {
+            acknowledged: false,
+            action,
+            entityKey: key,
+            id,
+            sessionId,
+            undo: () => undefined,
+            applyOptimistic: (publish) => {
+                const entry = sessionEntries.get(sessionId);
+                if (entry === undefined) return () => undefined;
+                const changed = entry.store.applyOptimisticSession(patch, clear);
+                if (publish) publishSession(entry, changed.deltas);
+                return changed.undo;
+            },
+            prepare: () => {
+                const expectedEventId = currentSessionCursor(sessionId);
+                return {
+                    body: { ...body, mutationId: id },
+                    headers: {
+                        ...ifMatchHeader(expectedEventId),
+                        "x-rig-mutation-id": id,
+                    },
+                    method,
+                    url: endpointUrl(
+                        options.endpoint,
+                        `sessions/${encodeURIComponent(sessionId)}/${path}`,
+                    ),
+                };
+            },
+            matchesAuthoritative: (data) => {
+                const session = responseEntity(data, "session");
+                return (
+                    session !== undefined &&
+                    Object.entries(patch).every(([name, value]) => session[name] === value) &&
+                    clear.every((name) => session[name] === undefined)
+                );
+            },
+            ...(replacesTranscript ? { replacesTranscript: true } : {}),
+            retryOnConflict: true,
+            versionSessionId: sessionId,
+        };
+        return enqueue(mutation);
+    };
+
+    const createSession = (input: CreateSessionInput): MutationId => {
+        const id = nextMutationId();
+        return enqueue({
+            acknowledged: false,
+            action: "create_session",
+            applyOptimistic: () => () => undefined,
+            entityKey: sessionKey(id),
+            id,
+            prepare: () => ({
+                body: { ...input, clientSessionId: id, mutationId: id },
+                headers: { "x-rig-mutation-id": id },
+                method: "POST",
+                url: endpointUrl(options.endpoint, "sessions"),
+            }),
+            sessionId: id,
+            undo: () => undefined,
+        });
+    };
+
+    const forkSession = (sourceSessionId: string): MutationId => {
+        const id = nextMutationId();
+        return enqueue({
+            acknowledged: false,
+            action: "fork_session",
+            applyOptimistic: () => () => undefined,
+            entityKey: sessionKey(sourceSessionId),
+            id,
+            prepare: () => {
+                const expectedEventId = currentSessionCursor(sourceSessionId);
+                return {
+                    headers: {
+                        ...ifMatchHeader(expectedEventId),
+                        "x-rig-mutation-id": id,
+                    },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `sessions/${encodeURIComponent(sourceSessionId)}/fork`,
+                    ),
+                };
+            },
+            retryOnConflict: true,
+            sessionId: id,
+            undo: () => undefined,
+            versionSessionId: sourceSessionId,
+        });
+    };
+
     const sendMessage = (sessionId: string, message: string | SendMessageInput): MutationId => {
         const input = typeof message === "string" ? { text: message } : message;
         const id = nextMutationId();
@@ -1168,6 +1354,238 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return enqueue(mutation);
     };
 
+    const setEffort = (sessionId: string, effort?: string): MutationId =>
+        enqueueSessionUpdate(
+            "set_effort",
+            sessionId,
+            "effort",
+            "PATCH",
+            effort === undefined ? {} : { effort },
+            effort === undefined ? {} : { effort },
+            effort === undefined ? ["effort"] : [],
+        );
+
+    const setServiceTier = (sessionId: string, serviceTier?: string): MutationId =>
+        enqueueSessionUpdate(
+            "set_service_tier",
+            sessionId,
+            "service-tier",
+            "PATCH",
+            serviceTier === undefined ? {} : { serviceTier },
+            serviceTier === undefined ? {} : { serviceTier },
+            serviceTier === undefined ? ["serviceTier"] : [],
+        );
+
+    const setPermissionMode = (sessionId: string, permissionMode: string): MutationId =>
+        enqueueSessionUpdate(
+            "set_permission_mode",
+            sessionId,
+            "permissions",
+            "PATCH",
+            { permissionMode },
+            { permissionMode },
+        );
+
+    const setDraft = (sessionId: string, input: string | DraftUpdate): MutationId => {
+        const update: DraftUpdate =
+            typeof input === "string" ? { draft: input.length === 0 ? null : input } : input;
+        const updatedAt = update.updatedAt ?? now();
+        return enqueueSessionUpdate(
+            "set_draft",
+            sessionId,
+            "draft",
+            "PUT",
+            {
+                draft: update.draft,
+                ...(update.origin === undefined ? {} : { origin: update.origin }),
+                updatedAt,
+            },
+            update.draft === null
+                ? { draftUpdatedAt: updatedAt }
+                : { draft: update.draft, draftUpdatedAt: updatedAt },
+            update.draft === null ? ["draft"] : [],
+        );
+    };
+
+    const answerUserInput = (
+        sessionId: string,
+        requestId: string,
+        response: UserInputAnswers,
+    ): MutationId => {
+        const current = sessionEntries.get(sessionId)?.store.session().pendingUserInputs ?? [];
+        return enqueueSessionUpdate(
+            "answer_user_input",
+            sessionId,
+            `user-input/${encodeURIComponent(requestId)}`,
+            "POST",
+            response,
+            {
+                pendingUserInputs: current.filter((request) => request.requestId !== requestId),
+            },
+        );
+    };
+
+    const setGoal = (sessionId: string, objective: string): MutationId => {
+        const timestamp = now();
+        return enqueueSessionUpdate(
+            "set_goal",
+            sessionId,
+            "goal",
+            "POST",
+            { objective },
+            {
+                goal: {
+                    createdAt: timestamp,
+                    objective,
+                    status: "active",
+                    updatedAt: timestamp,
+                },
+            },
+        );
+    };
+
+    const setGoalStatus = (sessionId: string, status: GoalStatus): MutationId => {
+        const goal = sessionEntries.get(sessionId)?.store.session().goal;
+        return enqueueSessionUpdate(
+            "set_goal_status",
+            sessionId,
+            "goal",
+            "PATCH",
+            { status },
+            goal === undefined ? {} : { goal: { ...goal, status, updatedAt: now() } },
+        );
+    };
+
+    const clearGoal = (sessionId: string): MutationId =>
+        enqueueSessionUpdate("clear_goal", sessionId, "goal", "DELETE", {}, {}, ["goal"]);
+
+    const attachSecret = (
+        sessionId: string,
+        secretId: string,
+        scope: SecretAttachmentScope = "session",
+    ): MutationId => {
+        const session = sessionEntries.get(sessionId)?.store.session();
+        const scoped =
+            scope === "project"
+                ? uniqueAppend(session?.projectSecretIds ?? [], secretId)
+                : uniqueAppend(session?.sessionSecretIds ?? [], secretId);
+        return enqueueSessionUpdate(
+            "attach_secret",
+            sessionId,
+            "secrets",
+            "POST",
+            { scope, secretId },
+            {
+                ...(scope === "project"
+                    ? { projectSecretIds: scoped }
+                    : { sessionSecretIds: scoped }),
+                secretIds: uniqueAppend(session?.secretIds ?? [], secretId),
+            },
+        );
+    };
+
+    const detachSecret = (
+        sessionId: string,
+        secretId: string,
+        scope: SecretAttachmentScope = "session",
+    ): MutationId => {
+        const session = sessionEntries.get(sessionId)?.store.session();
+        const remainingProject =
+            scope === "project"
+                ? (session?.projectSecretIds ?? []).filter((id) => id !== secretId)
+                : (session?.projectSecretIds ?? []);
+        const remainingSession =
+            scope === "session"
+                ? (session?.sessionSecretIds ?? []).filter((id) => id !== secretId)
+                : (session?.sessionSecretIds ?? []);
+        return enqueueSessionUpdate(
+            "detach_secret",
+            sessionId,
+            `secrets/${encodeURIComponent(secretId)}?scope=${scope}`,
+            "DELETE",
+            {},
+            {
+                projectSecretIds: remainingProject,
+                secretIds: uniqueAppend(remainingProject, ...remainingSession),
+                sessionSecretIds: remainingSession,
+            },
+        );
+    };
+
+    const compactSession = (sessionId: string): MutationId =>
+        enqueueSessionUpdate(
+            "compact_session",
+            sessionId,
+            "compact",
+            "POST",
+            {},
+            {
+                activity: {
+                    kind: "compacting",
+                    label: "Compacting",
+                    since: now(),
+                },
+            },
+            [],
+            true,
+        );
+
+    const resetSession = (sessionId: string): MutationId =>
+        enqueueSessionUpdate(
+            "reset_session",
+            sessionId,
+            "reset",
+            "POST",
+            {},
+            {
+                activity: { kind: "stopped", label: "Resetting", since: now() },
+            },
+            [],
+            true,
+        );
+
+    const rewindSession = (sessionId: string, messageId: string): MutationId =>
+        enqueueSessionUpdate(
+            "rewind_session",
+            sessionId,
+            "rewind",
+            "POST",
+            { messageId },
+            {
+                activity: { kind: "stopped", label: "Rewinding", since: now() },
+            },
+            [],
+            true,
+        );
+
+    const runShellCommand = (sessionId: string, input: ShellCommandInput): MutationId => {
+        const commands = sessionEntries.get(sessionId)?.store.session().shellCommands ?? [];
+        return enqueueSessionUpdate("run_shell_command", sessionId, "shell", "POST", input, {
+            shellCommands: [
+                ...commands.filter((command) => command.commandId !== input.commandId),
+                { ...input, status: "running" },
+            ],
+        });
+    };
+
+    const stopWorkflow = (sessionId: string, runId: string): MutationId => {
+        const workflows = sessionEntries.get(sessionId)?.store.session().workflows ?? [];
+        return enqueueSessionUpdate(
+            "stop_workflow",
+            sessionId,
+            `workflows/${encodeURIComponent(runId)}/stop`,
+            "POST",
+            {},
+            {
+                workflows: workflows.map((workflow) =>
+                    workflow.runId === runId
+                        ? { ...workflow, finishedAt: now(), status: "stopped" }
+                        : workflow,
+                ),
+            },
+        );
+    };
+
     const setSessionArchived = (sessionId: string, archived: boolean): MutationId => {
         const id = nextMutationId();
         const key = sessionKey(sessionId);
@@ -1273,12 +1691,29 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 groupsEntry = undefined;
             }
         },
+        answerUserInput,
+        attachSecret,
+        clearGoal,
+        compactSession,
         connectGroups,
         connectSession,
+        createSession,
+        detachSecret,
+        forkSession,
         renameGroup,
+        resetSession,
+        rewindSession,
+        runShellCommand,
         sendMessage,
+        setDraft,
+        setEffort,
+        setPermissionMode,
+        setServiceTier,
+        setGoal,
+        setGoalStatus,
         setSessionArchived,
         stopRun,
+        stopWorkflow,
         switchModel,
     };
 }
@@ -1330,6 +1765,10 @@ function composeUndo(undos: readonly (() => void)[]): () => void {
     return () => {
         for (const undo of [...undos].reverse()) undo();
     };
+}
+
+function uniqueAppend(values: readonly string[], ...added: readonly string[]): readonly string[] {
+    return [...new Set([...values, ...added])];
 }
 
 function linkedController(parent: AbortSignal): {

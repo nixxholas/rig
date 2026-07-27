@@ -1,6 +1,8 @@
 import type { ConnectionState, MutationRejectedDelta } from "./ChatElement.js";
 import type {
     GitChangeSnapshot,
+    DaemonIdentity,
+    ModelCatalog,
     RemoteTerminalSummary,
     SessionStatus,
     SessionTokenCount,
@@ -82,6 +84,8 @@ export interface WorkspaceGroup {
 /** Live facts about the group catalog as a whole. */
 export interface GroupsState {
     readonly connection: ConnectionState;
+    readonly catalog?: ModelCatalog;
+    readonly identity?: DaemonIdentity;
     /** True because the opening frame carries the complete active session catalog. */
     readonly sessionsComplete: boolean;
 }

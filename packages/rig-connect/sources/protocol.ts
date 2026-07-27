@@ -309,6 +309,26 @@ export interface ModelSummary {
     thinkingLevels: readonly string[];
 }
 
+export interface ProviderModelCatalog {
+    disabledReason?: "not_authenticated" | "not_enabled" | "no_models";
+    providerId: string;
+    providerType?: string;
+    models: readonly ModelSummary[];
+    serviceTiers?: readonly string[];
+}
+
+export interface ModelCatalog {
+    defaultModelId: string;
+    defaultProviderId: string;
+    models: readonly ModelSummary[];
+    providers: readonly ProviderModelCatalog[];
+}
+
+export interface DaemonIdentity {
+    developmentBuildId?: string;
+    version: string;
+}
+
 export interface UserInputOption {
     description: string;
     label: string;
@@ -407,6 +427,100 @@ export interface ShellCommandState {
     timedOut?: boolean;
 }
 
+export type SessionExecutionEnvironment =
+    | { type: "local" }
+    | {
+          kind: "container" | "image";
+          reference: string;
+          type: "docker";
+          workingDirectory: string;
+      };
+
+export interface SessionAgentMetadata {
+    depth: number;
+    rootSessionId: string;
+    type: "primary" | "subagent";
+    description?: string;
+    parentSessionId?: string;
+    parentToolCallId?: string;
+    taskName?: string;
+}
+
+export interface SessionInterruption {
+    interruptedAt: number;
+    message: string;
+    reason: "crash" | "shutdown";
+    runId?: string;
+}
+
+export interface McpServerSummary {
+    errorMessage?: string;
+    name: string;
+    status: "blocked" | "connected" | "disabled" | "failed";
+    promptSupport?: boolean;
+    resourceSupport?: boolean;
+    toolCount: number;
+}
+
+export interface WorkflowRun {
+    agentCount: number;
+    code: string;
+    description: string;
+    error?: string;
+    finishedAt?: number;
+    logs: readonly string[];
+    name: string;
+    output?: unknown;
+    phase?: string;
+    runId: string;
+    startedAt: number;
+    status: "completed" | "error" | "running" | "stopped";
+    taskId: string;
+}
+
+export interface WorkflowRunUpdate extends Partial<Omit<WorkflowRun, "runId">> {
+    log?: string;
+    runId: string;
+}
+
+export interface DurableSkillDefinition {
+    description: string;
+    location: "durable";
+    name: string;
+}
+
+export interface ExternalToolDefinition {
+    description: string;
+    label?: string;
+    name: string;
+    parameters: unknown;
+}
+
+export type ExternalToolCallResolution =
+    | { status: "completed"; content?: readonly ContentBlock[]; output?: unknown }
+    | {
+          status: "failed";
+          error: { code?: string; data?: unknown; message: string };
+      };
+
+export interface ExternalToolCall {
+    arguments: unknown;
+    batchId: string;
+    consumed: boolean;
+    createdAt: number;
+    definition: ExternalToolDefinition;
+    id: string;
+    providerToolCallId?: string;
+    resolution?: ExternalToolCallResolution;
+    resolvedAt?: number;
+    runId: string;
+    sessionId: string;
+    skill?: DurableSkillDefinition;
+    status: "pending" | "completed" | "failed" | "cancelled";
+    toolCallId: string;
+    toolCallIndex: number;
+}
+
 export interface GitFileChange {
     binary: boolean;
     deletions?: number;
@@ -467,6 +581,8 @@ export interface ProtocolSession {
     id: string;
     activity: SessionActivity;
     activeTurn?: SessionActiveTurn;
+    agentId?: string;
+    agent?: SessionAgentMetadata;
     archived: boolean;
     projectId: string;
     workspaceId?: string;
@@ -481,12 +597,19 @@ export interface ProtocolSession {
     permissionMode: string;
     effort?: string;
     serviceTier?: string;
+    secretIds?: readonly string[];
+    projectSecretIds?: readonly string[];
+    sessionSecretIds?: readonly string[];
+    environment?: SessionExecutionEnvironment;
     modelLocked: boolean;
     models: readonly ModelSummary[];
     snapshot: { messages: readonly Message[] };
     status: SessionStatus;
     title?: string;
+    titleError?: string;
+    titleStatus?: "error" | "generating" | "idle" | "ready";
     recap?: string;
+    interruption?: SessionInterruption;
     pendingUserInputs: readonly UserInputRequest[];
     permissionReviews?: readonly PermissionReviewState[];
     pendingSteeringMessages?: readonly PendingSteeringMessage[];
@@ -495,7 +618,13 @@ export interface ProtocolSession {
     subagents?: readonly SubagentSummary[];
     backgroundProcesses?: readonly BackgroundProcess[];
     shellCommands?: readonly ShellCommandState[];
+    mcpServers?: readonly McpServerSummary[];
+    workflowsEnabled?: boolean;
+    workflows?: readonly WorkflowRun[];
     sessionTokenCount?: SessionTokenCount;
+    externalTools?: readonly ExternalToolDefinition[];
+    skills?: readonly DurableSkillDefinition[];
+    pendingExternalToolCalls?: readonly ExternalToolCall[];
 }
 
 export interface SessionPartialMessage {
@@ -544,8 +673,20 @@ export interface SessionStreamHello {
 export interface SessionStreamCurrentState {
     draft?: string;
     draftUpdatedAt?: number;
+    externalTools?: readonly ExternalToolDefinition[];
     git?: GitChangeSnapshot;
+    interruption?: SessionInterruption;
+    mcpServers?: readonly McpServerSummary[];
+    pendingExternalToolCalls?: readonly ExternalToolCall[];
+    projectSecretIds?: readonly string[];
+    secretIds?: readonly string[];
     sessionTokenCount?: SessionTokenCount;
+    sessionSecretIds?: readonly string[];
+    skills?: readonly DurableSkillDefinition[];
+    titleError?: string;
+    titleStatus?: "error" | "generating" | "idle" | "ready";
+    workflows?: readonly WorkflowRun[];
+    workflowsEnabled?: boolean;
 }
 
 export interface BaseSessionEvent<TType extends string, TData> {
@@ -579,24 +720,43 @@ export type InterpretedSessionEvent =
           }
       >
     | BaseSessionEvent<
+          "permission_mode_changed",
+          { mutationId?: MutationId; permissionMode: string }
+      >
+    | BaseSessionEvent<
           "session_title_changed",
           { errorMessage?: string; recap?: string; status: string; title?: string }
       >
     | BaseSessionEvent<
           "session_draft_changed",
-          { draft?: string; origin?: string; updatedAt: number }
+          { draft?: string; mutationId?: MutationId; origin?: string; updatedAt: number }
       >
     | BaseSessionEvent<"user_input_requested", UserInputRequest>
     | BaseSessionEvent<
           "user_input_resolved",
           {
               answers?: Readonly<Record<string, readonly string[]>>;
+              mutationId?: MutationId;
               requestId: string;
               status: string;
           }
       >
+    | BaseSessionEvent<
+          "secrets_changed",
+          {
+              projectSecretIds: readonly string[];
+              secretIds: readonly string[];
+              sessionSecretIds: readonly string[];
+              mutationId?: MutationId;
+          }
+      >
+    | BaseSessionEvent<"mcp_servers_changed", { servers: readonly McpServerSummary[] }>
+    | BaseSessionEvent<"mutation_applied", { mutationId: MutationId }>
+    | BaseSessionEvent<"workflow_changed", { update: WorkflowRunUpdate }>
+    | BaseSessionEvent<"external_tool_call_requested", { call: ExternalToolCall }>
+    | BaseSessionEvent<"external_tool_call_resolved", { call: ExternalToolCall }>
     | BaseSessionEvent<"tasks_changed", { tasks: readonly SessionTask[] }>
-    | BaseSessionEvent<"goal_changed", { goal: SessionGoal | null }>
+    | BaseSessionEvent<"goal_changed", { goal: SessionGoal | null; mutationId?: MutationId }>
     | BaseSessionEvent<"subagent_changed", { subagent: SubagentSummary }>
     | BaseSessionEvent<
           "shell_command_started",
@@ -848,7 +1008,9 @@ export interface RemoteTerminalGroupState {
 }
 
 export interface GlobalStreamHello {
+    catalog?: ModelCatalog;
     cursor: string;
+    identity?: DaemonIdentity;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];
     workspaces: readonly ProjectWorkspace[];
@@ -868,14 +1030,8 @@ export interface BaseGlobalEvent<TType extends string, TData> {
 export type GlobalEvent =
     | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"project_updated", { mutationId?: MutationId; project: Project }>
-    | BaseGlobalEvent<
-          "workspace_created",
-          { mutationId?: MutationId; workspace: ProjectWorkspace }
-      >
-    | BaseGlobalEvent<
-          "workspace_updated",
-          { mutationId?: MutationId; workspace: ProjectWorkspace }
-      >
+    | BaseGlobalEvent<"workspace_created", { mutationId?: MutationId; workspace: ProjectWorkspace }>
+    | BaseGlobalEvent<"workspace_updated", { mutationId?: MutationId; workspace: ProjectWorkspace }>
     | BaseGlobalEvent<"project_git_changed", { git: GitChangeSnapshot }>
     | BaseGlobalEvent<"workspace_git_changed", { git: GitChangeSnapshot }>
     | BaseGlobalEvent<"remote_terminals_changed", { terminals: readonly RemoteTerminalSummary[] }>

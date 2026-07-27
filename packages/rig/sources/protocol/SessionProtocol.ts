@@ -381,8 +381,20 @@ export interface SessionStreamHello {
 export interface SessionStreamCurrentState {
     draft?: string;
     draftUpdatedAt?: number;
+    externalTools?: readonly ExternalToolDefinition[];
     git?: GitChangeSnapshot;
+    interruption?: SessionInterruption;
+    mcpServers: readonly McpServerSummary[];
+    pendingExternalToolCalls?: readonly ExternalToolCall[];
+    projectSecretIds?: readonly string[];
+    secretIds?: readonly string[];
     sessionTokenCount?: SessionTokenCount;
+    sessionSecretIds?: readonly string[];
+    skills?: readonly DurableSkillDefinition[];
+    titleError?: string;
+    titleStatus?: SessionTitleStatus;
+    workflows?: readonly WorkflowRun[];
+    workflowsEnabled?: boolean;
 }
 
 /**
@@ -470,6 +482,9 @@ export interface CreateSessionRequest {
     docker?: DockerExecutionConfig;
     local?: boolean;
     workspaceId?: string;
+    /** Client-selected UUID used to make optimistic creation retry-safe. */
+    clientSessionId?: string;
+    mutationId?: string;
 }
 
 export interface UpdateSessionRequest {
@@ -478,6 +493,7 @@ export interface UpdateSessionRequest {
 
 export interface ChangePermissionModeRequest {
     permissionMode: PermissionMode;
+    mutationId?: string;
 }
 
 /**
@@ -503,6 +519,7 @@ export interface SetSessionDraftRequest {
      * stored is discarded even if it arrives later. Omitting it means now.
      */
     updatedAt?: number;
+    mutationId?: string;
 }
 
 export interface AttachSecretRequest {
@@ -529,15 +546,15 @@ export interface UnregisterSecretResponse {
     removed: boolean;
 }
 
-export type SetGoalRequest = CreateGoalRequest;
+export type SetGoalRequest = CreateGoalRequest & { mutationId?: string };
 
-export type ChangeSessionGoalStatusRequest = ChangeGoalStatusRequest;
+export type ChangeSessionGoalStatusRequest = ChangeGoalStatusRequest & { mutationId?: string };
 
 export interface GoalSessionResponse {
     session: ProtocolSession;
 }
 
-export type AnswerUserInputRequest = UserInputResponse;
+export type AnswerUserInputRequest = UserInputResponse & { mutationId?: string };
 
 export interface CreateSessionResponse {
     session: ProtocolSession;
@@ -785,10 +802,12 @@ export interface ChangeModelRequest {
 
 export interface ChangeEffortRequest {
     effort?: string;
+    mutationId?: string;
 }
 
 export interface ChangeServiceTierRequest {
     serviceTier?: ServiceTier;
+    mutationId?: string;
 }
 
 export interface AbortRunResponse {
@@ -834,6 +853,7 @@ export type SessionEvent =
     | SecretsChangedEvent
     | UserInputRequestedEvent
     | UserInputResolvedEvent
+    | MutationAppliedEvent
     | McpServersChangedEvent
     | TasksChangedEvent
     | GoalChangedEvent
@@ -1088,7 +1108,7 @@ export type SessionConfigurationChangedEvent = BaseSessionEvent<
 
 export type PermissionModeChangedEvent = BaseSessionEvent<
     "permission_mode_changed",
-    { permissionMode: PermissionMode }
+    { mutationId?: string; permissionMode: PermissionMode }
 >;
 
 /**
@@ -1099,7 +1119,7 @@ export type PermissionModeChangedEvent = BaseSessionEvent<
  */
 export type SessionDraftChangedEvent = BaseSessionEvent<
     "session_draft_changed",
-    { draft?: string; origin?: string; updatedAt: number }
+    { draft?: string; mutationId?: string; origin?: string; updatedAt: number }
 >;
 
 export type SecretsChangedEvent = BaseSessionEvent<
@@ -1108,6 +1128,7 @@ export type SecretsChangedEvent = BaseSessionEvent<
         projectSecretIds: readonly string[];
         secretIds: readonly string[];
         sessionSecretIds: readonly string[];
+        mutationId?: string;
     }
 >;
 
@@ -1117,10 +1138,13 @@ export type UserInputResolvedEvent = BaseSessionEvent<
     "user_input_resolved",
     {
         answers?: UserInputResponse["answers"];
+        mutationId?: string;
         requestId: string;
         status: "answered" | "cancelled";
     }
 >;
+
+export type MutationAppliedEvent = BaseSessionEvent<"mutation_applied", { mutationId: string }>;
 
 export type McpServersChangedEvent = BaseSessionEvent<
     "mcp_servers_changed",
@@ -1132,7 +1156,10 @@ export type TasksChangedEvent = BaseSessionEvent<
     { tasks: readonly SessionTask[] }
 >;
 
-export type GoalChangedEvent = BaseSessionEvent<"goal_changed", { goal: SessionGoal | null }>;
+export type GoalChangedEvent = BaseSessionEvent<
+    "goal_changed",
+    { goal: SessionGoal | null; mutationId?: string }
+>;
 
 export type SubagentChangedEvent = BaseSessionEvent<
     "subagent_changed",

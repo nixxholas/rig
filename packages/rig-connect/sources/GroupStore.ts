@@ -164,8 +164,7 @@ export class GroupStore {
             this.#markDirty(target.projectId);
             const projects = this.projects();
             return {
-                deltas:
-                    projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
+                deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
                 undo: () => {
                     this.#projects.set(target.projectId, known);
                     this.#markDirty(target.projectId);
@@ -310,8 +309,19 @@ export class GroupStore {
         // is already showing.
 
         const deltas: GroupDelta[] = [];
-        if (this.#state.sessionsComplete !== hello.sessionsComplete) {
-            this.#state = { ...this.#state, sessionsComplete: hello.sessionsComplete };
+        const catalog = hello.catalog ?? this.#state.catalog;
+        const identity = hello.identity ?? this.#state.identity;
+        if (
+            this.#state.sessionsComplete !== hello.sessionsComplete ||
+            !sameProtocolValue(this.#state.catalog, catalog) ||
+            !sameProtocolValue(this.#state.identity, identity)
+        ) {
+            this.#state = {
+                ...this.#state,
+                sessionsComplete: hello.sessionsComplete,
+                ...(catalog === undefined ? {} : { catalog }),
+                ...(identity === undefined ? {} : { identity }),
+            };
             deltas.push({ state: this.#state, type: "groups_state_changed" });
         }
         const projects = this.projects();
@@ -452,7 +462,10 @@ export class GroupStore {
             if (incoming.lastEventId !== undefined) {
                 this.#sessionEventIds.set(sessionId, incoming.lastEventId);
             }
-            this.#sessions.set(sessionId, known === undefined ? incoming : { ...known, ...incoming });
+            this.#sessions.set(
+                sessionId,
+                known === undefined ? incoming : { ...known, ...incoming },
+            );
             this.#markDirty(incoming.projectId);
             if (known !== undefined && known.projectId !== incoming.projectId) {
                 this.#markDirty(known.projectId);

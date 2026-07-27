@@ -124,6 +124,7 @@ export class InMemorySessionStore implements SessionStore {
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
+        mutationId?: string,
     ): InMemorySession | undefined {
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
@@ -135,11 +136,19 @@ export class InMemorySessionStore implements SessionStore {
             this.#projectSecretIds.set(projectId, ids);
             for (const candidate of this.#sessions.values()) {
                 if (candidate.snapshot().projectId === projectId) {
-                    candidate.attachSecret(secretId, { scope });
+                    candidate.attachSecret(secretId, {
+                        ...(candidate.id === sessionId && mutationId !== undefined
+                            ? { mutationId }
+                            : {}),
+                        scope,
+                    });
                 }
             }
         } else {
-            session.attachSecret(secretId, { scope });
+            session.attachSecret(secretId, {
+                ...(mutationId === undefined ? {} : { mutationId }),
+                scope,
+            });
         }
         return session;
     }
@@ -158,10 +167,15 @@ export class InMemorySessionStore implements SessionStore {
         return this.#createSession(request);
     }
 
+    createWithId(id: string, request: CreateSessionRequest): InMemorySession {
+        return this.get(id) ?? this.#createSession(request, undefined, undefined, id);
+    }
+
     detachSecret(
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
+        mutationId?: string,
     ): InMemorySession | undefined {
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
@@ -170,16 +184,28 @@ export class InMemorySessionStore implements SessionStore {
             this.#projectSecretIds.get(projectId)?.delete(secretId);
             for (const candidate of this.#sessions.values()) {
                 if (candidate.snapshot().projectId === projectId) {
-                    candidate.detachSecret(secretId, { scope });
+                    candidate.detachSecret(secretId, {
+                        ...(candidate.id === sessionId && mutationId !== undefined
+                            ? { mutationId }
+                            : {}),
+                        scope,
+                    });
                 }
             }
         } else {
-            session.detachSecret(secretId, { scope });
+            session.detachSecret(secretId, {
+                ...(mutationId === undefined ? {} : { mutationId }),
+                scope,
+            });
         }
         return session;
     }
 
-    fork(sessionId: string): InMemorySession | undefined {
+    fork(sessionId: string, targetSessionId?: string): InMemorySession | undefined {
+        if (targetSessionId !== undefined) {
+            const existing = this.get(targetSessionId);
+            if (existing !== undefined) return existing;
+        }
         const source = this.get(sessionId);
         if (source === undefined) return undefined;
         const state = source.createForkState();
@@ -196,6 +222,7 @@ export class InMemorySessionStore implements SessionStore {
         const session = new InMemorySession({
             agentManager: this.#agentManager,
             createEventId: createEventIdFactory(),
+            ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             modelCatalog: this.#modelCatalog,
             onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
@@ -209,6 +236,12 @@ export class InMemorySessionStore implements SessionStore {
             secretRegistry: this.#secrets,
             restore: {
                 ...state,
+                ...(targetSessionId === undefined
+                    ? {}
+                    : {
+                          agent: { ...state.agent, rootSessionId: targetSessionId },
+                          id: targetSessionId,
+                      }),
                 orderKey: this.#newLastSessionOrderKey(
                     sourceSnapshot.projectId,
                     sourceSnapshot.workspaceId,
@@ -227,6 +260,7 @@ export class InMemorySessionStore implements SessionStore {
         request: CreateSessionRequest,
         metadata?: SessionAgentMetadata,
         contextMessages?: readonly Message[],
+        id?: string,
     ): InMemorySession {
         const inherited =
             metadata?.parentSessionId === undefined
@@ -269,6 +303,7 @@ export class InMemorySessionStore implements SessionStore {
                 : {}),
             ...(metadata !== undefined ? { metadata } : {}),
             ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
+            ...(id === undefined ? {} : { id }),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
             orderKey:
                 inherited === undefined

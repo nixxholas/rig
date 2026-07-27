@@ -283,6 +283,8 @@ describe("rig-connect groups against a live daemon", () => {
             archivedWorkspace.id,
         );
         expect(hello.sessionsComplete).toBe(true);
+        expect(hello.catalog?.providers).toEqual(expect.any(Array));
+        expect(hello.identity?.version).toEqual(expect.any(String));
 
         connection = connectGroups({
             endpoint,
@@ -290,6 +292,8 @@ describe("rig-connect groups against a live daemon", () => {
             token: "secret",
         });
         await waitFor(() => connection?.state().connection === "live", "the stream to open");
+        expect(connection.state().catalog?.providers).toEqual(expect.any(Array));
+        expect(connection.state().identity?.version).toEqual(expect.any(String));
         expect(listedSessionIds(connection)).toEqual(
             expect.arrayContaining(active.map((session) => session.id)),
         );

@@ -36,6 +36,7 @@ import {
 } from "../runtime/createCodingAssistantAgent.js";
 import type {
     ChangeEffortRequest,
+    AnswerUserInputRequest,
     AbortRunResponse,
     ChangeModelRequest,
     ChangePermissionModeRequest,
@@ -1338,13 +1339,19 @@ export class InMemorySession {
     }
 
     changeEffort(request: ChangeEffortRequest): ProtocolSession {
-        return this.#applyConfiguration({
-            effort: request.effort ?? this.#selectedModel().defaultThinkingLevel,
-        });
+        return this.#applyConfiguration(
+            {
+                effort: request.effort ?? this.#selectedModel().defaultThinkingLevel,
+            },
+            request.mutationId === undefined ? {} : { mutationId: request.mutationId },
+        );
     }
 
     changeServiceTier(request: ChangeServiceTierRequest): ProtocolSession {
-        return this.#applyConfiguration({ serviceTier: request.serviceTier ?? null });
+        return this.#applyConfiguration(
+            { serviceTier: request.serviceTier ?? null },
+            request.mutationId === undefined ? {} : { mutationId: request.mutationId },
+        );
     }
 
     /**
@@ -1620,6 +1627,7 @@ export class InMemorySession {
         this.#draftUpdatedAt = updatedAt;
         this.#append("session_draft_changed", {
             ...(draft === undefined ? {} : { draft }),
+            ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
             ...(request.origin === undefined ? {} : { origin: request.origin }),
             updatedAt,
         });
@@ -1674,7 +1682,10 @@ export class InMemorySession {
         if (permissionChanged) {
             this.#removeMcpTools(runtime);
         }
-        this.#append("permission_mode_changed", { permissionMode });
+        this.#append("permission_mode_changed", {
+            ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
+            permissionMode,
+        });
         if (
             permissionChanged &&
             runtime !== undefined &&
@@ -1688,25 +1699,31 @@ export class InMemorySession {
 
     attachSecret(
         secretId: string,
-        options: { scope?: SecretAttachmentScope } = {},
+        options: { mutationId?: string; scope?: SecretAttachmentScope } = {},
     ): ProtocolSession {
         const scope = options.scope ?? "session";
         this.#secrets.attach(secretId, scope);
-        this.#append("secrets_changed", this.#secretAttachmentData());
+        this.#append("secrets_changed", {
+            ...this.#secretAttachmentData(),
+            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
+        });
         return this.snapshot();
     }
 
     detachSecret(
         secretId: string,
-        options: { scope?: SecretAttachmentScope } = {},
+        options: { mutationId?: string; scope?: SecretAttachmentScope } = {},
     ): ProtocolSession {
         const scope = options.scope ?? "session";
         if (!this.#secrets.detach(secretId, scope)) return this.snapshot();
-        this.#append("secrets_changed", this.#secretAttachmentData());
+        this.#append("secrets_changed", {
+            ...this.#secretAttachmentData(),
+            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
+        });
         return this.snapshot();
     }
 
-    setGoal(request: CreateGoalRequest): SessionGoal {
+    setGoal(request: CreateGoalRequest, mutationId?: string): SessionGoal {
         if (this.isSubagent()) {
             throw new Error("Goals can only be managed from the primary session.");
         }
@@ -1724,7 +1741,10 @@ export class InMemorySession {
             updatedAt: now,
         };
         this.#lastMessageAt = now;
-        this.#append("goal_changed", { goal: { ...this.#goal } });
+        this.#append("goal_changed", {
+            goal: { ...this.#goal },
+            ...(mutationId === undefined ? {} : { mutationId }),
+        });
         if (this.#titleStatus === "idle") {
             this.#title = createGoalTitle(this.#goal.objective);
             this.#titleStatus = "ready";
@@ -1739,7 +1759,7 @@ export class InMemorySession {
 
     changeGoalStatus(
         request: ChangeGoalStatusRequest,
-        options: { stopActiveGoalRun?: boolean } = {},
+        options: { mutationId?: string; stopActiveGoalRun?: boolean } = {},
     ): SessionGoal {
         if (this.isSubagent()) {
             throw new Error("Goals can only be managed from the primary session.");
@@ -1752,7 +1772,10 @@ export class InMemorySession {
         }
 
         this.#goal = { ...this.#goal, status: request.status, updatedAt: this.#now() };
-        this.#append("goal_changed", { goal: { ...this.#goal } });
+        this.#append("goal_changed", {
+            goal: { ...this.#goal },
+            ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
+        });
         if (request.status === "active") {
             this.#continueGoalIfIdle();
         } else if (options.stopActiveGoalRun !== false) {
@@ -1766,7 +1789,7 @@ export class InMemorySession {
         return { ...this.#goal };
     }
 
-    clearGoal(): boolean {
+    clearGoal(mutationId?: string): boolean {
         if (this.isSubagent()) {
             throw new Error("Goals can only be managed from the primary session.");
         }
@@ -1779,7 +1802,10 @@ export class InMemorySession {
             this.#activeRun.controller.abort();
             void this.#killRuntimeProcesses();
         }
-        this.#append("goal_changed", { goal: null });
+        this.#append("goal_changed", {
+            goal: null,
+            ...(mutationId === undefined ? {} : { mutationId }),
+        });
         return true;
     }
 
@@ -1883,7 +1909,10 @@ export class InMemorySession {
         return response;
     }
 
-    answerUserInput(requestId: string, response: UserInputResponse): ProtocolSession | undefined {
+    answerUserInput(
+        requestId: string,
+        response: AnswerUserInputRequest,
+    ): ProtocolSession | undefined {
         const pending = this.#pendingUserInputs.get(requestId);
         const durable = this.#durableUserInputs.get(requestId);
         if (pending === undefined && durable === undefined) return undefined;
@@ -1944,6 +1973,7 @@ export class InMemorySession {
         }
         this.#append("user_input_resolved", {
             answers,
+            ...(response.mutationId === undefined ? {} : { mutationId: response.mutationId }),
             requestId,
             status: "answered",
         });
@@ -2512,6 +2542,10 @@ export class InMemorySession {
 
     recordUserActivity(): void {
         this.#restartMetadataSettlement();
+    }
+
+    recordMutationApplied(mutationId: string | undefined): void {
+        if (mutationId !== undefined) this.#append("mutation_applied", { mutationId });
     }
 
     requestForSubagent(): CreateSessionRequest {

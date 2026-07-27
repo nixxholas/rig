@@ -86,6 +86,29 @@ function event<TType extends string>(type: TType, data: unknown, scope: object =
 }
 
 describe("GroupStore", () => {
+    it("projects daemon identity and the global model catalog from the opening frame", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                catalog: {
+                    defaultModelId: "sonnet-5",
+                    defaultProviderId: "claude",
+                    models: [],
+                    providers: [],
+                },
+                identity: { developmentBuildId: "dev-1", version: "0.0.74" },
+            }),
+        );
+
+        expect(store.state()).toMatchObject({
+            catalog: {
+                defaultModelId: "sonnet-5",
+                defaultProviderId: "claude",
+            },
+            identity: { developmentBuildId: "dev-1", version: "0.0.74" },
+        });
+    });
+
     it("joins projects, worktrees, and sessions into one tree", () => {
         const store = new GroupStore();
         store.applyHello(

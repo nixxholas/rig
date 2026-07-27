@@ -108,6 +108,127 @@ const randomValues = (bytes: Uint8Array): Uint8Array => {
 };
 
 describe("connectRig mutations", () => {
+    it("uses client-selected identities for retry-safe create and fork", async () => {
+        const stream = streamResponse();
+        const calls: { init?: RequestInit; url: URL }[] = [];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                calls.push({ ...(init === undefined ? {} : { init }), url });
+                return Promise.resolve(
+                    url.pathname.endsWith("/stream")
+                        ? stream.response
+                        : new Response("{}", { status: 200 }),
+                );
+            },
+            now: () => 1_700_000_000_000,
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: "session-1",
+        });
+        try {
+            stream.write(hello());
+            await settle();
+            const createdId = rig.createSession({ cwd: "/new-work" });
+            const forkedId = rig.forkSession("session-1");
+            expect(createdId).not.toBe(forkedId);
+            await settle();
+
+            const createCall = calls.find(
+                (call) => call.url.pathname === "/sessions" && call.init?.method === "POST",
+            );
+            expect(JSON.parse(String(createCall?.init?.body))).toMatchObject({
+                clientSessionId: createdId,
+                cwd: "/new-work",
+                mutationId: createdId,
+            });
+            const forkCall = calls.find((call) => call.url.pathname.endsWith("/fork"));
+            expect(forkCall?.init?.headers).toMatchObject({
+                "x-rig-mutation-id": forkedId,
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("applies the expanded session actions synchronously and delivers them FIFO", async () => {
+        const stream = streamResponse();
+        const calls: { init?: RequestInit; url: URL }[] = [];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                calls.push({ ...(init === undefined ? {} : { init }), url });
+                return Promise.resolve(
+                    url.pathname.endsWith("/stream")
+                        ? stream.response
+                        : new Response("{}", { status: 200 }),
+                );
+            },
+            now: () => 1_700_000_000_000,
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: "session-1",
+        });
+        try {
+            stream.write(hello());
+            await settle();
+            stream.write(
+                event("user_input_requested", {
+                    questions: [],
+                    requestId: "question-1",
+                }),
+            );
+            await settle();
+
+            rig.setEffort("session-1", "high");
+            expect(connection.session().effort).toBe("high");
+            rig.setServiceTier("session-1", "priority");
+            expect(connection.session().serviceTier).toBe("priority");
+            rig.setPermissionMode("session-1", "full_access");
+            expect(connection.session().permissionMode).toBe("full_access");
+            rig.setDraft("session-1", "unfinished thought");
+            expect(connection.session().draft).toBe("unfinished thought");
+            rig.answerUserInput("session-1", "question-1", { answers: {} });
+            expect(connection.session().pendingUserInputs).toEqual([]);
+            rig.setGoal("session-1", "Ship the connector");
+            expect(connection.session().goal?.objective).toBe("Ship the connector");
+            rig.attachSecret("session-1", "secret-1");
+            expect(connection.session().sessionSecretIds).toEqual(["secret-1"]);
+            rig.runShellCommand("session-1", { command: "pwd", commandId: "shell-1" });
+            expect(connection.session().shellCommands).toEqual([
+                { command: "pwd", commandId: "shell-1", status: "running" },
+            ]);
+
+            await settle();
+            expect(
+                calls
+                    .filter((call) => !call.url.pathname.endsWith("/stream"))
+                    .map((call) => `${call.init?.method} ${call.url.pathname}`),
+            ).toEqual([
+                "PATCH /sessions/session-1/effort",
+                "PATCH /sessions/session-1/service-tier",
+                "PATCH /sessions/session-1/permissions",
+                "PUT /sessions/session-1/draft",
+                "POST /sessions/session-1/user-input/question-1",
+                "POST /sessions/session-1/goal",
+                "POST /sessions/session-1/secrets",
+                "POST /sessions/session-1/shell",
+            ]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("shows a sent message synchronously and reuses one session stream", async () => {
         const stream = streamResponse();
         const calls: { init?: RequestInit; url: URL }[] = [];

@@ -27,6 +27,7 @@ export interface SessionStore {
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
+        mutationId?: string,
     ): InMemorySession | undefined;
     changeEffort(sessionId: string, request: ChangeEffortRequest): InMemorySession | undefined;
     changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined;
@@ -35,6 +36,7 @@ export interface SessionStore {
         request: ChangeServiceTierRequest,
     ): InMemorySession | undefined;
     create(request: CreateSessionRequest): InMemorySession;
+    createWithId(id: string, request: CreateSessionRequest): InMemorySession;
     createWorkspace(
         projectId: string,
         request: CreateProjectWorkspaceRequest,
@@ -43,8 +45,9 @@ export interface SessionStore {
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
+        mutationId?: string,
     ): InMemorySession | undefined;
-    fork(sessionId: string): InMemorySession | undefined;
+    fork(sessionId: string, targetSessionId?: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     getProject(projectId: string): Project | undefined;
     getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined>;

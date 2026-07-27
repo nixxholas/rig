@@ -15,6 +15,7 @@ import {
 } from "@slopus/rig-execution";
 import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
+import { connectRig } from "@/connectRig.js";
 import { connectSession } from "@/connectSession.js";
 import type { SessionConnection } from "@/connectSession.js";
 
@@ -97,6 +98,59 @@ describe("rig-connect against a live daemon", () => {
             subagents: [],
             tasks: [],
         });
+    });
+
+    it("delivers expanded optimistic actions through the real mutation protocol", async () => {
+        const { endpoint, store } = await startDaemon();
+        const source = store.create({ cwd: "/tmp/rig-connect-actions" });
+        const requests: string[] = [];
+        const mutationFailures: string[] = [];
+        const rig = connectRig({
+            endpoint,
+            fetch: (input, init) => {
+                requests.push(`${init?.method ?? "GET"} ${String(input)}`);
+                return fetch(input, init);
+            },
+            onMutationRejected: (delta) => mutationFailures.push(delta.message),
+            token: "secret",
+        });
+        const session = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: source.id,
+        });
+        try {
+            await waitFor(() => session.session().connection === "live", "the stream to open");
+
+            rig.setDraft(source.id, "local first");
+            expect(session.session().draft).toBe("local first");
+            rig.setPermissionMode(source.id, "full_access");
+            expect(session.session().permissionMode).toBe("full_access");
+            rig.setGoal(source.id, "Finish the connector");
+            expect(session.session().goal?.objective).toBe("Finish the connector");
+
+            await waitFor(
+                () =>
+                    source.snapshot().draft === "local first" &&
+                    source.snapshot().permissionMode === "full_access" &&
+                    source.snapshot().goal?.objective === "Finish the connector",
+                "the daemon to accept the optimistic changes",
+            );
+
+            const createdId = rig.createSession({ cwd: "/tmp/rig-created-through-connect" });
+            await waitFor(() => store.get(createdId) !== undefined, "the new session to exist");
+            expect(store.get(createdId)?.snapshot().cwd).toBe("/tmp/rig-created-through-connect");
+
+            const forkedId = rig.forkSession(createdId);
+            await waitFor(
+                () => store.get(forkedId) !== undefined || mutationFailures.length > 0,
+                `the fork to exist; requests: ${requests.join(", ")}`,
+            );
+            expect(mutationFailures).toEqual([]);
+            expect(store.get(forkedId)?.snapshot().id).toBe(forkedId);
+        } finally {
+            session.close();
+            rig.close();
+        }
     });
 
     it("tracks what the session is doing without asking the daemon anything else", async () => {

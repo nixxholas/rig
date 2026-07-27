@@ -209,6 +209,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
+        mutationId?: string,
     ): InMemorySession | undefined {
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
@@ -222,11 +223,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .run(projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
                 if (candidate.snapshot().projectId === projectId) {
-                    candidate.attachSecret(secretId, { scope });
+                    candidate.attachSecret(secretId, {
+                        ...(candidate.id === sessionId && mutationId !== undefined
+                            ? { mutationId }
+                            : {}),
+                        scope,
+                    });
                 }
             }
         } else {
-            session.attachSecret(secretId, { scope });
+            session.attachSecret(secretId, {
+                ...(mutationId === undefined ? {} : { mutationId }),
+                scope,
+            });
         }
         return session;
     }
@@ -302,6 +311,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         sessionId: string,
         secretId: string,
         scope: SecretAttachmentScope,
+        mutationId?: string,
     ): InMemorySession | undefined {
         const session = this.get(sessionId);
         if (session === undefined) return undefined;
@@ -314,17 +324,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .run(projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
                 if (candidate.snapshot().projectId === projectId) {
-                    candidate.detachSecret(secretId, { scope });
+                    candidate.detachSecret(secretId, {
+                        ...(candidate.id === sessionId && mutationId !== undefined
+                            ? { mutationId }
+                            : {}),
+                        scope,
+                    });
                 }
             }
         } else {
-            session.detachSecret(secretId, { scope });
+            session.detachSecret(secretId, {
+                ...(mutationId === undefined ? {} : { mutationId }),
+                scope,
+            });
         }
         return session;
     }
 
-    fork(sessionId: string): InMemorySession | undefined {
+    fork(sessionId: string, targetSessionId?: string): InMemorySession | undefined {
         this.#assertAcceptingMutations();
+        if (targetSessionId !== undefined) {
+            const existing = this.get(targetSessionId);
+            if (existing !== undefined) return existing;
+        }
         const source = this.get(sessionId);
         if (source === undefined) return undefined;
         const state = source.createForkState();
@@ -347,6 +369,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     ? {}
                     : { createRuntime: this.#createRuntime }),
                 emitCreatedEvent: false,
+                ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
                 modelCatalog: this.#modelCatalog,
                 onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
                 ...(this.#mcpToolProvider !== undefined
@@ -360,6 +383,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 secretRegistry: this.#secrets,
                 restore: {
                     ...state,
+                    ...(targetSessionId === undefined
+                        ? {}
+                        : {
+                              agent: { ...state.agent, rootSessionId: targetSessionId },
+                              id: targetSessionId,
+                          }),
                     orderKey: this.#newLastSessionOrderKey(
                         sourceSnapshot.projectId,
                         sourceSnapshot.workspaceId,

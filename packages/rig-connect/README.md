@@ -4,10 +4,10 @@
 Rig endpoint, follows a stream, keeps the state in memory, and hands it to the caller as ordered
 values plus a stream of deltas.
 
-There are two subscriptions, because there are two questions. `connectSession` answers what is
-happening inside one conversation. `connectGroups` answers what projects, worktrees, and sessions
-exist. They are independent: a session list does not require a session connection, and a
-conversation does not require the catalog.
+`connectRig` creates one shared connection. From it, `connectSession` answers what is happening
+inside one conversation and `connectGroups` answers what projects, worktrees, and sessions exist.
+The subscriptions are independent, share transport and mutation delivery, and release their state
+when the last interested view closes.
 
 It is the only place in the product where sync is reasoned about. A UI embeds it and renders; it
 never asks the daemon a follow-up question to understand what it was just told. The single
@@ -21,12 +21,14 @@ code.
 ## Creating a connection
 
 ```ts
-import { connectSession } from "@slopus/rig-connect";
+import { connectRig } from "@slopus/rig-connect";
 
-const connection = connectSession({
+const rig = connectRig({
     endpoint: "http://127.0.0.1:4517",
-    sessionId: "01960f2c-...",
     token: process.env.RIG_TOKEN!,
+});
+const connection = rig.connectSession({
+    sessionId: "01960f2c-...",
     onChange(elements, session) {
         render(elements, session);
     },
@@ -34,14 +36,15 @@ const connection = connectSession({
 
 // Later, when the view goes away.
 connection.close();
+rig.close();
 ```
 
 An endpoint and a token are the only inputs. Obtaining the token is somebody else's job:
 `rig-connect` never logs in, never reads credentials from disk, and never touches the environment.
 
-The endpoint is any HTTP address serving Rig's protocol; the port above is only an example. Note
-that the local daemon currently listens on a Unix domain socket rather than a TCP port, so reaching
-it from this library means exposing the protocol over HTTP.
+The endpoint is any HTTP address serving Rig's protocol; the port above is only an example.
+Platform clients may supply a Fetch-compatible transport. Rig's local Node client uses this seam to
+reach the daemon's Unix socket without adding Node built-ins to this package.
 
 `onChange` fires whenever any element changes, with the current list and the current session state.
 `close` releases everything the connection holds and stops all reporting.
@@ -125,13 +128,32 @@ const { activity, git, modelId, tokens, title } = connection.session();
 `stopped`, or `error`, and `activity.label` is ready to display. A status line renders from this
 without walking the list.
 
-The session state also carries the live facts a complete conversation surface renders: project and
-worktree identity, model catalog and locking, effort and service tier, permission mode, composer
-draft, recap, pending steering and input requests, tasks, goal, subagents, background processes,
-shell commands, permission reviews, context size, and Git changes. Each is initialized by the
-opening frame and tracked continuously rather than fetched on demand. `connection` is `connecting`,
-`live`, `reconnecting`, or `closed`, so an interruption is a state the subscriber can see rather
-than a silent stall.
+The session state also carries the live facts a complete conversation surface renders: project,
+worktree, environment and agent identity; model locking, effort and service tier; permission mode;
+composer draft and recap; title generation and structured interruption state; pending steering and
+input requests; tasks, goal, subagents, MCP servers and workflows; secret attachments, external
+tools and durable skills; background processes and ordered shell commands; permission reviews,
+context size, usage, quota, and Git changes. Each is initialized by the opening frame and tracked
+continuously rather than fetched on demand. `connection` is `connecting`, `live`, `reconnecting`,
+or `closed`, so a transport interruption is visible rather than a silent stall.
+
+## Actions
+
+Actions live on the shared `RigConnection`. They update subscribed state synchronously and return
+their ordered mutation ID; delivery, retry, per-entity ordering, reconnect survival, conflict
+reconciliation, and rejection rollback happen in the background.
+
+```ts
+const mutationId = rig.setDraft(sessionId, "Unsent message");
+rig.setPermissionMode(sessionId, "full_access");
+rig.setGoal(sessionId, "Ship the release");
+rig.sendMessage(sessionId, "Continue.");
+```
+
+The same contract covers create and fork, model/effort/service-tier changes, structured answers,
+goals, secrets, shell commands, workflow stop, archive, reset, rewind, compaction, and run stop.
+`onMutationRejected` receives failures even when no view is currently subscribed to the affected
+entity. Loading earlier transcript turns remains the only operation with a loading state.
 
 ## The groups
 
@@ -209,12 +231,11 @@ one.
 Nothing is a bare notification that something changed, so there is no polling loop and no fan-out
 of requests after each event.
 
-The events the library interprets are `session_activity_changed`, `session_context_changed`,
-`session_git_changed`, `session_configuration_changed`, `session_title_changed`,
-`message_submitted`, `run_started`, `agent_event`, `agent_message`, `run_finished`, `run_error`,
-`session_reset`, and `session_rewound`. Rig emits more than these; anything unrecognised is ordered
-and cursored like the rest and then ignored, so a daemon that gained an event does not break a
-client that has not learned it yet.
+The interpreted events include activity, context, Git, configuration, permissions, title, draft,
+secrets, MCP, workflows, external calls, structured input, tasks, goals, subagents, shell commands,
+messages, runs, retries, reset, and rewind. Rig emits more than these; anything unrecognised is
+ordered and cursored like the rest and then ignored, so a daemon that gained an event does not
+break a client that has not learned it yet.
 
 ### Reconnection
 
@@ -239,7 +260,9 @@ type-check rather than a runtime surprise. Run it with `pnpm check`.
 
 ## Layers
 
-`connectSession` and `connectGroups` are the public surface, and most callers need nothing else.
+`connectRig` and its session/group subscriptions and actions are the public surface, and most
+callers need nothing else. `connectSession` and `connectGroups` remain convenience wrappers for a
+view that needs only one subscription.
 The pieces beneath them are exported for consumers that want to supply their own transport or drive
 the state directly:
 

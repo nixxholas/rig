@@ -6,6 +6,7 @@ export {
     type LocalProtocolServerConnection,
 } from "./ensureLocalProtocolServer.js";
 export { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
+export { createUnixSocketFetch } from "./createUnixSocketFetch.js";
 export {
     ProtocolHttpClient,
     type AttachRemoteTerminalOptions,

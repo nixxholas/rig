@@ -5,6 +5,9 @@ export type { ConnectGroupsOptions, GroupsConnection } from "./connectGroups.js"
 export { connectRig } from "./connectRig.js";
 export type {
     ConnectRigOptions,
+    CreateSessionInput,
+    DraftUpdate,
+    GoalStatus,
     GroupTarget,
     ModelSelection,
     RigConnection,
@@ -13,6 +16,9 @@ export type {
     RigSessionConnection,
     RigSessionSubscriptionOptions,
     SendMessageInput,
+    SecretAttachmentScope,
+    ShellCommandInput,
+    UserInputAnswers,
 } from "./connectRig.js";
 export { ChatStore } from "./ChatStore.js";
 export { GroupStore } from "./GroupStore.js";
@@ -59,13 +65,21 @@ export type {
 } from "./GroupElement.js";
 export type {
     BackgroundProcess,
+    DaemonIdentity,
+    DurableSkillDefinition,
+    ExternalToolCall,
+    ExternalToolCallResolution,
+    ExternalToolDefinition,
     GitChangeSnapshot,
     GlobalEvent,
     GlobalStreamHello,
     InterpretedSessionEvent,
     ModelSummary,
+    McpServerSummary,
+    ModelCatalog,
     MutationId,
     PendingSteeringMessage,
+    ProviderModelCatalog,
     PermissionReviewState,
     ProviderQuota,
     RemoteTerminalGroupState,
@@ -78,6 +92,9 @@ export type {
     SessionSummary,
     SessionActivity,
     SessionActivityKind,
+    SessionAgentMetadata,
+    SessionExecutionEnvironment,
+    SessionInterruption,
     SessionEvent,
     SessionStreamHello,
     SessionTask,
@@ -90,4 +107,5 @@ export type {
     ToolCallPresentation,
     ToolResultPresentation,
     UserInputRequest,
+    WorkflowRun,
 } from "./protocol.js";

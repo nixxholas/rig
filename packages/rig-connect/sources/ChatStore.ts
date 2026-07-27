@@ -5,7 +5,9 @@ import type {
     AgentMessage,
     BackgroundProcess,
     ContentBlock,
+    ExternalToolCall,
     GitChangeSnapshot,
+    McpServerSummary,
     Message,
     PendingSteeringMessage,
     PermissionReviewState,
@@ -26,8 +28,10 @@ import type {
     ToolResultBlock,
     ToolResultPresentation,
     Usage,
-    UserMessage,
     UserInputRequest,
+    UserMessage,
+    WorkflowRun,
+    WorkflowRunUpdate,
 } from "./protocol.js";
 import type {
     ActiveTurn,
@@ -126,6 +130,8 @@ export class ChatStore {
             backgroundProcesses: [],
             connection: "connecting",
             cwd: "",
+            externalTools: [],
+            mcpServers: [],
             modelLocked: false,
             modelId: "",
             models: [],
@@ -134,15 +140,23 @@ export class ChatStore {
             pendingUserInputs: [],
             permissionMode: "",
             permissionReviews: [],
+            pendingExternalToolCalls: [],
             projectId: "",
+            projectSecretIds: [],
             providerId: "",
+            secretIds: [],
+            sessionSecretIds: [],
+            skills: [],
             loadingMore: false,
             sessionId,
             shellCommands: [],
             status: "idle",
             subagents: [],
             tasks: [],
+            titleStatus: "idle",
             transcriptComplete: true,
+            workflows: [],
+            workflowsEnabled: false,
         };
     }
 
@@ -330,7 +344,10 @@ export class ChatStore {
      * whole prior reference is therefore both cheaper and more exact than
      * reconstructing optional fields one by one.
      */
-    applyOptimisticSession(patch: Partial<SessionState>): {
+    applyOptimisticSession(
+        patch: Partial<SessionState>,
+        clear: readonly (keyof SessionState)[] = [],
+    ): {
         deltas: readonly ChatDelta[];
         undo: () => void;
     } {
@@ -339,13 +356,15 @@ export class ChatStore {
             keyof SessionState,
             { present: boolean; value: SessionState[keyof SessionState] }
         >();
-        for (const key of Object.keys(patch) as (keyof SessionState)[]) {
+        for (const key of new Set([...(Object.keys(patch) as (keyof SessionState)[]), ...clear])) {
             previous.set(key, {
                 present: Object.hasOwn(before, key),
                 value: before[key],
             });
         }
-        this.#session = { ...this.#session, ...patch };
+        const updated = { ...this.#session, ...patch };
+        for (const key of clear) delete updated[key];
+        this.#session = updated;
         const deltas = this.#finish([], this.#revision, before);
         return {
             deltas,
@@ -403,34 +422,53 @@ export class ChatStore {
             ...withoutKeys(this.#session, [
                 "draft",
                 "draftUpdatedAt",
+                "agent",
+                "agentId",
+                "environment",
                 "effort",
                 "goal",
                 "git",
+                "interruption",
                 "lastEventId",
                 "recap",
                 "serviceTier",
                 "title",
+                "titleError",
                 "tokens",
                 "workspaceId",
             ]),
             archived: session.archived,
             backgroundProcesses: session.backgroundProcesses ?? [],
             cwd: session.cwd,
+            externalTools: session.externalTools ?? [],
+            mcpServers: session.mcpServers ?? [],
             modelLocked: session.modelLocked,
             modelId: session.modelId,
             models: session.models,
             orderKey: session.orderKey,
             pendingSteeringMessages: session.pendingSteeringMessages ?? [],
+            pendingExternalToolCalls: session.pendingExternalToolCalls ?? [],
             pendingUserInputs: session.pendingUserInputs,
             permissionReviews: session.permissionReviews ?? [],
             permissionMode: session.permissionMode,
             projectId: session.projectId,
+            projectSecretIds: session.projectSecretIds ?? [],
             providerId: session.providerId,
+            secretIds: session.secretIds ?? [],
+            sessionSecretIds: session.sessionSecretIds ?? [],
             sessionId: session.id,
             shellCommands: session.shellCommands ?? [],
+            skills: session.skills ?? [],
             status: session.status,
             subagents: session.subagents ?? [],
             tasks: session.tasks,
+            titleStatus: session.titleStatus ?? "idle",
+            workflows: session.workflows ?? [],
+            workflowsEnabled: session.workflowsEnabled ?? false,
+            ...(session.agent === undefined ? {} : { agent: session.agent }),
+            ...(session.agentId === undefined ? {} : { agentId: session.agentId }),
+            ...(session.environment === undefined ? {} : { environment: session.environment }),
+            ...(session.interruption === undefined ? {} : { interruption: session.interruption }),
             ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
             ...(session.draft === undefined ? {} : { draft: session.draft }),
             ...(session.draftUpdatedAt === undefined
@@ -443,10 +481,19 @@ export class ChatStore {
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
             ...(session.title === undefined ? {} : { title: session.title }),
+            ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
             ...(session.sessionTokenCount === undefined
                 ? {}
                 : { tokens: session.sessionTokenCount }),
         };
+        return this.#finish([], revisionBefore, sessionBefore);
+    }
+
+    /** Replaces transcript and session facts after reset, rewind, or compaction. */
+    applySessionReplacement(session: ProtocolSession): readonly ChatDelta[] {
+        const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
+        this.#resetFromSession(session);
         return this.#finish([], revisionBefore, sessionBefore);
     }
 
@@ -482,15 +529,37 @@ export class ChatStore {
         if (hello.current !== undefined) {
             const current = hello.current;
             this.#session = {
-                ...withoutKeys(this.#session, ["draft", "draftUpdatedAt", "git", "tokens"]),
+                ...withoutKeys(this.#session, [
+                    "draft",
+                    "draftUpdatedAt",
+                    "git",
+                    "interruption",
+                    "titleError",
+                    "tokens",
+                ]),
+                externalTools: current.externalTools ?? this.#session.externalTools,
+                mcpServers: current.mcpServers ?? this.#session.mcpServers,
+                pendingExternalToolCalls:
+                    current.pendingExternalToolCalls ?? this.#session.pendingExternalToolCalls,
+                projectSecretIds: current.projectSecretIds ?? this.#session.projectSecretIds,
+                secretIds: current.secretIds ?? this.#session.secretIds,
+                sessionSecretIds: current.sessionSecretIds ?? this.#session.sessionSecretIds,
+                skills: current.skills ?? this.#session.skills,
+                titleStatus: current.titleStatus ?? this.#session.titleStatus,
+                workflows: current.workflows ?? this.#session.workflows,
+                workflowsEnabled: current.workflowsEnabled ?? this.#session.workflowsEnabled,
                 ...(current.draft === undefined ? {} : { draft: current.draft }),
                 ...(current.draftUpdatedAt === undefined
                     ? {}
                     : { draftUpdatedAt: current.draftUpdatedAt }),
                 ...(current.git === undefined ? {} : { git: applicationGit(current.git) }),
+                ...(current.interruption === undefined
+                    ? {}
+                    : { interruption: current.interruption }),
                 ...(current.sessionTokenCount === undefined
                     ? {}
                     : { tokens: current.sessionTokenCount }),
+                ...(current.titleError === undefined ? {} : { titleError: current.titleError }),
                 ...(this.#session.usage === undefined || current.sessionTokenCount === undefined
                     ? {}
                     : {
@@ -627,7 +696,8 @@ export class ChatStore {
                 };
                 break;
             case "session_title_changed": {
-                const { recap, status, title } = event.data as {
+                const { errorMessage, recap, status, title } = event.data as {
+                    errorMessage?: string;
                     recap?: string;
                     status: string;
                     title?: string;
@@ -648,6 +718,17 @@ export class ChatStore {
                     if (recap === undefined) clear.push("recap");
                     this.#session = withoutKeys(this.#session, clear);
                 }
+                this.#session = {
+                    ...withoutKeys(this.#session, ["titleError"]),
+                    titleStatus:
+                        status === "error" ||
+                        status === "generating" ||
+                        status === "idle" ||
+                        status === "ready"
+                            ? status
+                            : this.#session.titleStatus,
+                    ...(errorMessage === undefined ? {} : { titleError: errorMessage }),
+                };
                 break;
             }
             case "user_input_requested": {
@@ -670,6 +751,75 @@ export class ChatStore {
                     pendingUserInputs: this.#session.pendingUserInputs.filter(
                         (pending) => pending.requestId !== requestId,
                     ),
+                };
+                break;
+            }
+            case "secrets_changed": {
+                const data = event.data as {
+                    projectSecretIds: readonly string[];
+                    secretIds: readonly string[];
+                    sessionSecretIds: readonly string[];
+                };
+                this.#session = { ...this.#session, ...data };
+                break;
+            }
+            case "mcp_servers_changed":
+                this.#session = {
+                    ...this.#session,
+                    mcpServers: (event.data as { servers: readonly McpServerSummary[] }).servers,
+                };
+                break;
+            case "workflow_changed": {
+                const { update } = event.data as { update: WorkflowRunUpdate };
+                const existing = this.#session.workflows.find(
+                    (workflow) => workflow.runId === update.runId,
+                );
+                if (existing === undefined) {
+                    if (isCompleteWorkflowUpdate(update)) {
+                        this.#session = {
+                            ...this.#session,
+                            workflows: [...this.#session.workflows, workflowFromUpdate(update)],
+                        };
+                    }
+                    break;
+                }
+                const { log, ...fields } = update;
+                this.#session = {
+                    ...this.#session,
+                    workflows: this.#session.workflows.map((workflow) =>
+                        workflow.runId === update.runId
+                            ? {
+                                  ...workflow,
+                                  ...fields,
+                                  logs: log === undefined ? workflow.logs : [...workflow.logs, log],
+                              }
+                            : workflow,
+                    ),
+                };
+                break;
+            }
+            case "external_tool_call_requested": {
+                const { call } = event.data as { call: ExternalToolCall };
+                if (!this.#session.pendingExternalToolCalls.some((item) => item.id === call.id)) {
+                    this.#session = {
+                        ...this.#session,
+                        pendingExternalToolCalls: [...this.#session.pendingExternalToolCalls, call],
+                    };
+                }
+                break;
+            }
+            case "external_tool_call_resolved": {
+                const { call } = event.data as { call: ExternalToolCall };
+                this.#session = {
+                    ...this.#session,
+                    pendingExternalToolCalls:
+                        call.status === "pending"
+                            ? this.#session.pendingExternalToolCalls.map((item) =>
+                                  item.id === call.id ? call : item,
+                              )
+                            : this.#session.pendingExternalToolCalls.filter(
+                                  (item) => item.id !== call.id,
+                              ),
                 };
                 break;
             }
@@ -927,15 +1077,20 @@ export class ChatStore {
     ): void {
         this.#session = {
             ...withoutKeys(this.#session, [
+                "agent",
+                "agentId",
                 "draft",
                 "draftUpdatedAt",
+                "environment",
                 "effort",
                 "goal",
                 "git",
+                "interruption",
                 "lastEventId",
                 "recap",
                 "serviceTier",
                 "title",
+                "titleError",
                 "tokens",
                 "usage",
                 "workspaceId",
@@ -943,21 +1098,35 @@ export class ChatStore {
             archived: session.archived,
             backgroundProcesses: session.backgroundProcesses ?? [],
             cwd: session.cwd,
+            externalTools: session.externalTools ?? [],
+            mcpServers: session.mcpServers ?? [],
             modelLocked: session.modelLocked,
             modelId: session.modelId,
             models: session.models,
             orderKey: session.orderKey,
+            pendingExternalToolCalls: session.pendingExternalToolCalls ?? [],
             pendingSteeringMessages: session.pendingSteeringMessages ?? [],
             pendingUserInputs: session.pendingUserInputs,
             permissionReviews: session.permissionReviews ?? [],
             permissionMode: session.permissionMode,
             projectId: session.projectId,
+            projectSecretIds: session.projectSecretIds ?? [],
             providerId: session.providerId,
+            secretIds: session.secretIds ?? [],
+            sessionSecretIds: session.sessionSecretIds ?? [],
             sessionId: session.id,
             shellCommands: session.shellCommands ?? [],
+            skills: session.skills ?? [],
             status: session.status,
             subagents: session.subagents ?? [],
             tasks: session.tasks,
+            titleStatus: session.titleStatus ?? "idle",
+            workflows: session.workflows ?? [],
+            workflowsEnabled: session.workflowsEnabled ?? false,
+            ...(session.agent === undefined ? {} : { agent: session.agent }),
+            ...(session.agentId === undefined ? {} : { agentId: session.agentId }),
+            ...(session.environment === undefined ? {} : { environment: session.environment }),
+            ...(session.interruption === undefined ? {} : { interruption: session.interruption }),
             ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
             ...(session.draft === undefined ? {} : { draft: session.draft }),
             ...(session.draftUpdatedAt === undefined
@@ -970,6 +1139,7 @@ export class ChatStore {
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
             ...(session.title === undefined ? {} : { title: session.title }),
+            ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
             ...(session.sessionTokenCount === undefined
                 ? {}
                 : { tokens: session.sessionTokenCount }),
@@ -1325,6 +1495,7 @@ export class ChatStore {
             displayText: string;
             message: Message;
             runId: string;
+            source?: "notification";
         };
         if (data.delivery === "run") {
             this.#rememberTurn(data.runId, event.createdAt);
@@ -1338,6 +1509,7 @@ export class ChatStore {
             deltas,
             data.runId,
             data.delivery === "steer" ? "pending_steering" : "sent",
+            data.source,
         );
     }
 
@@ -1486,6 +1658,7 @@ export class ChatStore {
         deltas: ChatDelta[],
         turnId = this.#turnId,
         delivery: UserMessageElement["delivery"] = "sent",
+        source?: "notification",
     ): void {
         if (message.internal === true) return;
         if (this.#appliedMessageIds.has(message.id)) {
@@ -1509,7 +1682,7 @@ export class ChatStore {
             return;
         }
         if (message.role === "user") {
-            this.#appendUserMessage(message, at, turnId, delivery);
+            this.#appendUserMessage(message, at, turnId, delivery, source);
             return;
         }
         this.#appendAgentBlocks(message, at, deltas, turnId);
@@ -1520,6 +1693,7 @@ export class ChatStore {
         at: number,
         turnId = this.#turnId,
         delivery: UserMessageElement["delivery"] = "sent",
+        source?: "notification",
     ): void {
         const attachments = message.blocks
             .filter((block): block is Extract<ContentBlock, { type: "image" }> =>
@@ -1532,6 +1706,7 @@ export class ChatStore {
             id: `message:${message.id}`,
             kind: "user_message",
             messageId: message.id,
+            ...(source === undefined ? {} : { source }),
             text: textOf(message.blocks),
             turnId: turnId ?? `history:${message.id}`,
             ...(attachments.length === 0 ? {} : { attachments }),
@@ -2210,6 +2385,42 @@ function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
         ...snapshot,
         ...(branch === undefined ? {} : { branch }),
         revision: `${git.generation}:${String(git.version)}:${String(git.scannedAt)}`,
+    };
+}
+
+type CompleteWorkflowUpdate = WorkflowRunUpdate &
+    Required<
+        Pick<
+            WorkflowRun,
+            | "agentCount"
+            | "code"
+            | "description"
+            | "logs"
+            | "name"
+            | "startedAt"
+            | "status"
+            | "taskId"
+        >
+    >;
+
+function isCompleteWorkflowUpdate(update: WorkflowRunUpdate): update is CompleteWorkflowUpdate {
+    return (
+        typeof update.agentCount === "number" &&
+        typeof update.code === "string" &&
+        typeof update.description === "string" &&
+        Array.isArray(update.logs) &&
+        typeof update.name === "string" &&
+        typeof update.startedAt === "number" &&
+        typeof update.status === "string" &&
+        typeof update.taskId === "string"
+    );
+}
+
+function workflowFromUpdate(update: CompleteWorkflowUpdate): WorkflowRun {
+    const { log, ...workflow } = update;
+    return {
+        ...workflow,
+        logs: log === undefined ? workflow.logs : [...workflow.logs, log],
     };
 }
 

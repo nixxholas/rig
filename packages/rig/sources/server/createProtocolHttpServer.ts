@@ -1027,6 +1027,8 @@ async function handleRequest(
                         );
                     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
                     return {
+                        catalog: modelCatalog,
+                        identity,
                         projects,
                         terminalGroups: store.remoteTerminals.groups().flatMap((group) =>
                             !projectIds.has(group.scope.projectId) ||
@@ -1165,9 +1167,21 @@ async function handleRequest(
             });
             return;
         }
+        if (
+            body.clientSessionId !== undefined &&
+            (typeof body.clientSessionId !== "string" ||
+                body.clientSessionId.length === 0 ||
+                body.clientSessionId.length > 256)
+        ) {
+            sendJson(response, 400, { error: "The client session ID is invalid." });
+            return;
+        }
         try {
             const sessionRequest = configureSessionRequest(body, defaultDocker);
-            const session = store.create(sessionRequest);
+            const session =
+                body.clientSessionId === undefined
+                    ? store.create(sessionRequest)
+                    : store.createWithId(body.clientSessionId, sessionRequest);
             sendJson<CreateSessionResponse>(response, 201, { session: session.snapshot() });
         } catch (error) {
             sendJson(response, error instanceof SessionConfigurationError ? 400 : 409, {
@@ -1426,11 +1440,25 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "workflow-stop") {
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            const workflow = session
+                .listWorkflows()
+                .find((candidate) => candidate.runId === route.workflowRunId);
+            sendJson(
+                response,
+                workflow === undefined ? 404 : 200,
+                workflow === undefined ? { error: "Workflow not found" } : { workflow },
+            );
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         const workflow = session.stopWorkflow(route.workflowRunId);
         if (workflow === undefined) {
             sendJson(response, 404, { error: "Workflow not found" });
             return;
         }
+        session.recordMutationApplied(mutationId);
         sendJson<StopWorkflowResponse>(response, 200, { workflow });
         return;
     }
@@ -1451,8 +1479,10 @@ async function handleRequest(
             sendJson(response, 409, { error: "Subagent histories cannot be forked." });
             return;
         }
+        const targetSessionId = requestMutationId(request);
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const forked = store.fork(sessionId);
+            const forked = store.fork(sessionId, targetSessionId);
             if (forked === undefined) {
                 sendJson(response, 404, { error: "Session not found" });
                 return;
@@ -1641,16 +1671,28 @@ async function handleRequest(
             sendJson(response, 400, { error: "Enter a shell command after !." });
             return;
         }
-        sendJson<RunShellCommandResponse>(
-            response,
-            200,
-            await session.runShellCommand(candidate as RunShellCommandRequest),
-        );
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, {});
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        const result = await session.runShellCommand(candidate as RunShellCommandRequest);
+        session.recordMutationApplied(mutationId);
+        sendJson<RunShellCommandResponse>(response, 200, result);
         return;
     }
 
     if (request.method === "POST" && route.name === "reset") {
-        sendJson(response, 200, { session: await session.reset() });
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        await session.reset();
+        session.recordMutationApplied(mutationId);
+        sendJson(response, 200, { session: session.snapshot() });
         return;
     }
 
@@ -1660,8 +1702,19 @@ async function handleRequest(
             sendJson(response, 400, { error: "Choose a user message to rewind to." });
             return;
         }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            sendJson<RewindSessionResponse>(response, 200, session.rewind(body.messageId));
+            const result = session.rewind(body.messageId);
+            session.recordMutationApplied(mutationId);
+            sendJson<RewindSessionResponse>(response, 200, {
+                ...result,
+                session: session.snapshot(),
+            });
         } catch (error) {
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The session could not be rewound.",
@@ -1671,7 +1724,14 @@ async function handleRequest(
     }
 
     if (request.method === "POST" && route.name === "compact") {
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         const result = await session.compact();
+        session.recordMutationApplied(mutationId);
         sendJson<CompactSessionResponse>(response, 200, {
             result,
             session: session.snapshot(),
@@ -1681,13 +1741,35 @@ async function handleRequest(
 
     if (request.method === "PATCH" && route.name === "effort") {
         const body = await readJson<ChangeEffortRequest>(request);
-        sendJson(response, 200, { session: session.changeEffort(body) });
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: session.changeEffort({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
     if (request.method === "PATCH" && route.name === "service-tier") {
         const body = await readJson<ChangeServiceTierRequest>(request);
-        sendJson(response, 200, { session: session.changeServiceTier(body) });
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: session.changeServiceTier({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
@@ -1733,7 +1815,18 @@ async function handleRequest(
             });
             return;
         }
-        sendJson(response, 200, { session: await session.changePermissionMode(body) });
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: await session.changePermissionMode({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
@@ -1754,7 +1847,18 @@ async function handleRequest(
             });
             return;
         }
-        sendJson(response, 200, { session: session.setDraft(body) });
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        sendJson(response, 200, {
+            session: session.setDraft({
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            }),
+        });
         return;
     }
 
@@ -1774,10 +1878,16 @@ async function handleRequest(
             sendJson(response, 400, { error: "Secret scope must be Session or Project." });
             return;
         }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
             sendJson<SecretSessionResponse>(response, 200, {
                 session:
-                    store.attachSecret(session.id, body.secretId, scope)?.snapshot() ??
+                    store.attachSecret(session.id, body.secretId, scope, mutationId)?.snapshot() ??
                     session.snapshot(),
             });
         } catch (error) {
@@ -1794,9 +1904,15 @@ async function handleRequest(
             sendJson(response, 400, { error: "Secret scope must be Session or Project." });
             return;
         }
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         sendJson<SecretSessionResponse>(response, 200, {
             session:
-                store.detachSecret(session.id, route.secretId, scope)?.snapshot() ??
+                store.detachSecret(session.id, route.secretId, scope, mutationId)?.snapshot() ??
                 session.snapshot(),
         });
         return;
@@ -1808,8 +1924,14 @@ async function handleRequest(
             sendJson(response, 400, { error: "Goal objective must be text." });
             return;
         }
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            session.setGoal(body);
+            session.setGoal(body, mutationId);
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             sendJson(response, 409, {
@@ -1827,8 +1949,14 @@ async function handleRequest(
             });
             return;
         }
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            session.changeGoalStatus(body);
+            session.changeGoalStatus(body, mutationId === undefined ? {} : { mutationId });
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
             sendJson(response, 409, {
@@ -1839,15 +1967,30 @@ async function handleRequest(
     }
 
     if (request.method === "DELETE" && route.name === "goal") {
-        session.clearGoal();
+        const mutationId = requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
+        session.clearGoal(mutationId);
         sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         return;
     }
 
     if (request.method === "POST" && route.name === "user-input") {
         const body = await readJson<AnswerUserInputRequest>(request);
+        const mutationId = body.mutationId ?? requestMutationId(request);
+        if (sessionMutationCompleted(session, mutationId)) {
+            sendJson(response, 200, { session: session.snapshot() });
+            return;
+        }
+        if (!sessionMutationCanApply(request, response, session)) return;
         try {
-            const snapshot = session.answerUserInput(route.requestId, body);
+            const snapshot = session.answerUserInput(route.requestId, {
+                ...body,
+                ...(mutationId === undefined ? {} : { mutationId }),
+            });
             if (snapshot === undefined) {
                 sendJson(response, 409, {
                     error: "This question is no longer waiting for an answer.",
@@ -2387,6 +2530,19 @@ function sessionMutationCanApply(
     return false;
 }
 
+function sessionMutationCompleted(
+    session: Pick<SessionEventSource, "events">,
+    mutationId: string | undefined,
+): boolean {
+    if (mutationId === undefined) return false;
+    return (
+        session.events.since(undefined)?.some((event) => {
+            if (event.data === null || typeof event.data !== "object") return false;
+            return (event.data as { mutationId?: unknown }).mutationId === mutationId;
+        }) === true
+    );
+}
+
 function parseExpectedEventId(value: string | readonly string[] | undefined): string | undefined {
     const selected = Array.isArray(value) ? value.at(-1) : value;
     if (selected === undefined) return undefined;
@@ -2504,9 +2660,37 @@ function streamEvents(
                           ? {}
                           : { draftUpdatedAt: currentSession.draftUpdatedAt }),
                       ...(currentSession.git === undefined ? {} : { git: currentSession.git }),
+                      ...(currentSession.interruption === undefined
+                          ? {}
+                          : { interruption: currentSession.interruption }),
+                      ...(currentSession.externalTools === undefined
+                          ? {}
+                          : { externalTools: currentSession.externalTools }),
+                      mcpServers: currentSession.mcpServers,
+                      ...(currentSession.pendingExternalToolCalls === undefined
+                          ? {}
+                          : {
+                                pendingExternalToolCalls: currentSession.pendingExternalToolCalls,
+                            }),
+                      projectSecretIds: currentSession.projectSecretIds,
+                      secretIds: currentSession.secretIds,
+                      sessionSecretIds: currentSession.sessionSecretIds,
+                      ...(currentSession.skills === undefined
+                          ? {}
+                          : { skills: currentSession.skills }),
                       ...(currentSession.sessionTokenCount === undefined
                           ? {}
                           : { sessionTokenCount: currentSession.sessionTokenCount }),
+                      ...(currentSession.titleError === undefined
+                          ? {}
+                          : { titleError: currentSession.titleError }),
+                      titleStatus: currentSession.titleStatus,
+                      ...(currentSession.workflows === undefined
+                          ? {}
+                          : { workflows: currentSession.workflows }),
+                      ...(currentSession.workflowsEnabled === undefined
+                          ? {}
+                          : { workflowsEnabled: currentSession.workflowsEnabled }),
                   },
               }
             : {}),

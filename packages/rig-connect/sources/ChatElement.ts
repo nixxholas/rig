@@ -1,12 +1,19 @@
 import type { ToolPresentation } from "./ToolPresentation.js";
 import type {
     BackgroundProcess,
+    DurableSkillDefinition,
+    ExternalToolCall,
+    ExternalToolDefinition,
     GitChangeSnapshot,
+    McpServerSummary,
     ModelSummary,
     PendingSteeringMessage,
     PermissionReviewState,
     SessionActivity,
+    SessionAgentMetadata,
+    SessionExecutionEnvironment,
     SessionGoal,
+    SessionInterruption,
     SessionStatus,
     SessionTask,
     SessionTokenCount,
@@ -15,6 +22,7 @@ import type {
     SubagentSummary,
     Usage,
     UserInputRequest,
+    WorkflowRun,
 } from "./protocol.js";
 
 /**
@@ -49,6 +57,8 @@ export interface UserMessageElement extends BaseChatElement {
     messageId: string;
     /** Whether this bubble is still queued to steer the active run. */
     delivery: "pending_steering" | "sent";
+    /** Present for workflow/subagent news injected by Rig rather than typed by the user. */
+    source?: "notification";
     text: string;
     /** Images and other non-text content the user sent. */
     attachments?: readonly { data: string; mediaType: string }[];
@@ -164,6 +174,8 @@ export interface SessionState {
     /** Whether the session has been archived out of the active list. */
     archived: boolean;
     sessionId: string;
+    agentId?: string;
+    agent?: SessionAgentMetadata;
     lastEventId?: string;
     projectId: string;
     workspaceId?: string;
@@ -175,9 +187,16 @@ export interface SessionState {
     providerId: string;
     title?: string;
     recap?: string;
+    titleError?: string;
+    titleStatus: "error" | "generating" | "idle" | "ready";
+    interruption?: SessionInterruption;
     /** How hard the model is asked to think, when the provider offers a choice. */
     effort?: string;
     serviceTier?: string;
+    environment?: SessionExecutionEnvironment;
+    secretIds: readonly string[];
+    projectSecretIds: readonly string[];
+    sessionSecretIds: readonly string[];
     permissionMode: string;
     /** True when the session is pinned to its model and cannot switch. */
     modelLocked: boolean;
@@ -189,6 +208,12 @@ export interface SessionState {
     subagents: readonly SubagentSummary[];
     backgroundProcesses: readonly BackgroundProcess[];
     shellCommands: readonly ShellCommandState[];
+    mcpServers: readonly McpServerSummary[];
+    workflowsEnabled: boolean;
+    workflows: readonly WorkflowRun[];
+    externalTools: readonly ExternalToolDefinition[];
+    skills: readonly DurableSkillDefinition[];
+    pendingExternalToolCalls: readonly ExternalToolCall[];
     permissionReviews: readonly PermissionReviewState[];
     git?: GitChangeSnapshot;
     tokens?: SessionTokenCount;
@@ -217,9 +242,26 @@ export interface SessionState {
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 
 export type MutationAction =
+    | "create_session"
+    | "fork_session"
     | "send_message"
     | "stop_run"
     | "switch_model"
+    | "set_effort"
+    | "set_service_tier"
+    | "set_permission_mode"
+    | "set_draft"
+    | "answer_user_input"
+    | "set_goal"
+    | "set_goal_status"
+    | "clear_goal"
+    | "compact_session"
+    | "reset_session"
+    | "rewind_session"
+    | "attach_secret"
+    | "detach_secret"
+    | "run_shell_command"
+    | "stop_workflow"
     | "set_session_archived"
     | "rename_group";
 
