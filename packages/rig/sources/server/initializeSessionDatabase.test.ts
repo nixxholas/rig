@@ -75,6 +75,27 @@ describe("initializeSessionDatabase", () => {
         }
     });
 
+    it("adds the inherited workspace title to earlier workspace databases", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            database.exec(`
+                ALTER TABLE project_workspaces DROP COLUMN title;
+                PRAGMA user_version = 11;
+            `);
+
+            initializeSessionDatabase(database);
+
+            expect(columnInfo(database, "project_workspaces", "title")).toMatchObject({
+                notnull: 0,
+                type: "TEXT",
+            });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
+        } finally {
+            database.close();
+        }
+    });
+
     it("adds project archive state to earlier project databases", () => {
         const database = new DatabaseSync(":memory:");
         try {

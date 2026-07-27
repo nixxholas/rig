@@ -489,6 +489,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         ensureColumn(database, "projects", "worktree_support", "TEXT NOT NULL DEFAULT 'unknown'");
         ensureColumn(database, "projects", "worktree_support_reason", "TEXT");
         ensureColumn(database, "project_workspaces", "base_commit", "TEXT");
+        ensureColumn(database, "project_workspaces", "title", "TEXT");
         // Managed worktrees are always created detached, so the superseded `branch` column was
         // never populated. Git tracking reports the branch through `git_branch` instead.
         if (hasColumn(database, "project_workspaces", "branch")) {
