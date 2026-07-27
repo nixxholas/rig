@@ -26,16 +26,14 @@ export interface SessionConnection {
     elements: () => readonly ChatElement[];
     session: () => SessionState;
     /**
-     * Adds the turns before the oldest one loaded to the front of the list.
+     * Starts loading the history page identified by `session().loadMoreToken`.
      *
-     * Loading is the one thing a caller waits on, so this is the only part of
-     * the surface that returns a promise. It resolves once the list reflects the
-     * outcome, whether that is more history, the beginning of the conversation,
-     * or a failure reported on the session state. Concurrent calls share one
-     * request, and a call that is still in flight when the connection closes
-     * resolves without touching the list.
+     * This is intentionally a synchronous command. The token is consumed before
+     * the request starts, so repeated calls from one render race are no-ops. A
+     * page landing changes the token; callers never await or coordinate network
+     * work themselves.
      */
-    loadEarlier: () => Promise<void>;
+    loadMore: (token: string) => void;
     /** Releases every resource held by this connection. */
     close: () => void;
 }
@@ -88,33 +86,26 @@ export function connectSession(options: ConnectSessionOptions): SessionConnectio
             if (!closed) publish(store.setConnection("closed"));
         });
 
-    let loading: Promise<void> | undefined;
-
-    const loadEarlier = async (): Promise<void> => {
-        const anchor = store.earlierTranscriptAnchor();
-        if (closed || anchor === undefined) return;
-        // Concurrent callers share one request. A virtual list can ask again
-        // while a page is still arriving, and two requests from the same anchor
-        // would fetch the same turns twice.
-        loading ??= (async () => {
+    const loadMore = (token: string): void => {
+        if (closed) return;
+        const started = store.startLoadingMore(token);
+        if (started === undefined) return;
+        publish(started.deltas);
+        void (async () => {
             try {
-                publish(store.startLoadingEarlier());
-                const page = await fetchEarlier(options, anchor.before, controller.signal);
+                const page = await fetchEarlier(options, started.anchor.before, controller.signal);
                 if (closed) return;
-                publish(store.prependEarlier(page, anchor));
+                publish(store.prependEarlier(page, started.anchor));
             } catch (error: unknown) {
                 if (closed) return;
-                publish(store.failLoadingEarlier(describeLoadFailure(error)));
-            } finally {
-                loading = undefined;
+                publish(store.failLoadingMore(started.anchor, describeLoadFailure(error)));
             }
         })();
-        await loading;
     };
 
     return {
         elements: () => store.elements(),
-        loadEarlier,
+        loadMore,
         session: () => store.session(),
         close: () => {
             if (closed) return;

@@ -234,6 +234,66 @@ export interface Usage {
     };
 }
 
+export type ProviderQuotaWindow =
+    | {
+          capturedAt: number;
+          status: "available";
+          usedPercent: number;
+          resetsAt: number;
+          durationMs?: number;
+      }
+    | { status: "unavailable" };
+
+export interface ProviderQuota {
+    capturedAt: number;
+    source: "claude" | "codex";
+    windows: {
+        fiveHour?: ProviderQuotaWindow;
+        weekly?: ProviderQuotaWindow;
+    };
+}
+
+export interface SessionUsageGroup {
+    kind: "attributed";
+    modelId: string;
+    providerId: string;
+    requestedModelId: string;
+    role?: "permission_review";
+    usage: Usage;
+    responseModel?: string;
+}
+
+export interface SessionContextUsage {
+    approximate: boolean;
+    modelId: string;
+    providerId: string;
+    requestedModelId: string;
+    responseModel?: string;
+    totalTokens: number;
+}
+
+export interface SessionProviderQuota {
+    providerId: string;
+    quota: ProviderQuota;
+}
+
+export interface SessionQuotaContribution {
+    providerId: string;
+    windows: {
+        fiveHour?: { observedUsedPercent: number };
+        weekly?: { observedUsedPercent: number };
+    };
+}
+
+export interface SessionUsageSnapshot {
+    currentProviderId: string;
+    groups: readonly SessionUsageGroup[];
+    context?: SessionContextUsage;
+    observedQuota: readonly SessionQuotaContribution[];
+    quotas: readonly SessionProviderQuota[];
+    sessionTokenCount: SessionTokenCount;
+}
+
 export interface SessionTokenCount {
     lastContextTokens: number;
     totalTokens: number;
@@ -316,8 +376,23 @@ export interface BackgroundProcess {
 }
 
 export interface PendingSteeringMessage {
+    createdAt: number;
     message: UserMessage;
     runId: string;
+}
+
+export interface SessionActiveTurn {
+    runId: string;
+    startedAt: number;
+}
+
+export interface PermissionReviewState {
+    action: string;
+    decision: "allow" | "deny";
+    reason: string;
+    risk: "low" | "medium" | "high" | "critical";
+    toolCallId: string;
+    userAuthorization: "unknown" | "low" | "medium" | "high";
 }
 
 export interface ShellCommandState {
@@ -329,14 +404,6 @@ export interface ShellCommandState {
     sessionId?: number;
     status: "running" | "finished";
     timedOut?: boolean;
-}
-
-export interface PermissionReviewState {
-    action: string;
-    decision: "allow" | "deny";
-    reason: string;
-    risk: "low" | "medium" | "high" | "critical";
-    toolCallId: string;
 }
 
 export interface GitFileChange {
@@ -387,6 +454,7 @@ export type SessionStatus =
 export interface ProtocolSession {
     id: string;
     activity: SessionActivity;
+    activeTurn?: SessionActiveTurn;
     archived: boolean;
     projectId: string;
     workspaceId?: string;
@@ -408,6 +476,7 @@ export interface ProtocolSession {
     title?: string;
     recap?: string;
     pendingUserInputs: readonly UserInputRequest[];
+    permissionReviews?: readonly PermissionReviewState[];
     pendingSteeringMessages?: readonly PendingSteeringMessage[];
     tasks: readonly SessionTask[];
     goal?: SessionGoal;
@@ -429,6 +498,14 @@ export interface SessionTranscriptTurn {
     endedAt?: number;
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
+    retries?: readonly SessionTranscriptRetry[];
+}
+
+export interface SessionTranscriptRetry {
+    id: EventId;
+    createdAt: number;
+    attempt: number;
+    reason: string;
 }
 
 export interface SessionTranscriptWindow {
@@ -441,6 +518,7 @@ export interface SessionTranscriptWindow {
 
 export interface SessionStreamHello {
     activity: SessionActivity;
+    usage?: SessionUsageSnapshot;
     session?: ProtocolSession;
     transcript?: SessionTranscriptWindow;
     partial?: SessionPartialMessage;
@@ -469,7 +547,7 @@ export type InterpretedSessionEvent =
     | BaseSessionEvent<"session_context_changed", { sessionTokenCount: SessionTokenCount }>
     | BaseSessionEvent<
           "session_configuration_changed",
-          { effort?: string; modelId: string; serviceTier: string | null }
+          { effort?: string; modelId: string; providerId: string; serviceTier: string | null }
       >
     | BaseSessionEvent<
           "session_title_changed",
@@ -519,8 +597,19 @@ export type InterpretedSessionEvent =
           }
       >
     | BaseSessionEvent<"run_started", { runId: string }>
+    | BaseSessionEvent<"inference_retry", { attempt: number; reason: string; runId: string }>
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
+    | BaseSessionEvent<
+          "provider_quota_observed",
+          {
+              observationId: string;
+              phase: "before" | "after";
+              providerId: string;
+              quota: ProviderQuota;
+              runId: string;
+          }
+      >
     | BaseSessionEvent<
           "run_finished",
           { errorMessage?: string; modelLocked: boolean; runId: string; stopReason: string }
@@ -528,13 +617,24 @@ export type InterpretedSessionEvent =
     | BaseSessionEvent<"run_error", { errorMessage: string; modelLocked: boolean; runId: string }>
     | BaseSessionEvent<
           "session_reset",
-          { snapshot: { messages: readonly Message[] }; transcript: SessionTranscriptWindow }
+          {
+              snapshot: {
+                  messages: readonly Message[];
+                  modelId?: string;
+                  providerId?: string;
+              };
+              transcript: SessionTranscriptWindow;
+          }
       >
     | BaseSessionEvent<
           "session_rewound",
           {
               messageId: string;
-              snapshot: { messages: readonly Message[] };
+              snapshot: {
+                  messages: readonly Message[];
+                  modelId?: string;
+                  providerId?: string;
+              };
               transcript: SessionTranscriptWindow;
           }
       >;
@@ -599,6 +699,12 @@ export type AgentLoopEvent =
           reason: string;
           risk: "low" | "medium" | "high" | "critical";
           toolCallId: string;
+          transcript?: {
+              modelId: string;
+              providerId: string;
+              usage: Usage;
+          };
+          userAuthorization: "unknown" | "low" | "medium" | "high";
       }
     | {
           type: "background_processes_changed";

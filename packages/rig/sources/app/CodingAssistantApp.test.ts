@@ -2968,6 +2968,7 @@ describe("CodingAssistantApp", () => {
             data: {
                 changed: ["serviceTier"],
                 modelId: "gpt-test",
+                providerId: agent.snapshot().providerId,
                 serviceTier: "fast",
                 snapshot: agent.snapshot(),
             },
@@ -5273,6 +5274,7 @@ describe("CodingAssistantApp", () => {
             data: {
                 changed: ["model"],
                 modelId: model.id,
+                providerId: agent.snapshot().providerId,
                 serviceTier: null,
                 snapshot: agent.snapshot(),
             },

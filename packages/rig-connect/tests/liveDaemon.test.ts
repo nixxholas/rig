@@ -30,11 +30,12 @@ afterEach(async () => {
     for (const server of started.splice(0)) await server.close();
 });
 
-async function startDaemon(options: { withModel?: boolean } = {}) {
+async function startDaemon(options: { inferenceGate?: Promise<void>; withModel?: boolean } = {}) {
     const store =
         options.withModel === true
             ? new InMemorySessionStore({
-                  createRuntime: (runtimeOptions) => createRuntime(runtimeOptions),
+                  createRuntime: (runtimeOptions) =>
+                      createRuntime(runtimeOptions, options.inferenceGate),
                   modelCatalog: testCatalog(),
               })
             : new InMemorySessionStore();
@@ -169,8 +170,79 @@ describe("rig-connect against a live daemon", () => {
         const ends = elements.filter((element) => element.kind === "turn_end");
         expect(ends).toHaveLength(2);
         expect(ends.every((element) => element.turnId.startsWith("history:"))).toBe(false);
+        const events = session.events.since(undefined) ?? [];
+        const firstSubmitted = events.find(
+            (event) => event.type === "message_submitted" && event.data.runId === first.runId,
+        );
+        const firstFinished = events.find(
+            (event) => event.type === "run_finished" && event.data.runId === first.runId,
+        );
+        expect(ends[0]).toMatchObject({
+            endedAt: firstFinished?.createdAt,
+            startedAt: firstSubmitted?.createdAt,
+        });
+        expect(connection.session().usage).toMatchObject({
+            currentProviderId: "test",
+            totalCost: 0.2,
+            totalTokens: 24,
+        });
         expect(elements.at(-1)?.kind).toBe("turn_end");
         expect(connection.session().transcriptComplete).toBe(true);
+    });
+
+    it("exposes one authoritative active clock from submission through completion", async () => {
+        let releaseInference = (): void => undefined;
+        const inferenceGate = new Promise<void>((resolve) => {
+            releaseInference = resolve;
+        });
+        const { endpoint, store } = await startDaemon({
+            inferenceGate,
+            withModel: true,
+        });
+        const session = store.create({ cwd: "/tmp/rig-connect-test" });
+        connection = connectSession({
+            endpoint,
+            onChange: () => undefined,
+            sessionId: session.id,
+            token: "secret",
+        });
+        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+
+        const submitted = session.submit({ text: "Keep this clock." });
+        const submission = (session.events.since(undefined) ?? []).find(
+            (event) => event.type === "message_submitted" && event.data.runId === submitted.runId,
+        );
+        await waitFor(
+            () => connection?.session().activeTurn?.turnId === submitted.runId,
+            "the active turn timing to arrive",
+        );
+        expect(connection.session().activeTurn).toEqual({
+            startedAt: submission?.createdAt,
+            turnId: submitted.runId,
+        });
+
+        releaseInference();
+        await session.waitForRun(submitted.runId);
+        await waitFor(
+            () =>
+                connection
+                    ?.elements()
+                    .some((element) => element.id === `turn:${submitted.runId}`) === true,
+            "the completed turn timing to arrive",
+        );
+        const end = connection
+            .elements()
+            .find((element) => element.id === `turn:${submitted.runId}`);
+        expect(connection.session().activeTurn).toBeUndefined();
+        expect(end).toMatchObject({
+            elapsedMs: expect.any(Number),
+            endedAt: expect.any(Number),
+            startedAt: submission?.createdAt,
+        });
+        expect(connection.session().usage).toMatchObject({
+            totalCost: 0.1,
+            totalTokens: 12,
+        });
     });
 
     it("says so when the conversation began before the window it was given", async () => {
@@ -217,7 +289,7 @@ function testModel() {
     });
 }
 
-function testProvider() {
+function testProvider(inferenceGate?: Promise<void>) {
     const model = testModel();
     return defineProvider({
         id: "test",
@@ -226,6 +298,7 @@ function testProvider() {
             const message = assistantMessage(model.id);
             return createInferenceStream(async function* () {
                 yield { type: "start", partial: { ...message, content: [] } };
+                await inferenceGate;
                 yield { type: "done", reason: "stop", message };
                 return message;
             });
@@ -233,8 +306,11 @@ function testProvider() {
     });
 }
 
-function createRuntime(options: CreateCodingAssistantAgentOptions): CodingAssistantRuntime {
-    const provider = testProvider();
+function createRuntime(
+    options: CreateCodingAssistantAgentOptions,
+    inferenceGate?: Promise<void>,
+): CodingAssistantRuntime {
+    const provider = testProvider(inferenceGate);
     const processManager = new NativeProcessManager();
     const context = createNodeAgentContext({ cwd: options.cwd, processManager });
     return {
@@ -264,10 +340,10 @@ function assistantMessage(model: string): AssistantMessage {
         usage: {
             cacheRead: 0,
             cacheWrite: 0,
-            cost: { cacheRead: 0, cacheWrite: 0, input: 0, output: 0, total: 0 },
-            input: 0,
-            output: 0,
-            totalTokens: 0,
+            cost: { cacheRead: 0, cacheWrite: 0, input: 0.1, output: 0, total: 0.1 },
+            input: 10,
+            output: 2,
+            totalTokens: 12,
         },
     };
 }
@@ -301,7 +377,22 @@ describe("loading earlier turns through the connection", () => {
         expect(connection.session().transcriptComplete).toBe(false);
         const newest = connection.elements().map((element) => element.id);
 
-        await connection.loadEarlier();
+        const loadOnePage = async (): Promise<void> => {
+            const token = connection?.session().loadMoreToken;
+            if (connection === undefined || token === undefined) {
+                throw new Error("Expected a load-more token.");
+            }
+            connection.loadMore(token);
+            await waitFor(
+                () =>
+                    connection?.session().loadingMore === false &&
+                    (connection.session().loadMoreToken !== token ||
+                        connection.session().transcriptComplete),
+                "the earlier transcript page to load",
+            );
+        };
+
+        if (!connection.session().transcriptComplete) await loadOnePage();
 
         const afterOnePage = connection.elements().map((element) => element.id);
         // History is added in front, so what a reader is looking at keeps both
@@ -309,15 +400,14 @@ describe("loading earlier turns through the connection", () => {
         expect(afterOnePage.slice(-newest.length)).toEqual(newest);
         expect(afterOnePage.length).toBeGreaterThan(newest.length);
 
-        await connection.loadEarlier();
-        await connection.loadEarlier();
+        if (!connection.session().transcriptComplete) await loadOnePage();
 
         expect(connection.session().transcriptComplete).toBe(true);
-        expect(connection.session().loadEarlierError).toBeUndefined();
+        expect(connection.session().loadMoreError).toBeUndefined();
         // Nothing older remains, so further requests are refused rather than
         // repeating the first page forever.
         const settled = connection.elements().map((element) => element.id);
-        await connection.loadEarlier();
+        connection.loadMore("stale-message-token");
         expect(connection.elements().map((element) => element.id)).toEqual(settled);
     });
 });

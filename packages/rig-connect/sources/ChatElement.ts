@@ -10,6 +10,7 @@ import type {
     SessionStatus,
     SessionTask,
     SessionTokenCount,
+    SessionUsageSnapshot,
     ShellCommandState,
     SubagentSummary,
     Usage,
@@ -30,6 +31,7 @@ export type ChatElement =
     | ThinkingElement
     | ToolCallElement
     | CompactionElement
+    | RetryElement
     | TurnEndElement;
 
 interface BaseChatElement {
@@ -43,6 +45,10 @@ interface BaseChatElement {
 
 export interface UserMessageElement extends BaseChatElement {
     kind: "user_message";
+    /** Durable source identity; consumers never need to parse the element id. */
+    messageId: string;
+    /** Whether this bubble is still queued to steer the active run. */
+    delivery: "pending_steering" | "sent";
     text: string;
     /** Images and other non-text content the user sent. */
     attachments?: readonly { data: string; mediaType: string }[];
@@ -89,6 +95,8 @@ export interface ToolCallElement extends BaseChatElement {
      * replaced by a differently shaped one.
      */
     presentation?: ToolPresentation;
+    /** The complete automatic review associated with this action, when one was required. */
+    permissionReview?: PermissionReviewState;
     /** Set when related calls were issued together, so a UI can draw one unit. */
     groupId?: string;
 }
@@ -102,6 +110,13 @@ export interface CompactionElement extends BaseChatElement {
     messagesCompacted?: number;
 }
 
+/** One provider retry retained in the transcript at the moment it occurred. */
+export interface RetryElement extends BaseChatElement {
+    kind: "retry";
+    attempt: number;
+    reason: string;
+}
+
 /**
  * The last element of a turn.
  *
@@ -113,14 +128,33 @@ export interface TurnEndElement extends BaseChatElement {
     outcome: "success" | "error" | "stopped";
     /** Present when the turn ended in an error. */
     errorMessage?: string;
-    /** Wall-clock time from the turn's first element to this one. */
+    /** Authoritative wall-clock start from the original run submission. */
+    startedAt: number;
+    /** Authoritative wall-clock completion time. */
+    endedAt: number;
+    /** Convenience duration derived from `startedAt` and `endedAt`. */
     elapsedMs: number;
     usage?: Usage;
+}
+
+/** The turn currently occupying the session. */
+export interface ActiveTurn {
+    turnId: string;
+    /** Stable across every activity transition, reconnect, retry, and steering segment. */
+    startedAt: number;
+}
+
+export interface SessionUsage extends SessionUsageSnapshot {
+    /** Total billed tokens across every attributed model and permission reviewer. */
+    totalTokens: number;
+    /** Total reported US-dollar cost across every attributed usage group. */
+    totalCost: number;
 }
 
 /** Live facts a UI shows next to the conversation. */
 export interface SessionState {
     activity: SessionActivity;
+    activeTurn?: ActiveTurn;
     /**
      * The durable lifecycle status, as opposed to `activity`, which describes
      * only the current moment. A session list needs this to tell a suspended or
@@ -157,6 +191,8 @@ export interface SessionState {
     permissionReviews: readonly PermissionReviewState[];
     git?: GitChangeSnapshot;
     tokens?: SessionTokenCount;
+    /** Complete usage/cost/context/quota state maintained from the same session stream. */
+    usage?: SessionUsage;
     /** Whether the library currently has a live connection to the daemon. */
     connection: ConnectionState;
     /**
@@ -165,10 +201,16 @@ export interface SessionState {
      * long session; a UI that scrolls back asks for the earlier messages.
      */
     transcriptComplete: boolean;
-    /** True while earlier turns are being fetched. */
-    loadingEarlier: boolean;
-    /** Why the last attempt to load earlier turns failed, in words a UI can show. */
-    loadEarlierError?: string;
+    /**
+     * Opaque identity of the oldest loaded message. Pass this exact value to
+     * `loadMore`; it changes when an earlier page lands and disappears at the
+     * beginning of the conversation.
+     */
+    loadMoreToken?: string;
+    /** True while the page identified by `loadMoreToken` is being fetched. */
+    loadingMore: boolean;
+    /** Why the last attempt to load more history failed, in words a UI can show. */
+    loadMoreError?: string;
 }
 
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
@@ -177,8 +219,14 @@ export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 export type ChatDelta =
     | { type: "elements_changed"; elements: readonly ChatElement[] }
     | { type: "session_changed"; session: SessionState }
-    | { type: "turn_started"; turnId: string }
-    | { type: "turn_ended"; turnId: string; outcome: TurnEndElement["outcome"] }
+    | { type: "turn_started"; turnId: string; startedAt: number }
+    | {
+          type: "turn_ended";
+          turnId: string;
+          outcome: TurnEndElement["outcome"];
+          startedAt: number;
+          endedAt: number;
+      }
     | { type: "compaction_started"; compactionId: string }
     | { type: "compaction_finished"; compactionId: string }
     | { type: "retry_started"; attempt: number; reason: string }

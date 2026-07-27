@@ -268,7 +268,11 @@ describe("connectSession", () => {
             try {
                 stream.write(pagedHelloFrame());
                 await settle();
-                const loading = connection.loadEarlier();
+                const token = connection.session().loadMoreToken;
+                if (token === undefined) throw new Error("Expected a load-more token.");
+                expect(connection.loadMore(token)).toBeUndefined();
+                // A rendering race with the same token must not issue another request.
+                expect(connection.loadMore(token)).toBeUndefined();
                 await settle();
 
                 stream.write(
@@ -286,11 +290,11 @@ describe("connectSession", () => {
                 resolvePage?.(
                     new Response(JSON.stringify(transcriptWindow(1, true)), { status: 200 }),
                 );
-                await loading;
+                await settle();
 
                 expect(connection.elements()).toEqual([]);
                 expect(connection.session()).toMatchObject({
-                    loadingEarlier: false,
+                    loadingMore: false,
                     transcriptComplete: true,
                 });
             } finally {

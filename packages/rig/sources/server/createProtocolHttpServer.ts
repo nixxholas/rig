@@ -79,6 +79,7 @@ import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { InMemorySessionStore } from "./InMemorySessionStore.js";
 import { latestObservedProviderQuotas } from "./latestObservedProviderQuotas.js";
+import type { SessionUsageSummary } from "./sessionUsage/index.js";
 import { createModelCatalog } from "./createModelCatalog.js";
 import { FileSearchService, type FileSearchServiceContract } from "./FileSearchService.js";
 import type { SessionEventLog } from "./SessionEventLog.js";
@@ -2214,6 +2215,7 @@ function streamEvents(
     // result never arrives without the call it belongs to.
     const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
     const full = resumed ? undefined : session.snapshot();
+    const usage = full === undefined ? undefined : session.usage();
     const snapshot =
         full === undefined || transcript === undefined
             ? undefined
@@ -2226,6 +2228,24 @@ function streamEvents(
     writeSseHello(response, {
         activity: session.activity(),
         resumed,
+        ...(full === undefined || usage === undefined
+            ? {}
+            : {
+                  usage: {
+                      currentProviderId: full.providerId,
+                      groups: usage.groups,
+                      observedQuota: usage.observedQuota,
+                      quotas: [
+                          ...latestObservedProviderQuotas(
+                              session.events.since(undefined) ?? [],
+                          ).entries(),
+                      ].map(([providerId, quota]) => ({ providerId, quota })),
+                      sessionTokenCount: usage.sessionTokenCount,
+                      ...(usage.currentContext === undefined
+                          ? {}
+                          : { context: usage.currentContext }),
+                  },
+              }),
         ...(snapshot === undefined || transcript === undefined
             ? {}
             : { session: snapshot, transcript }),
@@ -2262,6 +2282,7 @@ interface SessionEventSource {
     partialMessage: () => SessionPartialMessage | undefined;
     snapshot: () => ProtocolSession;
     transcriptWindow: (turnLimit?: number) => SessionTranscriptWindow;
+    usage: () => SessionUsageSummary;
 }
 
 function shellCommandStates(

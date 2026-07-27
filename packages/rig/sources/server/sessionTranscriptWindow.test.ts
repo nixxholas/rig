@@ -109,6 +109,34 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[1]).toMatchObject({ errorMessage: "Boom", outcome: "error" });
     });
 
+    it("carries durable retries with the turn where they occurred", () => {
+        const facts = new Map<string, TranscriptRunFacts>([
+            [
+                "run-1",
+                {
+                    retries: [
+                        {
+                            attempt: 2,
+                            createdAt: 50,
+                            id: "retry-1",
+                            reason: "Connection lost",
+                        },
+                    ],
+                    startedAt: 10,
+                },
+            ],
+        ]);
+
+        expect(newest(turn("run-1"), facts, 20).turns[0]?.retries).toEqual([
+            {
+                attempt: 2,
+                createdAt: 50,
+                id: "retry-1",
+                reason: "Connection lost",
+            },
+        ]);
+    });
+
     it("carries each message's own occurrence time", () => {
         const entries = turn("run-1").map((entry, index) => ({
             ...entry,

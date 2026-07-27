@@ -398,6 +398,7 @@ describe("RemoteAgent", () => {
                 changed: ["effort"],
                 effort: "high",
                 modelId: model.id,
+                providerId: session.snapshot.providerId,
                 serviceTier: null,
                 snapshot: { ...session.snapshot, effort: "high" },
             },
@@ -521,6 +522,7 @@ describe("RemoteAgent", () => {
             data: {
                 changed: ["serviceTier"],
                 modelId: model.id,
+                providerId: fastSession.snapshot.providerId,
                 serviceTier: "fast",
                 snapshot: fastSession.snapshot,
             },
@@ -618,6 +620,7 @@ describe("RemoteAgent", () => {
                 changed: ["effort"],
                 effort: "high",
                 modelId: model.id,
+                providerId: authoritativeSnapshot.providerId,
                 serviceTier: null,
                 snapshot: authoritativeSnapshot,
             },

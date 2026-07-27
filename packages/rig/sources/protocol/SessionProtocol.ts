@@ -204,14 +204,31 @@ export interface UpdateDaemonConfigRequest {
 export type UpdateDaemonConfigResponse = GetDaemonConfigResponse;
 
 export interface PendingSteeringMessage {
+    createdAt: number;
     message: UserMessage;
     runId: string;
+}
+
+/** The turn currently occupying the session, timed from its original submission. */
+export interface SessionActiveTurn {
+    runId: string;
+    startedAt: number;
+}
+
+export interface SessionPermissionReview {
+    action: string;
+    decision: "allow" | "deny";
+    reason: string;
+    risk: "low" | "medium" | "high" | "critical";
+    toolCallId: string;
+    userAuthorization: "unknown" | "low" | "medium" | "high";
 }
 
 export interface ProtocolSession {
     id: string;
     /** What the session is doing at this moment. */
     activity: SessionActivity;
+    activeTurn?: SessionActiveTurn;
     agentId: string;
     /** Git state of the session's directory, when it is inside a repository. */
     git?: GitChangeSnapshot;
@@ -249,6 +266,7 @@ export interface ProtocolSession {
     agent: SessionAgentMetadata;
     snapshot: AgentSnapshot;
     pendingUserInputs: readonly UserInputRequest[];
+    permissionReviews?: readonly SessionPermissionReview[];
     pendingSteeringMessages?: readonly PendingSteeringMessage[];
     subagents?: readonly SubagentSummary[];
     shellCommands?: readonly ShellCommandState[];
@@ -296,6 +314,14 @@ export interface SessionTranscriptTurn {
     /** Absent while the turn is still running. */
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
+    retries?: readonly SessionTranscriptRetry[];
+}
+
+export interface SessionTranscriptRetry {
+    id: EventId;
+    createdAt: number;
+    attempt: number;
+    reason: string;
 }
 
 /**
@@ -324,6 +350,8 @@ export interface SessionTranscriptWindow {
  */
 export interface SessionStreamHello {
     activity: SessionActivity;
+    /** Complete session usage at the hello cursor; later durable events update it. */
+    usage?: GetSessionUsageResponse;
     /**
      * Present only when the client attached without a cursor. Its transcript
      * holds the most recent `SESSION_STREAM_TURN_LIMIT` complete turns, so the
@@ -763,6 +791,7 @@ export type SessionEvent =
     | MessageSubmittedEvent
     | SteeringAppliedEvent
     | RunStartedEvent
+    | InferenceRetryEvent
     | AgentStreamEvent
     | AgentMessageEvent
     | RunFinishedEvent
@@ -835,6 +864,11 @@ export type SteeringAppliedEvent = BaseSessionEvent<
 >;
 
 export type RunStartedEvent = BaseSessionEvent<"run_started", { runId: string }>;
+
+export type InferenceRetryEvent = BaseSessionEvent<
+    "inference_retry",
+    { attempt: number; reason: string; runId: string }
+>;
 
 export type AgentStreamEvent = BaseSessionEvent<
     "agent_event",
@@ -1015,6 +1049,7 @@ export type SessionConfigurationChangedEvent = BaseSessionEvent<
         changed: readonly SessionConfigurationField[];
         effort?: string;
         modelId: string;
+        providerId: string;
         serviceTier: ServiceTier | null;
         snapshot: AgentSnapshot;
     }

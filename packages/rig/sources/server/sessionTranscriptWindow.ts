@@ -1,5 +1,9 @@
 import type { Message } from "../agent/types.js";
-import type { SessionTranscriptTurn, SessionTranscriptWindow } from "../protocol/index.js";
+import type {
+    SessionTranscriptRetry,
+    SessionTranscriptTurn,
+    SessionTranscriptWindow,
+} from "../protocol/index.js";
 
 /** When a run began, ended, and how, gathered from the durable event log. */
 export interface TranscriptRunFacts {
@@ -7,6 +11,7 @@ export interface TranscriptRunFacts {
     endedAt?: number;
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
+    retries?: readonly SessionTranscriptRetry[];
 }
 
 export interface TranscriptEntry {
@@ -80,6 +85,7 @@ export function sessionTranscriptWindow(
             ...(facts?.endedAt === undefined ? {} : { endedAt: facts.endedAt }),
             ...(facts?.outcome === undefined ? {} : { outcome: facts.outcome }),
             ...(facts?.errorMessage === undefined ? {} : { errorMessage: facts.errorMessage }),
+            ...(facts?.retries === undefined ? {} : { retries: facts.retries }),
         };
     });
 

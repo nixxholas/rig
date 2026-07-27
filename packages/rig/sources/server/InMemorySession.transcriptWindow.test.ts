@@ -11,7 +11,7 @@ import {
     defineProvider,
     type AssistantMessage,
 } from "@slopus/rig-execution";
-import { InMemorySession } from "./InMemorySession.js";
+import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
 
 /**
  * These drive real runs rather than appending events by hand, because the point
@@ -38,6 +38,85 @@ describe("InMemorySession transcript window", () => {
             // elapsed footer it is promised for history.
             expect(turn.endedAt).toBeGreaterThanOrEqual(turn.startedAt);
         }
+
+        await session.beginShutdown();
+    });
+
+    it("uses the original run submission as the authoritative turn start", async () => {
+        let now = 1_000;
+        const session = createSession({ now: () => (now += 10) });
+
+        const submitted = session.submit({ text: "Measure from here." });
+        const events = session.events.since(undefined) ?? [];
+        const messageSubmitted = events.find(
+            (event) => event.type === "message_submitted" && event.data.runId === submitted.runId,
+        );
+        expect(session.snapshot().activeTurn).toEqual({
+            runId: submitted.runId,
+            startedAt: messageSubmitted?.createdAt,
+        });
+
+        await session.waitForRun(submitted.runId);
+
+        const runStarted = (session.events.since(undefined) ?? []).find(
+            (event) => event.type === "run_started" && event.data.runId === submitted.runId,
+        );
+        const turn = session
+            .transcriptWindow()
+            .turns.find((candidate) => candidate.runId === submitted.runId);
+
+        expect(messageSubmitted).toBeDefined();
+        expect(runStarted).toBeDefined();
+        expect(runStarted?.createdAt).toBeGreaterThan(messageSubmitted?.createdAt ?? 0);
+        expect(turn?.startedAt).toBe(messageSubmitted?.createdAt);
+
+        await session.beginShutdown();
+    });
+
+    it("rebuilds authoritative turn timing from durable events after restart", async () => {
+        const session = createSession();
+        const submitted = session.submit({ text: "Survive restart." });
+        await session.waitForRun(submitted.runId);
+        const expected = session
+            .transcriptWindow()
+            .turns.find((turn) => turn.runId === submitted.runId);
+
+        const restored = createSession({
+            events: session.events.since(undefined) ?? [],
+            restore: session.state(),
+        });
+
+        expect(
+            restored.transcriptWindow().turns.find((turn) => turn.runId === submitted.runId),
+        ).toEqual(expected);
+
+        await restored.beginShutdown();
+        await session.beginShutdown();
+    });
+
+    it("persists provider retries inside their transcript turn", async () => {
+        const session = createSession({ retry: true });
+        const submitted = session.submit({ text: "Retry if needed." });
+        await session.waitForRun(submitted.runId);
+
+        const retry = (session.events.since(undefined) ?? []).find(
+            (event) => event.type === "inference_retry" && event.data.runId === submitted.runId,
+        );
+        expect(retry).toMatchObject({
+            data: { attempt: 1, reason: "Connection lost" },
+            type: "inference_retry",
+        });
+        expect(
+            session.transcriptWindow().turns.find((turn) => turn.runId === submitted.runId)
+                ?.retries,
+        ).toEqual([
+            {
+                attempt: 1,
+                createdAt: retry?.createdAt,
+                id: retry?.id,
+                reason: "Connection lost",
+            },
+        ]);
 
         await session.beginShutdown();
     });
@@ -102,7 +181,11 @@ describe("InMemorySession transcript window", () => {
     });
 });
 
-function createSession(): InMemorySession {
+function createSession(
+    options: Partial<Pick<InMemorySessionOptions, "events" | "now" | "restore">> & {
+        retry?: boolean;
+    } = {},
+): InMemorySession {
     const model = defineModel({
         defaultThinkingLevel: "off",
         id: "test/transcript-window",
@@ -116,6 +199,9 @@ function createSession(): InMemorySession {
             const message = assistantMessage(model.id);
             return createInferenceStream(async function* () {
                 yield { type: "start", partial: { ...message, content: [] } };
+                if (options.retry === true) {
+                    yield { attempt: 1, reason: "Connection lost", type: "retrying" };
+                }
                 yield { type: "done", reason: "stop", message };
                 return message;
             });
@@ -131,6 +217,9 @@ function createSession(): InMemorySession {
         createEventId: createEventIdFactory(),
         createRuntime: (options) => createRuntime(options, provider),
         modelCatalog: catalog,
+        ...(options.events === undefined ? {} : { events: options.events }),
+        ...(options.now === undefined ? {} : { now: options.now }),
+        ...(options.restore === undefined ? {} : { restore: options.restore }),
         request: {
             cwd: "/tmp/rig-transcript-window",
             modelId: model.id,

@@ -18,6 +18,7 @@ import type {
     SessionStreamHello,
     SessionTokenCount,
     SessionTranscriptWindow,
+    SessionUsageSnapshot,
     ShellCommandState,
     SubagentSummary,
     ToolCallBlock,
@@ -29,11 +30,13 @@ import type {
     UserInputRequest,
 } from "./protocol.js";
 import type {
+    ActiveTurn,
     AgentTextElement,
     ChatDelta,
     ChatElement,
     ConnectionState,
     SessionState,
+    SessionUsage,
     SystemNoticeElement,
     ThinkingElement,
     ToolCallElement,
@@ -58,9 +61,12 @@ const IDLE_ACTIVITY: SessionActivity = { kind: "idle", label: "Idle", since: 0 }
  */
 export class ChatStore {
     #elements: readonly ChatElement[] = [];
+    /** Authoritative insertion order before pending steering is pinned to the tail. */
+    #chronologicalElementIds: string[] = [];
     #session: SessionState;
     #turnId: string | undefined;
-    #turnStartedAt = 0;
+    #turnStartedAt = new Map<string, number>();
+    #openTurnIds: string[] = [];
     /** Elements by id, so a delta reaches its element without scanning the list. */
     #byId = new Map<string, ChatElement>();
     /** In-flight tool calls by the daemon's tool-call id. */
@@ -124,7 +130,7 @@ export class ChatStore {
             permissionReviews: [],
             projectId: "",
             providerId: "",
-            loadingEarlier: false,
+            loadingMore: false,
             sessionId,
             shellCommands: [],
             status: "idle",
@@ -143,28 +149,51 @@ export class ChatStore {
         return this.#loadedTranscript?.turns[0]?.runId;
     }
 
-    /** The exact transcript state an earlier-page request is continuing from. */
-    earlierTranscriptAnchor(): { before: string; generation: number } | undefined {
+    /**
+     * Atomically consumes one rendered load token.
+     *
+     * A virtual list may call this more than once before React commits the state
+     * change. The first call marks the token in flight synchronously; duplicates
+     * and stale renders therefore become no-ops before any request is created.
+     */
+    startLoadingMore(token: string):
+        | {
+              anchor: { before: string; generation: number };
+              deltas: readonly ChatDelta[];
+          }
+        | undefined {
         const before = this.earliestRunId();
-        return before === undefined
-            ? undefined
-            : { before, generation: this.#transcriptGeneration };
-    }
-
-    /** Reports that earlier turns are being fetched, clearing any earlier failure. */
-    startLoadingEarlier(): readonly ChatDelta[] {
-        const before = this.#session;
+        if (
+            before === undefined ||
+            this.#session.loadingMore ||
+            token !== this.#session.loadMoreToken
+        ) {
+            return undefined;
+        }
+        const sessionBefore = this.#session;
         this.#session = {
-            ...withoutKeys(this.#session, ["loadEarlierError"]),
-            loadingEarlier: true,
+            ...withoutKeys(this.#session, ["loadMoreError"]),
+            loadingMore: true,
         };
-        return this.#finish([], this.#revision, before);
+        return {
+            anchor: { before, generation: this.#transcriptGeneration },
+            deltas: this.#finish([], this.#revision, sessionBefore),
+        };
     }
 
-    /** Reports that loading earlier turns failed, in words a UI can show. */
-    failLoadingEarlier(message: string): readonly ChatDelta[] {
+    /** Reports that loading more history failed, in words a UI can show. */
+    failLoadingMore(
+        anchor: { before: string; generation: number },
+        message: string,
+    ): readonly ChatDelta[] {
+        if (
+            anchor.generation !== this.#transcriptGeneration ||
+            anchor.before !== this.earliestRunId()
+        ) {
+            return [];
+        }
         const before = this.#session;
-        this.#session = { ...this.#session, loadEarlierError: message, loadingEarlier: false };
+        this.#session = { ...this.#session, loadMoreError: message, loadingMore: false };
         return this.#finish([], this.#revision, before);
     }
 
@@ -187,8 +216,8 @@ export class ChatStore {
                 anchor.before !== this.earliestRunId())
         ) {
             this.#session = {
-                ...withoutKeys(this.#session, ["loadEarlierError"]),
-                loadingEarlier: false,
+                ...withoutKeys(this.#session, ["loadMoreError"]),
+                loadingMore: false,
             };
             return this.#finish(deltas, revisionBefore, sessionBefore);
         }
@@ -203,10 +232,12 @@ export class ChatStore {
             messages: [...page.messages, ...(loaded?.messages ?? [])],
             turns: [...page.turns, ...(loaded?.turns ?? [])],
         };
-        this.#resetTranscript(merged.messages, deltas, merged);
+        this.#resetTranscript(merged.messages, deltas, merged, this.#session.activeTurn);
+        const loadMoreToken = merged.complete ? undefined : historyToken(merged);
         this.#session = {
-            ...withoutKeys(this.#session, ["loadEarlierError"]),
-            loadingEarlier: false,
+            ...withoutKeys(this.#session, ["loadMoreError", "loadMoreToken"]),
+            ...(loadMoreToken === undefined ? {} : { loadMoreToken }),
+            loadingMore: false,
             transcriptComplete: merged.complete,
         };
         return this.#finish(deltas, revisionBefore, sessionBefore);
@@ -236,11 +267,16 @@ export class ChatStore {
                 hello.transcript === undefined
                     ? undefined
                     : mergeTranscriptWindow(this.#loadedTranscript, hello.transcript);
-            this.#resetFromSession(hello.session, merged);
+            this.#resetFromSession(hello.session, merged, hello.usage);
             // The opening frame carries a bounded window, so the caller is told
             // whether the conversation began before the first element it has.
+            const loadMoreToken =
+                this.#loadedTranscript?.complete === false
+                    ? historyToken(this.#loadedTranscript)
+                    : undefined;
             this.#session = {
-                ...this.#session,
+                ...withoutKeys(this.#session, ["loadMoreToken"]),
+                ...(loadMoreToken === undefined ? {} : { loadMoreToken }),
                 transcriptComplete: this.#loadedTranscript?.complete ?? true,
             };
         }
@@ -293,24 +329,41 @@ export class ChatStore {
                 };
                 break;
             case "session_context_changed":
-                this.#session = {
-                    ...this.#session,
-                    tokens: (event.data as { sessionTokenCount: SessionTokenCount })
-                        .sessionTokenCount,
-                };
+                {
+                    const tokens = (event.data as { sessionTokenCount: SessionTokenCount })
+                        .sessionTokenCount;
+                    this.#session = {
+                        ...this.#session,
+                        tokens,
+                        ...(this.#session.usage === undefined
+                            ? {}
+                            : { usage: { ...this.#session.usage, sessionTokenCount: tokens } }),
+                    };
+                }
                 break;
             case "session_configuration_changed": {
                 const data = event.data as {
                     effort?: string;
                     modelId: string;
+                    providerId?: string;
                     serviceTier: string | null;
                 };
+                const providerId = data.providerId ?? this.#session.providerId;
                 // Effort and service tier are cleared by omission and by null
                 // respectively, so both are written every time rather than
                 // merged, or a cleared value would linger.
                 this.#session = {
                     ...withoutKeys(this.#session, ["effort", "serviceTier"]),
                     modelId: data.modelId,
+                    providerId,
+                    ...(this.#session.usage === undefined
+                        ? {}
+                        : {
+                              usage: {
+                                  ...this.#session.usage,
+                                  currentProviderId: providerId,
+                              },
+                          }),
                     ...(data.effort === undefined ? {} : { effort: data.effort }),
                     ...(data.serviceTier === null ? {} : { serviceTier: data.serviceTier }),
                 };
@@ -427,12 +480,20 @@ export class ChatStore {
                 const applied = new Set(
                     (event.data as { messageIds: readonly string[] }).messageIds,
                 );
+                for (const messageId of applied) {
+                    const elementId = `message:${messageId}`;
+                    const element = this.#byId.get(elementId);
+                    if (element?.kind === "user_message") {
+                        this.#update(elementId, { delivery: "sent" });
+                    }
+                }
                 this.#session = {
                     ...this.#session,
                     pendingSteeringMessages: this.#session.pendingSteeringMessages.filter(
                         (pending) => !applied.has(pending.message.id),
                     ),
                 };
+                this.#presentPendingSteeringAtTail();
                 break;
             }
             case "message_submitted":
@@ -442,13 +503,31 @@ export class ChatStore {
             case "run_started":
                 this.#startTurn((event.data as { runId: string }).runId, event.createdAt, deltas);
                 break;
-            case "agent_message":
-                this.#applyMessage(
-                    (event.data as { message: Message }).message,
-                    event.createdAt,
-                    deltas,
-                );
+            case "inference_retry": {
+                const data = event.data as { attempt: number; reason: string; runId: string };
+                this.#appendRetry(event.id, data.runId, event.createdAt, data.attempt, data.reason);
+                deltas.push({
+                    attempt: data.attempt,
+                    reason: data.reason,
+                    type: "retry_started",
+                });
                 break;
+            }
+            case "agent_message":
+                {
+                    const data = event.data as { message: Message; runId: string };
+                    if (data.message.role === "agent") this.#recordAgentUsage(data.message);
+                    this.#applyMessage(data.message, event.createdAt, deltas, data.runId);
+                }
+                break;
+            case "provider_quota_observed": {
+                const data = event.data as {
+                    providerId: string;
+                    quota: SessionUsageSnapshot["quotas"][number]["quota"];
+                };
+                this.#recordProviderQuota(data.providerId, data.quota);
+                break;
+            }
             case "agent_event":
                 this.#applyAgentEvent(
                     (event.data as { event: AgentLoopEvent }).event,
@@ -460,6 +539,7 @@ export class ChatStore {
                 const data = event.data as {
                     errorMessage?: string;
                     modelLocked: boolean;
+                    runId: string;
                     stopReason: string;
                 };
                 this.#session = { ...this.#session, modelLocked: data.modelLocked };
@@ -469,28 +549,33 @@ export class ChatStore {
                         : data.stopReason === "aborted"
                           ? "stopped"
                           : "success";
-                this.#endTurn(outcome, data.errorMessage, event.createdAt, deltas);
+                this.#endTurn(data.runId, outcome, data.errorMessage, event.createdAt, deltas);
                 break;
             }
-            case "run_error":
+            case "run_error": {
+                const data = event.data as {
+                    errorMessage: string;
+                    modelLocked: boolean;
+                    runId: string;
+                };
                 this.#session = {
                     ...this.#session,
-                    modelLocked: (event.data as { modelLocked: boolean }).modelLocked,
+                    modelLocked: data.modelLocked,
                 };
-                this.#endTurn(
-                    "error",
-                    (event.data as { errorMessage: string }).errorMessage,
-                    event.createdAt,
-                    deltas,
-                );
+                this.#endTurn(data.runId, "error", data.errorMessage, event.createdAt, deltas);
                 break;
+            }
             case "session_reset":
             case "session_rewound": {
                 // Both carry the transcript as it stands afterwards, so the list
                 // is rebuilt with real runs and closed turns rather than the
                 // per-message boundaries the snapshot alone would imply.
                 const data = event.data as {
-                    snapshot: { messages: readonly Message[] };
+                    snapshot: {
+                        messages: readonly Message[];
+                        modelId?: string;
+                        providerId?: string;
+                    };
                     transcript?: SessionTranscriptWindow;
                 };
                 const transcript =
@@ -498,10 +583,32 @@ export class ChatStore {
                         ? undefined
                         : mergeTranscriptWindow(this.#loadedTranscript, data.transcript);
                 this.#resetTranscript(data.snapshot.messages, deltas, transcript);
+                const usage = this.#session.usage;
+                const loadMoreToken =
+                    transcript?.complete === false ? historyToken(transcript) : undefined;
                 this.#session = {
-                    ...withoutKeys(this.#session, ["loadEarlierError"]),
-                    loadingEarlier: false,
+                    ...withoutKeys(this.#session, ["loadMoreError", "loadMoreToken"]),
+                    ...(loadMoreToken === undefined ? {} : { loadMoreToken }),
+                    loadingMore: false,
                     transcriptComplete: transcript?.complete ?? true,
+                    ...(event.type === "session_reset" ? { permissionReviews: [] } : {}),
+                    ...(usage === undefined
+                        ? {}
+                        : event.type === "session_reset"
+                          ? {
+                                usage: applicationUsage({
+                                    currentProviderId:
+                                        data.snapshot.providerId ?? usage.currentProviderId,
+                                    groups: [],
+                                    observedQuota: [],
+                                    quotas: usage.quotas,
+                                    sessionTokenCount: {
+                                        lastContextTokens: 0,
+                                        totalTokens: 0,
+                                    },
+                                }),
+                            }
+                          : { usage: withoutUsageContext(usage) }),
                 };
                 break;
             }
@@ -557,7 +664,11 @@ export class ChatStore {
         for (const element of grouped) this.#byId.set(element.id, element);
     }
 
-    #resetFromSession(session: ProtocolSession, transcript?: SessionTranscriptWindow): void {
+    #resetFromSession(
+        session: ProtocolSession,
+        transcript?: SessionTranscriptWindow,
+        usage?: SessionUsageSnapshot,
+    ): void {
         this.#session = {
             ...withoutKeys(this.#session, [
                 "draft",
@@ -569,6 +680,7 @@ export class ChatStore {
                 "serviceTier",
                 "title",
                 "tokens",
+                "usage",
                 "workspaceId",
             ]),
             archived: session.archived,
@@ -580,6 +692,7 @@ export class ChatStore {
             orderKey: session.orderKey,
             pendingSteeringMessages: session.pendingSteeringMessages ?? [],
             pendingUserInputs: session.pendingUserInputs,
+            permissionReviews: session.permissionReviews ?? [],
             permissionMode: session.permissionMode,
             projectId: session.projectId,
             providerId: session.providerId,
@@ -602,8 +715,27 @@ export class ChatStore {
             ...(session.sessionTokenCount === undefined
                 ? {}
                 : { tokens: session.sessionTokenCount }),
+            ...(usage === undefined ? {} : { usage: applicationUsage(usage) }),
         };
-        this.#resetTranscript(session.snapshot.messages, [], transcript);
+        this.#resetTranscript(
+            session.snapshot.messages,
+            [],
+            transcript,
+            session.activeTurn === undefined
+                ? undefined
+                : { startedAt: session.activeTurn.startedAt, turnId: session.activeTurn.runId },
+            true,
+        );
+        for (const pending of session.pendingSteeringMessages ?? []) {
+            this.#applyMessage(
+                pending.message,
+                pending.createdAt,
+                [],
+                pending.runId,
+                "pending_steering",
+            );
+        }
+        this.#priorElements = undefined;
     }
 
     /**
@@ -619,12 +751,15 @@ export class ChatStore {
         messages: readonly Message[],
         deltas: ChatDelta[],
         transcript?: SessionTranscriptWindow,
+        activeTurn?: ActiveTurn,
+        preservePriorElements = false,
     ): void {
         this.#transcriptGeneration += 1;
         if (this.#elements.length > 0) this.#revision += 1;
         // Copied, not aliased: the map this reads from is cleared just below.
         this.#priorElements = new Map(this.#byId);
         this.#elements = [];
+        this.#chronologicalElementIds = [];
         this.#byId.clear();
         this.#indexById.clear();
         this.#groupingDirty = true;
@@ -635,21 +770,29 @@ export class ChatStore {
         this.#compactionElementIds.clear();
         this.#streamingMessageId = undefined;
         this.#turnId = undefined;
+        this.#turnStartedAt.clear();
+        this.#openTurnIds = [];
         this.#turnUsage = undefined;
+        this.#retrying = false;
+        this.#session = withoutKeys(this.#session, ["activeTurn"]);
         this.#loadedTranscript = transcript;
         try {
             if (transcript !== undefined && transcript.turns.length > 0) {
-                this.#rebuildTurns(transcript.messages, transcript, deltas);
+                this.#rebuildTurns(transcript.messages, transcript, deltas, activeTurn);
                 return;
             }
             for (const message of messages) {
                 if (message.internal === true) continue;
                 this.#turnId = `history:${message.id}`;
-                this.#applyMessage(message, 0, deltas);
+                this.#applyMessage(message, 0, deltas, this.#turnId);
             }
             this.#turnId = undefined;
+            if (activeTurn !== undefined) {
+                this.#rememberTurn(activeTurn.turnId, activeTurn.startedAt);
+                this.#activateTurn(activeTurn.turnId, activeTurn.startedAt, deltas);
+            }
         } finally {
-            this.#priorElements = undefined;
+            if (!preservePriorElements) this.#priorElements = undefined;
         }
     }
 
@@ -665,24 +808,70 @@ export class ChatStore {
         messages: readonly Message[],
         transcript: SessionTranscriptWindow,
         deltas: ChatDelta[],
+        activeTurn?: ActiveTurn,
     ): void {
         const byId = new Map(messages.map((message) => [message.id, message]));
         for (const turn of transcript.turns) {
             this.#turnId = turn.runId;
-            this.#turnStartedAt = turn.startedAt;
-            for (const messageId of turn.messageIds) {
-                const message = byId.get(messageId);
-                if (message === undefined) continue;
-                this.#applyMessage(
-                    message,
-                    transcript.messageCreatedAt?.[messageId] ?? turn.startedAt,
-                    deltas,
-                );
+            this.#rememberTurn(turn.runId, turn.startedAt);
+            const timeline = [
+                ...turn.messageIds.flatMap((messageId, order) => {
+                    const message = byId.get(messageId);
+                    return message === undefined
+                        ? []
+                        : [
+                              {
+                                  at: transcript.messageCreatedAt?.[messageId] ?? turn.startedAt,
+                                  kind: "message" as const,
+                                  message,
+                                  order,
+                              },
+                          ];
+                }),
+                ...(turn.retries ?? []).map((retry, order) => ({
+                    at: retry.createdAt,
+                    kind: "retry" as const,
+                    order: turn.messageIds.length + order,
+                    retry,
+                })),
+            ].sort((left, right) => left.at - right.at || left.order - right.order);
+            for (const item of timeline) {
+                if (item.kind === "message") {
+                    this.#applyMessage(item.message, item.at, deltas, turn.runId);
+                } else {
+                    this.#appendRetry(
+                        item.retry.id,
+                        turn.runId,
+                        item.retry.createdAt,
+                        item.retry.attempt,
+                        item.retry.reason,
+                    );
+                }
             }
             if (turn.endedAt === undefined) continue;
-            this.#endTurn(turn.outcome ?? "success", turn.errorMessage, turn.endedAt, deltas);
+            this.#endTurn(
+                turn.runId,
+                turn.outcome ?? "success",
+                turn.errorMessage,
+                turn.endedAt,
+                deltas,
+                false,
+            );
         }
-        this.#turnId = undefined;
+        const restored =
+            activeTurn ??
+            this.#openTurnIds
+                .map((turnId) => {
+                    const startedAt = this.#turnStartedAt.get(turnId);
+                    return startedAt === undefined ? undefined : { startedAt, turnId };
+                })
+                .find((turn): turn is ActiveTurn => turn !== undefined);
+        if (restored === undefined) {
+            this.#turnId = undefined;
+        } else {
+            this.#rememberTurn(restored.turnId, restored.startedAt);
+            this.#activateTurn(restored.turnId, restored.startedAt, deltas);
+        }
     }
 
     #setActivity(activity: SessionActivity, deltas: ChatDelta[]): void {
@@ -690,24 +879,34 @@ export class ChatStore {
         this.#session = { ...this.#session, activity };
         deltas.push({ type: "session_changed", session: this.#session });
         this.#retrying = activity.retry !== undefined;
-        if (this.#retrying && !wasRetrying && activity.retry !== undefined) {
-            deltas.push({
-                type: "retry_started",
-                attempt: activity.retry.attempt,
-                reason: activity.retry.reason,
-            });
-        }
         if (!this.#retrying && wasRetrying) deltas.push({ type: "retry_finished" });
     }
 
     #startTurn(runId: string, at: number, deltas: ChatDelta[]): void {
-        if (this.#turnId === runId) return;
+        const startedAt = this.#turnStartedAt.get(runId) ?? at;
+        this.#rememberTurn(runId, startedAt);
+        this.#activateTurn(runId, startedAt, deltas);
+    }
+
+    #rememberTurn(runId: string, startedAt: number): void {
+        if (!this.#turnStartedAt.has(runId)) this.#turnStartedAt.set(runId, startedAt);
+        if (!this.#openTurnIds.includes(runId)) this.#openTurnIds.push(runId);
+    }
+
+    #activateTurn(runId: string, startedAt: number, deltas: ChatDelta[]): void {
+        if (
+            this.#session.activeTurn?.turnId === runId &&
+            this.#session.activeTurn.startedAt === startedAt
+        ) {
+            this.#turnId = runId;
+            return;
+        }
         this.#turnId = runId;
-        this.#turnStartedAt = at;
+        this.#session = { ...this.#session, activeTurn: { startedAt, turnId: runId } };
         this.#streamingElementIds.clear();
         this.#streamingMessageId = undefined;
         this.#turnUsage = undefined;
-        deltas.push({ type: "turn_started", turnId: runId });
+        deltas.push({ type: "turn_started", startedAt, turnId: runId });
     }
 
     /**
@@ -717,25 +916,29 @@ export class ChatStore {
      * was in, it gains exactly one `turn_end` element and no more.
      */
     #endTurn(
+        turnId: string,
         outcome: TurnEndElement["outcome"],
         errorMessage: string | undefined,
         at: number,
         deltas: ChatDelta[],
+        advance = true,
     ): void {
-        const turnId = this.#turnId;
-        if (turnId === undefined) return;
+        const startedAt = this.#turnStartedAt.get(turnId);
+        if (startedAt === undefined) return;
         // Text and tool calls left open by an interrupted turn are closed here so
         // no element stays perpetually in progress.
-        this.#closeOpenElements(outcome);
+        if (this.#session.activeTurn?.turnId === turnId) this.#closeOpenElements(outcome);
         this.#append({
             createdAt: at,
-            elapsedMs: Math.max(0, at - this.#turnStartedAt),
+            elapsedMs: Math.max(0, at - startedAt),
+            endedAt: at,
             // Derived from the turn rather than a counter: a turn ends exactly
             // once, and rebuilding the list after a recovery has to produce the
             // same identity so a reader keeps their place.
             id: `turn:${turnId}`,
             kind: "turn_end",
             outcome,
+            startedAt,
             turnId,
             ...(errorMessage === undefined ? {} : { errorMessage }),
             // Omitted rather than zeroed when nothing was reported, because a
@@ -743,10 +946,22 @@ export class ChatStore {
             ...(this.#turnUsage === undefined ? {} : { usage: this.#turnUsage }),
         });
         this.#turnUsage = undefined;
-        this.#turnId = undefined;
-        this.#streamingElementIds.clear();
-        this.#streamingMessageId = undefined;
-        deltas.push({ type: "turn_ended", turnId, outcome });
+        this.#turnStartedAt.delete(turnId);
+        this.#openTurnIds = this.#openTurnIds.filter((openTurnId) => openTurnId !== turnId);
+        if (this.#session.activeTurn?.turnId === turnId) {
+            this.#session = withoutKeys(this.#session, ["activeTurn"]);
+            this.#turnId = undefined;
+            this.#streamingElementIds.clear();
+            this.#streamingMessageId = undefined;
+        }
+        deltas.push({ endedAt: at, outcome, startedAt, turnId, type: "turn_ended" });
+        if (!advance) return;
+        const nextTurnId = this.#openTurnIds[0];
+        const nextStartedAt =
+            nextTurnId === undefined ? undefined : this.#turnStartedAt.get(nextTurnId);
+        if (nextTurnId !== undefined && nextStartedAt !== undefined) {
+            this.#activateTurn(nextTurnId, nextStartedAt, deltas);
+        }
     }
 
     #closeOpenElements(outcome: TurnEndElement["outcome"]): void {
@@ -776,9 +991,25 @@ export class ChatStore {
     }
 
     #applySubmittedMessage(event: SessionEvent, deltas: ChatDelta[]): void {
-        const data = event.data as { displayText: string; message: Message; runId: string };
-        this.#startTurn(data.runId, event.createdAt, deltas);
-        this.#applyMessage(data.message, event.createdAt, deltas);
+        const data = event.data as {
+            delivery?: "run" | "steer";
+            displayText: string;
+            message: Message;
+            runId: string;
+        };
+        if (data.delivery === "run") {
+            this.#rememberTurn(data.runId, event.createdAt);
+            if (this.#session.activeTurn === undefined) {
+                this.#activateTurn(data.runId, event.createdAt, deltas);
+            }
+        }
+        this.#applyMessage(
+            data.message,
+            event.createdAt,
+            deltas,
+            data.runId,
+            data.delivery === "steer" ? "pending_steering" : "sent",
+        );
     }
 
     #trackPendingSteering(event: SessionEvent): void {
@@ -788,7 +1019,11 @@ export class ChatStore {
             runId: string;
         };
         if (data.delivery !== "steer") return;
-        const pending: PendingSteeringMessage = { message: data.message, runId: data.runId };
+        const pending: PendingSteeringMessage = {
+            createdAt: event.createdAt,
+            message: data.message,
+            runId: data.runId,
+        };
         this.#session = {
             ...this.#session,
             pendingSteeringMessages: [
@@ -813,11 +1048,120 @@ export class ChatStore {
         this.#session = { ...this.#session, shellCommands };
     }
 
+    #appendRetry(id: string, turnId: string, at: number, attempt: number, reason: string): void {
+        this.#append({
+            attempt,
+            createdAt: at,
+            id: `retry:${id}`,
+            kind: "retry",
+            reason,
+            turnId,
+        });
+    }
+
+    #recordAgentUsage(message: AgentMessage): void {
+        if (
+            message.usage === undefined ||
+            message.providerId === undefined ||
+            message.requestedModelId === undefined
+        ) {
+            return;
+        }
+        const modelId = message.responseModel ?? message.requestedModelId;
+        this.#recordUsageGroup({
+            kind: "attributed",
+            modelId,
+            providerId: message.providerId,
+            requestedModelId: message.requestedModelId,
+            ...(message.responseModel === undefined
+                ? {}
+                : { responseModel: message.responseModel }),
+            usage: message.usage,
+        });
+        const usage = this.#session.usage;
+        if (usage === undefined) return;
+        this.#session = {
+            ...this.#session,
+            usage: applicationUsage({
+                ...usage,
+                context: {
+                    approximate: false,
+                    modelId,
+                    providerId: message.providerId,
+                    requestedModelId: message.requestedModelId,
+                    ...(message.responseModel === undefined
+                        ? {}
+                        : { responseModel: message.responseModel }),
+                    totalTokens: message.usage.totalTokens,
+                },
+                currentProviderId: message.providerId,
+            }),
+        };
+    }
+
+    #recordUsageGroup(group: SessionUsageSnapshot["groups"][number]): void {
+        const current =
+            this.#session.usage ??
+            applicationUsage({
+                currentProviderId: this.#session.providerId,
+                groups: [],
+                observedQuota: [],
+                quotas: [],
+                sessionTokenCount: this.#session.tokens ?? {
+                    lastContextTokens: 0,
+                    totalTokens: 0,
+                },
+            });
+        const index = current.groups.findIndex(
+            (known) =>
+                known.providerId === group.providerId &&
+                known.modelId === group.modelId &&
+                known.role === group.role,
+        );
+        const groups =
+            index === -1
+                ? [...current.groups, group]
+                : current.groups.map((known, knownIndex) =>
+                      knownIndex === index
+                          ? { ...known, usage: addUsage(known.usage, group.usage) }
+                          : known,
+                  );
+        this.#session = {
+            ...this.#session,
+            usage: applicationUsage({ ...current, groups }),
+        };
+    }
+
+    #recordProviderQuota(
+        providerId: string,
+        quota: SessionUsageSnapshot["quotas"][number]["quota"],
+    ): void {
+        const usage = this.#session.usage;
+        if (usage === undefined) return;
+        const known = usage.quotas.find((entry) => entry.providerId === providerId);
+        if (known !== undefined && known.quota.capturedAt > quota.capturedAt) return;
+        const quotas = [
+            ...usage.quotas.filter((entry) => entry.providerId !== providerId),
+            { providerId, quota },
+        ];
+        this.#session = { ...this.#session, usage: { ...usage, quotas } };
+    }
+
     /** Applies one committed message, expanding its blocks into elements. */
-    #applyMessage(message: Message, at: number, deltas: ChatDelta[]): void {
+    #applyMessage(
+        message: Message,
+        at: number,
+        deltas: ChatDelta[],
+        turnId = this.#turnId,
+        delivery: UserMessageElement["delivery"] = "sent",
+    ): void {
         if (message.internal === true) return;
         if (this.#appliedMessageIds.has(message.id)) {
             if (message.role === "agent") this.#reconcileAgentMessage(message, at);
+            if (message.role === "user" && delivery === "pending_steering") {
+                this.#update(`message:${message.id}`, { delivery });
+                this.#presentPendingSteeringAtTail();
+            }
             return;
         }
         this.#appliedMessageIds.add(message.id);
@@ -827,19 +1171,24 @@ export class ChatStore {
                 id: `message:${message.id}`,
                 kind: "system_notice",
                 text: textOf(message.blocks),
-                turnId: this.#turnId ?? `history:${message.id}`,
+                turnId: turnId ?? `history:${message.id}`,
             };
             this.#append(element);
             return;
         }
         if (message.role === "user") {
-            this.#appendUserMessage(message, at);
+            this.#appendUserMessage(message, at, turnId, delivery);
             return;
         }
-        this.#appendAgentBlocks(message, at, deltas);
+        this.#appendAgentBlocks(message, at, deltas, turnId);
     }
 
-    #appendUserMessage(message: UserMessage, at: number): void {
+    #appendUserMessage(
+        message: UserMessage,
+        at: number,
+        turnId = this.#turnId,
+        delivery: UserMessageElement["delivery"] = "sent",
+    ): void {
         const attachments = message.blocks
             .filter((block): block is Extract<ContentBlock, { type: "image" }> =>
                 isImageBlock(block),
@@ -847,10 +1196,12 @@ export class ChatStore {
             .map((block) => ({ data: block.data, mediaType: block.mediaType }));
         const element: UserMessageElement = {
             createdAt: at,
+            delivery,
             id: `message:${message.id}`,
             kind: "user_message",
+            messageId: message.id,
             text: textOf(message.blocks),
-            turnId: this.#turnId ?? `history:${message.id}`,
+            turnId: turnId ?? `history:${message.id}`,
             ...(attachments.length === 0 ? {} : { attachments }),
         };
         this.#append(element);
@@ -863,8 +1214,13 @@ export class ChatStore {
      * so the authoritative message replaces the live rendering without producing
      * a second copy of the same text.
      */
-    #appendAgentBlocks(message: AgentMessage, at: number, deltas: ChatDelta[]): void {
-        const turnId = this.#turnId ?? `history:${message.id}`;
+    #appendAgentBlocks(
+        message: AgentMessage,
+        at: number,
+        deltas: ChatDelta[],
+        turnId = this.#turnId,
+    ): void {
+        const elementTurnId = turnId ?? `history:${message.id}`;
         const streamed = this.#streamingMessageId === message.id;
         for (const [contentIndex, block] of message.blocks.entries()) {
             if (isTextBlock(block)) {
@@ -882,7 +1238,7 @@ export class ChatStore {
                     id: `${message.id}:agent_text:${contentIndex}`,
                     kind: "agent_text",
                     text: block.text,
-                    turnId,
+                    turnId: elementTurnId,
                 });
                 continue;
             }
@@ -901,12 +1257,12 @@ export class ChatStore {
                     id: `${message.id}:thinking:${contentIndex}`,
                     kind: "thinking",
                     text: block.thinking,
-                    turnId,
+                    turnId: elementTurnId,
                 });
                 continue;
             }
             if (isToolCallBlock(block)) {
-                this.#upsertToolCall(block, at, turnId);
+                this.#upsertToolCall(block, at, elementTurnId);
                 continue;
             }
             if (isToolResultBlock(block)) this.#applyToolResult(block);
@@ -1036,11 +1392,25 @@ export class ChatStore {
                     estimatedTokensAfter: number;
                 };
                 const elementId = this.#compactionElementIds.get(data.compactionId);
-                if (elementId === undefined) return;
-                this.#update(elementId, {
-                    estimatedTokensAfter: data.estimatedTokensAfter,
-                    messagesCompacted: data.compactedMessageCount,
-                });
+                if (elementId !== undefined) {
+                    this.#update(elementId, {
+                        estimatedTokensAfter: data.estimatedTokensAfter,
+                        messagesCompacted: data.compactedMessageCount,
+                    });
+                }
+                if (this.#session.usage?.context !== undefined) {
+                    this.#session = {
+                        ...this.#session,
+                        usage: {
+                            ...this.#session.usage,
+                            context: {
+                                ...this.#session.usage.context,
+                                approximate: true,
+                                totalTokens: data.estimatedTokensAfter,
+                            },
+                        },
+                    };
+                }
                 return;
             }
             case "context_compaction_finished": {
@@ -1065,14 +1435,32 @@ export class ChatStore {
                 return;
             }
             case "permission_review": {
-                const review = event as PermissionReviewState & { type: "permission_review" };
+                const review = event as PermissionReviewState & {
+                    transcript?: { modelId: string; providerId: string; usage: Usage };
+                    type: "permission_review";
+                };
                 const next: PermissionReviewState = {
                     action: review.action,
                     decision: review.decision,
                     reason: review.reason,
                     risk: review.risk,
                     toolCallId: review.toolCallId,
+                    userAuthorization: review.userAuthorization,
                 };
+                const elementId = this.#toolCallElementIds.get(next.toolCallId);
+                if (elementId !== undefined) {
+                    this.#update(elementId, { permissionReview: next });
+                }
+                if (review.transcript !== undefined) {
+                    this.#recordUsageGroup({
+                        kind: "attributed",
+                        modelId: review.transcript.modelId,
+                        providerId: review.transcript.providerId,
+                        requestedModelId: review.transcript.modelId,
+                        role: "permission_review",
+                        usage: review.transcript.usage,
+                    });
+                }
                 this.#session = {
                     ...this.#session,
                     permissionReviews: [
@@ -1283,9 +1671,11 @@ export class ChatStore {
             element = kept;
         }
         this.#byId.set(element.id, element);
+        this.#chronologicalElementIds.push(element.id);
         this.#indexById.set(element.id, this.#elements.length);
         this.#elements = [...this.#elements, element];
         this.#revision += 1;
+        this.#presentPendingSteeringAtTail();
         // Only a tool call can change how calls are grouped.
         if (element.kind === "tool_call") this.#groupingDirty = true;
     }
@@ -1320,10 +1710,43 @@ export class ChatStore {
         const removed = this.#byId.get(id);
         this.#byId.delete(id);
         this.#indexById.delete(id);
+        this.#chronologicalElementIds = this.#chronologicalElementIds.filter(
+            (elementId) => elementId !== id,
+        );
         this.#elements = this.#elements.filter((element) => element.id !== id);
         this.#reindex();
         this.#revision += 1;
         if (removed?.kind === "tool_call") this.#groupingDirty = true;
+    }
+
+    /**
+     * Presents queued steering as ordinary bubbles pinned after all live work.
+     *
+     * `#chronologicalElementIds` never changes when a bubble is pinned, so
+     * accepting it can restore the authoritative event position using the same
+     * element object and id.
+     */
+    #presentPendingSteeringAtTail(): void {
+        const pendingIds = this.#session.pendingSteeringMessages
+            .map((pending) => `message:${pending.message.id}`)
+            .filter((id) => this.#byId.get(id)?.kind === "user_message");
+        const pending = new Set(pendingIds);
+        const orderedIds = [
+            ...this.#chronologicalElementIds.filter((id) => this.#byId.has(id) && !pending.has(id)),
+            ...pendingIds,
+        ];
+        if (
+            orderedIds.length === this.#elements.length &&
+            orderedIds.every((id, index) => this.#elements[index]?.id === id)
+        ) {
+            return;
+        }
+        this.#elements = orderedIds.flatMap((id) => {
+            const element = this.#byId.get(id);
+            return element === undefined ? [] : [element];
+        });
+        this.#reindex();
+        this.#revision += 1;
     }
 
     /** Rebuilds the position index after the list order or length changed. */
@@ -1414,6 +1837,23 @@ function addUsage(total: Usage | undefined, next: Usage): Usage {
             ? {}
             : { reasoning: (total.reasoning ?? 0) + (next.reasoning ?? 0) }),
     };
+}
+
+function applicationUsage(snapshot: SessionUsageSnapshot): SessionUsage {
+    return {
+        ...snapshot,
+        totalCost: snapshot.groups.reduce((total, group) => total + group.usage.cost.total, 0),
+        totalTokens: snapshot.groups.reduce((total, group) => total + group.usage.totalTokens, 0),
+    };
+}
+
+function historyToken(transcript: SessionTranscriptWindow): string | undefined {
+    return transcript.messages[0]?.id;
+}
+
+function withoutUsageContext(usage: SessionUsage): SessionUsage {
+    const { context: _context, ...withoutContext } = usage;
+    return withoutContext;
 }
 
 function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {

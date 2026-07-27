@@ -53,8 +53,10 @@ import type {
     GitChangeSnapshot,
     SessionEvent,
     SessionActivity,
+    SessionActiveTurn,
     SessionAgentMetadata,
     SessionPartialMessage,
+    SessionPermissionReview,
     SessionInterruption,
     SessionStatus,
     SessionSummary,
@@ -361,6 +363,7 @@ interface PartialMessageState {
 }
 
 interface PendingSteeringMessage {
+    createdAt: number;
     message: UserMessage;
     runId: string;
 }
@@ -442,6 +445,7 @@ export class InMemorySession {
      * the log, and bounded to the runs the window can reach.
      */
     #runFacts = new Map<string, TranscriptRunFacts>();
+    #permissionReviews = new Map<string, SessionPermissionReview>();
     /** The status a client has already been told about. */
     #reportedStatus: SessionStatus | undefined;
     #reportingStatus = false;
@@ -687,6 +691,10 @@ export class InMemorySession {
         if (options.lastEventId !== undefined) eventLogOptions.lastEventId = options.lastEventId;
         if (options.onAppendEvent !== undefined) eventLogOptions.onAppend = options.onAppendEvent;
         this.events = new SessionEventLog(eventLogOptions);
+        for (const event of this.events.since(undefined) ?? []) {
+            this.#recordRunFacts(event);
+            this.#recordPermissionReview(event);
+        }
         this.#sessionTokenCount = aggregateSessionTokenCount(this.events.since(undefined) ?? []);
 
         this.#ensureKnownModel(this.#modelId, this.#providerId);
@@ -1240,6 +1248,7 @@ export class InMemorySession {
             changed,
             ...(this.#effort === undefined ? {} : { effort: this.#effort }),
             modelId: this.#modelId,
+            providerId: this.#providerId,
             serviceTier: this.#serviceTier ?? null,
             snapshot: this.#agentSnapshot(),
         });
@@ -2442,12 +2451,22 @@ export class InMemorySession {
         return { message: structuredClone(entry.message), runId: active.runId };
     }
 
+    #activeTurn(): SessionActiveTurn | undefined {
+        const runId =
+            this.#activeRun?.runId ?? this.#restoredActiveRunId ?? this.#queue.at(0)?.runId;
+        if (runId === undefined) return undefined;
+        const startedAt = this.#runFacts.get(runId)?.startedAt;
+        return startedAt === undefined ? undefined : { runId, startedAt };
+    }
+
     snapshot(): ProtocolSession {
         const snapshot = this.#agentSnapshot();
         const lastEventId = this.events.lastEventId();
+        const activeTurn = this.#activeTurn();
         return {
             id: this.id,
             activity: this.activity(),
+            ...(activeTurn === undefined ? {} : { activeTurn }),
             agentId: this.#agentId,
             ...(this.#git === undefined ? {} : { git: structuredClone(this.#git) }),
             archived: this.#archived,
@@ -2491,7 +2510,9 @@ export class InMemorySession {
                     ].map((request) => [request.requestId, request]),
                 ).values(),
             ],
+            permissionReviews: [...this.#permissionReviews.values()],
             pendingSteeringMessages: [...this.#pendingSteeringMessages.values()].map((pending) => ({
+                createdAt: pending.createdAt,
                 message: structuredClone(pending.message),
                 runId: pending.runId,
             })),
@@ -2857,6 +2878,7 @@ export class InMemorySession {
         const pending = agent.status === "running";
         if (pending) {
             this.#pendingSteeringMessages.set(userMessage.id, {
+                createdAt: this.#now(),
                 message: userMessage,
                 runId: activeRun.runId,
             });
@@ -2915,6 +2937,7 @@ export class InMemorySession {
         const pending = agent.status === "running";
         if (pending) {
             this.#pendingSteeringMessages.set(userMessage.id, {
+                createdAt: this.#now(),
                 message: visibleMessage,
                 runId: activeRun.runId,
             });
@@ -2954,6 +2977,7 @@ export class InMemorySession {
             .join("\n");
         if (activeRun !== undefined && agent.status === "running") {
             this.#pendingSteeringMessages.set(message.id, {
+                createdAt: this.#now(),
                 message,
                 runId: activeRun.runId,
             });
@@ -3686,7 +3710,9 @@ export class InMemorySession {
         }
         this.#saveSession();
         this.#recordRunFacts(event);
+        this.#recordPermissionReview(event);
         this.#reportContextSize(previousSessionTokenCount);
+        this.#reportInferenceRetry(event);
         this.#reportActivity(event);
         return event;
     }
@@ -3718,9 +3744,35 @@ export class InMemorySession {
      * the event that caused it and never feeds back into the derivation.
      */
     #recordRunFacts(event: SessionEvent): void {
+        if (event.type === "message_submitted" && event.data.delivery === "run") {
+            if (!this.#runFacts.has(event.data.runId)) {
+                this.#runFacts.set(event.data.runId, { startedAt: event.createdAt });
+            }
+            return;
+        }
         if (event.type === "run_started") {
-            this.#runFacts.set(event.data.runId, { startedAt: event.createdAt });
+            if (!this.#runFacts.has(event.data.runId)) {
+                this.#runFacts.set(event.data.runId, { startedAt: event.createdAt });
+            }
             this.#forgetUnreachableRunFacts();
+            return;
+        }
+        if (event.type === "inference_retry") {
+            const facts = this.#runFacts.get(event.data.runId) ?? {
+                startedAt: event.createdAt,
+            };
+            this.#runFacts.set(event.data.runId, {
+                ...facts,
+                retries: [
+                    ...(facts.retries ?? []),
+                    {
+                        attempt: event.data.attempt,
+                        createdAt: event.createdAt,
+                        id: event.id,
+                        reason: event.data.reason,
+                    },
+                ],
+            });
             return;
         }
         if (event.type === "run_finished") {
@@ -3749,6 +3801,37 @@ export class InMemorySession {
                 outcome: "error",
             });
         }
+    }
+
+    #recordPermissionReview(event: SessionEvent): void {
+        if (event.type === "session_reset") {
+            this.#permissionReviews.clear();
+            return;
+        }
+        if (event.type !== "agent_event" || event.data.event.type !== "permission_review") return;
+        const review = event.data.event;
+        this.#permissionReviews.set(review.toolCallId, {
+            action: review.action,
+            decision: review.decision,
+            reason: review.reason,
+            risk: review.risk,
+            toolCallId: review.toolCallId,
+            userAuthorization: review.userAuthorization,
+        });
+        while (this.#permissionReviews.size > 100) {
+            const oldest = this.#permissionReviews.keys().next().value as string | undefined;
+            if (oldest === undefined) break;
+            this.#permissionReviews.delete(oldest);
+        }
+    }
+
+    #reportInferenceRetry(event: SessionEvent): void {
+        if (event.type !== "agent_event" || event.data.event.type !== "retrying") return;
+        this.#append("inference_retry", {
+            attempt: event.data.event.attempt,
+            reason: event.data.event.reason,
+            runId: event.data.runId,
+        });
     }
 
     /**

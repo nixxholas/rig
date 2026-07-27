@@ -137,6 +137,273 @@ describe("ChatStore", () => {
         expect(last).toMatchObject({ kind: "turn_end", outcome: "success" });
     });
 
+    it("keeps authoritative active turn timing through steering and activity changes", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const submitted = event("message_submitted", {
+            delivery: "run",
+            displayText: "Start",
+            message: {
+                blocks: [{ text: "Start", type: "text" }],
+                id: "user-1",
+                role: "user",
+            },
+            runId: "run-1",
+        });
+        store.apply(submitted);
+
+        expect(store.session()).toMatchObject({
+            activeTurn: { startedAt: submitted.createdAt, turnId: "run-1" },
+        });
+
+        store.apply(
+            event("message_submitted", {
+                delivery: "steer",
+                displayText: "Continue",
+                message: {
+                    blocks: [{ text: "Continue", type: "text" }],
+                    id: "steer-1",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+        );
+        store.apply(
+            event("session_activity_changed", {
+                activity: { kind: "thinking", label: "Thinking", since: 99 },
+            }),
+        );
+        store.applyHello({
+            activity: { kind: "executing_tool_call", label: "Running a tool", since: 120 },
+            resumed: true,
+        });
+
+        expect(store.session()).toMatchObject({
+            activeTurn: { startedAt: submitted.createdAt, turnId: "run-1" },
+        });
+    });
+
+    it("pins pending steering as one message bubble and restores chronological order on acceptance", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            event("message_submitted", {
+                delivery: "steer",
+                displayText: "Check this too",
+                message: {
+                    blocks: [{ text: "Check this too", type: "text" }],
+                    id: "steer-1",
+                    role: "user",
+                },
+                runId: "run-1",
+            }),
+        );
+        const stableId = store.elements().at(-1)?.id;
+        store.apply(
+            agentEvent({
+                contentIndex: 0,
+                delta: "Still working",
+                messageId: "agent-live",
+                type: "text_delta",
+            }),
+        );
+
+        expect(store.elements().at(-1)).toMatchObject({
+            delivery: "pending_steering",
+            id: stableId,
+            kind: "user_message",
+            messageId: "steer-1",
+        });
+        expect(
+            store
+                .elements()
+                .filter(
+                    (element) => element.kind === "user_message" && element.messageId === "steer-1",
+                ),
+        ).toHaveLength(1);
+
+        store.apply(event("steering_applied", { messageIds: ["steer-1"], runId: "run-1" }));
+
+        const acceptedIndex = store.elements().findIndex((element) => element.id === stableId);
+        const laterAgentIndex = store
+            .elements()
+            .findIndex((element) => element.id === "agent-live:agent_text:0");
+        expect(store.elements()[acceptedIndex]).toMatchObject({
+            delivery: "sent",
+            id: stableId,
+            messageId: "steer-1",
+        });
+        expect(acceptedIndex).toBeLessThan(laterAgentIndex);
+    });
+
+    it("keeps multiple steering bubbles in queue order through back-to-back acceptance", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        for (const id of ["steer-1", "steer-2"]) {
+            store.apply(
+                event("message_submitted", {
+                    delivery: "steer",
+                    displayText: id,
+                    message: {
+                        blocks: [{ text: id, type: "text" }],
+                        id,
+                        role: "user",
+                    },
+                    runId: "run-1",
+                }),
+            );
+        }
+        store.apply(
+            agentEvent({
+                contentIndex: 0,
+                delta: "New work",
+                messageId: "agent-after-steering",
+                type: "text_delta",
+            }),
+        );
+
+        expect(
+            store
+                .elements()
+                .slice(-2)
+                .map((element) =>
+                    element.kind === "user_message" ? element.messageId : element.kind,
+                ),
+        ).toEqual(["steer-1", "steer-2"]);
+
+        store.apply(event("steering_applied", { messageIds: ["steer-1"], runId: "run-1" }));
+        expect(store.elements().at(-1)).toMatchObject({
+            delivery: "pending_steering",
+            messageId: "steer-2",
+        });
+        store.apply(event("steering_applied", { messageIds: ["steer-2"], runId: "run-1" }));
+
+        const order = store
+            .elements()
+            .filter((element) => element.kind === "user_message")
+            .map((element) => [element.messageId, element.delivery]);
+        expect(order).toEqual([
+            ["steer-1", "sent"],
+            ["steer-2", "sent"],
+        ]);
+        expect(store.elements().at(-1)?.kind).toBe("agent_text");
+    });
+
+    it("rebuilds pending steering once at the transcript tail on attach", () => {
+        const opening = hello();
+        const committed = {
+            blocks: [{ text: "Working", type: "text" as const }],
+            id: "agent-before-pending",
+            role: "agent" as const,
+        };
+        const store = new ChatStore("session-1");
+        const recovered = {
+            ...opening,
+            session: {
+                ...opening.session!,
+                snapshot: { messages: [committed] },
+                pendingSteeringMessages: [
+                    {
+                        createdAt: 3_000,
+                        message: {
+                            blocks: [{ text: "Queued", type: "text" as const }],
+                            id: "steer-recovered",
+                            role: "user" as const,
+                        },
+                        runId: "run-2",
+                    },
+                ],
+            },
+            transcript: {
+                complete: true,
+                messageCreatedAt: { "agent-before-pending": 2_000 },
+                messages: [committed],
+                turns: [
+                    {
+                        messageIds: ["agent-before-pending"],
+                        runId: "run-2",
+                        startedAt: 1_000,
+                    },
+                ],
+            },
+        };
+        store.applyHello(recovered);
+
+        expect(store.elements().at(-1)).toMatchObject({
+            createdAt: 3_000,
+            delivery: "pending_steering",
+            messageId: "steer-recovered",
+        });
+        expect(
+            store
+                .elements()
+                .filter(
+                    (element) =>
+                        element.kind === "user_message" && element.messageId === "steer-recovered",
+                ),
+        ).toHaveLength(1);
+        const pendingBeforeReconnect = store.elements().at(-1);
+        store.applyHello(recovered);
+        expect(store.elements().at(-1)).toBe(pendingBeforeReconnect);
+    });
+
+    it("atomically hands authoritative timing to a queued turn and records both wall clocks", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const first = event("message_submitted", {
+            delivery: "run",
+            displayText: "First",
+            message: {
+                blocks: [{ text: "First", type: "text" }],
+                id: "user-1",
+                role: "user",
+            },
+            runId: "run-1",
+        });
+        const second = event("message_submitted", {
+            delivery: "run",
+            displayText: "Second",
+            message: {
+                blocks: [{ text: "Second", type: "text" }],
+                id: "user-2",
+                role: "user",
+            },
+            runId: "run-2",
+        });
+        store.apply(first);
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(second);
+
+        expect(store.session()).toMatchObject({
+            activeTurn: { startedAt: first.createdAt, turnId: "run-1" },
+        });
+
+        const finished = event("run_finished", {
+            modelLocked: false,
+            runId: "run-1",
+            stopReason: "stop",
+        });
+        const deltas = store.apply(finished);
+
+        expect(store.session()).toMatchObject({
+            activeTurn: { startedAt: second.createdAt, turnId: "run-2" },
+        });
+        expect(deltas).not.toContainEqual(
+            expect.objectContaining({
+                session: expect.not.objectContaining({ activeTurn: expect.anything() }),
+                type: "session_changed",
+            }),
+        );
+        expect(store.elements().find((element) => element.id === "turn:run-1")).toMatchObject({
+            elapsedMs: finished.createdAt - first.createdAt,
+            endedAt: finished.createdAt,
+            kind: "turn_end",
+            startedAt: first.createdAt,
+        });
+    });
+
     it("ends a failed turn with an error outcome that carries the reason", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
@@ -490,10 +757,26 @@ describe("ChatStore", () => {
         expect(deltas.at(-1)?.type).toBe("elements_changed");
     });
 
-    it("reports a retry starting and finishing from the session activity", () => {
+    it("retains a retry as a transcript element and reports its live lifecycle", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
         const started = store.apply(
+            event("inference_retry", {
+                attempt: 2,
+                reason: "rate limited",
+                runId: "run-1",
+            }),
+        );
+        expect(started.map((delta) => delta.type)).toContain("retry_started");
+        expect(store.elements().at(-1)).toMatchObject({
+            attempt: 2,
+            kind: "retry",
+            reason: "rate limited",
+            turnId: "run-1",
+        });
+
+        store.apply(
             event("session_activity_changed", {
                 activity: {
                     kind: "retrying",
@@ -503,7 +786,6 @@ describe("ChatStore", () => {
                 },
             }),
         );
-        expect(started.map((delta) => delta.type)).toContain("retry_started");
 
         const finished = store.apply(
             event("session_activity_changed", {
@@ -743,6 +1025,7 @@ describe("ChatStore", () => {
                     orderKey: "b0",
                     pendingSteeringMessages: [
                         {
+                            createdAt: 10,
                             message: {
                                 blocks: [{ text: "Also check this", type: "text" }],
                                 id: "steer-1",
@@ -909,12 +1192,24 @@ describe("ChatStore", () => {
             );
             store.apply(
                 agentEvent({
+                    toolCall: {
+                        arguments: { command: "pnpm test" },
+                        id: "call-1",
+                        name: "exec_command",
+                        type: "tool_call",
+                    },
+                    type: "tool_execution_start",
+                }),
+            );
+            store.apply(
+                agentEvent({
                     action: "Run tests",
                     decision: "allow",
                     reason: "The user asked for verification.",
                     risk: "low",
                     toolCallId: "call-1",
                     type: "permission_review",
+                    userAuthorization: "high",
                 }),
             );
 
@@ -925,10 +1220,28 @@ describe("ChatStore", () => {
                 goal: { objective: "Ship" },
                 pendingSteeringMessages: [{ message: { id: "steer-1" } }],
                 pendingUserInputs: [{ requestId: "input-1" }],
-                permissionReviews: [{ toolCallId: "call-1" }],
+                permissionReviews: [
+                    {
+                        action: "Run tests",
+                        decision: "allow",
+                        reason: "The user asked for verification.",
+                        risk: "low",
+                        toolCallId: "call-1",
+                        userAuthorization: "high",
+                    },
+                ],
                 shellCommands: [{ commandId: "command-1", status: "running" }],
                 subagents: [{ id: "session-2", status: "running" }],
                 tasks: [{ id: "task-1" }],
+            });
+            expect(store.elements().find((element) => element.kind === "tool_call")).toMatchObject({
+                permissionReview: {
+                    action: "Run tests",
+                    decision: "allow",
+                    reason: "The user asked for verification.",
+                    risk: "low",
+                    userAuthorization: "high",
+                },
             });
 
             store.apply(
@@ -1043,6 +1356,90 @@ describe("ChatStore", () => {
                 totalTokens: input + output,
             };
         }
+
+        it("opens with complete session usage and derives panel totals", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello({
+                ...hello(),
+                usage: {
+                    currentProviderId: "claude",
+                    groups: [
+                        {
+                            kind: "attributed",
+                            modelId: "sonnet-5",
+                            providerId: "claude",
+                            requestedModelId: "sonnet-5",
+                            usage: usage(100, 20, 0.5),
+                        },
+                    ],
+                    observedQuota: [],
+                    quotas: [],
+                    sessionTokenCount: { lastContextTokens: 120, totalTokens: 120 },
+                },
+            });
+
+            expect(store.session().usage).toMatchObject({
+                currentProviderId: "claude",
+                totalCost: 0.5,
+                totalTokens: 120,
+            });
+        });
+
+        it("keeps session usage, context, and provider quota current from stream events", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello({
+                ...hello(),
+                usage: {
+                    currentProviderId: "claude",
+                    groups: [],
+                    observedQuota: [],
+                    quotas: [],
+                    sessionTokenCount: { lastContextTokens: 0, totalTokens: 0 },
+                },
+            });
+            store.apply(event("run_started", { runId: "run-1" }));
+            store.apply(
+                event("agent_message", {
+                    message: {
+                        blocks: [{ text: "Done", type: "text" }],
+                        id: "m-usage",
+                        providerId: "claude",
+                        requestedModelId: "sonnet-5",
+                        role: "agent",
+                        usage: usage(200, 30, 0.75),
+                    },
+                    runId: "run-1",
+                }),
+            );
+            store.apply(
+                event("provider_quota_observed", {
+                    observationId: "quota-1",
+                    phase: "after",
+                    providerId: "claude",
+                    quota: {
+                        capturedAt: 10,
+                        source: "claude",
+                        windows: {
+                            fiveHour: {
+                                capturedAt: 10,
+                                resetsAt: 20,
+                                status: "available",
+                                usedPercent: 25,
+                            },
+                        },
+                    },
+                    runId: "run-1",
+                }),
+            );
+
+            expect(store.session().usage).toMatchObject({
+                context: { approximate: false, totalTokens: 230 },
+                currentProviderId: "claude",
+                quotas: [{ providerId: "claude", quota: { capturedAt: 10 } }],
+                totalCost: 0.75,
+                totalTokens: 230,
+            });
+        });
 
         it("reports the usage of the turn on the element that ends it", () => {
             const store = new ChatStore("session-1");
@@ -1250,8 +1647,51 @@ describe("ChatStore", () => {
             store.applyHello(withTurns());
 
             const ends = store.elements().filter((element) => element.kind === "turn_end");
-            expect(ends[0]).toMatchObject({ elapsedMs: 500, outcome: "success" });
-            expect(ends[1]).toMatchObject({ errorMessage: "It broke", outcome: "error" });
+            expect(ends[0]).toMatchObject({
+                elapsedMs: 500,
+                endedAt: 1_500,
+                outcome: "success",
+                startedAt: 1_000,
+            });
+            expect(ends[1]).toMatchObject({
+                endedAt: 2_800,
+                errorMessage: "It broke",
+                outcome: "error",
+                startedAt: 2_000,
+            });
+        });
+
+        it("rebuilds durable retries in their historical time position", () => {
+            const store = new ChatStore("session-1");
+            const opening = withTurns();
+            store.applyHello({
+                ...opening,
+                transcript: {
+                    ...opening.transcript!,
+                    messageCreatedAt: { a1: 1_400, a2: 2_700, u1: 1_050, u2: 2_100 },
+                    turns: [
+                        {
+                            ...opening.transcript!.turns[0]!,
+                            retries: [
+                                {
+                                    attempt: 1,
+                                    createdAt: 1_200,
+                                    id: "retry-1",
+                                    reason: "Connection lost",
+                                },
+                            ],
+                        },
+                        opening.transcript!.turns[1]!,
+                    ],
+                },
+            });
+
+            expect(
+                store.elements().map((element) => [element.kind, element.createdAt]),
+            ).toContainEqual(["retry", 1_200]);
+            expect(store.elements().findIndex((element) => element.kind === "retry")).toBe(
+                store.elements().findIndex((element) => element.id === "a1:agent_text:0") - 1,
+            );
         });
 
         it("leaves a turn that is still running open for live events to finish", () => {
@@ -1271,6 +1711,20 @@ describe("ChatStore", () => {
             const kinds = store.elements().map((element) => element.kind);
             expect(kinds.filter((kind) => kind === "turn_end")).toHaveLength(1);
             expect(kinds.at(-1)).toBe("agent_text");
+            expect(store.session().activeTurn).toEqual({
+                startedAt: 2_000,
+                turnId: "run-2",
+            });
+
+            store.apply(
+                event("session_activity_changed", {
+                    activity: { kind: "tool", label: "Running a tool", since: 90_000 },
+                }),
+            );
+            expect(store.session().activeTurn).toEqual({
+                startedAt: 2_000,
+                turnId: "run-2",
+            });
         });
 
         it("reports what a historical turn cost, as the live path does", () => {
@@ -1374,6 +1828,47 @@ describe("ChatStore", () => {
         );
 
         expect(store.elements()).toMatchObject([{ kind: "user_message", text: "Start over" }]);
+    });
+
+    it("rebuilds authoritative active timing when the session is reset", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const message = {
+            blocks: [{ text: "Continue", type: "text" as const }],
+            id: "u-reset",
+            role: "user" as const,
+        };
+        store.apply(
+            event("session_reset", {
+                snapshot: { messages: [message] },
+                transcript: {
+                    complete: true,
+                    messages: [message],
+                    turns: [
+                        {
+                            messageIds: [message.id],
+                            runId: "run-reset",
+                            startedAt: 5_000,
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(store.session().activeTurn).toEqual({
+            startedAt: 5_000,
+            turnId: "run-reset",
+        });
+        const finished = event("run_finished", {
+            modelLocked: false,
+            runId: "run-reset",
+            stopReason: "stop",
+        });
+        store.apply(finished);
+        expect(store.elements().at(-1)).toMatchObject({
+            endedAt: finished.createdAt,
+            startedAt: 5_000,
+        });
     });
 });
 
@@ -1595,7 +2090,7 @@ describe("recovering a connection", () => {
             110,
         );
         expect(store.session().transcriptComplete).toBe(true);
-        expect(store.session().loadingEarlier).toBe(false);
+        expect(store.session().loadingMore).toBe(false);
     });
 
     it.each(["session_reset", "session_rewound"] as const)(
@@ -1603,9 +2098,10 @@ describe("recovering a connection", () => {
         (type) => {
             const store = new ChatStore("session-1");
             store.applyHello(helloWith(4, 6, false));
-            const anchor = store.earlierTranscriptAnchor();
-            if (anchor === undefined) throw new Error("Expected an earlier transcript anchor.");
-            store.startLoadingEarlier();
+            const token = store.session().loadMoreToken;
+            if (token === undefined) throw new Error("Expected a load-more token.");
+            const started = store.startLoadingMore(token);
+            if (started === undefined) throw new Error("Expected loading to start.");
 
             store.apply(
                 event(type, {
@@ -1614,10 +2110,10 @@ describe("recovering a connection", () => {
                     transcript: { complete: true, messages: [], turns: [] },
                 }),
             );
-            store.prependEarlier(windowOf(1, 3, true), anchor);
+            store.prependEarlier(windowOf(1, 3, true), started.anchor);
 
             expect(store.elements()).toEqual([]);
-            expect(store.session().loadingEarlier).toBe(false);
+            expect(store.session().loadingMore).toBe(false);
             expect(store.session().transcriptComplete).toBe(true);
         },
     );
@@ -1633,21 +2129,26 @@ describe("recovering a connection", () => {
         expect(store.earliestRunId()).toBeUndefined();
     });
 
-    it("reports a failure to load earlier turns, and clears it on the next try", () => {
+    it("consumes a message token once and clears a failure on the next try", () => {
         const store = new ChatStore("session-1");
         store.applyHello(helloWith(4, 6, false));
+        const token = store.session().loadMoreToken;
+        if (token === undefined) throw new Error("Expected a load-more token.");
 
-        store.startLoadingEarlier();
-        expect(store.session().loadingEarlier).toBe(true);
-        store.failLoadingEarlier("Could not reach Rig.");
-        expect(store.session().loadEarlierError).toBe("Could not reach Rig.");
-        expect(store.session().loadingEarlier).toBe(false);
+        const started = store.startLoadingMore(token);
+        if (started === undefined) throw new Error("Expected loading to start.");
+        expect(store.session().loadingMore).toBe(true);
+        // A duplicate call from the same render is consumed synchronously.
+        expect(store.startLoadingMore(token)).toBeUndefined();
+        store.failLoadingMore(started.anchor, "Could not reach Rig.");
+        expect(store.session().loadMoreError).toBe("Could not reach Rig.");
+        expect(store.session().loadingMore).toBe(false);
 
-        store.startLoadingEarlier();
+        store.startLoadingMore(token);
 
         // A retry starts from a clean slate, so a stale message is not shown
         // next to a request that is currently in flight.
-        expect(store.session().loadEarlierError).toBeUndefined();
+        expect(store.session().loadMoreError).toBeUndefined();
     });
 
     it("trusts a complete window to be the whole conversation", () => {
