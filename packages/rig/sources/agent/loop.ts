@@ -574,148 +574,169 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 ? true
                 : permissionDenialLimitReached;
         }
-        const executeToolCalls = (calls: readonly ProviderToolCall[]) =>
-            Promise.all(
+        const executeToolCalls = (calls: readonly ProviderToolCall[]) => {
+            type ToolExecutionOutcome = {
+                completedBeforeAbort: boolean;
+                result: ToolResultBlock;
+                toolCall: ProviderToolCall;
+            };
+            const executionByAction = new Map<string, Promise<ToolExecutionOutcome>>();
+            return Promise.all(
                 calls.map(async (toolCall) => {
-                    const interrupted = () => ({
-                        completedBeforeAbort: false,
-                        result: interruptedToolResultBlock(toolCall, toolsByName),
-                        toolCall,
-                    });
-                    const operation = (async () => {
-                        if (options.signal?.aborted) return interrupted();
+                    const action = sameBatchToolAction(toolCall);
+                    const duplicate = executionByAction.get(action);
+                    if (duplicate !== undefined) {
+                        const outcome = await duplicate;
+                        return {
+                            ...outcome,
+                            result: toolResultForCall(outcome.result, toolCall),
+                            toolCall,
+                        };
+                    }
+                    const execution = (async (): Promise<ToolExecutionOutcome> => {
+                        const interrupted = () => ({
+                            completedBeforeAbort: false,
+                            result: interruptedToolResultBlock(toolCall, toolsByName),
+                            toolCall,
+                        });
+                        const operation = (async () => {
+                            if (options.signal?.aborted) return interrupted();
+                            await ignoreOptionalFailure(() =>
+                                options.debug?.record("tool-call", {
+                                    iteration,
+                                    toolCall,
+                                }),
+                            );
+                            if (options.signal?.aborted) return interrupted();
+                            await ignoreOptionalFailure(() =>
+                                options.onEvent?.({
+                                    type: "tool_execution_start",
+                                    toolCall: presentedToolCalls.get(toolCall.id) ?? toolCall,
+                                }),
+                            );
+                            if (options.signal?.aborted) return interrupted();
+                            const preparedPermission = preparedPermissions.get(toolCall.id) ?? {
+                                kind: "skip" as const,
+                            };
+                            return toolLocks.run(
+                                resolveToolLockKeys(toolCall, toolsByName),
+                                async () => {
+                                    if (options.signal?.aborted) return interrupted();
+                                    const tool = resolveTool(toolCall, toolsByName);
+                                    const executionSignal = tool?.steerable
+                                        ? combineAbortSignals(
+                                              options.signal,
+                                              options.getSteeringSignal?.(),
+                                          )
+                                        : options.signal;
+                                    const result = await executeToolCall(
+                                        toolCall,
+                                        toolsByName,
+                                        toolContext,
+                                        {
+                                            batchId: agentMessage.id,
+                                            messages: transcript,
+                                            model,
+                                            now,
+                                            toolCallIndex: toolCalls.indexOf(toolCall),
+                                            onProgress: (display) => {
+                                                if (options.signal?.aborted) return;
+                                                void ignoreOptionalFailure(() =>
+                                                    options.onEvent?.({
+                                                        type: "tool_execution_progress",
+                                                        display,
+                                                        toolCallId: toolCall.id,
+                                                    }),
+                                                );
+                                            },
+                                            onStatus: (status) => {
+                                                if (options.signal?.aborted) return;
+                                                void ignoreOptionalFailure(() =>
+                                                    options.onEvent?.({
+                                                        type: "tool_execution_status",
+                                                        status,
+                                                        toolCallId: toolCall.id,
+                                                    }),
+                                                );
+                                            },
+                                            onPermissionReview: (review) =>
+                                                options.signal?.aborted
+                                                    ? Promise.resolve()
+                                                    : ignoreOptionalFailure(() =>
+                                                          options.onEvent?.({
+                                                              type: "permission_review",
+                                                              toolCallId: toolCall.id,
+                                                              ...review,
+                                                          }),
+                                                      ),
+                                            onRawResult: (rawResult) =>
+                                                options.signal?.aborted
+                                                    ? Promise.resolve()
+                                                    : ignoreOptionalFailure(() =>
+                                                          options.debug?.record("tool-raw-result", {
+                                                              iteration,
+                                                              rawResult,
+                                                              toolCall,
+                                                          }),
+                                                      ),
+                                            onError: (error) =>
+                                                ignoreOptionalFailure(() =>
+                                                    options.debug?.record("tool-error", {
+                                                        error,
+                                                        iteration,
+                                                        toolCall,
+                                                    }),
+                                                ),
+                                            provider: options.provider,
+                                            preparedPermission,
+                                            ...(executionSignal === undefined
+                                                ? {}
+                                                : { signal: executionSignal }),
+                                        },
+                                    );
+                                    return {
+                                        completedBeforeAbort: options.signal?.aborted !== true,
+                                        result,
+                                        toolCall,
+                                    };
+                                },
+                            );
+                        })();
+                        const raced = await raceWithAbort(operation, options.signal);
+                        const outcome = raced === ABORTED_BY_SIGNAL ? interrupted() : raced;
+                        const durableResult = outcome.completedBeforeAbort
+                            ? outcome.result
+                            : interruptedToolResultBlock(toolCall, toolsByName);
                         await ignoreOptionalFailure(() =>
-                            options.debug?.record("tool-call", {
+                            options.debug?.record("tool-result", {
                                 iteration,
+                                result: durableResult,
                                 toolCall,
                             }),
                         );
-                        if (options.signal?.aborted) return interrupted();
                         await ignoreOptionalFailure(() =>
                             options.onEvent?.({
-                                type: "tool_execution_start",
-                                toolCall: presentedToolCalls.get(toolCall.id) ?? toolCall,
+                                type: "tool_execution_end",
+                                result: toToolExecutionEndResult(durableResult),
                             }),
                         );
-                        if (options.signal?.aborted) return interrupted();
-                        const preparedPermission = preparedPermissions.get(toolCall.id) ?? {
-                            kind: "skip" as const,
-                        };
-                        return toolLocks.run(
-                            resolveToolLockKeys(toolCall, toolsByName),
-                            async () => {
-                                if (options.signal?.aborted) return interrupted();
-                                const tool = resolveTool(toolCall, toolsByName);
-                                const executionSignal = tool?.steerable
-                                    ? combineAbortSignals(
-                                          options.signal,
-                                          options.getSteeringSignal?.(),
-                                      )
-                                    : options.signal;
-                                const result = await executeToolCall(
-                                    toolCall,
-                                    toolsByName,
-                                    toolContext,
-                                    {
-                                        batchId: agentMessage.id,
-                                        messages: transcript,
-                                        model,
-                                        now,
-                                        toolCallIndex: toolCalls.indexOf(toolCall),
-                                        onProgress: (display) => {
-                                            if (options.signal?.aborted) return;
-                                            void ignoreOptionalFailure(() =>
-                                                options.onEvent?.({
-                                                    type: "tool_execution_progress",
-                                                    display,
-                                                    toolCallId: toolCall.id,
-                                                }),
-                                            );
-                                        },
-                                        onStatus: (status) => {
-                                            if (options.signal?.aborted) return;
-                                            void ignoreOptionalFailure(() =>
-                                                options.onEvent?.({
-                                                    type: "tool_execution_status",
-                                                    status,
-                                                    toolCallId: toolCall.id,
-                                                }),
-                                            );
-                                        },
-                                        onPermissionReview: (review) =>
-                                            options.signal?.aborted
-                                                ? Promise.resolve()
-                                                : ignoreOptionalFailure(() =>
-                                                      options.onEvent?.({
-                                                          type: "permission_review",
-                                                          toolCallId: toolCall.id,
-                                                          ...review,
-                                                      }),
-                                                  ),
-                                        onRawResult: (rawResult) =>
-                                            options.signal?.aborted
-                                                ? Promise.resolve()
-                                                : ignoreOptionalFailure(() =>
-                                                      options.debug?.record("tool-raw-result", {
-                                                          iteration,
-                                                          rawResult,
-                                                          toolCall,
-                                                      }),
-                                                  ),
-                                        onError: (error) =>
-                                            ignoreOptionalFailure(() =>
-                                                options.debug?.record("tool-error", {
-                                                    error,
-                                                    iteration,
-                                                    toolCall,
-                                                }),
-                                            ),
-                                        provider: options.provider,
-                                        preparedPermission,
-                                        ...(executionSignal === undefined
-                                            ? {}
-                                            : { signal: executionSignal }),
-                                    },
-                                );
-                                return {
-                                    completedBeforeAbort: options.signal?.aborted !== true,
-                                    result,
-                                    toolCall,
-                                };
-                            },
+                        await ignoreOptionalFailure(() =>
+                            options.onEvent?.({
+                                type: "background_processes_changed",
+                                processes: toolContext.bash.activeSessions?.() ?? [],
+                                running: toolContext.bash.activeSessionCount?.() ?? 0,
+                            }),
                         );
-                    })();
-                    const raced = await raceWithAbort(operation, options.signal);
-                    const outcome = raced === ABORTED_BY_SIGNAL ? interrupted() : raced;
-                    const durableResult = outcome.completedBeforeAbort
-                        ? outcome.result
-                        : interruptedToolResultBlock(toolCall, toolsByName);
-                    await ignoreOptionalFailure(() =>
-                        options.debug?.record("tool-result", {
-                            iteration,
+                        return {
+                            ...outcome,
                             result: durableResult,
-                            toolCall,
-                        }),
-                    );
-                    await ignoreOptionalFailure(() =>
-                        options.onEvent?.({
-                            type: "tool_execution_end",
-                            result: toToolExecutionEndResult(durableResult),
-                        }),
-                    );
-                    await ignoreOptionalFailure(() =>
-                        options.onEvent?.({
-                            type: "background_processes_changed",
-                            processes: toolContext.bash.activeSessions?.() ?? [],
-                            running: toolContext.bash.activeSessionCount?.() ?? 0,
-                        }),
-                    );
-                    return {
-                        ...outcome,
-                        result: durableResult,
-                    };
+                        };
+                    })();
+                    executionByAction.set(action, execution);
+                    return execution;
                 }),
             );
+        };
         const immediateCalls = toolCalls.filter(
             (toolCall) => resolveTool(toolCall, toolsByName)?.execution !== "durable",
         );
@@ -1364,6 +1385,36 @@ async function executeToolCall(
             message,
         });
     }
+}
+
+/** One externally visible action, independent of provider-generated call ids. */
+function sameBatchToolAction(toolCall: ProviderToolCall): string {
+    try {
+        return JSON.stringify([
+            toolCall.name,
+            toolCall.namespace ?? null,
+            toolCall.kind ?? null,
+            toolCall.arguments,
+        ]);
+    } catch {
+        // Provider tool arguments are JSON in normal operation. If a custom
+        // provider violates that contract, keep the calls distinct rather than
+        // guessing that two opaque values describe the same action.
+        return toolCall.id;
+    }
+}
+
+/** Reuses one execution result while answering every provider call it represents. */
+function toolResultForCall(result: ToolResultBlock, toolCall: ProviderToolCall): ToolResultBlock {
+    const { providerToolCallId: _providerToolCallId, ...shared } = result;
+    return {
+        ...shared,
+        toolCallId: toolCall.id,
+        toolName: toolCall.name,
+        ...(toolCall.providerToolCallId === undefined
+            ? {}
+            : { providerToolCallId: toolCall.providerToolCallId }),
+    };
 }
 
 function combineAbortSignals(

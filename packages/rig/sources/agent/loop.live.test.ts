@@ -477,6 +477,80 @@ describe("agent loop live", () => {
         });
     });
 
+    it("executes an identical tool mutation only once within one provider message", async () => {
+        const model = defineModel({
+            id: "mock/model",
+            name: "Mock Model",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const contexts: Context[] = [];
+        const provider = defineProvider({
+            id: "mock",
+            models: [model],
+            stream(_model, context) {
+                contexts.push(context);
+                return contexts.length === 1
+                    ? streamFor(
+                          assistantMessage(
+                              [
+                                  {
+                                      type: "toolCall",
+                                      id: "call-first",
+                                      name: "send",
+                                      arguments: { message: "One delivery.", target: "agent-1" },
+                                  },
+                                  {
+                                      type: "toolCall",
+                                      id: "call-duplicate",
+                                      name: "send",
+                                      arguments: { message: "One delivery.", target: "agent-1" },
+                                  },
+                              ],
+                              "toolUse",
+                          ),
+                      )
+                    : streamFor(assistantMessage([{ type: "text", text: "done" }], "stop"));
+            },
+        });
+        const execute = vi.fn((args: { message: string; target: string }) => args);
+        const sendTool = defineTool({
+            name: "send",
+            label: "Send",
+            description: "Sends one externally visible message.",
+            arguments: Type.Object({ message: Type.String(), target: Type.String() }),
+            returnType: Type.Object({ message: Type.String(), target: Type.String() }),
+            shouldReviewInAutoMode: () => false,
+            execute,
+            toLLM: () => [{ type: "text", text: "sent" }],
+            toUI: () => "sent",
+            locks: [],
+        });
+        const harness = createJustBashToolHarness();
+
+        await runAgentLoop({
+            provider,
+            modelId: model.id,
+            tools: [sendTool],
+            messages: [
+                {
+                    role: "user",
+                    id: "user-1",
+                    blocks: [{ type: "text", text: "Send this once." }],
+                },
+            ],
+            context: harness.context,
+        });
+
+        expect(execute).toHaveBeenCalledTimes(1);
+        const resultIds =
+            contexts[1]?.messages
+                .filter((message) => message.role === "toolResult")
+                .map((message) => message.toolCallId) ?? [];
+        expect(resultIds).toHaveLength(2);
+        expect(new Set(resultIds).size).toBe(2);
+    });
+
     it("serializes provider tool calls that share a declared lock", async () => {
         const model = defineModel({
             id: "mock/model",
