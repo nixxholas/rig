@@ -407,6 +407,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             "TEXT NOT NULL COLLATE BINARY DEFAULT ''",
         );
         ensureColumn(database, "external_tool_calls", "provider_tool_call_id", "TEXT");
+        ensureColumn(database, "durable_user_inputs", "provider_tool_call_id", "TEXT");
 
         if (legacyGlobalEventTable) {
             const streamId = createId();

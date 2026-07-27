@@ -55,6 +55,26 @@ describe("initializeSessionDatabase", () => {
         }
     });
 
+    it("adds provider tool identity storage to existing durable user input tables", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            database.exec(`
+                ALTER TABLE durable_user_inputs DROP COLUMN provider_tool_call_id;
+                PRAGMA user_version = 10;
+            `);
+
+            initializeSessionDatabase(database);
+
+            expect(
+                columnInfo(database, "durable_user_inputs", "provider_tool_call_id"),
+            ).toBeDefined();
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 11 });
+        } finally {
+            database.close();
+        }
+    });
+
     it("adds project archive state to earlier project databases", () => {
         const database = new DatabaseSync(":memory:");
         try {
