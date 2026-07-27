@@ -9,6 +9,7 @@ export * from "./image.js";
 export * from "./patch.js";
 export * from "../../images/index.js";
 export * from "./path.js";
+export * from "./parseOptionalTerminalSessionId.js";
 export * from "./readTextFile.js";
 export * from "./search.js";
 export * from "./shell.js";

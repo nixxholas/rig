@@ -3,7 +3,11 @@ import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../../agent/types.js";
 import { summarizeEscalatedShellAction } from "../../permissions/summarizeEscalatedShellAction.js";
-import { summarizeTextOutput, toTextBlocks } from "../utils/index.js";
+import {
+    parseOptionalTerminalSessionId,
+    summarizeTextOutput,
+    toTextBlocks,
+} from "../utils/index.js";
 import { parseShellExplorationPresentation } from "../utils/parseShellExplorationPresentation.js";
 
 export const grokRunTerminalCommandTool = defineTool({
@@ -89,6 +93,15 @@ Usage notes:
     },
     toCallPresentation: ({ background, command }) =>
         background ? undefined : parseShellExplorationPresentation(command),
+    toPresentation: (result, { background, command }) => {
+        const sessionId = parseOptionalTerminalSessionId(result.task_id);
+        return {
+            command,
+            output: background ? "" : result.text,
+            ...(sessionId === undefined ? {} : { sessionId }),
+            type: "exec_command",
+        };
+    },
     toLLM: (result) => toTextBlocks({ text: result.text }),
     toUI: (result) => summarizeTextOutput(result.text),
     locks: [],

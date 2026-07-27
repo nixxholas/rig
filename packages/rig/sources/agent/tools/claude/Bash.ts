@@ -6,6 +6,7 @@ import {
     SHELL_CAPTURE_MAX_BYTES,
     SHELL_OUTPUT_MAX_BYTES,
     SHELL_OUTPUT_MAX_LINES,
+    parseOptionalTerminalSessionId,
     runShellCommand,
     shellOutputToText,
     shellToolOutputSchema,
@@ -103,6 +104,15 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     },
     toCallPresentation: ({ command, run_in_background }) =>
         run_in_background === true ? undefined : parseShellExplorationPresentation(command),
+    toPresentation: (result, { command }) => {
+        const sessionId = parseOptionalTerminalSessionId(result.backgroundTaskId);
+        return {
+            command,
+            output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+            ...(sessionId === undefined ? {} : { sessionId }),
+            type: "exec_command",
+        };
+    },
     toLLM: shellOutputToText,
     toUI: (result) => summarizeShellOutput(result),
     locks: [],
