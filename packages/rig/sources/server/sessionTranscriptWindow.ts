@@ -30,7 +30,12 @@ export function sessionTranscriptWindow(
     entries: readonly TranscriptEntry[],
     runFacts: ReadonlyMap<string, TranscriptRunFacts>,
     turnLimit: number,
-): SessionTranscriptWindow {
+    /**
+     * Return the turns that come immediately before this run, rather than the
+     * newest ones. This is how a reader pages back through a long conversation.
+     */
+    before?: string,
+): SessionTranscriptWindow | undefined {
     const groups: { runId: string; messages: Message[] }[] = [];
     // Messages arrive in order, so a run's messages are contiguous and a change
     // of run id is a turn boundary.
@@ -42,7 +47,18 @@ export function sessionTranscriptWindow(
         else groups.push({ messages: [entry.message], runId });
     }
 
-    const kept = turnLimit >= groups.length ? groups : groups.slice(-turnLimit);
+    // Everything from the requested run onwards is already held by whoever asked
+    // for it, so paging looks at the conversation that precedes it.
+    let earlier = groups;
+    if (before !== undefined) {
+        const index = indexOfRun(groups, before);
+        // A run the transcript no longer has cannot anchor a page. Answering
+        // with the newest turns instead would look like a successful page and
+        // silently duplicate the conversation.
+        if (index === undefined) return undefined;
+        earlier = groups.slice(0, index);
+    }
+    const kept = turnLimit >= earlier.length ? earlier : earlier.slice(-turnLimit);
     const turns: SessionTranscriptTurn[] = kept.map((group) => {
         const facts = runFacts.get(group.runId);
         return {
@@ -59,8 +75,14 @@ export function sessionTranscriptWindow(
     });
 
     return {
-        complete: kept.length === groups.length,
+        complete: kept.length === earlier.length,
         messages: kept.flatMap((group) => group.messages),
         turns,
     };
+}
+
+/** Where a run sits among the turns, or undefined when it is not among them. */
+function indexOfRun(groups: readonly { runId: string }[], runId: string): number | undefined {
+    const index = groups.findIndex((group) => group.runId === runId);
+    return index === -1 ? undefined : index;
 }

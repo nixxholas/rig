@@ -2369,6 +2369,21 @@ export class InMemorySession {
      * session.
      */
     transcriptWindow(turnLimit: number = SESSION_STREAM_TURN_LIMIT): SessionTranscriptWindow {
+        // No anchor is given, so the newest turns always exist to return.
+        return this.transcriptPage(turnLimit) as SessionTranscriptWindow;
+    }
+
+    /**
+     * The turns immediately before `before`, or the newest turns without it.
+     *
+     * Undefined when the anchor is a run the transcript no longer has, which a
+     * caller has to tell apart from an empty page: one means the conversation
+     * moved under them, the other that they have reached the beginning.
+     */
+    transcriptPage(
+        turnLimit: number = SESSION_STREAM_TURN_LIMIT,
+        before?: string,
+    ): SessionTranscriptWindow | undefined {
         return sessionTranscriptWindow(
             this.#messages
                 .filter((entry) => !entry.isPartial)
@@ -2378,6 +2393,7 @@ export class InMemorySession {
                 })),
             this.#runFacts,
             turnLimit,
+            before,
         );
     }
 

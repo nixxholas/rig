@@ -90,6 +90,7 @@ import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
 import { parseGlobalEventCursor } from "./parseGlobalEventCursor.js";
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
 import { selectRecentSessionEvents } from "./selectRecentSessionEvents.js";
+import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
 import type { GitStateTracker } from "./GitStateTracker.js";
@@ -1196,6 +1197,21 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "GET" && route.name === "transcript") {
+        const before = url.searchParams.get("before") ?? undefined;
+        const page = session.transcriptPage(SESSION_STREAM_TURN_LIMIT, before);
+        if (page === undefined) {
+            // The anchor turn is gone, so the reader's view of the conversation
+            // is stale and paging from it would duplicate or misplace content.
+            sendJson(response, 409, {
+                error: "That part of the conversation is no longer available.",
+            });
+            return;
+        }
+        sendJson(response, 200, page);
+        return;
+    }
+
     if (request.method === "GET" && route.name === "usage") {
         const usage = session.usage();
         const currentProviderId = session.snapshot().providerId;
@@ -1789,6 +1805,7 @@ function matchRoute(pathname: string):
               | "session"
               | "stream"
               | "steer"
+              | "transcript"
               | "subagents"
               | "unarchive"
               | "usage";
@@ -1992,6 +2009,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "shell") return { name: "shell", sessionId };
     if (parts[2] === "stream") return { name: "stream", sessionId };
     if (parts[2] === "steer") return { name: "steer", sessionId };
+    if (parts[2] === "transcript") return { name: "transcript", sessionId };
     if (parts[2] === "subagents") return { name: "subagents", sessionId };
     if (parts[2] === "usage") return { name: "usage", sessionId };
     if (parts[2] === "unarchive") return { name: "unarchive", sessionId };

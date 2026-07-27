@@ -259,3 +259,48 @@ function assistantMessage(model: string): AssistantMessage {
         },
     };
 }
+
+describe("paging back through a transcript", () => {
+    it("serves the turns before an anchor, and refuses a missing one", async () => {
+        const { endpoint, store } = await startDaemon({ withModel: true });
+        const session = store.create({ cwd: "/tmp/rig-transcript-page" });
+        for (const text of ["One.", "Two.", "Three."]) {
+            const submitted = session.submit({ text });
+            await session.waitForRun(submitted.runId);
+        }
+
+        const newest = await fetchJson(endpoint, `/sessions/${session.id}/transcript`);
+        expect(newest.status).toBe(200);
+        const runIds = (newest.body as { turns: { runId: string }[] }).turns.map(
+            (turn) => turn.runId,
+        );
+        expect(runIds).toHaveLength(3);
+
+        const page = await fetchJson(
+            endpoint,
+            `/sessions/${session.id}/transcript?before=${runIds[1]}`,
+        );
+        // The anchor is the oldest turn already held, so the page stops before it
+        // and reports that there is nothing older left.
+        expect(
+            (page.body as { turns: { runId: string }[] }).turns.map((turn) => turn.runId),
+        ).toEqual([runIds[0]]);
+        expect((page.body as { complete: boolean }).complete).toBe(true);
+
+        const gone = await fetchJson(
+            endpoint,
+            `/sessions/${session.id}/transcript?before=run-that-never-existed`,
+        );
+        expect(gone.status).toBe(409);
+    });
+});
+
+async function fetchJson(
+    endpoint: string,
+    path: string,
+): Promise<{ status: number; body: unknown }> {
+    const response = await fetch(`${endpoint}${path}`, {
+        headers: { authorization: "Bearer secret" },
+    });
+    return { body: await response.json(), status: response.status };
+}

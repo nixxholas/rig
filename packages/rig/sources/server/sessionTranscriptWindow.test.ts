@@ -24,9 +24,20 @@ function turn(runId: string, toolCalls = 0): TranscriptEntry[] {
     return entries;
 }
 
+/** The newest turns, which always exist when no page anchor is given. */
+function newest(
+    entries: readonly TranscriptEntry[],
+    runFacts: ReadonlyMap<string, TranscriptRunFacts>,
+    turnLimit: number,
+) {
+    const window = sessionTranscriptWindow(entries, runFacts, turnLimit);
+    if (window === undefined) throw new Error("The newest turns are always available.");
+    return window;
+}
+
 describe("sessionTranscriptWindow", () => {
     it("groups contiguous messages of one run into a single turn", () => {
-        const window = sessionTranscriptWindow(turn("run-1", 2), new Map(), 20);
+        const window = newest(turn("run-1", 2), new Map(), 20);
 
         expect(window.turns).toHaveLength(1);
         expect(window.turns[0]?.messageIds).toEqual(["run-1-u", "run-1-t0", "run-1-t1", "run-1-a"]);
@@ -36,7 +47,7 @@ describe("sessionTranscriptWindow", () => {
     it("keeps only the most recent turns when the conversation is longer", () => {
         const entries = Array.from({ length: 50 }, (_, index) => turn(`run-${index}`)).flat();
 
-        const window = sessionTranscriptWindow(entries, new Map(), 20);
+        const window = newest(entries, new Map(), 20);
 
         expect(window.turns).toHaveLength(20);
         expect(window.turns[0]?.runId).toBe("run-30");
@@ -49,7 +60,7 @@ describe("sessionTranscriptWindow", () => {
         // kept intact rather than trimmed to fit a message budget.
         const entries = [...turn("run-old"), ...turn("run-big", 38)];
 
-        const window = sessionTranscriptWindow(entries, new Map(), 1);
+        const window = newest(entries, new Map(), 1);
 
         expect(window.turns).toHaveLength(1);
         expect(window.turns[0]?.messageIds).toHaveLength(40);
@@ -62,7 +73,7 @@ describe("sessionTranscriptWindow", () => {
     it("reports the transcript complete when every turn fits", () => {
         const entries = [...turn("run-1"), ...turn("run-2")];
 
-        expect(sessionTranscriptWindow(entries, new Map(), 20).complete).toBe(true);
+        expect(newest(entries, new Map(), 20).complete).toBe(true);
     });
 
     it("carries the timing and outcome of each retained turn", () => {
@@ -71,7 +82,7 @@ describe("sessionTranscriptWindow", () => {
             ["run-2", { endedAt: 260, errorMessage: "Boom", outcome: "error", startedAt: 200 }],
         ]);
 
-        const window = sessionTranscriptWindow([...turn("run-1"), ...turn("run-2")], facts, 20);
+        const window = newest([...turn("run-1"), ...turn("run-2")], facts, 20);
 
         expect(window.turns[0]).toMatchObject({ endedAt: 90, outcome: "success", startedAt: 10 });
         expect(window.turns[1]).toMatchObject({ errorMessage: "Boom", outcome: "error" });
@@ -80,7 +91,7 @@ describe("sessionTranscriptWindow", () => {
     it("leaves a still-running turn without an end", () => {
         const facts = new Map<string, TranscriptRunFacts>([["run-1", { startedAt: 10 }]]);
 
-        const window = sessionTranscriptWindow(turn("run-1"), facts, 20);
+        const window = newest(turn("run-1"), facts, 20);
 
         expect(window.turns[0]?.endedAt).toBeUndefined();
         expect(window.turns[0]?.outcome).toBeUndefined();
@@ -92,7 +103,7 @@ describe("sessionTranscriptWindow", () => {
             ...turn("run-1"),
         ];
 
-        const window = sessionTranscriptWindow(entries, new Map(), 20);
+        const window = newest(entries, new Map(), 20);
 
         expect(window.messages.map((message: Message) => message.id)).not.toContain("hidden");
     });
@@ -103,8 +114,59 @@ describe("sessionTranscriptWindow", () => {
             { message: userMessage("loose-2") },
         ];
 
-        const window = sessionTranscriptWindow(entries, new Map(), 20);
+        const window = newest(entries, new Map(), 20);
 
         expect(window.turns).toHaveLength(2);
+    });
+});
+
+describe("paging back through a transcript", () => {
+    const entries = Array.from({ length: 50 }, (_, index) => turn(`run-${index}`)).flat();
+
+    it("returns the turns immediately before the anchor", () => {
+        const page = sessionTranscriptWindow(entries, new Map(), 20, "run-30");
+
+        // The anchor is the oldest turn the caller already has, so the page ends
+        // just before it and never repeats it.
+        expect(page?.turns.map((item) => item.runId)).toEqual(
+            Array.from({ length: 20 }, (_, index) => `run-${10 + index}`),
+        );
+        expect(page?.complete).toBe(false);
+    });
+
+    it("reports reaching the beginning of the conversation", () => {
+        const page = sessionTranscriptWindow(entries, new Map(), 20, "run-5");
+
+        expect(page?.turns.map((item) => item.runId)).toEqual(
+            Array.from({ length: 5 }, (_, index) => `run-${index}`),
+        );
+        // Everything older has been delivered, so a reader is at the start and
+        // must not be asked to page again.
+        expect(page?.complete).toBe(true);
+    });
+
+    it("returns an empty and complete page at the very beginning", () => {
+        const page = sessionTranscriptWindow(entries, new Map(), 20, "run-0");
+
+        expect(page?.turns).toEqual([]);
+        expect(page?.complete).toBe(true);
+    });
+
+    it("refuses an anchor the transcript no longer has", () => {
+        // A rewind can remove the turn a reader was paging from. Returning the
+        // newest turns instead would look like a successful page and duplicate
+        // the conversation.
+        expect(sessionTranscriptWindow(entries, new Map(), 20, "run-gone")).toBeUndefined();
+    });
+
+    it("carries only the messages of the turns it returns", () => {
+        const page = sessionTranscriptWindow(entries, new Map(), 2, "run-30");
+
+        expect(page?.messages.map((message) => message.id)).toEqual([
+            "run-28-u",
+            "run-28-a",
+            "run-29-u",
+            "run-29-a",
+        ]);
     });
 });
