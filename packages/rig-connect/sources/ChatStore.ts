@@ -151,16 +151,37 @@ export class ChatStore {
                         .sessionTokenCount,
                 };
                 break;
-            case "session_configuration_changed":
+            case "session_configuration_changed": {
+                const data = event.data as {
+                    effort?: string;
+                    modelId: string;
+                    serviceTier: string | null;
+                };
+                // Effort and service tier are cleared by omission and by null
+                // respectively, so both are written every time rather than
+                // merged, or a cleared value would linger.
+                this.#session = {
+                    ...withoutKeys(this.#session, ["effort", "serviceTier"]),
+                    modelId: data.modelId,
+                    ...(data.effort === undefined ? {} : { effort: data.effort }),
+                    ...(data.serviceTier === null ? {} : { serviceTier: data.serviceTier }),
+                };
+                break;
+            }
+            case "permission_mode_changed":
                 this.#session = {
                     ...this.#session,
-                    modelId: (event.data as { modelId: string }).modelId,
+                    permissionMode: (event.data as { permissionMode: string }).permissionMode,
                 };
                 break;
             case "session_title_changed": {
                 const title = (event.data as { title?: string }).title;
-                if (title === undefined) return [];
-                this.#session = { ...this.#session, title };
+                // A title is cleared by omission, so an absent one removes it
+                // rather than leaving the previous title on screen.
+                this.#session =
+                    title === undefined
+                        ? withoutKeys(this.#session, ["title"])
+                        : { ...this.#session, title };
                 break;
             }
             case "message_submitted":
@@ -996,4 +1017,16 @@ function presentationOf(presentation: ToolPresentation | undefined): {
     presentation?: ToolPresentation;
 } {
     return presentation === undefined ? {} : { presentation };
+}
+
+/**
+ * Copies a session state without the named keys.
+ *
+ * `exactOptionalPropertyTypes` forbids assigning `undefined` to an optional
+ * field, so a value that was cleared has to be dropped rather than blanked.
+ */
+function withoutKeys(session: SessionState, keys: readonly (keyof SessionState)[]): SessionState {
+    const next = { ...session };
+    for (const key of keys) delete next[key];
+    return next;
 }

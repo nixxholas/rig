@@ -164,6 +164,22 @@ export class GroupStore {
             return true;
         }
 
+        // A sidebar shows a session's name and whether it is working, and both
+        // change through events that carry only the change rather than a whole
+        // session. Applying them here is what keeps a list live without asking
+        // the daemon to restate the session every time something moves.
+        const patch = sessionPatch(event);
+        if (patch !== undefined) {
+            const known = this.#sessions.get(sessionId);
+            if (known === undefined) return false;
+            this.#sessionEventIds.set(sessionId, event.id);
+            const updated = { ...known, ...patch.set };
+            for (const key of patch.clear ?? []) delete updated[key];
+            this.#sessions.set(sessionId, updated);
+            this.#markDirty(known.projectId);
+            return true;
+        }
+
         if (event.type !== "session_created" && event.type !== "session_updated") return false;
         const incoming = (event.data as { session?: Partial<SessionSummary> }).session;
         if (incoming === undefined || typeof incoming.id !== "string") return false;
@@ -220,11 +236,15 @@ export class GroupStore {
         }
         const workspacesByProject = new Map<string, ProjectWorkspace[]>();
         for (const workspace of this.#workspaces.values()) {
+            if (isArchivedWorkspace(workspace)) continue;
             mapList(workspacesByProject, workspace.projectId).push(workspace);
         }
 
         const next: ProjectGroup[] = [];
         for (const project of [...this.#projects.values()].sort(byOrderKey)) {
+            // An archived project is out of the catalog a client renders, along
+            // with everything inside it.
+            if (project.archivedAt !== undefined) continue;
             const cached = this.#groups.get(project.id);
             if (cached !== undefined && cached.project === project) {
                 next.push(cached);
@@ -258,7 +278,7 @@ export class GroupStore {
         if (
             cached !== undefined &&
             cached.workspace === workspace &&
-            sameOrder(cached.sessions, sessions)
+            sameSessions(cached.sessions, sessions)
         ) {
             return cached;
         }
@@ -287,7 +307,49 @@ function byOrderKey(left: { orderKey: string }, right: { orderKey: string }): nu
     return left.orderKey < right.orderKey ? -1 : left.orderKey > right.orderKey ? 1 : 0;
 }
 
-function sameOrder(left: readonly { id: string }[], right: readonly { id: string }[]): boolean {
+/**
+ * Whether two session lists hold the very same objects in the same order.
+ *
+ * Comparing ids alone would reuse a cached workspace after one of its sessions
+ * was renamed or changed status, because the list looks unchanged by id while
+ * the session it points at is a different object.
+ */
+function sameSessions(left: readonly SessionSummary[], right: readonly SessionSummary[]): boolean {
     if (left.length !== right.length) return false;
-    return left.every((item, index) => item.id === right[index]?.id);
+    return left.every((item, index) => item === right[index]);
+}
+
+function isArchivedWorkspace(workspace: ProjectWorkspace): boolean {
+    return workspace.archivedAt !== undefined || workspace.status === "archived";
+}
+
+/**
+ * The catalog-visible change an event describes, or `undefined` for one that
+ * says nothing a session list renders.
+ *
+ * A run's status is derived rather than read: the events that start and end a
+ * run say what happened, and a list only needs to know whether the session is
+ * busy.
+ */
+function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
+    switch (event.type) {
+        case "session_title_changed": {
+            const { title } = event.data as { title?: string };
+            // A title is cleared by omission, which is a different statement
+            // from setting it to an empty name.
+            return title === undefined ? { clear: ["title"] } : { set: { title } };
+        }
+        case "run_started":
+            return { set: { status: "running" } };
+        case "run_finished":
+        case "run_error":
+            return { set: { status: "idle" } };
+        default:
+            return undefined;
+    }
+}
+
+interface SessionPatch {
+    set?: Partial<SessionSummary>;
+    clear?: readonly (keyof SessionSummary)[];
 }

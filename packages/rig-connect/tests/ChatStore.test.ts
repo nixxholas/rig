@@ -635,6 +635,66 @@ describe("ChatStore", () => {
         expect(store.elements()).toBe(before);
     });
 
+    describe("live session facts", () => {
+        it("removes a title the daemon cleared", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello(hello());
+            store.apply(event("session_title_changed", { status: "ready", title: "Ship it" }));
+
+            store.apply(event("session_title_changed", { status: "pending" }));
+
+            // A title is cleared by omission. Leaving the old one on screen
+            // would show a name the session no longer has.
+            expect(store.session().title).toBeUndefined();
+        });
+
+        it("tracks effort, service tier, and permission mode", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello(hello());
+
+            store.apply(
+                event("session_configuration_changed", {
+                    changed: ["model"],
+                    effort: "high",
+                    modelId: "opus-5",
+                    serviceTier: "priority",
+                }),
+            );
+            store.apply(event("permission_mode_changed", { permissionMode: "read_only" }));
+
+            expect(store.session()).toMatchObject({
+                effort: "high",
+                modelId: "opus-5",
+                permissionMode: "read_only",
+                serviceTier: "priority",
+            });
+        });
+
+        it("clears effort and service tier when the session no longer has them", () => {
+            const store = new ChatStore("session-1");
+            store.applyHello(hello());
+            store.apply(
+                event("session_configuration_changed", {
+                    changed: ["model"],
+                    effort: "high",
+                    modelId: "opus-5",
+                    serviceTier: "priority",
+                }),
+            );
+
+            store.apply(
+                event("session_configuration_changed", {
+                    changed: ["model"],
+                    modelId: "sonnet-5",
+                    serviceTier: null,
+                }),
+            );
+
+            expect(store.session().effort).toBeUndefined();
+            expect(store.session().serviceTier).toBeUndefined();
+        });
+    });
+
     describe("what a turn cost", () => {
         function usage(input: number, output: number, cost: number) {
             return {

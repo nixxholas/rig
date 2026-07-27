@@ -337,6 +337,105 @@ describe("GroupStore", () => {
         expect(stale).toEqual([]);
     });
 
+    it("refreshes a worktree session that changed without moving", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [session("s1", "p1", "w1")],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+
+        store.apply(
+            event(
+                "session_updated",
+                { session: { ...session("s1", "p1", "w1"), title: "Renamed" } },
+                { sessionId: "s1" },
+            ),
+        );
+
+        // The list looks unchanged by id, so a cache keyed on order alone would
+        // hand back the session as it was before the rename.
+        expect(store.projects()[0]?.workspaces[0]?.sessions[0]?.title).toBe("Renamed");
+    });
+
+    it("drops an archived project and its worktrees from the catalog", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                projects: [project("p1"), project("p2")],
+                sessions: [],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+
+        store.apply(
+            event(
+                "project_updated",
+                { project: project("p1", { archivedAt: 99, version: 2 }) },
+                { projectId: "p1" },
+            ),
+        );
+
+        expect(store.projects().map((group) => group.id)).toEqual(["p2"]);
+    });
+
+    it("drops an archived worktree while keeping its project", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [],
+                workspaces: [workspace("w1", "p1"), workspace("w2", "p1")],
+            }),
+        );
+
+        store.apply(
+            event(
+                "workspace_updated",
+                { workspace: workspace("w1", "p1", { status: "archived", version: 2 }) },
+                { projectId: "p1" },
+            ),
+        );
+
+        expect(store.projects()[0]?.workspaces.map((item) => item.id)).toEqual(["w2"]);
+    });
+
+    it("follows a session title as the daemon learns and clears it", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(
+            event(
+                "session_title_changed",
+                { status: "ready", title: "Ship it" },
+                {
+                    sessionId: "s1",
+                },
+            ),
+        );
+        expect(store.projects()[0]?.sessions[0]?.title).toBe("Ship it");
+
+        store.apply(event("session_title_changed", { status: "pending" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.sessions[0]?.title).toBeUndefined();
+    });
+
+    it("shows a session as working while a run is in flight", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(event("run_started", { runId: "run-1" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.sessions[0]?.status).toBe("running");
+
+        // A sidebar has to settle back on its own; the daemon does not restate
+        // the whole session when a run ends.
+        store.apply(
+            event("run_finished", { runId: "run-1", stopReason: "stop" }, { sessionId: "s1" }),
+        );
+        expect(store.projects()[0]?.sessions[0]?.status).toBe("idle");
+    });
+
     it("reports that older sessions exist beyond the opening frame", () => {
         const store = new GroupStore();
         store.applyHello(hello({ sessionsComplete: false }));

@@ -104,6 +104,12 @@ export interface SessionState {
     modelId: string;
     providerId: string;
     title?: string;
+    /** How hard the model is asked to think, when the provider offers a choice. */
+    effort?: string;
+    serviceTier?: string;
+    permissionMode?: string;
+    /** True when the session is pinned to its model and cannot switch. */
+    modelLocked?: boolean;
     git?: GitChangeSnapshot;
     tokens?: SessionTokenCount;
     /** Whether the library currently has a live connection to the daemon. */
