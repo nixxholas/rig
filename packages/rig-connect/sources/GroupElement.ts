@@ -28,10 +28,7 @@ export interface WorkspaceGroup {
 /** Live facts about the group catalog as a whole. */
 export interface GroupsState {
     readonly connection: ConnectionState;
-    /**
-     * False when the daemon holds more sessions than the opening frame carried.
-     * A client that wants the rest asks for them; the common case does not.
-     */
+    /** True because the opening frame carries the complete active session catalog. */
     readonly sessionsComplete: boolean;
 }
 

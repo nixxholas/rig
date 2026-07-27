@@ -4,8 +4,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
+import type { ProjectWorkspace as DaemonProjectWorkspace } from "../../rig/sources/protocol/index.js";
 import { connectGroups } from "@/connectGroups.js";
 import type { GroupsConnection } from "@/connectGroups.js";
+import type { GlobalStreamHello } from "@/protocol.js";
 
 /**
  * These run against the real daemon rather than scripted frames, because the
@@ -139,6 +141,70 @@ describe("rig-connect groups against a live daemon", () => {
         );
     });
 
+    it("opens with every unarchived session, project, and workspace", async () => {
+        const { endpoint, store } = await startDaemon();
+        const templateSession = store.create({ cwd: "/tmp/rig-all-active" });
+        const templateSummary = store.list()[0]!;
+        const active = Array.from({ length: 501 }, (_, index) => ({
+            ...templateSummary,
+            id: `active-${String(index)}`,
+        }));
+        const archivedSession = {
+            ...templateSummary,
+            archived: true,
+            id: "archived-session",
+        };
+        const listed = [...active, archivedSession];
+        store.list = (options = {}) =>
+            options.limit === undefined ? listed : listed.slice(0, options.limit);
+
+        const activeProject = store.listProjects()[0]!;
+        const archivedProject = {
+            ...activeProject,
+            archivedAt: 1,
+            id: "archived-project",
+        };
+        store.listProjects = () => [activeProject, archivedProject];
+
+        // An archived workspace remains durable after its worktree is removed.
+        // Injecting the summary avoids making this sync test build a Git worktree.
+        const activeProjectId = templateSession.snapshot().projectId;
+        const archivedWorkspace: DaemonProjectWorkspace = {
+            archivedAt: 1,
+            createdAt: 1,
+            gitCommonDir: "/tmp/rig-all-active/.git",
+            id: "archived-workspace",
+            kind: "git_worktree",
+            name: "Archived workspace",
+            orderKey: "a0",
+            path: "/tmp/rig-all-active-workspace",
+            presence: "missing",
+            projectId: activeProjectId,
+            status: "archived",
+            storageKey: "archived-workspace",
+            updatedAt: 1,
+            version: 1,
+        };
+        const listWorkspaces = store.listWorkspaces.bind(store);
+        store.listWorkspaces = (projectId) => [
+            ...listWorkspaces(projectId),
+            ...(projectId === undefined || projectId === activeProjectId
+                ? [archivedWorkspace]
+                : []),
+        ];
+
+        const hello = await readGlobalHello(endpoint);
+        const sessionIds = hello.sessions.map((session) => session.id);
+        expect(sessionIds).toHaveLength(active.length);
+        expect(sessionIds).toEqual(expect.arrayContaining(active.map((session) => session.id)));
+        expect(sessionIds).not.toContain(archivedSession.id);
+        expect(hello.projects.map((project) => project.id)).not.toContain(archivedProject.id);
+        expect(hello.workspaces.map((workspace) => workspace.id)).not.toContain(
+            archivedWorkspace.id,
+        );
+        expect(hello.sessionsComplete).toBe(true);
+    });
+
     it("keeps a session listed when it is unarchived rather than dropping it", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-groups-a" });
@@ -183,4 +249,42 @@ function listedStatus(
             ...group.workspaces.flatMap((workspace) => workspace.sessions),
         ])
         .find((item) => item.id === sessionId)?.status;
+}
+
+async function readGlobalHello(endpoint: string): Promise<GlobalStreamHello> {
+    const controller = new AbortController();
+    const response = await fetch(`${endpoint}/events/stream`, {
+        headers: { accept: "text/event-stream", authorization: "Bearer secret" },
+        signal: controller.signal,
+    });
+    if (response.body === null) throw new Error("The group stream carried no body.");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let text = "";
+    try {
+        for (;;) {
+            const boundary = text.indexOf("\n\n");
+            if (boundary !== -1) {
+                const frame = text.slice(0, boundary);
+                text = text.slice(boundary + 2);
+                if (frame.includes("event: hello")) {
+                    const data = frame
+                        .split("\n")
+                        .find((line) => line.startsWith("data: "))
+                        ?.slice("data: ".length);
+                    if (data === undefined) {
+                        throw new Error("The group stream opening frame carried no data.");
+                    }
+                    return JSON.parse(data) as GlobalStreamHello;
+                }
+                continue;
+            }
+            const next = await reader.read();
+            if (next.done) throw new Error("The group stream carried no opening frame.");
+            text += decoder.decode(next.value, { stream: true });
+        }
+    } finally {
+        controller.abort();
+        await reader.cancel().catch(() => undefined);
+    }
 }

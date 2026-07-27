@@ -73,7 +73,7 @@ import type {
     SetSessionDraftRequest,
     UpdateSessionRequest,
 } from "../protocol/index.js";
-import { GLOBAL_STREAM_SESSION_LIMIT, SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
+import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { InMemorySessionStore } from "./InMemorySessionStore.js";
@@ -889,16 +889,25 @@ async function handleRequest(
                 url.searchParams.get("after"),
                 () => runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
                 () => {
-                    const listed = store.list({ limit: GLOBAL_STREAM_SESSION_LIMIT + 1 });
+                    const sessions = store
+                        .list()
+                        .map((summary) =>
+                            sessionSummaryWithTerminalPresence(summary, sessionTerminals),
+                        )
+                        .filter((summary) => !summary.archived);
                     return {
-                        projects: store.listProjects(),
-                        sessions: listed
-                            .slice(0, GLOBAL_STREAM_SESSION_LIMIT)
-                            .map((summary) =>
-                                sessionSummaryWithTerminalPresence(summary, sessionTerminals),
+                        projects: store
+                            .listProjects()
+                            .filter((project) => project.archivedAt === undefined),
+                        sessions,
+                        sessionsComplete: true,
+                        workspaces: store
+                            .listWorkspaces()
+                            .filter(
+                                (workspace) =>
+                                    workspace.archivedAt === undefined &&
+                                    workspace.status !== "archived",
                             ),
-                        sessionsComplete: listed.length <= GLOBAL_STREAM_SESSION_LIMIT,
-                        workspaces: store.listWorkspaces(),
                     };
                 },
             );

@@ -577,7 +577,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 LIMIT ?
                 `,
             )
-            .all(options.limit ?? 500);
+            // SQLite treats a negative LIMIT as unbounded.
+            .all(options.limit ?? -1);
 
         return rows.map((row) => {
             const effort = readOptionalString(row, "effort");

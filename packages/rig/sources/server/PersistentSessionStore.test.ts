@@ -18,6 +18,22 @@ import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
+    it("lists every session when no limit is requested", () => {
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        try {
+            for (let index = 0; index < 501; index += 1) {
+                store.createWithId(`session-${String(index)}`, {
+                    cwd: "/tmp/rig-complete-session-list",
+                });
+            }
+
+            expect(store.list()).toHaveLength(501);
+            expect(store.list({ limit: 500 })).toHaveLength(500);
+        } finally {
+            store.close();
+        }
+    });
+
     it("creates an idempotent persistent session with an integrating client ID", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         try {

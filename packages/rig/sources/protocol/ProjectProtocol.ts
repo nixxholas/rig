@@ -292,14 +292,6 @@ export interface GlobalStreamHello {
     sessionsComplete: boolean;
 }
 
-/**
- * How many sessions the global stream's opening frame carries.
- *
- * A machine that has accumulated thousands of sessions must still be cheap to
- * attach to, and a client shows the most recent ones first regardless.
- */
-export const GLOBAL_STREAM_SESSION_LIMIT = 500;
-
 export interface TrimGlobalEventsRequest {
     through: string;
 }

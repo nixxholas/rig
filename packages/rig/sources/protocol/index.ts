@@ -61,7 +61,7 @@ export type {
 export type { GoalStatus, SessionGoal } from "../goals/index.js";
 export type { DurableSkillDefinition } from "../external-skills/index.js";
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
-export { GLOBAL_STREAM_SESSION_LIMIT, isLiveGlobalEvent } from "./ProjectProtocol.js";
+export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
     createEventIdFactory,
     eventIdsShareScope,
