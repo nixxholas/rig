@@ -38,14 +38,22 @@ export function sessionTranscriptWindow(
     before?: string,
 ): SessionTranscriptWindow | undefined {
     const groups: { runId: string; entries: TranscriptEntry[] }[] = [];
-    // Messages arrive in order, so a run's messages are contiguous and a change
-    // of run id is a turn boundary.
+    const groupByRunId = new Map<string, (typeof groups)[number]>();
+    // A queued prompt can be stored before the active run finishes producing its
+    // agent messages, so messages of two runs may interleave. The first occurrence
+    // fixes each turn's order; later messages return to that turn rather than
+    // creating a second fragment whose completion would render before its reply.
     for (const entry of entries) {
         if (entry.message.internal === true) continue;
         const runId = entry.runId ?? `orphan:${entry.message.id}`;
-        const open = groups.at(-1);
-        if (open !== undefined && open.runId === runId) open.entries.push(entry);
-        else groups.push({ entries: [entry], runId });
+        const group = groupByRunId.get(runId);
+        if (group !== undefined) {
+            group.entries.push(entry);
+            continue;
+        }
+        const created = { entries: [entry], runId };
+        groupByRunId.set(runId, created);
+        groups.push(created);
     }
 
     // Everything from the requested run onwards is already held by whoever asked

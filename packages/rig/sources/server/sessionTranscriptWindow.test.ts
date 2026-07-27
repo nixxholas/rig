@@ -44,6 +44,27 @@ describe("sessionTranscriptWindow", () => {
         expect(window.complete).toBe(true);
     });
 
+    it("keeps queued runs whole when their messages interleave", () => {
+        const entries: TranscriptEntry[] = [
+            { message: userMessage("run-1-u"), runId: "run-1" },
+            { message: userMessage("run-2-u"), runId: "run-2" },
+            { message: agentMessage("run-1-a"), runId: "run-1" },
+            { message: agentMessage("run-2-a"), runId: "run-2" },
+        ];
+
+        const window = newest(entries, new Map(), 20);
+
+        expect(window.turns.map((item) => item.runId)).toEqual(["run-1", "run-2"]);
+        expect(window.turns[0]?.messageIds).toEqual(["run-1-u", "run-1-a"]);
+        expect(window.turns[1]?.messageIds).toEqual(["run-2-u", "run-2-a"]);
+        expect(window.messages.map((message) => message.id)).toEqual([
+            "run-1-u",
+            "run-1-a",
+            "run-2-u",
+            "run-2-a",
+        ]);
+    });
+
     it("keeps only the most recent turns when the conversation is longer", () => {
         const entries = Array.from({ length: 50 }, (_, index) => turn(`run-${index}`)).flat();
 
