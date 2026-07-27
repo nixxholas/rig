@@ -752,6 +752,7 @@ export type SessionEvent =
     | AbortRequestedEvent
     | SessionResetEvent
     | SessionRewoundEvent
+    | SessionStatusChangedEvent
     | SessionTitleChangedEvent
     | SessionActivityChangedEvent
     | SessionContextChangedEvent
@@ -891,6 +892,18 @@ export type SubagentsSuspendedEvent = BaseSessionEvent<
     {
         displayText: string;
     }
+>;
+
+/**
+ * The session's durable lifecycle status changed.
+ *
+ * This is the persisted status, not the current-moment activity. A client needs
+ * both: activity says what the session is doing, while status says whether it is
+ * archived, suspended, failed, or simply idle.
+ */
+export type SessionStatusChangedEvent = BaseSessionEvent<
+    "session_status_changed",
+    { status: SessionStatus }
 >;
 
 export type SessionResetEvent = BaseSessionEvent<"session_reset", { snapshot: AgentSnapshot }>;

@@ -21,7 +21,10 @@ describe("InMemorySession rewind", () => {
             "agent-1",
         ]);
         expect(deleteMessagesFrom).toHaveBeenCalledWith("session-1", 2);
-        expect(session.events.since(undefined)?.at(-1)).toMatchObject({
+        const rewound = session.events
+            .since(undefined)
+            ?.findLast((event) => event.type === "session_rewound");
+        expect(rewound).toMatchObject({
             data: {
                 messageId: "user-2",
                 snapshot: { messages: [{ id: "user-1" }, { id: "agent-1" }] },

@@ -161,6 +161,7 @@ export type {
     SessionTranscriptTurn,
     SessionTranscriptWindow,
     SessionResetEvent,
+    SessionStatusChangedEvent,
     SessionRewoundEvent,
     SessionStatus,
     SessionSummaryStatus,

@@ -2226,7 +2226,14 @@ describe("PersistentSessionStore", () => {
                     runId: "run-1",
                 });
                 expect(events.filter((event) => event.type === "run_error")).toHaveLength(2);
-                expect(events.map((event) => event.type)).toEqual(["run_error", "run_error"]);
+                // The interrupted run moves the session to the error status, and
+                // that transition is announced so an attached client learns the
+                // crash without re-reading the session.
+                expect(events.map((event) => event.type)).toEqual([
+                    "run_error",
+                    "session_status_changed",
+                    "run_error",
+                ]);
             } finally {
                 restoredStore.close();
             }

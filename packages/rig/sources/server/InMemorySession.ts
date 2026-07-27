@@ -438,6 +438,9 @@ export class InMemorySession {
      * the log, and bounded to the runs the window can reach.
      */
     #runFacts = new Map<string, TranscriptRunFacts>();
+    /** The status a client has already been told about. */
+    #reportedStatus: SessionStatus | undefined;
+    #reportingStatus = false;
     #submittedUserMessages = new Map<string, PersistedSessionMessage>();
     #mcpLoaded = false;
     #mcpServers: readonly McpServerSummary[] = [];
@@ -600,6 +603,10 @@ export class InMemorySession {
                 : [...options.restore.contextMessages];
         this.#models = this.#modelsForProvider(this.#providerId);
         this.#status = options.restore?.status ?? "idle";
+        // The status a session opens in is already on the snapshot every client
+        // reads, so it is recorded as reported and only later changes are
+        // announced.
+        this.#reportedStatus = this.#status;
         this.#workspaceArchived = this.#status === "archived";
         this.#unread =
             options.restore?.unread === undefined ? undefined : { ...options.restore.unread };
@@ -4233,6 +4240,27 @@ export class InMemorySession {
     #saveSession(): void {
         if (this.#workspaceArchived) this.#status = "archived";
         this.#persistence?.saveSession(this.state());
+        this.#reportStatus();
+    }
+
+    /**
+     * Announces a change to the durable lifecycle status.
+     *
+     * The status is assigned from many places and was only ever persisted, so a
+     * client could not tell that a session had gone idle, been suspended, or
+     * failed without asking for the whole session again. Reporting it from the
+     * one point every change passes through keeps the stream self-describing
+     * without threading an event through each assignment.
+     */
+    #reportStatus(): void {
+        if (this.#reportingStatus || this.#status === this.#reportedStatus) return;
+        this.#reportedStatus = this.#status;
+        this.#reportingStatus = true;
+        try {
+            this.#append("session_status_changed", { status: this.#status });
+        } finally {
+            this.#reportingStatus = false;
+        }
     }
 
     #separateModelContextFromVisibleTranscript(): void {
