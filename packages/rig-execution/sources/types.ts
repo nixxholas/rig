@@ -118,7 +118,6 @@ export interface AssistantMessage {
     provider: string;
     model: string;
     responseModel?: string;
-    responseId?: string;
     /** Ordered opaque provider output items required for native continuation. */
     responseItems?: readonly string[];
     endTurn?: boolean;
@@ -243,8 +242,8 @@ export interface ProviderCompactionOptions<
     timestamp: number;
 }
 
-/** Streaming events emitted while building an assistant message. */
-export type AssistantMessageEvent =
+/** Raw provider events emitted while building an assistant message. */
+export type ProviderAssistantMessageEvent =
     | { type: "start"; partial: AssistantMessage }
     | { type: "block_start" }
     | { type: "block_stop" }
@@ -270,8 +269,11 @@ export type AssistantMessageEvent =
           error: AssistantMessage;
       };
 
+/** Rig-owned assistant stream event exposed to session observers and clients. */
+export type AssistantMessageEvent = ProviderAssistantMessageEvent & { messageId: string };
+
 /** Async stream of assistant message events with a final result promise. */
-export interface InferenceStream extends AsyncIterable<AssistantMessageEvent> {
+export interface InferenceStream extends AsyncIterable<ProviderAssistantMessageEvent> {
     result(): Promise<AssistantMessage>;
 }
 

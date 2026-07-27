@@ -1,6 +1,6 @@
-import type { AssistantMessageEvent } from "@slopus/rig-execution";
+import type { ProviderAssistantMessageEvent } from "@slopus/rig-execution";
 
-export function hasResponseContentBegun(event: AssistantMessageEvent): boolean {
+export function hasResponseContentBegun(event: ProviderAssistantMessageEvent): boolean {
     if (
         event.type === "start" ||
         event.type === "block_start" ||

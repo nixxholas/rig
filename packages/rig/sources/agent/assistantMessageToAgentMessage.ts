@@ -8,13 +8,13 @@ import type {
 
 export function assistantMessageToAgentMessage(
     message: ProviderAssistantMessage,
-    fallbackId: () => string,
+    messageId: string,
     attribution: { providerId: string; requestedModelId: string },
     toToolCallPresentation?: (toolCall: ProviderToolCall) => ToolCallPresentation | undefined,
 ): AgentMessage {
     return {
         role: "agent",
-        id: message.responseId ?? fallbackId(),
+        id: messageId,
         blocks: message.content.map((content) =>
             providerAssistantContentToAgentBlock(content, toToolCallPresentation),
         ),

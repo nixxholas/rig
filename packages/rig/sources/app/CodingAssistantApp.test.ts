@@ -190,6 +190,7 @@ describe("CodingAssistantApp", () => {
             data: {
                 event: {
                     contentIndex: 0,
+                    messageId: "empty-thinking-message",
                     partial: {
                         api: "test",
                         content: [],
@@ -214,6 +215,7 @@ describe("CodingAssistantApp", () => {
                 event: {
                     content: "\n\n",
                     contentIndex: 0,
+                    messageId: "empty-thinking-message",
                     partial: {
                         api: "test",
                         content: [],
@@ -1700,6 +1702,7 @@ describe("CodingAssistantApp", () => {
                 event: {
                     contentIndex: 0,
                     delta: table,
+                    messageId: "streaming-table-message",
                     partial,
                     type: "text_delta",
                 },
@@ -5459,6 +5462,7 @@ describe("CodingAssistantApp", () => {
                         timestamp: now,
                         usage: zeroUsage(),
                     },
+                    messageId: "out-of-tokens-message",
                     reason: "error",
                     type: "error",
                 },
@@ -5530,6 +5534,7 @@ describe("CodingAssistantApp", () => {
                                 timestamp: now,
                                 usage: zeroUsage(),
                             },
+                            messageId: "rate-limit-message",
                             reason: "error",
                             type: "error",
                         },
@@ -5615,6 +5620,7 @@ describe("CodingAssistantApp", () => {
                             timestamp: now,
                             usage: zeroUsage(),
                         },
+                        messageId: "rate-limit-message",
                         reason: "error",
                         type: "error",
                     },
@@ -6085,24 +6091,42 @@ describe("CodingAssistantApp", () => {
             sessionId: "session-1",
             type: "run_started",
         });
-        apply("thinking-start", { type: "thinking_start", contentIndex: 0, partial });
+        apply("thinking-start", {
+            type: "thinking_start",
+            contentIndex: 0,
+            messageId: "reset-message",
+            partial,
+        });
         apply("thinking-delta", {
             type: "thinking_delta",
             contentIndex: 0,
             delta: "Tentative reasoning",
+            messageId: "reset-message",
             partial,
         });
-        apply("text-start", { type: "text_start", contentIndex: 1, partial });
+        apply("text-start", {
+            type: "text_start",
+            contentIndex: 1,
+            messageId: "reset-message",
+            partial,
+        });
         apply("text-delta", {
             type: "text_delta",
             contentIndex: 1,
             delta: "Tentative answer",
+            messageId: "reset-message",
             partial,
         });
-        apply("tool-start", { type: "toolcall_start", contentIndex: 2, partial });
+        apply("tool-start", {
+            type: "toolcall_start",
+            contentIndex: 2,
+            messageId: "reset-message",
+            partial,
+        });
         apply("tool-end", {
             type: "toolcall_end",
             contentIndex: 2,
+            messageId: "reset-message",
             toolCall: partial.content[2] as Extract<
                 AssistantMessage["content"][number],
                 { type: "toolCall" }
@@ -6116,6 +6140,7 @@ describe("CodingAssistantApp", () => {
         expect(tentative).toContain("echo tentative");
 
         apply("inference-reset", {
+            messageId: "reset-message",
             partial: {
                 ...partial,
                 content: [],
@@ -7199,6 +7224,7 @@ describe("CodingAssistantApp", () => {
                         timestamp: 10,
                         usage: zeroUsage(),
                     },
+                    messageId: "aborted-message",
                     reason: "aborted",
                     type: "error",
                 },

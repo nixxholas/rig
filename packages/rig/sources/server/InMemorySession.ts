@@ -342,7 +342,7 @@ interface PendingUserInput {
 }
 
 interface PartialMessageState {
-    fallbackId: string;
+    messageId: string;
     position: number | undefined;
     runId: string;
 }
@@ -3565,14 +3565,14 @@ export class InMemorySession {
 
         if (event.type === "inference_iteration_start") {
             this.#activePartial = {
-                fallbackId: `${runId}:assistant:${event.iteration}`,
+                messageId: event.messageId,
                 position: undefined,
                 runId,
             };
         } else if (event.type === "context_compacted") {
             this.#totalTokens = event.estimatedTokensAfter;
         } else if ("partial" in event) {
-            this.#storePartialMessage(runId, event.partial);
+            this.#storePartialMessage(runId, event.messageId, event.partial);
         }
 
         this.#append("agent_event", { event, runId });
@@ -4595,13 +4595,14 @@ export class InMemorySession {
 
     #storePartialMessage(
         runId: string,
+        messageId: string,
         partial: Parameters<typeof assistantMessageToAgentMessage>[0],
     ): void {
         const activePartial =
-            this.#activePartial?.runId === runId
+            this.#activePartial?.runId === runId && this.#activePartial.messageId === messageId
                 ? this.#activePartial
                 : {
-                      fallbackId: `${runId}:assistant`,
+                      messageId,
                       position: undefined,
                       runId,
                   };
@@ -4610,7 +4611,7 @@ export class InMemorySession {
             ...activePartial,
             position,
         };
-        const message = assistantMessageToAgentMessage(partial, () => activePartial.fallbackId, {
+        const message = assistantMessageToAgentMessage(partial, activePartial.messageId, {
             providerId: this.#providerId,
             requestedModelId: this.#modelId,
         });

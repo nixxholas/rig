@@ -9,7 +9,7 @@ import { getCodexCollaborationToolDefinition } from "@/tools/codex/getCodexColla
 import type {
     AssistantContent,
     AssistantMessage,
-    AssistantMessageEvent,
+    ProviderAssistantMessageEvent,
     Context,
     Model,
     InferenceStream,
@@ -35,7 +35,7 @@ async function* streamExecutorInference(options: {
     model: Model;
     providerId: string;
     streamOptions?: StreamOptions;
-}): AsyncGenerator<AssistantMessageEvent, AssistantMessage> {
+}): AsyncGenerator<ProviderAssistantMessageEvent, AssistantMessage> {
     let partial = emptyAssistantMessage(options.model, options.providerId);
     let terminal = false;
     let activeTextIndex: number | undefined;

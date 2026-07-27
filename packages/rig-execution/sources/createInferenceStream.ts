@@ -1,7 +1,7 @@
-import type { AssistantMessage, AssistantMessageEvent, InferenceStream } from "@/types.js";
+import type { AssistantMessage, InferenceStream, ProviderAssistantMessageEvent } from "@/types.js";
 
 export function createInferenceStream(
-    run: () => AsyncGenerator<AssistantMessageEvent, AssistantMessage>,
+    run: () => AsyncGenerator<ProviderAssistantMessageEvent, AssistantMessage>,
 ): InferenceStream {
     let resolveResult: (message: AssistantMessage) => void;
     let rejectResult: (error: unknown) => void;

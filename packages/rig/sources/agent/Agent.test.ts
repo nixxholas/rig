@@ -61,6 +61,7 @@ describe("Agent", () => {
             },
         });
         const execute = vi.fn(() => ({ applied: true }));
+        const observedEvents: AgentLoopEvent[] = [];
         const tool = defineTool({
             name: "custom_patch",
             label: "Custom patch",
@@ -91,6 +92,9 @@ describe("Agent", () => {
             context: createJustBashToolHarness().context,
             tools: [tool],
             printToConsole: false,
+            onEvent: (event) => {
+                observedEvents.push(event);
+            },
         });
 
         await agent.send("Apply it.");
@@ -110,6 +114,14 @@ describe("Agent", () => {
                 },
             ],
         });
+        const streamedMessageIds = new Set(
+            observedEvents.flatMap((event) => ("messageId" in event ? [event.messageId] : [])),
+        );
+        const committedMessageIds = agent.messages.flatMap((message) =>
+            message.role === "agent" && message.usage !== undefined ? [message.id] : [],
+        );
+        expect(streamedMessageIds.size).toBe(2);
+        expect(new Set(committedMessageIds)).toEqual(streamedMessageIds);
     });
 
     it("preserves tool results when optional debug and live observers fail", async () => {
@@ -382,7 +394,7 @@ describe("Agent", () => {
             },
         });
         const logs: unknown[][] = [];
-        const observedEvents: string[] = [];
+        const observedEvents: AgentLoopEvent[] = [];
         const observedMessages: string[] = [];
         const harness = createJustBashToolHarness();
         const agent = new Agent({
@@ -398,7 +410,7 @@ describe("Agent", () => {
                 },
             },
             onEvent(event) {
-                observedEvents.push(event.type);
+                observedEvents.push(event);
             },
             onMessage(message) {
                 observedMessages.push(message.id);
@@ -440,7 +452,14 @@ describe("Agent", () => {
             "[user:id-4] Say done.",
             "[agent:id-7] agent-done",
         ]);
-        expect(observedEvents).toEqual(["inference_iteration_start", "start", "done"]);
+        expect(observedEvents.map((event) => event.type)).toEqual([
+            "inference_iteration_start",
+            "start",
+            "done",
+        ]);
+        expect(
+            observedEvents.map((event) => ("messageId" in event ? event.messageId : undefined)),
+        ).toEqual(["id-7", "id-7", "id-7"]);
         expect(observedMessages).toEqual(["id-7"]);
     });
 

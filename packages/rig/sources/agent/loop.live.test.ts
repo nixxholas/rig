@@ -9,7 +9,7 @@ import {
     defineProvider,
     type AssistantContent,
     type AssistantMessage,
-    type AssistantMessageEvent,
+    type ProviderAssistantMessageEvent,
     type Context,
     type InferenceStream,
     type StopReason,
@@ -908,7 +908,7 @@ function streamFor(message: AssistantMessage): InferenceStream {
     const doneReason = toDoneReason(message.stopReason);
 
     return {
-        async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+        async *[Symbol.asyncIterator](): AsyncIterator<ProviderAssistantMessageEvent> {
             yield {
                 type: "start",
                 partial: message,

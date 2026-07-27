@@ -4,10 +4,10 @@ import {
     defineModel,
     defineProvider,
     type AssistantMessage,
-    type AssistantMessageEvent,
     type Context,
     type Model,
     type Provider,
+    type ProviderAssistantMessageEvent,
     type ServiceTier,
     type StreamOptions,
     type Usage,
@@ -168,7 +168,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                 }
 
                 if (stopReason === "error" || stopReason === "aborted") {
-                    const event: AssistantMessageEvent = {
+                    const event: ProviderAssistantMessageEvent = {
                         type: "error",
                         reason: stopReason,
                         error: message,
@@ -177,7 +177,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                     return message;
                 }
 
-                const event: AssistantMessageEvent = {
+                const event: ProviderAssistantMessageEvent = {
                     type: "done",
                     reason: stopReason,
                     message,
@@ -202,7 +202,7 @@ async function* eventsForBlock(
     textDeltaDelayMs: number | undefined,
     toolCallDeltaDelayMs: number | undefined,
     streamOptions: StreamOptions,
-): AsyncGenerator<AssistantMessageEvent, boolean> {
+): AsyncGenerator<ProviderAssistantMessageEvent, boolean> {
     if (block.type === "text") {
         const partialBlock = { type: "text" as const, text: "" };
         message.content = [...message.content, partialBlock];

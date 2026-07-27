@@ -177,6 +177,7 @@ function blockResetEvent(id: string): SessionEvent {
         createdAt: 1_700_000_000_000,
         data: {
             event: {
+                messageId: "message-1",
                 partial: {
                     api: "test",
                     content: [],

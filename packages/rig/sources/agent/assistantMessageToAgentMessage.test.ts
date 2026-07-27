@@ -6,10 +6,19 @@ import { modelOpenaiGpt56Sol } from "@slopus/rig-execution";
 import type { AssistantMessage } from "@slopus/rig-execution";
 
 describe("assistantMessageToAgentMessage", () => {
+    it("uses the Rig-owned message ID", () => {
+        const message = assistantMessageToAgentMessage(providerMessage(), "rig-message-1", {
+            providerId: "codex",
+            requestedModelId: "openai/gpt-5.6",
+        });
+
+        expect(message.id).toBe("rig-message-1");
+    });
+
     it("durably records requested and response model attribution", () => {
         const message = assistantMessageToAgentMessage(
             providerMessage({ responseModel: "gpt-5.6-2026-07-01" }),
-            () => "fallback",
+            "rig-message-1",
             { providerId: "codex", requestedModelId: "openai/gpt-5.6" },
         );
 
@@ -34,7 +43,7 @@ describe("assistantMessageToAgentMessage", () => {
                     },
                 ],
             },
-            () => "fallback",
+            "rig-message-1",
             { providerId: "pi", requestedModelId: "openai/gpt-5.6" },
             () => ({
                 type: "exploration",
@@ -71,7 +80,7 @@ describe("assistantMessageToAgentMessage", () => {
                     },
                 ],
             },
-            () => "fallback",
+            "rig-message-1",
             { providerId: "codex", requestedModelId: modelOpenaiGpt56Sol.id },
         );
 
@@ -111,7 +120,6 @@ function providerMessage(options: { responseModel?: string } = {}): AssistantMes
         content: [{ text: "hello", type: "text" }],
         model: "openai/gpt-5.6",
         provider: "openai-codex",
-        responseId: "response-1",
         role: "assistant",
         stopReason: "stop",
         timestamp: 1,

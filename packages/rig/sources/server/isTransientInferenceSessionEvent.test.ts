@@ -10,9 +10,11 @@ import {
 describe("isTransientInferenceSessionEvent", () => {
     it("classifies provider stream presentation events as transient", () => {
         for (const type of TRANSIENT_INFERENCE_EVENT_TYPES) {
-            expect(isTransientInferenceSessionEvent(agentEvent({ type } as AgentLoopEvent))).toBe(
-                true,
-            );
+            expect(
+                isTransientInferenceSessionEvent(
+                    agentEvent({ messageId: "message-1", type } as AgentLoopEvent),
+                ),
+            ).toBe(true);
         }
     });
 
@@ -20,6 +22,7 @@ describe("isTransientInferenceSessionEvent", () => {
         expect(
             isTransientInferenceSessionEvent(
                 agentEvent({
+                    messageId: "message-1",
                     partial: {
                         api: "test",
                         content: [],

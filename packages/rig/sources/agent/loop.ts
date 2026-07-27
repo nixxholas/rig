@@ -36,6 +36,7 @@ import type {
     Message as ProviderMessage,
     Model,
     Provider,
+    ProviderAssistantMessageEvent,
     ServiceTier,
     StopReason,
     StreamOptions,
@@ -136,6 +137,7 @@ export type AgentLoopEvent =
     | {
           type: "inference_iteration_start";
           iteration: number;
+          messageId: string;
       }
     | {
           type: "steering_applied";
@@ -273,9 +275,11 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         }
 
         iteration += 1;
+        const messageId = idFactory();
         await options.onEvent?.({
             type: "inference_iteration_start",
             iteration,
+            messageId,
         });
 
         let assistantMessage: ProviderAssistantMessage;
@@ -300,7 +304,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     if (options.signal?.aborted) {
                         throw new Error("Provider stream was aborted.");
                     }
-                    const event = assignRigToolCallEventIds(next.value, rigToolCallIds, idFactory);
+                    const event = identifyAssistantMessageEvent(
+                        assignRigToolCallEventIds(next.value, rigToolCallIds, idFactory),
+                        messageId,
+                    );
                     if (event.type === "start") {
                         pendingStartEvent = event;
                         continue;
@@ -429,7 +436,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                         : content,
                 ),
             },
-            idFactory,
+            messageId,
             {
                 providerId: options.provider.id,
                 requestedModelId: model.id,
@@ -1408,10 +1415,10 @@ function assignRigToolCallIds(
 }
 
 function assignRigToolCallEventIds(
-    event: AssistantMessageEvent,
+    event: ProviderAssistantMessageEvent,
     rigToolCallIds: Map<number, string>,
     idFactory: () => string,
-): AssistantMessageEvent {
+): ProviderAssistantMessageEvent {
     if (event.type === "done") {
         return {
             ...event,
@@ -1429,6 +1436,13 @@ function assignRigToolCallEventIds(
     if (event.type !== "toolcall_end") return { ...event, partial };
     const toolCall = partial.content[event.contentIndex];
     return toolCall?.type === "toolCall" ? { ...event, partial, toolCall } : { ...event, partial };
+}
+
+function identifyAssistantMessageEvent(
+    event: ProviderAssistantMessageEvent,
+    messageId: string,
+): AssistantMessageEvent {
+    return { ...event, messageId };
 }
 
 function localizeToolCall(

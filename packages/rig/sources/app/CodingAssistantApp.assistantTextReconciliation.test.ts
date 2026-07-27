@@ -44,7 +44,14 @@ describe("CodingAssistantApp assistant text reconciliation", () => {
         streamAnswer(app, "iterated");
         app.applySessionEvent({
             createdAt: 5,
-            data: { event: { iteration: 2, type: "inference_iteration_start" }, runId: "run-1" },
+            data: {
+                event: {
+                    iteration: 2,
+                    messageId: "message-2",
+                    type: "inference_iteration_start",
+                },
+                runId: "run-1",
+            },
             id: "iterated-iteration-2",
             sessionId: "session-1",
             type: "agent_event",
@@ -124,7 +131,14 @@ function streamAnswer(app: CodingAssistantApp, prefix: string): void {
     });
     app.applySessionEvent({
         createdAt: 2,
-        data: { event: { iteration: 1, type: "inference_iteration_start" }, runId: "run-1" },
+        data: {
+            event: {
+                iteration: 1,
+                messageId: `${prefix}-message`,
+                type: "inference_iteration_start",
+            },
+            runId: "run-1",
+        },
         id: `${prefix}-iteration`,
         sessionId: "session-1",
         type: "agent_event",
@@ -135,6 +149,7 @@ function streamAnswer(app: CodingAssistantApp, prefix: string): void {
             event: {
                 contentIndex: 0,
                 delta: ANSWER,
+                messageId: `${prefix}-message`,
                 partial: partialAnswer(ANSWER),
                 type: "text_delta",
             },
@@ -150,6 +165,7 @@ function streamAnswer(app: CodingAssistantApp, prefix: string): void {
             event: {
                 content: ANSWER,
                 contentIndex: 0,
+                messageId: `${prefix}-message`,
                 partial: partialAnswer(ANSWER),
                 type: "text_end",
             },

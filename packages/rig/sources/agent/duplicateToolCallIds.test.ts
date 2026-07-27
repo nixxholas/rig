@@ -8,7 +8,7 @@ import {
     defineModel,
     defineProvider,
     type AssistantMessage,
-    type AssistantMessageEvent,
+    type ProviderAssistantMessageEvent,
     type Context,
     type InferenceStream,
 } from "@slopus/rig-execution";
@@ -131,10 +131,9 @@ function message(
     };
 }
 
-
 function streamFor(message: AssistantMessage): InferenceStream {
     return {
-        async *[Symbol.asyncIterator](): AsyncIterator<AssistantMessageEvent> {
+        async *[Symbol.asyncIterator](): AsyncIterator<ProviderAssistantMessageEvent> {
             yield { type: "start", partial: message };
             yield {
                 type: "done",
