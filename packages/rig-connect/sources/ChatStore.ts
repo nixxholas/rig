@@ -266,13 +266,23 @@ export class ChatStore {
                 );
                 break;
             case "session_reset":
-            case "session_rewound":
+            case "session_rewound": {
+                // Both carry the transcript as it stands afterwards, so the list
+                // is rebuilt with real runs and closed turns rather than the
+                // per-message boundaries the snapshot alone would imply.
+                const data = event.data as {
+                    snapshot: { messages: readonly Message[] };
+                    transcript?: SessionTranscriptWindow;
+                };
                 this.#resetTranscript(
-                    (event.data as { snapshot: { messages: readonly Message[] } }).snapshot
-                        .messages,
+                    data.snapshot.messages,
                     deltas,
+                    data.transcript === undefined
+                        ? undefined
+                        : mergeTranscriptWindow(this.#loadedTranscript, data.transcript),
                 );
                 break;
+            }
             default:
                 return [];
         }

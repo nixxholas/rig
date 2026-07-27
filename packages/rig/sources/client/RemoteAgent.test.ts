@@ -630,7 +630,7 @@ describe("RemoteAgent", () => {
 
         agent.applySessionEvent({
             createdAt: 2,
-            data: { snapshot: authoritativeSnapshot },
+            data: { snapshot: authoritativeSnapshot, transcript: emptyTranscript() },
             id: "event-reset",
             sessionId: session.id,
             type: "session_reset",
@@ -639,7 +639,11 @@ describe("RemoteAgent", () => {
         expect(agent.confirmedServiceTier).toBeUndefined();
         agent.applySessionEvent({
             createdAt: 3,
-            data: { messageId: "message-1", snapshot: authoritativeSnapshot },
+            data: {
+                messageId: "message-1",
+                snapshot: authoritativeSnapshot,
+                transcript: emptyTranscript(),
+            },
             id: "event-rewound",
             sessionId: session.id,
             type: "session_rewound",
@@ -902,4 +906,9 @@ function permissionEvent(
         sessionId,
         type: "permission_mode_changed",
     };
+}
+
+/** These exercise configuration confirmation, not transcript rebuilding. */
+function emptyTranscript() {
+    return { complete: true, messages: [], turns: [] };
 }

@@ -356,10 +356,17 @@ export type SessionEvent =
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
     | BaseSessionEvent<"run_finished", { errorMessage?: string; runId: string; stopReason: string }>
     | BaseSessionEvent<"run_error", { errorMessage: string; runId: string }>
-    | BaseSessionEvent<"session_reset", { snapshot: { messages: readonly Message[] } }>
+    | BaseSessionEvent<
+          "session_reset",
+          { snapshot: { messages: readonly Message[] }; transcript: SessionTranscriptWindow }
+      >
     | BaseSessionEvent<
           "session_rewound",
-          { messageId: string; snapshot: { messages: readonly Message[] } }
+          {
+              messageId: string;
+              snapshot: { messages: readonly Message[] };
+              transcript: SessionTranscriptWindow;
+          }
       >
     | BaseSessionEvent<string, unknown>;
 

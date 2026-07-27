@@ -318,14 +318,18 @@ describe("CodingAssistantApp steering submit and Escape race", () => {
                 boundaryType === "session_reset"
                     ? {
                           createdAt: 3,
-                          data: { snapshot: agent.snapshot() },
+                          data: { snapshot: agent.snapshot(), transcript: emptyTranscript() },
                           id: "boundary",
                           sessionId: "session-1",
                           type: "session_reset",
                       }
                     : {
                           createdAt: 3,
-                          data: { messageId: "rewind-target", snapshot: agent.snapshot() },
+                          data: {
+                              messageId: "rewind-target",
+                              snapshot: agent.snapshot(),
+                              transcript: emptyTranscript(),
+                          },
                           id: "boundary",
                           sessionId: "session-1",
                           type: "session_rewound",
@@ -813,4 +817,9 @@ function fakeTui(): TUI {
         stop: vi.fn(),
         terminal: { columns: 100, rows: 40, write: vi.fn() },
     } as unknown as TUI;
+}
+
+/** These exercise boundary handling, not transcript rebuilding. */
+function emptyTranscript() {
+    return { complete: true, messages: [], turns: [] };
 }

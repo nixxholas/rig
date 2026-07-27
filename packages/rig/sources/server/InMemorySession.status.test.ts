@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../agent/index.js";
 import { NativeProcessManager } from "../processes/index.js";
-import { createEventIdFactory, type ModelCatalog, type SessionEvent } from "../protocol/index.js";
+import {
+    createEventIdFactory,
+    type ModelCatalog,
+    type SessionEvent,
+    type SessionTranscriptWindow,
+} from "../protocol/index.js";
 import type { CodingAssistantRuntime } from "../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../runtime/createCodingAssistantAgent.js";
 import {
@@ -104,6 +109,60 @@ describe("InMemorySession durable status", () => {
                 .filter((event: SessionEvent) => event.type === "session_status_changed")
                 .map((event: SessionEvent) => (event.data as { status: string }).status),
         ).toEqual(["queued", "running", "completed"]);
+
+        await session.beginShutdown();
+    });
+});
+
+describe("reset and rewind transcripts", () => {
+    it("carries the turns that survive a rewind", async () => {
+        const session = createSession();
+        const first = session.submit({ text: "One." });
+        await session.waitForRun(first.runId);
+        const second = session.submit({ text: "Two." });
+        await session.waitForRun(second.runId);
+
+        const target = session
+            .snapshot()
+            .snapshot.messages.find(
+                (message) => message.role === "user" && message.id !== undefined,
+            );
+        expect(target).toBeDefined();
+
+        const events: SessionEvent[] = [];
+        const unsubscribe = session.events.subscribe((event) => events.push(event));
+        session.rewind(session.snapshot().snapshot.messages[2]!.id);
+        unsubscribe();
+
+        const rewound = events.find((event) => event.type === "session_rewound");
+        expect(rewound).toBeDefined();
+        const transcript = (rewound!.data as { transcript?: SessionTranscriptWindow }).transcript;
+        // Without real turns a client rebuilding from this event invents its own
+        // boundaries, and the transcript silently loses the guarantee that every
+        // turn ends with a final element.
+        expect(transcript?.turns.length).toBeGreaterThan(0);
+        expect(transcript?.turns.every((turn) => turn.runId.length > 0)).toBe(true);
+        expect(transcript?.messages.map((message) => message.id)).toEqual(
+            session.snapshot().snapshot.messages.map((message) => message.id),
+        );
+
+        await session.beginShutdown();
+    });
+
+    it("carries an empty transcript when a reset clears the conversation", async () => {
+        const session = createSession();
+        const submitted = session.submit({ text: "One." });
+        await session.waitForRun(submitted.runId);
+
+        const events: SessionEvent[] = [];
+        const unsubscribe = session.events.subscribe((event) => events.push(event));
+        await session.reset();
+        unsubscribe();
+
+        const reset = events.find((event) => event.type === "session_reset");
+        expect(reset).toBeDefined();
+        const transcript = (reset!.data as { transcript?: SessionTranscriptWindow }).transcript;
+        expect(transcript).toEqual({ complete: true, messages: [], turns: [] });
 
         await session.beginShutdown();
     });

@@ -1251,14 +1251,18 @@ describe("CodingAssistantApp", () => {
                 boundaryType === "session_reset"
                     ? {
                           createdAt: 2,
-                          data: { snapshot: agent.snapshot() },
+                          data: { snapshot: agent.snapshot(), transcript: emptyTranscript() },
                           id: "boundary",
                           sessionId: "session-1",
                           type: "session_reset",
                       }
                     : {
                           createdAt: 2,
-                          data: { messageId: "rewind-target", snapshot: agent.snapshot() },
+                          data: {
+                              messageId: "rewind-target",
+                              snapshot: agent.snapshot(),
+                              transcript: emptyTranscript(),
+                          },
                           id: "boundary",
                           sessionId: "session-1",
                           type: "session_rewound",
@@ -9734,4 +9738,9 @@ function zeroUsage(): Usage {
             total: 0,
         },
     };
+}
+
+/** These exercise boundary handling, not transcript rebuilding. */
+function emptyTranscript() {
+    return { complete: true, messages: [], turns: [] };
 }

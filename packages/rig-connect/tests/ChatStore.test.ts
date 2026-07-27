@@ -1173,6 +1173,45 @@ describe("recovering a connection", () => {
         expect(store.elements().find((element) => element.id === "message:u2")).toBe(anchor);
     });
 
+    it("keeps real turns through a rewind", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(1, 6, false));
+
+        // The daemon rewound to turn 4, so turns 5 and 6 are gone.
+        const remaining = windowOf(1, 4, true);
+        store.apply(
+            event("session_rewound", {
+                messageId: "u5",
+                snapshot: { messages: remaining.messages },
+                transcript: remaining,
+            }),
+        );
+
+        const turnIds = store.elements().map((element) => element.turnId);
+        // Falling back to invented per-message turns here would lose the turn
+        // guarantee: a rewound transcript would have no closing element and no
+        // real run identity.
+        expect(turnIds).not.toContain("run-5");
+        expect(new Set(turnIds)).toEqual(new Set(["run-1", "run-2", "run-3", "run-4"]));
+        expect(store.elements().filter((element) => element.kind === "turn_end")).toHaveLength(4);
+    });
+
+    it("keeps real turns through a reset", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(helloWith(1, 6, false));
+
+        store.apply(
+            event("session_reset", {
+                snapshot: { messages: [] },
+                transcript: { complete: true, messages: [], turns: [] },
+            }),
+        );
+
+        // A reset clears the conversation, and the retained older turns must not
+        // survive it.
+        expect(store.elements()).toEqual([]);
+    });
+
     it("trusts a complete window to be the whole conversation", () => {
         const store = new ChatStore("session-1");
         store.applyHello(helloWith(1, 6, false));

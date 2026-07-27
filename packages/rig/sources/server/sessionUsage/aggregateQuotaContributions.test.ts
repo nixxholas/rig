@@ -199,6 +199,8 @@ function reset(): SessionEvent {
                 status: "idle",
                 tools: [],
             },
+            // These exercise event delivery, not transcript rebuilding.
+            transcript: { complete: true, messages: [], turns: [] },
         },
         id: "reset",
         sessionId: "session-1",

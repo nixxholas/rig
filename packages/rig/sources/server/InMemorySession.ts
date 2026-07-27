@@ -2189,7 +2189,10 @@ export class InMemorySession {
         this.#persistence?.clearMessages(this.id);
         if (hadTasks) this.#recordTasksChanged();
         if (hadGoal) this.#append("goal_changed", { goal: null });
-        this.#append("session_reset", { snapshot: this.#agentSnapshot() });
+        this.#append("session_reset", {
+            snapshot: this.#agentSnapshot(),
+            transcript: this.transcriptWindow(),
+        });
         return this.snapshot();
     }
 
@@ -2242,6 +2245,7 @@ export class InMemorySession {
         this.#append("session_rewound", {
             messageId,
             snapshot: this.#agentSnapshot(),
+            transcript: this.transcriptWindow(),
         });
         this.#restartMetadataSettlement();
         return { message: target.message, session: this.snapshot() };

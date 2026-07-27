@@ -438,6 +438,8 @@ function sessionResetEvent(id: string): SessionEvent {
                 status: "idle",
                 tools: [],
             },
+            // This exercises event delivery, not transcript rebuilding.
+            transcript: { complete: true, messages: [], turns: [] },
         },
         id,
         sessionId: "session-1",

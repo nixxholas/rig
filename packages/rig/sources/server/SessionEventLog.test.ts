@@ -129,6 +129,8 @@ function event(id: string): SessionEvent {
                 status: "idle",
                 tools: [],
             },
+            // These exercise event delivery, not transcript rebuilding.
+            transcript: { complete: true, messages: [], turns: [] },
         },
         id,
         sessionId: "session-1",

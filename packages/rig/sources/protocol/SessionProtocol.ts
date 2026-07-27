@@ -906,13 +906,29 @@ export type SessionStatusChangedEvent = BaseSessionEvent<
     { status: SessionStatus }
 >;
 
-export type SessionResetEvent = BaseSessionEvent<"session_reset", { snapshot: AgentSnapshot }>;
+export type SessionResetEvent = BaseSessionEvent<
+    "session_reset",
+    {
+        snapshot: AgentSnapshot;
+        /**
+         * The transcript as it stands after the reset.
+         *
+         * The snapshot alone carries messages without the runs that produced
+         * them, so a client rebuilding from it cannot say where one turn ended
+         * and the next began. This keeps a rebuilt transcript as complete as the
+         * one an attaching client is given.
+         */
+        transcript: SessionTranscriptWindow;
+    }
+>;
 
 export type SessionRewoundEvent = BaseSessionEvent<
     "session_rewound",
     {
         messageId: string;
         snapshot: AgentSnapshot;
+        /** The transcript as it stands after the rewind. See `SessionResetEvent`. */
+        transcript: SessionTranscriptWindow;
     }
 >;
 
