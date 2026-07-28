@@ -169,12 +169,15 @@ it is good at.
   order of a thousand events — and either replays from that cursor, or answers
   with the current cursor and reports that a gap was detected. A gap is not an
   error; it tells the client to re-fetch what it holds.
-- **Durable and non-durable may be two endpoints.** The durable events must stay
-  as they are. Whether durable and non-durable events actually differ is not
-  known; if the durable updates can simply be served non-durably, that would
-  most likely be enough for everything. Possibly there are just two endpoints —
-  one durable, one non-durable — carrying the same events, except the
-  non-durable one may report that something was lost.
+- **Durable and non-durable are the same events.** Events are just events;
+  durable means only that they are saved to disk. Live, durable, and non-durable
+  are the same stream of events — in one case it is written to disk, that is
+  all. The durable events must stay as they are. Possibly there are simply two
+  endpoints, one durable and one non-durable, over those same events — and the
+  non-durable endpoint may report that something was lost. Durable events exist
+  exclusively for synchronization with an external service, and that service
+  must trim them from time to time so they do not fill the disk, because there
+  are very many of them.
 - **One subscription, exactly.** Every local client uses one single global
   subscription; there is no session-scoped stream. A terminal subscribes to
   the same global stream and filters it down to the session it is showing.
@@ -239,11 +242,11 @@ it is good at.
   stream, the client has to recognise it as the echo of its own action rather
   than applying it a second time.
 
-All of this is live sync for local client sessions, nothing more — it is not the
-durable event queue. And because everything is local for now, the rare case
-where a client must re-fetch everything is allowed to stay simple; it is not
-worth engineering around. The result should be the lightest, tidiest
-synchronization we can build.
+All of this is live sync for local client sessions, nothing more — persisting
+the events to disk for the external service is a separate concern. And because
+everything is local for now, the rare case where a client must re-fetch
+everything is allowed to stay simple; it is not worth engineering around. The
+result should be the lightest, tidiest synchronization we can build.
 
 ## Requirements
 
@@ -252,7 +255,8 @@ synchronization we can build.
 2. **Cheap on the wire.** Updates are small, and there are no large packets.
    Entity objects never travel inside the stream; they travel by
    request-response. This is about ordinary live sync for terminals and other
-   UIs; the durable event queue is a separate concern.
+   UIs; persisting the events to disk for the external service is a separate
+   concern.
 3. **Cheap on the machine.** The library must not hold resources it does not
    need: bounded memory, no unbounded buffers or promise chains, no busy work
    when nothing is happening, everything released on unsubscribe. This is the
