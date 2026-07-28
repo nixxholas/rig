@@ -169,9 +169,21 @@ it is good at.
   order of a thousand events — and either replays from that cursor, or answers
   with the current cursor and reports that a gap was detected. A gap is not an
   error; it tells the client to re-fetch what it holds.
+- **Durable and non-durable may be two endpoints.** The durable events must stay
+  as they are. Whether durable and non-durable events actually differ is not
+  known; if the durable updates can simply be served non-durably, that would
+  most likely be enough for everything. Possibly there are just two endpoints —
+  one durable, one non-durable — carrying the same events, except the
+  non-durable one may report that something was lost.
 - **One subscription, exactly.** Every local client uses one single global
   subscription; there is no session-scoped stream. A terminal subscribes to
   the same global stream and filters it down to the session it is showing.
+  Rewrite the events so that one subscription is enough for everything, and a
+  client — Rig Connect in particular — can load anything. The global event
+  stream must be implemented and working.
+- **No backward compatibility, except two things.** Compatibility with the
+  existing reconnect is not needed at all. The durable events and the terminal
+  must be preserved.
 - **No large packets.** Updates are light and tidy. Messages appear in the
   stream as they are — they belong there. Session objects, group objects,
   workspace objects, project objects, and user objects are never sent inside
@@ -188,7 +200,8 @@ it is good at.
   the cursors, appends the last message, and marks it finished — all in a
   single frame from a single update, not a burst of them.
 - **Request-response carries the entities.** A client loads users, agents,
-  sessions, workspaces, projects, and the rest by asking for them.
+  sessions, workspaces, projects, and the rest by asking for them. The other
+  entity-fetching methods most likely exist already.
 - **Loading is flexible, but not too complex.** Loading projects, for
   instance, can ask for only the active ones, only the inactive ones, or a
   specific list of ids. The same request can include or leave out the
@@ -199,14 +212,28 @@ it is good at.
   application start it most likely loads everything; on a change or a
   reconnect it probably refreshes the session it is looking at first, then
   everything else. The client must be able to choose later what it needs,
-  and to optimize what turns out not to be optimal.
+  and to optimize what turns out not to be optimal. It should probably be a
+  POST, returning some subset of what needs loading — a session that has
+  dropped out of the catalog because it became archived, for instance.
 - **Every entity states its identity and its version.** Identity is a cuid2, as
   today. The version is the UUIDv7 id of the last event that touched the
   entity — what `session.lastEventId` already is. Two views of the same entity
   merge by comparing versions, never by guessing which is newer.
+- **Each entity has something like a mini-queue and a snapshot.** Events from
+  before the snapshot are deleted; everything after it is applied — probably in
+  some clever way, exactly how is not settled. Track the event id that was
+  current at the moment the snapshot was loaded, and when the snapshot itself
+  was last changed. That determines unambiguously whether an event must be
+  applied or not, because events are assumed to enter the system strictly
+  sequentially, with nothing lost.
 - **Fetch once, then follow.** An update tells a client that something changed.
   The client fetches the entity by request-response and from then on keeps it
   synchronized live over the SSE connection.
+- **Very simple, in order.** The protocol must be very simple. First, load the
+  initial state — that could be done synchronously, or some other way. Ideally
+  the events open first and the entities load after, so they can always be
+  rebased. From then on everything synchronizes in real time with exponential
+  backoffs — relatively short ones, though.
 - **A mutation carries its own identity.** A client changes its state locally
   and sends the command; when Rig's version of that change arrives on the
   stream, the client has to recognise it as the echo of its own action rather
