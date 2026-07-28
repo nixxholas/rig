@@ -1563,36 +1563,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     ): SessionTranscriptWindow | undefined {
         const messages = this.#loadTranscriptMessagesPage(sessionId, turnLimit, before);
         if (messages === undefined) return undefined;
-        const events = this.#loadTranscriptEvents(sessionId, messages);
-        const eventLog = new SessionEventLog({
-            events,
-            retentionLimit: Number.MAX_SAFE_INTEGER,
-        });
-        const entries = messages
-            .filter((entry) => !entry.isPartial)
-            .map((entry): TranscriptEntry => {
-                const createdAt = eventLog.messageCreatedAt(entry.message.id);
-                const eventId = eventLog.messageEventId(entry.message.id);
-                return {
-                    ...(createdAt === undefined ? {} : { createdAt }),
-                    ...(eventId === undefined ? {} : { eventId }),
-                    message: entry.message,
-                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
-                };
-            });
-        const window = sessionTranscriptWindow(
-            entries,
-            transcriptRunFacts(events),
-            turnLimit,
-            undefined,
-        );
-        if (window === undefined) return undefined;
-        const toolCallIds = new Set(
-            window.messages.flatMap((message) =>
-                message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
-            ),
-        );
-        const permissionReviews = eventLog.permissionReviews(toolCallIds);
         const firstPosition = messages[0]?.position;
         const hasEarlier =
             firstPosition !== undefined &&
@@ -1607,11 +1577,31 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     `,
                 )
                 .get(sessionId, firstPosition) !== undefined;
-        return {
-            ...window,
-            complete: !hasEarlier,
-            ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
-        };
+        return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasEarlier);
+    }
+
+    loadTranscriptSince(
+        sessionId: string,
+        turnLimit: number,
+        after: EventId,
+    ): SessionTranscriptWindow | undefined {
+        const messages = this.#loadTranscriptMessagesSince(sessionId, turnLimit, after);
+        if (messages === undefined) return undefined;
+        const lastPosition = messages.at(-1)?.position;
+        const hasLater =
+            lastPosition !== undefined &&
+            this.#database
+                .prepare(
+                    `
+                    SELECT 1
+                    FROM session_messages
+                    WHERE session_id = ? AND position > ? AND is_partial = 0
+                      AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
+                    LIMIT 1
+                    `,
+                )
+                .get(sessionId, lastPosition) !== undefined;
+        return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasLater);
     }
 
     upsertExternalToolCall(call: ExternalToolCall): void {
@@ -2448,6 +2438,100 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 position: readNumber(row, "position"),
                 runId: readString(row, "run_id"),
             }));
+    }
+
+    #loadTranscriptMessagesSince(
+        sessionId: string,
+        turnLimit: number,
+        after: EventId,
+    ): PersistedSessionMessage[] | undefined {
+        const runRows = this.#database
+            .prepare(
+                `
+                WITH anchor_run AS (
+                    SELECT turns.first_position
+                    FROM session_events AS events
+                    JOIN session_messages AS messages
+                      ON messages.session_id = events.session_id
+                     AND messages.message_id = events.message_id
+                     AND messages.is_partial = 0
+                    JOIN session_turns AS turns
+                      ON turns.session_id = messages.session_id
+                     AND turns.run_id = messages.run_id
+                    WHERE events.session_id = ? AND events.event_id = ?
+                    LIMIT 1
+                )
+                SELECT turns.run_id
+                FROM session_turns AS turns
+                WHERE turns.session_id = ?
+                  AND turns.first_position >= (SELECT first_position FROM anchor_run)
+                ORDER BY turns.first_position ASC
+                LIMIT ?
+                `,
+            )
+            .all(sessionId, after, sessionId, turnLimit) as Record<string, unknown>[];
+        if (runRows.length === 0) return undefined;
+        const runIds = runRows.map((row) => readString(row, "run_id"));
+        const placeholders = runIds.map(() => "?").join(", ");
+        return this.#database
+            .prepare(
+                `
+                SELECT position, is_partial, run_id, message_json
+                FROM session_messages
+                WHERE session_id = ? AND is_partial = 0 AND run_id IN (${placeholders})
+                ORDER BY position ASC
+                `,
+            )
+            .all(sessionId, ...runIds)
+            .map((row) => ({
+                isPartial: readNumber(row, "is_partial") !== 0,
+                message: JSON.parse(readString(row, "message_json")) as Message,
+                position: readNumber(row, "position"),
+                runId: readString(row, "run_id"),
+            }));
+    }
+
+    #transcriptWindowForMessages(
+        sessionId: string,
+        messages: readonly PersistedSessionMessage[],
+        turnLimit: number,
+        complete: boolean,
+    ): SessionTranscriptWindow | undefined {
+        const events = this.#loadTranscriptEvents(sessionId, messages);
+        const eventLog = new SessionEventLog({
+            events,
+            retentionLimit: Number.MAX_SAFE_INTEGER,
+        });
+        const entries = messages
+            .filter((entry) => !entry.isPartial)
+            .map((entry): TranscriptEntry => {
+                const createdAt = eventLog.messageCreatedAt(entry.message.id);
+                const eventId = eventLog.messageEventId(entry.message.id);
+                return {
+                    ...(createdAt === undefined ? {} : { createdAt }),
+                    ...(eventId === undefined ? {} : { eventId }),
+                    message: entry.message,
+                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                };
+            });
+        const window = sessionTranscriptWindow(
+            entries,
+            transcriptRunFacts(events),
+            turnLimit,
+            undefined,
+        );
+        if (window === undefined) return undefined;
+        const toolCallIds = new Set(
+            window.messages.flatMap((message) =>
+                message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
+            ),
+        );
+        const permissionReviews = eventLog.permissionReviews(toolCallIds);
+        return {
+            ...window,
+            complete,
+            ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
+        };
     }
 
     #loadPartialMessages(sessionId: string): PersistedSessionMessage[] {

@@ -33,8 +33,7 @@ export type {
     TerminalInputPresentation,
     ToolPresentation,
 } from "./ToolPresentation.js";
-export { streamSessionEvents, SessionStreamRefused } from "./streamSessionEvents.js";
-export type { SessionStreamOptions } from "./streamSessionEvents.js";
+export { LiveStreamRefused } from "./streamLiveEvents.js";
 export { streamLiveEvents } from "./streamLiveEvents.js";
 export type { LiveStreamHello, LiveStreamOptions } from "./streamLiveEvents.js";
 export type {

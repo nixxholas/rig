@@ -8,35 +8,27 @@ import type { Message, SessionTranscriptWindow } from "./protocol.js";
  * conversation somebody is reading, so the older turns already loaded are kept
  * in front of it.
  *
- * The fresh window is authoritative wherever the two overlap, and a window that
- * declares itself complete replaces everything: retaining older turns then would
- * resurrect turns a reset or a rewind removed.
+ * The fresh window is authoritative wherever the two overlap. Turns outside the
+ * overlap are immutable history: reset and rewind can change the active model
+ * context, but they do not delete turns the user has already seen.
  */
 export function mergeTranscriptWindow(
     loaded: SessionTranscriptWindow | undefined,
     incoming: SessionTranscriptWindow,
 ): SessionTranscriptWindow {
-    if (loaded === undefined || incoming.complete || incoming.turns.length === 0) return incoming;
+    if (loaded === undefined) return incoming;
 
-    const [oldestIncoming] = incoming.turns;
-    if (oldestIncoming === undefined) return incoming;
-    const fresh = new Set(incoming.turns.map((turn) => turn.runId));
-    // Anything the fresh window reaches is the fresh window's to describe. Only
-    // turns that start before it can be retained, so a turn it dropped stays
-    // dropped rather than coming back.
-    const retained = loaded.turns.filter(
-        (turn) => !fresh.has(turn.runId) && turn.startedAt < oldestIncoming.startedAt,
+    const turnsById = new Map(loaded.turns.map((turn) => [turn.runId, turn]));
+    for (const turn of incoming.turns) turnsById.set(turn.runId, turn);
+    const turns = [...turnsById.values()].sort((left, right) => left.startedAt - right.startedAt);
+    const messagesById = new Map(loaded.messages.map((message) => [message.id, message]));
+    for (const message of incoming.messages) messagesById.set(message.id, message);
+    const messages: Message[] = turns.flatMap((turn) =>
+        turn.messageIds.flatMap((messageId) => {
+            const message = messagesById.get(messageId);
+            return message === undefined ? [] : [message];
+        }),
     );
-    if (retained.length === 0) return incoming;
-
-    const keep = new Set(retained.flatMap((turn) => turn.messageIds));
-    const messages: Message[] = loaded.messages.filter((message) => keep.has(message.id));
-    const known = new Set(messages.map((message) => message.id));
-    for (const message of incoming.messages) {
-        if (known.has(message.id)) continue;
-        known.add(message.id);
-        messages.push(message);
-    }
     const messageCreatedAt = Object.fromEntries(
         messages.flatMap((message) => {
             const createdAt =
@@ -61,13 +53,32 @@ export function mergeTranscriptWindow(
     );
 
     return {
-        // The retained turns reach back to where the earlier window started, so
-        // the merged window is complete only if that one was.
-        complete: loaded.complete,
+        complete: loaded.complete || incoming.complete,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
         ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         messages,
-        turns: [...retained, ...incoming.turns],
+        turns,
+    };
+}
+
+/**
+ * Appends a page loaded toward the newest end of a conversation.
+ *
+ * Forward paging overlaps by one turn so a client can replace a possibly partial
+ * anchor turn. The incoming copy is authoritative for that overlap. Its
+ * `complete` flag describes whether paging reached the newest turn, so callers
+ * provide the history-completeness value that should remain visible afterward.
+ */
+export function mergeForwardTranscriptWindow(
+    loaded: SessionTranscriptWindow | undefined,
+    incoming: SessionTranscriptWindow,
+    historyComplete: boolean,
+): SessionTranscriptWindow {
+    if (loaded === undefined) return { ...incoming, complete: historyComplete };
+    if (incoming.turns.length === 0) return { ...loaded, complete: historyComplete };
+    return {
+        ...mergeTranscriptWindow(loaded, { ...incoming, complete: false }),
+        complete: historyComplete,
     };
 }

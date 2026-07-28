@@ -298,6 +298,11 @@ export interface InMemorySessionPersistence {
         turnLimit: number,
         before?: string,
     ): SessionTranscriptWindow | undefined;
+    loadTranscriptSince?(
+        sessionId: string,
+        turnLimit: number,
+        after: EventId,
+    ): SessionTranscriptWindow | undefined;
     pruneExternalToolCalls?(sessionId: string, retain: number): void;
     pruneDurableUserInputs?(sessionId: string, retain: number): void;
     saveSession(state: PersistedSessionState): void;
@@ -2679,6 +2684,104 @@ export class InMemorySession {
                   complete: !this.#transcriptHasEarlier && keptRunIds.length === earlierCount,
                   ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
               };
+    }
+
+    /**
+     * The turns from the one holding `after` through the newest.
+     *
+     * This is how a client catches up when it missed events: it says which
+     * message it last holds, and receives everything from there on. The unit is
+     * a whole turn, including the turn that contains the anchor, because a gap
+     * can begin in the middle of one — the client replaces those turns outright
+     * rather than trying to stitch a half-turn onto a half-turn.
+     *
+     * Undefined when the anchor is older than what is retained, which means the
+     * client has to start again from a bootstrap rather than page forward.
+     */
+    transcriptSince(
+        after: EventId,
+        turnLimit: number = SESSION_STREAM_TURN_LIMIT,
+    ): SessionTranscriptWindow | undefined {
+        // Persistent sessions can page from anchors older than the bounded
+        // in-memory window. Ask storage first so a months-old client position
+        // cannot turn into an undetected hole between held and recent turns.
+        if (this.#persistence?.loadTranscriptSince !== undefined) {
+            return this.#persistence.loadTranscriptSince(this.id, turnLimit, after);
+        }
+        const runIds = this.#transcriptRunOrder;
+        const eventIdOf = (runId: string): EventId | undefined => {
+            const messages = this.#transcriptRuns.get(runId) ?? [];
+            for (let index = messages.length - 1; index >= 0; index -= 1) {
+                const id = this.events.messageEventId(messages[index]!.message.id);
+                if (id !== undefined) return id;
+            }
+            return undefined;
+        };
+
+        // The first turn whose newest message is at or after the anchor. Turns
+        // are ordered, so everything from here on is what the client is missing.
+        let first = runIds.length;
+        for (let index = 0; index < runIds.length; index += 1) {
+            const newest = eventIdOf(runIds[index]!);
+            if (newest !== undefined && newest >= after) {
+                first = index;
+                break;
+            }
+        }
+        // Nothing at or after the anchor: the client is already current.
+        if (first === runIds.length) {
+            return { complete: true, messages: [], turns: [] };
+        }
+        // The anchor predates everything retained, so paging forward from it
+        // would silently skip whatever was trimmed in between.
+        if (first === 0 && this.#transcriptHasEarlier) return undefined;
+
+        const keptRunIds = runIds.slice(first, first + turnLimit);
+        if (
+            keptRunIds.some((runId) => !this.#runFacts.has(runId)) ||
+            keptRunIds.some((runId) =>
+                (this.#transcriptRuns.get(runId) ?? []).some(
+                    (entry) =>
+                        this.events.messageCreatedAt(entry.message.id) === undefined ||
+                        this.events.messageEventId(entry.message.id) === undefined,
+                ),
+            )
+        ) {
+            return undefined;
+        }
+
+        const entries = keptRunIds.flatMap((runId) =>
+            (this.#transcriptRuns.get(runId) ?? []).map((entry): TranscriptEntry => {
+                const createdAt = this.events.messageCreatedAt(entry.message.id);
+                const eventId = this.events.messageEventId(entry.message.id);
+                return {
+                    ...(createdAt === undefined ? {} : { createdAt }),
+                    ...(eventId === undefined ? {} : { eventId }),
+                    message: entry.message,
+                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                };
+            }),
+        );
+        const window = sessionTranscriptWindow(entries, this.#runFacts, keptRunIds.length);
+        if (window === undefined) return undefined;
+        const toolCallIds = new Set(
+            entries.flatMap((entry) =>
+                entry.message.blocks.flatMap((block) =>
+                    block.type === "tool_call" ? [block.id] : [],
+                ),
+            ),
+        );
+        const permissionReviews = [...toolCallIds].flatMap((toolCallId) => {
+            const review = this.#permissionReviews.get(toolCallId);
+            return review === undefined ? [] : [review];
+        });
+        return {
+            ...window,
+            // Whether this page reaches the newest turn, so a client knows if it
+            // must ask again to finish catching up.
+            complete: first + keptRunIds.length === runIds.length,
+            ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
+        };
     }
 
     /**

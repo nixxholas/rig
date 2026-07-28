@@ -1,6 +1,16 @@
 import type { GlobalEvent } from "./protocol.js";
 import { readSseFrames } from "./sseFrames.js";
-import { SessionStreamRefused } from "./streamSessionEvents.js";
+
+/** The daemon refused the request; retrying it unchanged cannot help. */
+export class LiveStreamRefused extends Error {
+    readonly status: number;
+
+    constructor(status: number) {
+        super(`The daemon refused the live stream with status ${String(status)}.`);
+        this.name = "LiveStreamRefused";
+        this.status = status;
+    }
+}
 
 /** What the daemon says when the stream opens. */
 export interface LiveStreamHello {
@@ -60,20 +70,23 @@ export async function streamLiveEvents(options: LiveStreamOptions): Promise<void
 
     while (!options.signal.aborted) {
         try {
-            await readStreamOnce(fetchImpl, cursor, options, (accepted) => {
+            const delivered = await readStreamOnce(fetchImpl, cursor, options, (accepted) => {
                 cursor = accepted;
             });
             // A stream that ends without throwing is a closed connection, so it
-            // reconnects like any other drop. The delay resets first: this
-            // connection worked, and the next failure starts its own backoff.
-            retryDelay = options.retryDelayMs ?? INITIAL_RETRY_MS;
+            // reconnects like any other drop. The delay resets only when the
+            // connection actually delivered something: an endpoint that accepts
+            // the request and then closes immediately would otherwise be retried
+            // in a hot loop forever, which is exactly the busy work this library
+            // must not do.
+            if (delivered) retryDelay = options.retryDelayMs ?? INITIAL_RETRY_MS;
             if (options.signal.aborted) return;
             options.onDisconnected(new Error("The live stream closed."));
         } catch (error) {
             if (options.signal.aborted) return;
             // A refused cursor is answered with a gap rather than a status, so
             // any refusal here would refuse the retry too.
-            if (error instanceof SessionStreamRefused) throw error;
+            if (error instanceof LiveStreamRefused) throw error;
             options.onDisconnected(error);
         }
         await wait(retryDelay, options.signal);
@@ -81,12 +94,13 @@ export async function streamLiveEvents(options: LiveStreamOptions): Promise<void
     }
 }
 
+/** Reads one connection, reporting whether it delivered any frame at all. */
 async function readStreamOnce(
     fetchImpl: typeof globalThis.fetch,
     after: string | undefined,
     options: LiveStreamOptions,
     onCursor: (cursor: string) => void,
-): Promise<void> {
+): Promise<boolean> {
     const url = new URL("events/live", endpointBase(options.endpoint));
     if (after !== undefined) url.searchParams.set("after", after);
 
@@ -97,11 +111,13 @@ async function readStreamOnce(
     if (response.status >= 400) {
         // Drained so the connection can be released rather than left hanging.
         await response.text().catch(() => undefined);
-        throw new SessionStreamRefused(response.status);
+        throw new LiveStreamRefused(response.status);
     }
     if (response.body === null) throw new Error("The live stream carried no body.");
 
+    let delivered = false;
     for await (const frame of readSseFrames(response.body)) {
+        delivered = true;
         if (frame.name === "hello") {
             const hello = frame.data as LiveStreamHello;
             // Recorded before the caller is told, so a reload triggered from
@@ -114,6 +130,7 @@ async function readStreamOnce(
         options.onEvent(update.event, update.cursor);
         onCursor(update.cursor);
     }
+    return delivered;
 }
 
 function endpointBase(endpoint: string): string {

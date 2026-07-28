@@ -5,7 +5,7 @@ import type { ChatDelta, ChatElement, SessionState } from "@/ChatElement.js";
 import type {
     Message,
     SessionEvent,
-    SessionStreamHello,
+    SessionStateResponse,
     SessionTranscriptWindow,
 } from "@/protocol.js";
 
@@ -19,10 +19,19 @@ function controllableStream() {
             controller = streamController;
         },
     });
+    let state: unknown = sessionStateBody(false);
     return {
         requests,
+        /** Replaces what a bootstrap of this session reports. */
+        setState(next: unknown) {
+            state = next;
+        },
         fetch: (input: string | URL | Request) => {
-            requests.push(new URL(String(input)));
+            const url = new URL(String(input));
+            requests.push(url);
+            if (url.pathname.endsWith("/state")) {
+                return Promise.resolve(new Response(JSON.stringify(state), { status: 200 }));
+            }
             return Promise.resolve(new Response(body, { status: 200 }));
         },
         write(frame: string) {
@@ -34,8 +43,18 @@ function controllableStream() {
     };
 }
 
-function helloFrame(): string {
-    const hello: SessionStreamHello = {
+function liveHello(): string {
+    return `event: hello\ndata: ${JSON.stringify({
+        cursor: "01900000-0000-7000-8000-000000000001",
+        gap: false,
+        resumed: false,
+    })}\n\n`;
+}
+
+function sessionStateBody(paged: boolean): SessionStateResponse {
+    const transcript = paged ? transcriptWindow(4, false) : undefined;
+    const hello: SessionStateResponse = {
+        cursor: "01900000-0000-7000-8000-000000000001",
         activity: { kind: "idle", label: "Idle", since: 0 },
         resumed: false,
         session: {
@@ -51,12 +70,13 @@ function helloFrame(): string {
             permissionMode: "auto",
             projectId: "project-1",
             providerId: "claude",
-            snapshot: { messages: [] },
+            snapshot: { messages: transcript?.messages ?? [] },
             status: "idle",
             tasks: [],
         },
+        ...(transcript === undefined ? {} : { transcript }),
     };
-    return `event: hello\ndata: ${JSON.stringify(hello)}\n\n`;
+    return hello;
 }
 
 function transcriptWindow(run: number, complete: boolean): SessionTranscriptWindow {
@@ -87,36 +107,15 @@ function transcriptWindow(run: number, complete: boolean): SessionTranscriptWind
     };
 }
 
-function pagedHelloFrame(): string {
-    const transcript = transcriptWindow(4, false);
-    const hello: SessionStreamHello = {
-        activity: { kind: "idle", label: "Idle", since: 0 },
-        resumed: false,
-        session: {
-            activity: { kind: "idle", label: "Idle", since: 0 },
-            archived: false,
-            cwd: "/work",
-            id: "session-1",
-            modelLocked: false,
-            modelId: "sonnet-5",
-            models: [],
-            orderKey: "a0",
-            pendingUserInputs: [],
-            permissionMode: "auto",
-            projectId: "project-1",
-            providerId: "claude",
-            snapshot: { messages: transcript.messages },
-            status: "idle",
-            tasks: [],
-        },
-        transcript,
-    };
-    return `event: hello\ndata: ${JSON.stringify(hello)}\n\n`;
-}
-
-function frame(event: Partial<SessionEvent> & { type: string }): string {
+function frame(
+    event: Partial<SessionEvent> & { type: string },
+    cursor = event.id ?? "event-1",
+): string {
     const full = { createdAt: 1, data: {}, id: "event-1", sessionId: "session-1", ...event };
-    return `id: ${full.id}\nevent: ${full.type}\ndata: ${JSON.stringify(full)}\n\n`;
+    return `id: ${cursor}\nevent: update\ndata: ${JSON.stringify({
+        cursor,
+        event: full,
+    })}\n\n`;
 }
 
 async function settle(): Promise<void> {
@@ -125,7 +124,7 @@ async function settle(): Promise<void> {
 }
 
 describe("connectSession", () => {
-    it("renders a conversation from the stream alone, without a follow-up request", async () => {
+    it("renders a conversation from one global stream plus one bootstrap", async () => {
         const stream = controllableStream();
         const renders: { elements: readonly ChatElement[]; session: SessionState }[] = [];
         const connection = connectSession({
@@ -137,28 +136,46 @@ describe("connectSession", () => {
         });
 
         try {
-            stream.write(helloFrame());
-            stream.write(frame({ data: { runId: "run-1" }, id: "e1", type: "run_started" }));
+            stream.write(liveHello());
+            // Stream cursors and session event ids are distinct UUID sequences.
+            // These event ids deliberately sort before the snapshot's stream
+            // cursor, while their delivery cursors sort after it.
             stream.write(
-                frame({
-                    data: {
-                        message: {
-                            blocks: [{ text: "Hello.", type: "text" }],
-                            id: "m1",
-                            role: "agent",
-                        },
-                        runId: "run-1",
+                frame(
+                    {
+                        data: { runId: "run-1" },
+                        id: "00000000-0000-7000-8000-000000000001",
+                        type: "run_started",
                     },
-                    id: "e2",
-                    type: "agent_message",
-                }),
+                    "01900000-0000-7000-8000-000000000002",
+                ),
             );
             stream.write(
-                frame({
-                    data: { runId: "run-1", stopReason: "stop" },
-                    id: "e3",
-                    type: "run_finished",
-                }),
+                frame(
+                    {
+                        data: {
+                            message: {
+                                blocks: [{ text: "Hello.", type: "text" }],
+                                id: "m1",
+                                role: "agent",
+                            },
+                            runId: "run-1",
+                        },
+                        id: "00000000-0000-7000-8000-000000000002",
+                        type: "agent_message",
+                    },
+                    "01900000-0000-7000-8000-000000000003",
+                ),
+            );
+            stream.write(
+                frame(
+                    {
+                        data: { runId: "run-1", stopReason: "stop" },
+                        id: "00000000-0000-7000-8000-000000000003",
+                        type: "run_finished",
+                    },
+                    "01900000-0000-7000-8000-000000000004",
+                ),
             );
             await settle();
 
@@ -167,8 +184,13 @@ describe("connectSession", () => {
                 "turn_end",
             ]);
             expect(connection.session()).toMatchObject({ connection: "live", modelId: "sonnet-5" });
-            // One stream, and nothing else: the whole conversation came from it.
-            expect(stream.requests).toHaveLength(1);
+            // One subscription, and one bootstrap. The stream carries no session
+            // object, so the chat is fetched once and followed from then on; what
+            // matters is that no session-scoped stream was opened.
+            expect(stream.requests.map((url) => url.pathname)).toEqual([
+                "/events/live",
+                "/sessions/session-1/state",
+            ]);
         } finally {
             connection.close();
         }
@@ -191,7 +213,7 @@ describe("connectSession", () => {
         });
 
         try {
-            stream.write(helloFrame());
+            stream.write(liveHello());
             stream.write(frame({ data: { runId: "run-1" }, id: "e1", type: "run_started" }));
             await settle();
 
@@ -214,7 +236,7 @@ describe("connectSession", () => {
         });
 
         try {
-            stream.write(helloFrame());
+            stream.write(liveHello());
             await settle();
             expect(states.at(-1)).toBe("live");
         } finally {
@@ -235,7 +257,7 @@ describe("connectSession", () => {
             token: "secret",
         });
 
-        stream.write(helloFrame());
+        stream.write(liveHello());
         await settle();
         const before = renders;
 
@@ -247,7 +269,7 @@ describe("connectSession", () => {
     });
 
     it.each(["session_reset", "session_rewound"] as const)(
-        "discards an earlier page that arrives after %s",
+        "keeps immutable turns and discards an earlier page that arrives after %s",
         async (type) => {
             const stream = controllableStream();
             let resolvePage: ((response: Response) => void) | undefined;
@@ -266,7 +288,8 @@ describe("connectSession", () => {
             });
 
             try {
-                stream.write(pagedHelloFrame());
+                stream.setState(sessionStateBody(true));
+                stream.write(liveHello());
                 await settle();
                 const token = connection.session().loadMoreToken;
                 if (token === undefined) throw new Error("Expected a load-more token.");
@@ -292,7 +315,9 @@ describe("connectSession", () => {
                 );
                 await settle();
 
-                expect(connection.elements()).toEqual([]);
+                expect(new Set(connection.elements().map((element) => element.turnId))).toEqual(
+                    new Set(["run-4"]),
+                );
                 expect(connection.session()).toMatchObject({
                     loadingMore: false,
                     transcriptComplete: true,

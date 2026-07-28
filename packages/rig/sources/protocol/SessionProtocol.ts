@@ -378,6 +378,24 @@ export interface SessionStreamHello {
     resumed: boolean;
 }
 
+/**
+ * A session bootstrapped by request-response rather than by opening a stream.
+ *
+ * `cursor` is the position in the global live stream that this payload reflects,
+ * so a client can replay everything after it and know exactly what the snapshot
+ * already contains.
+ */
+export interface SessionStateResponse extends SessionStreamHello {
+    /**
+     * The transcript continues what the client holds rather than replacing it.
+     *
+     * Set only when the client asked to catch up from a message it already has
+     * and the daemon could still page forward from there.
+     */
+    append?: boolean;
+    cursor: EventId;
+}
+
 export interface SessionStreamCurrentState {
     draft?: string;
     draftUpdatedAt?: number;

@@ -8,6 +8,7 @@ import type {
 import { ChatStore } from "./ChatStore.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
 import { GroupStore } from "./GroupStore.js";
+import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
 import { orderedUuidV7, type RandomValues } from "./orderedUuidV7.js";
 import type {
     ContentBlock,
@@ -22,13 +23,14 @@ import type {
     SessionEvent,
     SessionTranscriptWindow,
     GlobalStreamHello,
+    SessionStateResponse,
 } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
-import { streamSessionEvents } from "./streamSessionEvents.js";
 
 const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
 const MAXIMUM_PENDING_PER_ENTITY = 256;
+const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
 
 export interface ConnectRigOptions {
     endpoint: string;
@@ -202,9 +204,25 @@ interface GroupSubscriber extends RigGroupsSubscriptionOptions {
     closed: boolean;
 }
 
+interface BufferedSessionEvent {
+    cursor: string;
+    event: SessionEvent;
+}
+
 interface SessionEntry {
+    bootstrapVersion: number;
+    bufferOverflowed: boolean;
     controller: AbortController;
     detachRoot: () => void;
+    /**
+     * Events held while a bootstrap is in flight.
+     *
+     * A snapshot is taken at one position and delivered asynchronously, so events
+     * after that position can arrive before it lands. They are kept here and
+     * replayed onto the snapshot rather than being applied to a session the
+     * snapshot is about to replace.
+     */
+    pending?: BufferedSessionEvent[] | undefined;
     started: boolean;
     store: ChatStore;
     subscribers: Set<SessionSubscriber>;
@@ -212,6 +230,7 @@ interface SessionEntry {
 }
 
 interface GroupEntry {
+    bootstrapVersion: number;
     controller: AbortController;
     detachRoot: () => void;
     started: boolean;
@@ -274,6 +293,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const knownGroupVersions = new Map<string, number>();
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
+    let liveStreamStarted = false;
+    let liveStreamOpen = false;
     let closed = false;
 
     const publishSession = (entry: SessionEntry, deltas: readonly ChatDelta[]): void => {
@@ -824,6 +845,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (known !== undefined) return known;
         const linked = linkedController(rootController.signal);
         const entry: SessionEntry = {
+            bootstrapVersion: 0,
+            bufferOverflowed: false,
             controller: linked.controller,
             detachRoot: linked.detach,
             started: false,
@@ -839,67 +862,90 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return entry;
     };
 
+    /**
+     * Loads a session by request-response and rebases it onto the live stream.
+     *
+     * The stream is opened first and this runs second, so an event that lands
+     * while the bootstrap is in flight is still delivered and replayed on top of
+     * what it describes.
+     */
+    const bootstrapSession = async (entry: SessionEntry): Promise<void> => {
+        const sessionId = entry.store.session().sessionId;
+        let version = ++entry.bootstrapVersion;
+        // Collecting starts before the request, so an event that lands while it is
+        // in flight is held rather than lost or applied out of order.
+        entry.pending ??= [];
+        let state: SessionStateResponse;
+        while (true) {
+            try {
+                state = await fetchSessionState(
+                    options.endpoint,
+                    options.token,
+                    sessionId,
+                    entry.transcriptTurnLimit,
+                    entry.store.newestMessageEventId(),
+                    request,
+                    entry.controller.signal,
+                );
+            } catch (error) {
+                if (version !== entry.bootstrapVersion) return;
+                entry.bufferOverflowed = false;
+                entry.pending = undefined;
+                throw error;
+            }
+            // A newer reload supersedes this answer. It shares the same pending
+            // buffer, so events collected by this request remain available to the
+            // request that will actually land.
+            if (version !== entry.bootstrapVersion) return;
+            if (!entry.bufferOverflowed) break;
+            // The bounded buffer could not prove continuity. Take a newer
+            // snapshot while continuing to collect, rather than applying a
+            // response that might have an event missing after its cursor.
+            entry.bufferOverflowed = false;
+            entry.pending = [];
+            version = ++entry.bootstrapVersion;
+        }
+        // Only what the snapshot does not already contain. The cursor is the
+        // global-stream position it was taken at. Session event ids come from a
+        // different UUID scope and cannot be compared with it.
+        const replay = (entry.pending ?? []).filter((item) => item.cursor > state.cursor);
+        entry.pending = undefined;
+        const newest = replay.at(-1)?.event.id ?? state.lastEventId;
+        if (newest !== undefined) rememberSessionCursor(sessionId, newest);
+        reconcile([sessionKey(sessionId)], undefined, [sessionId], true, () => ({
+            sessionDeltas: new Map([
+                [
+                    sessionId,
+                    [
+                        ...entry.store.setConnection("live"),
+                        ...entry.store.applyHello(state),
+                        ...replay.flatMap(({ event }) => [...entry.store.apply(event)]),
+                    ],
+                ],
+            ]),
+        }));
+    };
+
     const startSessionEntry = (entry: SessionEntry): void => {
         if (entry.started) return;
         entry.started = true;
-        const sessionId = entry.store.session().sessionId;
-        const key = sessionKey(sessionId);
-        void streamSessionEvents({
-            endpoint: options.endpoint,
-            fetch: request,
-            sessionId,
-            signal: entry.controller.signal,
-            token: options.token,
-            ...(options.wait === undefined ? {} : { wait }),
-            ...(entry.transcriptTurnLimit === undefined
-                ? {}
-                : { transcriptTurnLimit: entry.transcriptTurnLimit }),
-            onHello: (hello) => {
-                if (hello.lastEventId !== undefined && !hello.resumed) {
-                    rememberSessionCursor(sessionId, hello.lastEventId);
-                }
-                reconcile([key], undefined, [sessionId], true, () => ({
-                    sessionDeltas: new Map([
-                        [
-                            sessionId,
-                            [
-                                ...entry.store.setConnection("live"),
-                                ...entry.store.applyHello(hello),
-                            ],
-                        ],
-                    ]),
-                }));
-            },
-            onEvent: (event) => {
-                rememberSessionCursor(sessionId, event.id);
-                reconcile([key], mutationIdOf(event), [sessionId], true, () => ({
-                    sessionDeltas: new Map([[sessionId, entry.store.apply(event)]]),
-                }));
-            },
-            onDisconnected: () => {
-                reconcile([key], undefined, [sessionId], false, () => ({
-                    sessionDeltas: new Map([
-                        [sessionId, entry.store.setConnection("reconnecting")],
-                    ]),
-                }));
-            },
-        })
-            .catch((error: unknown) => {
-                if (closed || entry.controller.signal.aborted) return;
-                publishSession(entry, entry.store.setConnection("closed"));
-                for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
-            })
-            .finally(() => {
-                if (!closed && !entry.controller.signal.aborted) {
-                    publishSession(entry, entry.store.setConnection("closed"));
-                }
-            });
+        ensureLiveStream();
+        // Opening the stream reports a position, and that is what triggers the
+        // load. A view attaching to a stream that is already open has missed that
+        // signal, so it loads now instead.
+        if (!liveStreamOpen) return;
+        void bootstrapSession(entry).catch((error: unknown) => {
+            if (closed || entry.controller.signal.aborted) return;
+            publishSession(entry, entry.store.setConnection("closed"));
+            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        });
     };
 
     const createGroupEntry = (): GroupEntry => {
         if (groupsEntry !== undefined) return groupsEntry;
         const linked = linkedController(rootController.signal);
         const entry: GroupEntry = {
+            bootstrapVersion: 0,
             controller: linked.controller,
             detachRoot: linked.detach,
             started: false,
@@ -919,84 +965,187 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return entry;
     };
 
-    const startGroupEntry = (entry: GroupEntry): void => {
-        if (entry.started) return;
-        entry.started = true;
-        // The stream opens first and the catalog loads second, so nothing that
-        // happens during the load can fall into a gap between them.
-        const loadCatalog = async (): Promise<void> => {
-            const hello = await fetchCatalog(
+    const loadCatalog = async (entry: GroupEntry): Promise<void> => {
+        const version = ++entry.bootstrapVersion;
+        let hello: GlobalStreamHello;
+        try {
+            hello = await fetchCatalog(
                 options.endpoint,
                 options.token,
                 request,
                 entry.controller.signal,
             );
-            applyCatalog(entry, hello);
-        };
-
-        const applyCatalog = (target: GroupEntry, hello: GlobalStreamHello): void => {
-            for (const project of hello.projects) {
-                rememberGroupVersion(projectKey(project.id), project.version);
-            }
-            for (const workspace of hello.workspaces) {
-                rememberGroupVersion(
-                    workspaceKey(workspace.projectId, workspace.id),
-                    workspace.version,
-                );
-            }
-            for (const session of hello.sessions) {
-                if (session.lastEventId !== undefined) {
-                    rememberSessionCursor(session.id, session.lastEventId);
-                }
-            }
-            reconcile(
-                pendingOverlays.map((mutation) => mutation.entityKey),
-                undefined,
-                [],
-                true,
-                () => ({
-                    groupDeltas: [
-                        ...target.store.setConnection("live"),
-                        ...target.store.applyHello(hello),
-                    ],
-                }),
+        } catch (error) {
+            if (version !== entry.bootstrapVersion) return;
+            throw error;
+        }
+        if (version !== entry.bootstrapVersion) return;
+        for (const project of hello.projects) {
+            rememberGroupVersion(projectKey(project.id), project.version);
+        }
+        for (const workspace of hello.workspaces) {
+            rememberGroupVersion(
+                workspaceKey(workspace.projectId, workspace.id),
+                workspace.version,
             );
-        };
+        }
+        for (const session of hello.sessions) {
+            if (session.lastEventId !== undefined) {
+                rememberSessionCursor(session.id, session.lastEventId);
+            }
+        }
+        reconcile(
+            pendingOverlays.map((mutation) => mutation.entityKey),
+            undefined,
+            [],
+            true,
+            () => ({
+                groupDeltas: [
+                    ...entry.store.setConnection("live"),
+                    ...entry.store.applyHello(hello),
+                ],
+            }),
+        );
+    };
 
+    const startGroupEntry = (entry: GroupEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (!liveStreamOpen) return;
+        void loadCatalog(entry).catch((error: unknown) => {
+            if (closed || entry.controller.signal.aborted) return;
+            publishGroups(entry, entry.store.setConnection("closed"));
+            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        });
+    };
+
+    /**
+     * Opens the one subscription this connection has, if it is not open already.
+     *
+     * Groups and chats are both views over this single stream: a chat filters it
+     * down to the session it is showing rather than opening a stream of its own.
+     */
+    const ensureLiveStream = (): void => {
+        if (liveStreamStarted) return;
+        liveStreamStarted = true;
         void streamLiveEvents({
             endpoint: options.endpoint,
             fetch: request,
-            signal: entry.controller.signal,
+            signal: rootController.signal,
             token: options.token,
             ...(options.wait === undefined ? {} : { wait }),
             onOpen: (hello) => {
-                // A clean resume replayed every missed event, so the entities this
-                // client holds are already current and re-fetching them is waste.
-                // A gap is what leaves them uncertain; a first open is the case
-                // where the client holds nothing at all.
-                if (hello.resumed && !hello.gap) return;
-                void loadCatalog().catch((error: unknown) => {
-                    if (closed || entry.controller.signal.aborted) return;
-                    for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
-                });
+                liveStreamOpen = true;
+                // A clean resume replayed every missed event, so what this client
+                // holds is already current. A gap is what leaves it uncertain, and
+                // a first open is the case where it holds nothing at all.
+                //
+                // Nothing needs reloading here, but the views are still showing
+                // "reconnecting", so they are told the stream is live. On the
+                // reload path this is deliberately left to the load itself: a view
+                // must not report live while it is still empty.
+                if (hello.resumed && !hello.gap) {
+                    if (groupsEntry !== undefined) {
+                        publishGroups(groupsEntry, groupsEntry.store.setConnection("live"));
+                    }
+                    for (const entry of [...sessionEntries.values()]) {
+                        if (entry.started) publishSession(entry, entry.store.setConnection("live"));
+                    }
+                    return;
+                }
+                const groups = groupsEntry;
+                if (groups !== undefined && groups.started) {
+                    void loadCatalog(groups).catch((error: unknown) => {
+                        if (closed || groups.controller.signal.aborted) return;
+                        for (const subscriber of [...groups.subscribers]) {
+                            subscriber.onError?.(error);
+                        }
+                    });
+                }
+                for (const entry of [...sessionEntries.values()]) {
+                    if (!entry.started) continue;
+                    void bootstrapSession(entry).catch((error: unknown) => {
+                        if (closed || entry.controller.signal.aborted) return;
+                        for (const subscriber of [...entry.subscribers]) {
+                            subscriber.onError?.(error);
+                        }
+                    });
+                }
             },
-            onEvent: (event) => {
+            onEvent: (event, cursor) => {
                 rememberGlobalIdentity(event);
+                if ("sessionId" in event && typeof event.sessionId === "string") {
+                    // Held only while that session is bootstrapping; the snapshot
+                    // replays these itself once it lands.
+                    const entry = sessionEntries.get(event.sessionId);
+                    if (entry?.pending !== undefined) {
+                        if (entry.pending.length === MAXIMUM_BUFFERED_SESSION_EVENTS) {
+                            entry.pending.shift();
+                            entry.bufferOverflowed = true;
+                        }
+                        entry.pending.push({ cursor, event: event as SessionEvent });
+                    }
+                }
                 const key = globalEventKey(event);
-                reconcile([key], mutationIdOf(event), [], true, () => ({
-                    groupDeltas: entry.store.apply(event),
-                }));
+                const sessionId =
+                    "sessionId" in event && typeof event.sessionId === "string"
+                        ? event.sessionId
+                        : undefined;
+                const session = sessionId === undefined ? undefined : sessionEntries.get(sessionId);
+                reconcile(
+                    [key],
+                    mutationIdOf(event),
+                    sessionId === undefined ? [] : [sessionId],
+                    true,
+                    () => ({
+                        ...(groupsEntry === undefined
+                            ? {}
+                            : { groupDeltas: groupsEntry.store.apply(event) }),
+                        ...(session === undefined ||
+                        sessionId === undefined ||
+                        session.pending !== undefined
+                            ? {}
+                            : {
+                                  sessionDeltas: new Map([
+                                      [sessionId, session.store.apply(event as SessionEvent)],
+                                  ]),
+                              }),
+                    }),
+                );
             },
-            onDisconnected: () => publishGroups(entry, entry.store.setConnection("reconnecting")),
+            onDisconnected: () => {
+                liveStreamOpen = false;
+                if (groupsEntry !== undefined) {
+                    publishGroups(groupsEntry, groupsEntry.store.setConnection("reconnecting"));
+                }
+                for (const entry of [...sessionEntries.values()]) {
+                    if (entry.started) {
+                        publishSession(entry, entry.store.setConnection("reconnecting"));
+                    }
+                }
+            },
         })
             .catch((error: unknown) => {
-                if (closed || entry.controller.signal.aborted) return;
-                publishGroups(entry, entry.store.setConnection("closed"));
-                for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                if (closed || rootController.signal.aborted) return;
+                if (groupsEntry !== undefined) {
+                    publishGroups(groupsEntry, groupsEntry.store.setConnection("closed"));
+                    for (const subscriber of [...groupsEntry.subscribers]) {
+                        subscriber.onError?.(error);
+                    }
+                }
+                for (const entry of [...sessionEntries.values()]) {
+                    publishSession(entry, entry.store.setConnection("closed"));
+                    for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                }
             })
             .finally(() => {
-                if (!closed && !entry.controller.signal.aborted) {
-                    publishGroups(entry, entry.store.setConnection("closed"));
+                if (closed || rootController.signal.aborted) return;
+                if (groupsEntry !== undefined) {
+                    publishGroups(groupsEntry, groupsEntry.store.setConnection("closed"));
+                }
+                for (const entry of [...sessionEntries.values()]) {
+                    publishSession(entry, entry.store.setConnection("closed"));
                 }
             });
     };
@@ -2136,6 +2285,105 @@ async function fetchCatalog(
     });
     if (!response.ok) throw new Error(`Rig answered with ${String(response.status)}.`);
     return (await response.json()) as GlobalStreamHello;
+}
+
+/**
+ * Loads everything needed to start showing a session, by request-response.
+ *
+ * The reply states the position in the live stream it reflects, so the events
+ * that arrive after it can be replayed on top rather than guessed about.
+ */
+async function fetchSessionState(
+    endpoint: string,
+    token: string,
+    sessionId: string,
+    turnLimit: number | undefined,
+    after: string | undefined,
+    request: typeof globalThis.fetch,
+    signal: AbortSignal,
+): Promise<SessionStateResponse> {
+    const query = new URLSearchParams();
+    if (turnLimit !== undefined) query.set("turns", String(turnLimit));
+    // The newest message already held, so the daemon sends only what follows it.
+    if (after !== undefined) query.set("after", after);
+    const path = `sessions/${encodeURIComponent(sessionId)}/state`;
+    const url = endpointUrl(endpoint, query.size === 0 ? path : `${path}?${query.toString()}`);
+    const response = await request(url, {
+        headers: { accept: "application/json", authorization: `Bearer ${token}` },
+        signal,
+    });
+    if (!response.ok) throw new Error(`Rig answered with ${String(response.status)}.`);
+    let state = (await response.json()) as SessionStateResponse;
+    if (state.append !== true || state.transcript === undefined) return state;
+
+    let transcript = state.transcript;
+    while (!transcript.complete) {
+        const pageAnchor = newestMessageEventId(transcript);
+        if (pageAnchor === undefined) {
+            throw new Error("Rig returned a forward transcript page without a message cursor.");
+        }
+        const page = await fetchTranscriptAfter(
+            endpoint,
+            token,
+            sessionId,
+            pageAnchor,
+            request,
+            signal,
+        );
+        const nextAnchor = newestMessageEventId(page);
+        if (!page.complete && (nextAnchor === undefined || nextAnchor === pageAnchor)) {
+            throw new Error("Rig returned a forward transcript page that made no progress.");
+        }
+        transcript = mergeForwardTranscriptWindow(transcript, page, page.complete);
+    }
+    state = {
+        ...state,
+        transcript,
+        ...(state.session === undefined
+            ? {}
+            : {
+                  session: {
+                      ...state.session,
+                      snapshot: { ...state.session.snapshot, messages: transcript.messages },
+                  },
+              }),
+    };
+    return state;
+}
+
+async function fetchTranscriptAfter(
+    endpoint: string,
+    token: string,
+    sessionId: string,
+    after: string,
+    request: typeof globalThis.fetch,
+    signal: AbortSignal,
+): Promise<SessionTranscriptWindow> {
+    const url = endpointUrl(
+        endpoint,
+        `sessions/${encodeURIComponent(sessionId)}/transcript?after=${encodeURIComponent(after)}`,
+    );
+    const response = await request(url, {
+        headers: { authorization: `Bearer ${token}` },
+        signal,
+    });
+    if (!response.ok) {
+        throw new Error(
+            response.status === 409
+                ? "That part of the conversation is no longer available."
+                : `Rig answered with ${String(response.status)}.`,
+        );
+    }
+    return (await response.json()) as SessionTranscriptWindow;
+}
+
+function newestMessageEventId(transcript: SessionTranscriptWindow): string | undefined {
+    let newest: string | undefined;
+    for (const message of transcript.messages) {
+        const eventId = transcript.messageEventId?.[message.id];
+        if (eventId !== undefined && (newest === undefined || eventId > newest)) newest = eventId;
+    }
+    return newest;
 }
 
 async function fetchEarlier(

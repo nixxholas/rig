@@ -48,7 +48,7 @@ import type {
     UserMessageElement,
 } from "./ChatElement.js";
 import { groupToolCalls } from "./groupToolCalls.js";
-import { mergeTranscriptWindow } from "./mergeTranscriptWindow.js";
+import { mergeForwardTranscriptWindow, mergeTranscriptWindow } from "./mergeTranscriptWindow.js";
 
 const IDLE_ACTIVITY: SessionActivity = { kind: "idle", label: "Idle", since: 0 };
 
@@ -167,6 +167,28 @@ export class ChatStore {
     earliestRunId(): string | undefined {
         if (this.#session.transcriptComplete) return undefined;
         return this.#loadedTranscript?.turns[0]?.runId;
+    }
+
+    /**
+     * The event id of the newest message this store holds.
+     *
+     * This is the anchor a catch-up starts from: the daemon returns the turns
+     * from here on, so a conversation is not re-sent from the beginning after a
+     * gap. Absent when nothing has been loaded yet, which means a full load.
+     */
+    newestMessageEventId(): string | undefined {
+        const transcript = this.#loadedTranscript;
+        if (transcript === undefined) return undefined;
+        const eventIds = transcript.messageEventId;
+        if (eventIds === undefined) return undefined;
+        let newest: string | undefined;
+        for (const message of transcript.messages) {
+            const eventId = eventIds[message.id];
+            if (eventId !== undefined && (newest === undefined || eventId > newest)) {
+                newest = eventId;
+            }
+        }
+        return newest;
     }
 
     /**
@@ -510,7 +532,7 @@ export class ChatStore {
      * transcript. A resume carries only what the event log cannot replay, so the
      * list is left alone and the in-flight message is restored.
      */
-    applyHello(hello: SessionStreamHello): readonly ChatDelta[] {
+    applyHello(hello: SessionStreamHello & { append?: boolean }): readonly ChatDelta[] {
         const deltas: ChatDelta[] = [];
         const revisionBefore = this.#revision;
         const sessionBefore = this.#session;
@@ -518,7 +540,9 @@ export class ChatStore {
             const merged =
                 hello.transcript === undefined
                     ? undefined
-                    : mergeTranscriptWindow(this.#loadedTranscript, hello.transcript);
+                    : hello.append === true
+                      ? this.#appendForwardPage(hello.transcript)
+                      : mergeTranscriptWindow(this.#loadedTranscript, hello.transcript);
             this.#resetFromSession(hello.session, merged, hello.usage);
             // The opening frame carries a bounded window, so the caller is told
             // whether the conversation began before the first element it has.
@@ -581,6 +605,21 @@ export class ChatStore {
             this.#applyPartialMessage(hello.partial.message, hello.partial.runId, deltas);
         }
         return this.#finish(deltas, revisionBefore, sessionBefore);
+    }
+
+    /**
+     * Joins a catch-up page onto the conversation already held.
+     *
+     * `complete` means something different on a forward page: it says the page
+     * reaches the newest turn, not that it holds the conversation from the
+     * beginning. Passing it through unchanged would tell the merge to replace
+     * everything, throwing away the history this client is catching up on. How
+     * far back the transcript reaches is unchanged by a page from the far end,
+     * so that answer is kept from what was already loaded.
+     */
+    #appendForwardPage(page: SessionTranscriptWindow): SessionTranscriptWindow {
+        const loaded = this.#loadedTranscript;
+        return mergeForwardTranscriptWindow(loaded, page, loaded?.complete ?? page.complete);
     }
 
     setConnection(connection: ConnectionState): readonly ChatDelta[] {
@@ -993,9 +1032,21 @@ export class ChatStore {
                 };
                 const transcript =
                     data.transcript === undefined
-                        ? undefined
+                        ? this.#loadedTranscript
                         : mergeTranscriptWindow(this.#loadedTranscript, data.transcript);
-                this.#resetTranscript(data.snapshot.messages, deltas, transcript);
+                if (transcript === undefined) {
+                    // Old turns are immutable even when this event carries only
+                    // the new model-context snapshot. Cancel a stale history
+                    // request without rebuilding the visible timeline from it.
+                    this.#transcriptGeneration += 1;
+                    this.#activeLoadMoreAnchor = undefined;
+                    this.#session = {
+                        ...withoutKeys(this.#session, ["activeTurn", "loadMoreError"]),
+                        loadingMore: false,
+                    };
+                } else {
+                    this.#resetTranscript(data.snapshot.messages, deltas, transcript);
+                }
                 const usage = this.#session.usage;
                 const loadMoreToken =
                     transcript?.complete === false ? historyToken(transcript) : undefined;

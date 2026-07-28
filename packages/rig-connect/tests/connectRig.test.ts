@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatDelta } from "@/ChatElement.js";
 import { connectRig } from "@/connectRig.js";
-import type { GlobalStreamHello, SessionStreamHello } from "@/protocol.js";
+import type {
+    GlobalStreamHello,
+    SessionStateResponse,
+    SessionTranscriptWindow,
+} from "@/protocol.js";
 
 function deferred<T>() {
     let resolve!: (value: T) => void;
@@ -29,8 +33,9 @@ function streamResponse() {
     };
 }
 
-function hello(modelId = "old-model"): string {
-    const value: SessionStreamHello = {
+function sessionState(modelId = "old-model"): SessionStateResponse {
+    return {
+        cursor: "01900000-0000-7000-8000-000000000001",
         activity: { kind: "idle", label: "Idle", since: 1 },
         lastEventId: "01900000-0000-7000-8000-000000000001",
         resumed: false,
@@ -53,7 +58,50 @@ function hello(modelId = "old-model"): string {
             tasks: [],
         },
     };
-    return `event: hello\ndata: ${JSON.stringify(value)}\n\n`;
+}
+
+function transcriptWindow(runs: readonly number[], complete: boolean): SessionTranscriptWindow {
+    const messages = runs.map((run) => ({
+        blocks: [{ text: `Message ${String(run)}`, type: "text" as const }],
+        id: `message-${String(run)}`,
+        role: "user" as const,
+    }));
+    return {
+        complete,
+        messageCreatedAt: Object.fromEntries(
+            runs.map((run) => [`message-${String(run)}`, run * 100]),
+        ),
+        messageEventId: Object.fromEntries(
+            runs.map((run) => [
+                `message-${String(run)}`,
+                `01900000-0000-7000-8000-${String(run).padStart(12, "0")}`,
+            ]),
+        ),
+        messages,
+        turns: runs.map((run) => ({
+            endedAt: run * 100 + 50,
+            messageIds: [`message-${String(run)}`],
+            outcome: "success" as const,
+            runId: `run-${String(run)}`,
+            startedAt: run * 100,
+        })),
+    };
+}
+
+function sessionStateWithTranscript(
+    transcript: SessionTranscriptWindow,
+    append = false,
+): SessionStateResponse {
+    const state = sessionState();
+    return {
+        ...state,
+        ...(append ? { append: true } : {}),
+        session: {
+            ...state.session!,
+            snapshot: { ...state.session!.snapshot, messages: transcript.messages },
+        },
+        transcript,
+    };
 }
 
 function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
@@ -82,8 +130,15 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
 }
 
 /** The light hello the live stream opens with: a position, and nothing else. */
-function liveHello(cursor = "01900000-0000-7000-8000-000000000001"): string {
-    return `event: hello\ndata: ${JSON.stringify({ cursor, gap: false, resumed: false })}\n\n`;
+function liveHello(
+    cursor = "01900000-0000-7000-8000-000000000001",
+    options: { gap?: boolean; resumed?: boolean } = {},
+): string {
+    return `event: hello\ndata: ${JSON.stringify({
+        cursor,
+        gap: options.gap ?? false,
+        resumed: options.resumed ?? false,
+    })}\n\n`;
 }
 
 function event(
@@ -91,12 +146,9 @@ function event(
     data: Record<string, unknown>,
     id = "01900000-0000-7000-8000-000000000002",
 ): string {
-    return `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify({
-        createdAt: 2,
-        data,
-        id,
-        sessionId: "session-1",
-        type,
+    return `id: ${id}\nevent: update\ndata: ${JSON.stringify({
+        cursor: id,
+        event: { createdAt: 2, data, id, sessionId: "session-1", type },
     })}\n\n`;
 }
 
@@ -176,9 +228,10 @@ describe("connectRig mutations", () => {
             fetch: (input, init) => {
                 const url = new URL(String(input));
                 calls.push({ ...(init === undefined ? {} : { init }), url });
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
                 return Promise.resolve(
-                    url.pathname.endsWith("/stream")
-                        ? stream.response
+                    url.pathname.endsWith("/state")
+                        ? new Response(JSON.stringify(sessionState()), { status: 200 })
                         : new Response("{}", { status: 200 }),
                 );
             },
@@ -191,7 +244,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             const createdId = rig.createSession({ cwd: "/new-work" });
             const forkedId = rig.forkSession("session-1");
@@ -224,9 +277,10 @@ describe("connectRig mutations", () => {
             fetch: (input, init) => {
                 const url = new URL(String(input));
                 calls.push({ ...(init === undefined ? {} : { init }), url });
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
                 return Promise.resolve(
-                    url.pathname.endsWith("/stream")
-                        ? stream.response
+                    url.pathname.endsWith("/state")
+                        ? new Response(JSON.stringify(sessionState()), { status: 200 })
                         : new Response("{}", { status: 200 }),
                 );
             },
@@ -239,7 +293,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             stream.write(
                 event("user_input_requested", {
@@ -280,7 +334,11 @@ describe("connectRig mutations", () => {
             await settle();
             expect(
                 calls
-                    .filter((call) => !call.url.pathname.endsWith("/stream"))
+                    .filter(
+                        (call) =>
+                            call.url.pathname !== "/events/live" &&
+                            !call.url.pathname.endsWith("/state"),
+                    )
                     .map((call) => `${call.init?.method} ${call.url.pathname}`),
             ).toEqual([
                 "PATCH /sessions/session-1/effort",
@@ -309,8 +367,13 @@ describe("connectRig mutations", () => {
         const fetch = vi.fn((input: string | URL | Request, init?: RequestInit) => {
             const url = new URL(String(input));
             calls.push({ ...(init === undefined ? {} : { init }), url });
-            if (url.pathname.endsWith("/stream")) {
+            if (url.pathname === "/events/live") {
                 return Promise.resolve(stream.response);
+            }
+            if (url.pathname.endsWith("/state")) {
+                return Promise.resolve(
+                    new Response(JSON.stringify(sessionState()), { status: 200 }),
+                );
             }
             return Promise.resolve(
                 new Response(JSON.stringify({ eventId: "event-send" }), { status: 202 }),
@@ -333,7 +396,7 @@ describe("connectRig mutations", () => {
         });
 
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             const mutationId = rig.sendMessage("session-1", "Visible now");
 
@@ -344,7 +407,7 @@ describe("connectRig mutations", () => {
                 text: "Visible now",
             });
             expect(second.elements()).toBe(first.elements());
-            expect(calls.filter((call) => call.url.pathname.endsWith("/stream"))).toHaveLength(1);
+            expect(calls.filter((call) => call.url.pathname === "/events/live")).toHaveLength(1);
             const sent = calls.find((call) => call.url.pathname.endsWith("/messages"));
             expect(JSON.parse(String(sent?.init?.body))).toMatchObject({
                 clientSubmissionId: mutationId,
@@ -369,7 +432,12 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input, init) => {
                 const url = new URL(String(input));
-                if (url.pathname.endsWith("/stream")) return Promise.resolve(stream.response);
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
                 bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
                 attempts += 1;
                 return attempts === 1
@@ -387,7 +455,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             rig.sendMessage("session-1", "Once");
             await settle();
@@ -408,7 +476,12 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input) => {
                 const url = new URL(String(input));
-                if (url.pathname.endsWith("/stream")) return Promise.resolve(stream.response);
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
                 attempts += 1;
                 return attempts === 1
                     ? Promise.reject(new TypeError("response lost"))
@@ -436,7 +509,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             rig.switchModel("session-1", "new-model");
             await settle();
@@ -456,7 +529,12 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input) => {
                 const url = new URL(String(input));
-                if (url.pathname.endsWith("/stream")) return Promise.resolve(stream.response);
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
                 return Promise.resolve(
                     new Response(
                         JSON.stringify({
@@ -491,7 +569,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             rig.switchModel("session-1", "new-model");
             expect(connection.session().modelId).toBe("new-model");
@@ -512,10 +590,15 @@ describe("connectRig mutations", () => {
             fetch: (input, init) => {
                 const url = new URL(String(input));
                 const sessionId = url.pathname.split("/")[2] ?? "";
-                if (url.pathname.endsWith("/stream")) {
+                if (url.pathname === "/events/live") {
                     const stream = streamResponse();
-                    streams.set(sessionId, stream);
+                    streams.set("live", stream);
                     return Promise.resolve(stream.response);
+                }
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
                 }
                 const pending = deferred<Response>();
                 responses.push(pending);
@@ -567,7 +650,12 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input) => {
                 const url = new URL(String(input));
-                if (url.pathname.endsWith("/stream")) return Promise.resolve(stream.response);
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
                 mutations += 1;
                 return mutations === 1
                     ? Promise.resolve(
@@ -586,7 +674,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             const rejected = rig.switchModel("session-1", "model-a");
             rig.switchModel("session-1", "model-b");
@@ -611,14 +699,21 @@ describe("connectRig mutations", () => {
         const streams: ReturnType<typeof streamResponse>[] = [];
         const response = deferred<Response>();
         let mutationCalls = 0;
+        // What the daemon reports when the client bootstraps the session again.
+        let stateModel = "old-model";
         const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: (input) => {
                 const url = new URL(String(input));
-                if (url.pathname.endsWith("/stream")) {
+                if (url.pathname === "/events/live") {
                     const stream = streamResponse();
                     streams.push(stream);
                     return Promise.resolve(stream.response);
+                }
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState(stateModel)), { status: 200 }),
+                    );
                 }
                 mutationCalls += 1;
                 return response.promise;
@@ -633,7 +728,7 @@ describe("connectRig mutations", () => {
         });
         try {
             await settle();
-            streams[0]?.write(hello());
+            streams[0]?.write(liveHello());
             await settle();
             rig.switchModel("session-1", "new-model");
             streams[0]?.close();
@@ -649,11 +744,226 @@ describe("connectRig mutations", () => {
             );
             await settle();
             expect(connection.session().modelId).toBe("new-model");
-            streams[1]?.write(hello("authoritative-model"));
+            stateModel = "authoritative-model";
+            streams[1]?.write(liveHello());
             await settle();
             // A completed mutation is committed, not retained as an overlay
             // that can overwrite a later recovery snapshot forever.
             expect(connection.session().modelId).toBe("authoritative-model");
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("ignores a late failure from a superseded session bootstrap", async () => {
+        const streams: ReturnType<typeof streamResponse>[] = [];
+        const states = [deferred<Response>(), deferred<Response>()];
+        const errors: unknown[] = [];
+        let stateRequests = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") {
+                    const stream = streamResponse();
+                    streams.push(stream);
+                    return Promise.resolve(stream.response);
+                }
+                if (url.pathname.endsWith("/state")) {
+                    return states[stateRequests++]!.promise;
+                }
+                return Promise.resolve(new Response("{}", { status: 500 }));
+            },
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            onError: (error) => errors.push(error),
+            sessionId: "session-1",
+        });
+        try {
+            await settle();
+            streams[0]?.write(liveHello());
+            await settle();
+            expect(stateRequests).toBe(1);
+
+            streams[0]?.close();
+            await settle();
+            streams[1]?.write(
+                liveHello("01900000-0000-7000-8000-000000000099", {
+                    gap: true,
+                    resumed: true,
+                }),
+            );
+            await settle();
+            expect(stateRequests).toBe(2);
+
+            states[1]!.resolve(
+                new Response(JSON.stringify(sessionState("recovered-model")), { status: 200 }),
+            );
+            await settle();
+            expect(connection.session()).toMatchObject({
+                connection: "live",
+                modelId: "recovered-model",
+            });
+
+            states[0]!.reject(new Error("stale bootstrap failed"));
+            await settle();
+            expect(connection.session()).toMatchObject({
+                connection: "live",
+                modelId: "recovered-model",
+            });
+            expect(errors).toEqual([]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("ignores a late failure from a superseded catalog bootstrap", async () => {
+        const streams: ReturnType<typeof streamResponse>[] = [];
+        const catalogs = [deferred<Response>(), deferred<Response>()];
+        const errors: unknown[] = [];
+        let catalogRequests = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") {
+                    const stream = streamResponse();
+                    streams.push(stream);
+                    return Promise.resolve(stream.response);
+                }
+                if (url.pathname === "/catalog") {
+                    return catalogs[catalogRequests++]!.promise;
+                }
+                return Promise.resolve(new Response("{}", { status: 500 }));
+            },
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        const connection = rig.connectGroups({
+            onChange: () => undefined,
+            onError: (error) => errors.push(error),
+        });
+        try {
+            await settle();
+            streams[0]?.write(liveHello());
+            await settle();
+            expect(catalogRequests).toBe(1);
+
+            streams[0]?.close();
+            await settle();
+            streams[1]?.write(
+                liveHello("01900000-0000-7000-8000-000000000099", {
+                    gap: true,
+                    resumed: true,
+                }),
+            );
+            await settle();
+            expect(catalogRequests).toBe(2);
+
+            const recovered = groupsCatalog();
+            catalogs[1]!.resolve(
+                new Response(
+                    JSON.stringify({
+                        ...recovered,
+                        projects: recovered.projects.map((project) => ({
+                            ...project,
+                            name: "Recovered",
+                        })),
+                    }),
+                    { status: 200 },
+                ),
+            );
+            await settle();
+            expect(connection.state().connection).toBe("live");
+            expect(connection.projects()[0]?.name).toBe("Recovered");
+
+            catalogs[0]!.reject(new Error("stale catalog failed"));
+            await settle();
+            expect(connection.state().connection).toBe("live");
+            expect(connection.projects()[0]?.name).toBe("Recovered");
+            expect(errors).toEqual([]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("pages from the held message through the newest turn after a gap", async () => {
+        const streams: ReturnType<typeof streamResponse>[] = [];
+        const requested: URL[] = [];
+        let stateRequests = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                requested.push(url);
+                if (url.pathname === "/events/live") {
+                    const stream = streamResponse();
+                    streams.push(stream);
+                    return Promise.resolve(stream.response);
+                }
+                if (url.pathname.endsWith("/state")) {
+                    stateRequests += 1;
+                    const state =
+                        stateRequests === 1
+                            ? sessionStateWithTranscript(transcriptWindow([1], true))
+                            : sessionStateWithTranscript(transcriptWindow([1, 2], false), true);
+                    return Promise.resolve(new Response(JSON.stringify(state), { status: 200 }));
+                }
+                if (url.pathname.endsWith("/transcript")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(transcriptWindow([2, 3], true)), {
+                            status: 200,
+                        }),
+                    );
+                }
+                return Promise.resolve(new Response("{}", { status: 500 }));
+            },
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: "session-1",
+        });
+        try {
+            await settle();
+            streams[0]?.write(liveHello());
+            await settle();
+            expect(
+                connection.elements().filter((element) => element.kind === "user_message"),
+            ).toHaveLength(1);
+
+            streams[0]?.close();
+            await settle();
+            streams[1]?.write(
+                liveHello("01900000-0000-7000-8000-000000000099", {
+                    gap: true,
+                    resumed: true,
+                }),
+            );
+            await settle();
+
+            const messages = connection
+                .elements()
+                .filter((element) => element.kind === "user_message");
+            expect(messages).toHaveLength(3);
+            expect(JSON.stringify(messages)).toContain("Message 3");
+            expect(
+                requested.some(
+                    (url) =>
+                        url.pathname === "/sessions/session-1/transcript" &&
+                        url.searchParams.get("after") === "01900000-0000-7000-8000-000000000002",
+                ),
+            ).toBe(true);
         } finally {
             connection.close();
             rig.close();
@@ -669,7 +979,12 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input) => {
                 const url = new URL(String(input));
-                if (url.pathname.endsWith("/stream")) return Promise.resolve(stream.response);
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
                 mutationCalls += 1;
                 return Promise.reject(new TypeError("offline"));
             },
@@ -683,7 +998,7 @@ describe("connectRig mutations", () => {
             },
             sessionId: "session-1",
         });
-        stream.write(hello());
+        stream.write(liveHello());
         await settle();
         rig.sendMessage("session-1", "Pending");
         await settle();
@@ -706,9 +1021,13 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input) => {
                 const url = new URL(String(input));
-                return url.pathname.endsWith("/stream")
-                    ? Promise.resolve(stream.response)
-                    : response.promise;
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
+                return response.promise;
             },
             randomValues,
             token: "secret",
@@ -718,7 +1037,7 @@ describe("connectRig mutations", () => {
             sessionId: "session-1",
         });
         try {
-            stream.write(hello());
+            stream.write(liveHello());
             await settle();
             const mutationId = rig.sendMessage("session-1", "Echoed");
             stream.write(

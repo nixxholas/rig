@@ -20,6 +20,7 @@ import type {
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
     GetSessionUsageResponse,
+    SessionStateResponse,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
     ListSecretsResponse,
@@ -1363,7 +1364,58 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "GET" && route.name === "session-state") {
+        // The position is read before the session is described, so the payload
+        // states the point in the live stream it reflects. Everything after that
+        // position arrives on the global stream and is replayed on top of this.
+        const cursor = store.liveEvents.cursor();
+        const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
+        const hello = sessionStreamHello(session, false, turnLimit, store.listSubagents(sessionId));
+        // A client catching up says which message it already holds, and receives
+        // only the turns from there on. It still gets the whole current session,
+        // because a gap leaves the rest of that state uncertain too — but the
+        // conversation itself, which is the part that can be colossal, is sent
+        // incrementally rather than from the beginning.
+        const after = url.searchParams.get("after") ?? undefined;
+        const forward = after === undefined ? undefined : session.transcriptSince(after, turnLimit);
+        if (after !== undefined && forward !== undefined) {
+            sendJson<SessionStateResponse>(response, 200, {
+                ...hello,
+                append: true,
+                cursor,
+                ...(hello.session === undefined
+                    ? {}
+                    : {
+                          session: {
+                              ...hello.session,
+                              snapshot: { ...hello.session.snapshot, messages: forward.messages },
+                          },
+                      }),
+                transcript: forward,
+            });
+            return;
+        }
+        // No anchor, or one too old to page from: the newest turns instead, which
+        // the client takes as a replacement rather than an addition.
+        sendJson<SessionStateResponse>(response, 200, { cursor, ...hello });
+        return;
+    }
+
     if (request.method === "GET" && route.name === "transcript") {
+        // Paging forward is how a client that missed events catches up; paging
+        // backward is how it reads further into the past.
+        const after = url.searchParams.get("after") ?? undefined;
+        if (after !== undefined) {
+            const forward = session.transcriptSince(after, SESSION_STREAM_TURN_LIMIT);
+            if (forward === undefined) {
+                sendJson(response, 409, {
+                    error: "That part of the conversation is no longer available.",
+                });
+                return;
+            }
+            sendJson(response, 200, forward);
+            return;
+        }
         const before = url.searchParams.get("before") ?? undefined;
         const page = session.transcriptPage(SESSION_STREAM_TURN_LIMIT, before);
         if (page === undefined) {
@@ -2172,6 +2224,7 @@ function matchRoute(pathname: string):
               | "service-tier"
               | "session"
               | "stream"
+              | "session-state"
               | "steer"
               | "transcript"
               | "subagents"
@@ -2378,6 +2431,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "service-tier") return { name: "service-tier", sessionId };
     if (parts[2] === "shell") return { name: "shell", sessionId };
     if (parts[2] === "stream") return { name: "stream", sessionId };
+    if (parts[2] === "state") return { name: "session-state", sessionId };
     if (parts[2] === "steer") return { name: "steer", sessionId };
     if (parts[2] === "transcript") return { name: "transcript", sessionId };
     if (parts[2] === "subagents") return { name: "subagents", sessionId };
@@ -2598,7 +2652,6 @@ function streamEvents(
     const eventId = Array.isArray(cursor) ? cursor.at(-1) : cursor;
     const resumeFrom = eventId ?? after;
     const resumed = resumeFrom !== undefined;
-    const lastEventId = session.events.lastEventId();
     // A client attaching without a cursor is already caught up by the snapshot
     // in the hello frame, which reflects every event through `lastEventId`.
     // Replaying the log on top of it would send the conversation twice.
@@ -2616,99 +2669,7 @@ function streamEvents(
     });
     // The hello frame is written before the catch-up batch so a client can apply
     // everything that follows without asking the daemon anything else.
-    const partial = session.partialMessage();
-    // A resuming client already holds the transcript, so it is sent only to a
-    // client attaching fresh. The window is cut on turn boundaries so a tool
-    // result never arrives without the call it belongs to.
-    const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
-    const currentSession = session.snapshot();
-    const full = resumed ? undefined : currentSession;
-    // Materialise the durable log once. A long-running session may have many
-    // events, and opening a stream must not allocate and walk three separate
-    // copies merely to derive current side-state.
-    const durableEvents = full === undefined ? undefined : session.events.all();
-    const usage =
-        full === undefined || durableEvents === undefined
-            ? undefined
-            : session.usage(durableEvents);
-    const snapshot =
-        full === undefined || transcript === undefined
-            ? undefined
-            : {
-                  ...full,
-                  shellCommands: session.events.shellCommandStates(),
-                  subagents,
-                  snapshot: { ...full.snapshot, messages: transcript.messages },
-              };
-    const hello: SessionStreamHello = {
-        activity: session.activity(),
-        resumed,
-        ...(resumed
-            ? {
-                  current: {
-                      ...(currentSession.draft === undefined
-                          ? {}
-                          : { draft: currentSession.draft }),
-                      ...(currentSession.draftUpdatedAt === undefined
-                          ? {}
-                          : { draftUpdatedAt: currentSession.draftUpdatedAt }),
-                      ...(currentSession.git === undefined ? {} : { git: currentSession.git }),
-                      ...(currentSession.interruption === undefined
-                          ? {}
-                          : { interruption: currentSession.interruption }),
-                      ...(currentSession.externalTools === undefined
-                          ? {}
-                          : { externalTools: currentSession.externalTools }),
-                      mcpServers: currentSession.mcpServers,
-                      ...(currentSession.pendingExternalToolCalls === undefined
-                          ? {}
-                          : {
-                                pendingExternalToolCalls: currentSession.pendingExternalToolCalls,
-                            }),
-                      projectSecretIds: currentSession.projectSecretIds,
-                      secretIds: currentSession.secretIds,
-                      sessionSecretIds: currentSession.sessionSecretIds,
-                      ...(currentSession.skills === undefined
-                          ? {}
-                          : { skills: currentSession.skills }),
-                      ...(currentSession.sessionTokenCount === undefined
-                          ? {}
-                          : { sessionTokenCount: currentSession.sessionTokenCount }),
-                      ...(currentSession.titleError === undefined
-                          ? {}
-                          : { titleError: currentSession.titleError }),
-                      titleStatus: currentSession.titleStatus,
-                      ...(currentSession.workflows === undefined
-                          ? {}
-                          : { workflows: currentSession.workflows }),
-                      ...(currentSession.workflowsEnabled === undefined
-                          ? {}
-                          : { workflowsEnabled: currentSession.workflowsEnabled }),
-                  },
-              }
-            : {}),
-        ...(full === undefined || usage === undefined
-            ? {}
-            : {
-                  usage: {
-                      currentProviderId: full.providerId,
-                      groups: usage.groups,
-                      observedQuota: usage.observedQuota,
-                      quotas: [...session.events.latestProviderQuotas().entries()].map(
-                          ([providerId, quota]) => ({ providerId, quota }),
-                      ),
-                      sessionTokenCount: usage.sessionTokenCount,
-                      ...(usage.currentContext === undefined
-                          ? {}
-                          : { context: usage.currentContext }),
-                  },
-              }),
-        ...(snapshot === undefined || transcript === undefined
-            ? {}
-            : { session: snapshot, transcript }),
-        ...(partial === undefined ? {} : { partial }),
-        ...(lastEventId === undefined ? {} : { lastEventId }),
-    };
+    const hello = sessionStreamHello(session, resumed, turnLimit, subagents);
 
     // A resumed client applies durable history first, then the current overlay.
     // If the connection drops mid-catch-up, its cursor advances only through
@@ -2827,4 +2788,115 @@ function buildGroupCatalog(
         sessionsComplete: true,
         workspaces,
     };
+}
+
+/**
+ * Everything a client needs to start showing a session.
+ *
+ * A resuming client already holds the transcript and receives only the current
+ * overlay; a client starting fresh receives the conversation itself. One
+ * builder serves both the stream and the request-response bootstrap, so the two
+ * cannot drift into describing the same session differently.
+ */
+function sessionStreamHello(
+    session: SessionEventSource,
+    resumed: boolean,
+    turnLimit: number | undefined,
+    subagents: readonly SubagentSummary[],
+): SessionStreamHello {
+    const lastEventId = session.events.lastEventId();
+    const partial = session.partialMessage();
+    // A resuming client already holds the transcript, so it is sent only to a
+    // client attaching fresh. The window is cut on turn boundaries so a tool
+    // result never arrives without the call it belongs to.
+    const transcript = resumed ? undefined : session.transcriptWindow(turnLimit);
+    const currentSession = session.snapshot();
+    const full = resumed ? undefined : currentSession;
+    // Materialise the durable log once. A long-running session may have many
+    // events, and opening a stream must not allocate and walk three separate
+    // copies merely to derive current side-state.
+    const durableEvents = full === undefined ? undefined : session.events.all();
+    const usage =
+        full === undefined || durableEvents === undefined
+            ? undefined
+            : session.usage(durableEvents);
+    const snapshot =
+        full === undefined || transcript === undefined
+            ? undefined
+            : {
+                  ...full,
+                  shellCommands: session.events.shellCommandStates(),
+                  subagents,
+                  snapshot: { ...full.snapshot, messages: transcript.messages },
+              };
+    const hello: SessionStreamHello = {
+        activity: session.activity(),
+        resumed,
+        ...(resumed
+            ? {
+                  current: {
+                      ...(currentSession.draft === undefined
+                          ? {}
+                          : { draft: currentSession.draft }),
+                      ...(currentSession.draftUpdatedAt === undefined
+                          ? {}
+                          : { draftUpdatedAt: currentSession.draftUpdatedAt }),
+                      ...(currentSession.git === undefined ? {} : { git: currentSession.git }),
+                      ...(currentSession.interruption === undefined
+                          ? {}
+                          : { interruption: currentSession.interruption }),
+                      ...(currentSession.externalTools === undefined
+                          ? {}
+                          : { externalTools: currentSession.externalTools }),
+                      mcpServers: currentSession.mcpServers,
+                      ...(currentSession.pendingExternalToolCalls === undefined
+                          ? {}
+                          : {
+                                pendingExternalToolCalls: currentSession.pendingExternalToolCalls,
+                            }),
+                      projectSecretIds: currentSession.projectSecretIds,
+                      secretIds: currentSession.secretIds,
+                      sessionSecretIds: currentSession.sessionSecretIds,
+                      ...(currentSession.skills === undefined
+                          ? {}
+                          : { skills: currentSession.skills }),
+                      ...(currentSession.sessionTokenCount === undefined
+                          ? {}
+                          : { sessionTokenCount: currentSession.sessionTokenCount }),
+                      ...(currentSession.titleError === undefined
+                          ? {}
+                          : { titleError: currentSession.titleError }),
+                      titleStatus: currentSession.titleStatus,
+                      ...(currentSession.workflows === undefined
+                          ? {}
+                          : { workflows: currentSession.workflows }),
+                      ...(currentSession.workflowsEnabled === undefined
+                          ? {}
+                          : { workflowsEnabled: currentSession.workflowsEnabled }),
+                  },
+              }
+            : {}),
+        ...(full === undefined || usage === undefined
+            ? {}
+            : {
+                  usage: {
+                      currentProviderId: full.providerId,
+                      groups: usage.groups,
+                      observedQuota: usage.observedQuota,
+                      quotas: [...session.events.latestProviderQuotas().entries()].map(
+                          ([providerId, quota]) => ({ providerId, quota }),
+                      ),
+                      sessionTokenCount: usage.sessionTokenCount,
+                      ...(usage.currentContext === undefined
+                          ? {}
+                          : { context: usage.currentContext }),
+                  },
+              }),
+        ...(snapshot === undefined || transcript === undefined
+            ? {}
+            : { session: snapshot, transcript }),
+        ...(partial === undefined ? {} : { partial }),
+        ...(lastEventId === undefined ? {} : { lastEventId }),
+    };
+    return hello;
 }

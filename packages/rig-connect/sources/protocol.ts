@@ -685,6 +685,17 @@ export interface SessionStreamHello {
     resumed: boolean;
 }
 
+/**
+ * A session bootstrapped by request-response rather than by opening a stream.
+ *
+ * `cursor` is the live-stream position this payload reflects.
+ */
+export interface SessionStateResponse extends SessionStreamHello {
+    /** The transcript continues what the client holds rather than replacing it. */
+    append?: boolean;
+    cursor: EventId;
+}
+
 export interface SessionStreamCurrentState {
     draft?: string;
     draftUpdatedAt?: number;

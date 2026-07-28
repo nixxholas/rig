@@ -2768,6 +2768,35 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("pages forward from a persisted message event without skipping turns", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            try {
+                const session = store.create({ cwd: "/tmp/rig-persisted-forward" });
+                for (const text of ["One.", "Two.", "Three."]) session.submit({ text });
+                const anchors = (session.events.since(undefined) ?? [])
+                    .filter((event) => event.type === "message_submitted")
+                    .map((event) => event.id);
+
+                const first = store.loadTranscriptSince(session.id, 2, anchors[0]!);
+                expect(JSON.stringify(first?.messages)).toContain("One.");
+                expect(JSON.stringify(first?.messages)).toContain("Two.");
+                expect(JSON.stringify(first?.messages)).not.toContain("Three.");
+                expect(first?.complete).toBe(false);
+
+                const second = store.loadTranscriptSince(session.id, 2, anchors[1]!);
+                expect(JSON.stringify(second?.messages)).toContain("Two.");
+                expect(JSON.stringify(second?.messages)).toContain("Three.");
+                expect(second?.complete).toBe(true);
+            } finally {
+                store.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("stores the model, provider, and fast mode a queued run carries", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {

@@ -2278,7 +2278,7 @@ describe("ChatStore", () => {
         });
     });
 
-    it("does not retain positions for elements a rewind discarded", () => {
+    it("keeps completed turns when a rewind starts a new context", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
         runOneTurn(store);
@@ -2302,16 +2302,23 @@ describe("ChatStore", () => {
             agentEvent({ contentIndex: 0, delta: "Again", messageId: "m2", type: "text_delta" }),
         );
 
-        // A rewind replaces the whole list, so the positions it tracked are
-        // dead. Without clearing them the index grows on every rewind while the
-        // conversation does not.
-        expect(store.elements()).toMatchObject([
-            { kind: "user_message", text: "Start over" },
-            { complete: false, kind: "agent_text", text: "Again" },
-        ]);
+        expect(store.elements()).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    complete: true,
+                    kind: "agent_text",
+                    text: "Let me check.",
+                }),
+                expect.objectContaining({
+                    complete: false,
+                    kind: "agent_text",
+                    text: "Again",
+                }),
+            ]),
+        );
     });
 
-    it("rebuilds the list when a session is rewound", () => {
+    it("does not remove a completed turn when a session is rewound", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
         runOneTurn(store);
@@ -2327,7 +2334,16 @@ describe("ChatStore", () => {
             }),
         );
 
-        expect(store.elements()).toMatchObject([{ kind: "user_message", text: "Start over" }]);
+        expect(store.elements()).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({
+                    complete: true,
+                    kind: "agent_text",
+                    text: "Let me check.",
+                }),
+                expect.objectContaining({ kind: "turn_end", turnId: "run-1" }),
+            ]),
+        );
     });
 
     it("rebuilds authoritative active timing when the session is reset", () => {
@@ -2539,7 +2555,8 @@ describe("recovering a connection", () => {
         const store = new ChatStore("session-1");
         store.applyHello(helloWith(1, 6, false));
 
-        // The daemon rewound to turn 4, so turns 5 and 6 are gone.
+        // The daemon rewound its active context to turn 4. The already-visible
+        // turns after that boundary remain immutable history.
         const remaining = windowOf(1, 4, true);
         store.apply(
             event("session_rewound", {
@@ -2553,9 +2570,10 @@ describe("recovering a connection", () => {
         // Falling back to invented per-message turns here would lose the turn
         // guarantee: a rewound transcript would have no closing element and no
         // real run identity.
-        expect(turnIds).not.toContain("run-5");
-        expect(new Set(turnIds)).toEqual(new Set(["run-1", "run-2", "run-3", "run-4"]));
-        expect(store.elements().filter((element) => element.kind === "turn_end")).toHaveLength(4);
+        expect(new Set(turnIds)).toEqual(
+            new Set(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"]),
+        );
+        expect(store.elements().filter((element) => element.kind === "turn_end")).toHaveLength(6);
     });
 
     it("keeps real turns through a reset", () => {
@@ -2569,9 +2587,9 @@ describe("recovering a connection", () => {
             }),
         );
 
-        // A reset clears the conversation, and the retained older turns must not
-        // survive it.
-        expect(store.elements()).toEqual([]);
+        expect(new Set(store.elements().map((element) => element.turnId))).toEqual(
+            new Set(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"]),
+        );
     });
 
     it("adds earlier turns in front without disturbing the ones already loaded", () => {
@@ -2640,7 +2658,7 @@ describe("recovering a connection", () => {
     });
 
     it.each(["session_reset", "session_rewound"] as const)(
-        "does not resurrect turns when an earlier page arrives after %s",
+        "keeps immutable turns and ignores a stale earlier page after %s",
         (type) => {
             const store = new ChatStore("session-1");
             store.applyHello(helloWith(4, 6, false));
@@ -2658,7 +2676,9 @@ describe("recovering a connection", () => {
             );
             store.prependEarlier(windowOf(1, 3, true), started.anchor);
 
-            expect(store.elements()).toEqual([]);
+            expect(new Set(store.elements().map((element) => element.turnId))).toEqual(
+                new Set(["run-4", "run-5", "run-6"]),
+            );
             expect(store.session().loadingMore).toBe(false);
             expect(store.session().transcriptComplete).toBe(true);
         },
@@ -2731,15 +2751,15 @@ describe("recovering a connection", () => {
         expect(store.startLoadingMore(replacement)).toBeDefined();
     });
 
-    it("trusts a complete window to be the whole conversation", () => {
+    it("does not let a complete context window delete immutable history", () => {
         const store = new ChatStore("session-1");
         store.applyHello(helloWith(1, 6, false));
 
-        // A window that says it is complete is the whole truth, so retaining
-        // anything older would resurrect turns the session no longer has.
+        // Complete describes the supplied context window, not permission to
+        // remove turns already present in the user's timeline.
         store.applyHello(helloWith(5, 6, true));
 
         const turnIds = new Set(store.elements().map((element) => element.turnId));
-        expect([...turnIds].sort()).toEqual(["run-5", "run-6"]);
+        expect([...turnIds].sort()).toEqual(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"]);
     });
 });
