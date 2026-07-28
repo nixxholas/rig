@@ -10,6 +10,20 @@ import type {
 import { Executor } from "@slopus/rig-execution";
 import { toLocalDate } from "../../executor/toLocalDate.js";
 
+/**
+ * What a provider gives back when it compacts a conversation.
+ *
+ * Most vendors return readable text. Codex returns an opaque checkpoint only it can read, so the
+ * summary is a plain notice and the checkpoint is kept verbatim to be replayed exactly as it came.
+ */
+export interface CompactionSummary {
+    summary: string;
+    encrypted?: { content: string; vendor?: unknown };
+}
+
+const CHECKPOINT_SUMMARY =
+    "The earlier conversation was compacted into a provider context checkpoint.";
+
 export async function requestCompactionSummary(options: {
     provider: Provider;
     model: Model;
@@ -20,7 +34,7 @@ export async function requestCompactionSummary(options: {
     startDate?: string;
     thinking?: string;
     now: () => number;
-}): Promise<string> {
+}): Promise<CompactionSummary> {
     const startDate =
         options.startDate ??
         toLocalDate(options.context.messages.at(0)?.timestamp ?? options.now());
@@ -44,11 +58,21 @@ export async function requestCompactionSummary(options: {
             throw new Error("Conversation compaction was stopped.");
         }
         if (result.status === "failed") throw new Error(result.message);
-        const summary = result.summary?.trim() || result.compaction?.content.trim();
-        if (summary === undefined || summary.length === 0) {
-            throw new Error("The model returned an empty conversation summary.");
+        const summary = result.summary?.trim();
+        if (summary !== undefined && summary.length > 0) return { summary };
+        // Codex answers with an encrypted checkpoint and no text. It is not a summary and must
+        // never be shown as one; it goes back to the provider exactly as it arrived.
+        const checkpoint = result.compaction;
+        if (checkpoint !== undefined && checkpoint.content.length > 0) {
+            return {
+                summary: CHECKPOINT_SUMMARY,
+                encrypted: {
+                    content: checkpoint.content,
+                    ...(checkpoint.vendor === undefined ? {} : { vendor: checkpoint.vendor }),
+                },
+            };
         }
-        return summary;
+        throw new Error("The model returned an empty conversation summary.");
     }
     const timestamp = options.now();
     const context: Context = {
@@ -79,5 +103,5 @@ export async function requestCompactionSummary(options: {
     if (summary.length === 0) {
         throw new Error("The model returned an empty conversation summary.");
     }
-    return summary;
+    return { summary };
 }

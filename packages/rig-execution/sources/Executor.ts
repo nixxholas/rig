@@ -138,6 +138,31 @@ export class Executor {
         return this.active !== undefined;
     }
 
+    /**
+     * An independent executor over the same providers, credentials, and models.
+     *
+     * An executor owns one provider session and serializes every inference through it, which is
+     * right for the conversation it runs and wrong for work that merely happens alongside it.
+     * Titles and permission reviews are their own conversations: they must not reset the session's
+     * cached prefix, wait behind its turn, or fail it. They get their own executor instead, with
+     * its own session identity so no cache prefix is shared.
+     *
+     * The provider definitions are borrowed, not owned: their credentials, clients and quota
+     * caches belong to this executor, and closing the isolate must leave them running. Only the
+     * sessions the isolate opens are its own to tear down.
+     */
+    isolate(label: string): Executor {
+        const isolated = new Executor(
+            this.providers.map(({ destroy: _destroy, ...provider }) => ({
+                ...provider,
+                sessionId: `${provider.sessionId ?? provider.id}:${label}`,
+            })),
+            { environment: this.environment, identity: this.identity },
+        );
+        isolated.selectProvider(this.selectedProviderId);
+        return isolated;
+    }
+
     selectProvider(providerId: string): void {
         if (!this.providersById.has(providerId)) {
             throw new Error(`Executor provider '${providerId}' is not configured.`);

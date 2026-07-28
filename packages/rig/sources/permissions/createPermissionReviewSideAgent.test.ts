@@ -53,6 +53,38 @@ describe("createPermissionReviewSideAgent", () => {
         await reviewer.close();
     });
 
+    it("uses and closes an isolated provider without closing the session provider", async () => {
+        const parent = recordingProvider();
+        const isolated = recordingProvider();
+        let parentCloseCount = 0;
+        let isolatedCloseCount = 0;
+        const isolatedProvider = {
+            ...isolated.provider,
+            close() {
+                isolatedCloseCount += 1;
+            },
+        };
+        const provider = {
+            ...parent.provider,
+            close() {
+                parentCloseCount += 1;
+            },
+            isolate(label: string) {
+                expect(label).toBe("auto-reviewer");
+                return isolatedProvider;
+            },
+        };
+        const reviewer = sideAgent(provider, parent.model);
+
+        await reviewer.review({ action: "review this", messages: [user("u1", "AUTHORIZED")] });
+        await reviewer.close();
+
+        expect(parent.requests).toHaveLength(0);
+        expect(isolated.requests).toHaveLength(1);
+        expect(parentCloseCount).toBe(0);
+        expect(isolatedCloseCount).toBe(1);
+    });
+
     it("sends only new conversation once it already has its own history", async () => {
         const { provider, model, requests } = recordingProvider();
         const reviewer = sideAgent(provider, model);

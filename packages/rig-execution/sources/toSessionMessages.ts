@@ -8,6 +8,13 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
             // A notice keeps the caller's position. Each vendor decides its own native shape.
             return { role: "system", content: message.content };
         }
+        if (message.role === "compaction") {
+            return {
+                role: "compaction",
+                content: message.content,
+                ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
+            };
+        }
         if (message.role === "user") {
             if (message.encryptedAgentMessage !== undefined) {
                 return {

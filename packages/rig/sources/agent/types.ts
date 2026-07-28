@@ -116,6 +116,19 @@ export interface UserMessage {
     };
     /** Whether this agent-authored message starts a new inference turn. */
     agentMessageTriggerTurn?: boolean;
+    /**
+     * Opaque provider-native context checkpoint this summary message stands for.
+     *
+     * A vendor that compacts into an encrypted checkpoint returns no readable text, so the blocks
+     * carry a plain notice and the checkpoint is replayed verbatim to the provider that issued it.
+     */
+    compactionCheckpoint?: {
+        content: string;
+        /** Opaque provider metadata required to replay the checkpoint natively. */
+        vendor?: unknown;
+        /** Provider that issued the checkpoint; no other provider can read it. */
+        providerId: string;
+    };
     /** Durable model context that must never be presented as user-authored content. */
     internal?: true;
     /** Marks a durable record of the project instructions the model has been given. */

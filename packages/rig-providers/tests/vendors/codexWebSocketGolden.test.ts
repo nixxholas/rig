@@ -1597,22 +1597,29 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("returns cancelled when compaction is aborted during retry backoff", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.beforeOutputFailures = 1;
+        const initialContext = withCodexSkills(
+            {
+                instructions: prompt.instructions,
+                messages: [{ role: "user", content: "compact" }],
+            },
+            codexSkills,
+            "gpt-5.6-sol",
+        );
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                {
-                    instructions: prompt.instructions,
-                    messages: [{ role: "user", content: "compact" }],
-                },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            context: initialContext,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
-        const compacting = session.compact({ signal: controller.signal });
+        const compacting = session.compact({
+            context: { messages: [{ role: "user", content: "new caller state" }] },
+            signal: controller.signal,
+        });
         setTimeout(() => controller.abort(), 10);
 
-        await expect(compacting).resolves.toMatchObject({ status: "cancelled" });
+        await expect(compacting).resolves.toEqual({
+            status: "cancelled",
+            context: initialContext,
+        });
         session.destroy();
     });
 
@@ -1746,6 +1753,114 @@ describe("Codex CLI mode WebSocket goldens", () => {
             },
         ]);
         expect(JSON.stringify(compacted.context)).not.toContain("conversation_summary");
+        session.destroy();
+    });
+
+    it("compacts the caller's history including the tool results of the finished turn", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                { instructions: prompt.instructions, messages: [] },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        for await (const _event of session.run({
+            context: { messages: [{ role: "user", content: "first" }] },
+        })) {
+            // Drain the turn so the session records what it has already transmitted.
+        }
+
+        // The caller has since finished that turn's tools and owns history the session never saw.
+        // Compacting the session's own lagging copy would summarize a conversation whose tool call
+        // never got an answer.
+        await session.compact({
+            context: {
+                messages: [
+                    { role: "user", content: "first" },
+                    {
+                        role: "assistant",
+                        content: "",
+                        toolCalls: [{ callId: "call-1", name: "shell", arguments: "{}" }],
+                    },
+                    { role: "tool", callId: "call-1", content: "tool finished" },
+                ],
+            },
+        });
+
+        const compaction = websocket.sent.at(-1)!;
+        expect(compaction.input).toContainEqual({ type: "compaction_trigger" });
+        expect(JSON.stringify(compaction.input)).toContain("tool finished");
+        session.destroy();
+    });
+
+    it("compacts a reordered caller history without repeating the session's own messages", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        // The session was built once the conversation was already under way, so its configuration
+        // holds those first messages too.
+        const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                {
+                    instructions: prompt.instructions,
+                    messages: [{ role: "user", content: "first" }],
+                },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+
+        // Compaction hoists system messages to the front, and a model switch writes one long after
+        // the session was built. The caller's history is then no longer a continuation of what the
+        // session started from, and prepending that start wholesale would say "first" twice.
+        await session.compact({
+            context: {
+                messages: [
+                    { role: "system", content: "The model changed to gpt-5.6-sol." },
+                    { role: "user", content: "first" },
+                    { role: "assistant", content: "answered" },
+                ],
+            },
+        });
+
+        const compaction = websocket.sent.at(-1)!;
+        const said = JSON.stringify(compaction.input).split('"first"').length - 1;
+        expect(said).toBe(1);
+        session.destroy();
+    });
+
+    it("keeps provider-added system content without repeating caller-owned system content", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
+            context: withCodexSkills(
+                {
+                    instructions: prompt.instructions,
+                    messages: [
+                        { role: "system", content: "Original instructions." },
+                        { role: "user", content: "first" },
+                    ],
+                },
+                codexSkills,
+                "gpt-5.6-sol",
+            ),
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+
+        await session.compact({
+            context: {
+                messages: [
+                    { role: "system", content: "Original instructions." },
+                    { role: "system", content: "Later instructions." },
+                    { role: "user", content: "first" },
+                    { role: "assistant", content: "answered" },
+                ],
+            },
+        });
+
+        const input = JSON.stringify(websocket.sent.at(-1)!.input);
+        expect(input.split("Original instructions.")).toHaveLength(2);
+        expect(input).toContain("<skills_instructions>");
         session.destroy();
     });
 

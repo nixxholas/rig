@@ -1,4 +1,5 @@
 import type { Model, Provider, StreamOptions } from "@slopus/rig-execution";
+import { providerModelFamily } from "@slopus/rig-providers";
 import { toLocalDate } from "../executor/toLocalDate.js";
 
 const METADATA_PROMPT = `Create concise session metadata from the visible conversation.
@@ -21,6 +22,8 @@ export interface GeneratedSessionMetadata {
 
 export async function generateSessionMetadata(options: {
     currentTitle?: string;
+    /** Model the session itself is running, which decides what may name it. */
+    modelId: string;
     now?: () => number;
     provider: Provider;
     sessionId: string;
@@ -30,50 +33,57 @@ export async function generateSessionMetadata(options: {
 }): Promise<GeneratedSessionMetadata> {
     const now = options.now ?? Date.now;
     const timestamp = now();
-    const model = selectMetadataModel(options.provider);
+    const model = selectMetadataModel(options.provider, options.modelId);
+    // Naming a chat is its own one-shot conversation, not a turn of the session's. It runs on its
+    // own provider session so it cannot reset the session's cached prefix or wait behind its turn.
+    const provider = options.provider.isolate?.("title") ?? options.provider;
     const streamOptions: StreamOptions = {
         sessionId: `${options.sessionId}:title`,
         startDate: options.startDate ?? toLocalDate(timestamp),
         thinking: "off",
         ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
-    const stream = options.provider.stream(
-        model,
-        {
-            systemPrompt: METADATA_PROMPT,
-            messages: [
-                {
-                    role: "user",
-                    content: [
-                        {
-                            type: "text",
-                            text: [
-                                `Current title: ${options.currentTitle ?? "(untitled)"}`,
-                                "",
-                                "Visible conversation:",
-                                options.transcript,
-                            ].join("\n"),
-                        },
-                    ],
-                    timestamp,
-                },
-            ],
-            tools: [],
-        },
-        streamOptions,
-    );
+    try {
+        const stream = provider.stream(
+            model,
+            {
+                systemPrompt: METADATA_PROMPT,
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "text",
+                                text: [
+                                    `Current title: ${options.currentTitle ?? "(untitled)"}`,
+                                    "",
+                                    "Visible conversation:",
+                                    options.transcript,
+                                ].join("\n"),
+                            },
+                        ],
+                        timestamp,
+                    },
+                ],
+                tools: [],
+            },
+            streamOptions,
+        );
+        for await (const _event of stream) {
+            // Drain the stream; the normalized final message is read below.
+        }
 
-    for await (const _event of stream) {
-        // Drain the stream; the normalized final message is read below.
+        const message = await stream.result();
+        const text = message.content
+            .filter((content) => content.type === "text")
+            .map((content) => content.text)
+            .join("")
+            .trim();
+        return parseSessionMetadata(text);
+    } finally {
+        // The isolated provider exists only for this one request.
+        if (provider !== options.provider) await provider.close?.();
     }
-
-    const message = await stream.result();
-    const text = message.content
-        .filter((content) => content.type === "text")
-        .map((content) => content.text)
-        .join("")
-        .trim();
-    return parseSessionMetadata(text);
 }
 
 export function parseSessionMetadata(text: string): GeneratedSessionMetadata {
@@ -118,17 +128,31 @@ function normalizeLine(value: string): string {
         .trim();
 }
 
-function selectMetadataModel(provider: Provider): Model {
-    const preferred =
-        findModel(provider, "openai/gpt-5.6-sol") ??
-        findModel(provider, "anthropic/fable-5") ??
-        provider.models.at(-1);
-    if (preferred === undefined) {
-        throw new Error(`Provider '${provider.id}' has no models for session metadata generation.`);
-    }
-    return preferred;
-}
+/** Inexpensive models worth naming a chat with, one per family. */
+const ECONOMICAL_MODEL_IDS = [
+    "anthropic/sonnet-5",
+    "openai/gpt-5.6-sol",
+    "xai/grok-composer-2.5-fast",
+];
 
-function findModel(provider: Provider, id: string): Model | undefined {
-    return provider.models.find((model) => model.id === id);
+/**
+ * Picks what writes the title, starting from the model the session is already running.
+ *
+ * Writing two sentences deserves the cheapest model available, but not at the cost of leaving the
+ * session's own family: a provider cannot serve a model from another family, so reaching for one
+ * fails outright. The session's model is therefore both the starting point and the fallback.
+ */
+function selectMetadataModel(provider: Provider, sessionModelId: string): Model {
+    const sessionModel = provider.models.find((model) => model.id === sessionModelId);
+    if (sessionModel === undefined) {
+        throw new Error(
+            `Model '${sessionModelId}' is unavailable on '${provider.id}' for session metadata.`,
+        );
+    }
+    const family = providerModelFamily(sessionModelId);
+    const economical = provider.models.find(
+        (model) =>
+            ECONOMICAL_MODEL_IDS.includes(model.id) && providerModelFamily(model.id) === family,
+    );
+    return economical ?? sessionModel;
 }

@@ -4833,6 +4833,7 @@ export class InMemorySession {
         try {
             const metadata = await generateSessionMetadata({
                 ...(this.#title === undefined ? {} : { currentTitle: this.#title }),
+                modelId: this.#modelId,
                 now: this.#now,
                 provider: this.#ensureRuntime().executor,
                 sessionId: this.id,

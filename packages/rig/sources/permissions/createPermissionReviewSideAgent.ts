@@ -40,6 +40,11 @@ export function createPermissionReviewSideAgent(options: {
     if (options.context.permissions?.mode === "auto") {
         throw new Error("The permission review agent must not run in Auto mode.");
     }
+    // A review is its own conversation running beside the session's, sharing nothing but
+    // credentials. On its own provider it keeps its own history, runs its own model — Bedrock
+    // reviews on GPT-5.4 while the session runs Claude — and cannot reset or stall the session's
+    // cached context by taking the provider's single session away from it.
+    const provider = options.provider.isolate?.("auto-reviewer") ?? options.provider;
     const agent = new Agent({
         allowReviewerModel: true,
         context: options.context,
@@ -51,7 +56,7 @@ export function createPermissionReviewSideAgent(options: {
         // precise instruction for a vague one. They describe what the user asked for; they never
         // authorize anything by themselves, which the review policy states explicitly.
         projectInstructions: "include",
-        provider: options.provider,
+        provider,
         ...(options.startDate === undefined ? {} : { startDate: options.startDate }),
         systemPrompt: PERMISSION_REVIEW_INSTRUCTIONS,
         tools: options.tools,
@@ -138,6 +143,8 @@ export function createPermissionReviewSideAgent(options: {
                     ...(transcript === undefined ? {} : { transcript }),
                 };
             }),
+        // Closing the agent closes the provider it was given, which is the isolate when there is
+        // one, so the isolate needs no separate teardown here.
         close: () => serialize(() => agent.close()),
     };
 }

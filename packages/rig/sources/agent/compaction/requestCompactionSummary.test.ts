@@ -43,7 +43,7 @@ describe("requestCompactionSummary", () => {
                 provider,
                 startDate: "2024-01-02",
             }),
-        ).resolves.toBe("Cached summary.");
+        ).resolves.toEqual({ summary: "Cached summary." });
 
         expect(observedContexts).toEqual([
             {

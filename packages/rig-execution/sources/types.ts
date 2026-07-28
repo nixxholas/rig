@@ -111,6 +111,20 @@ export interface UserMessage {
     timestamp: number;
 }
 
+/**
+ * An opaque provider-native context checkpoint standing in for the conversation it replaced.
+ *
+ * A vendor that compacts into an encrypted payload is the only reader of it, so the checkpoint is
+ * carried unchanged and handed back to that vendor exactly as it was returned.
+ */
+export interface CompactionMessage {
+    role: "compaction";
+    content: string;
+    /** Opaque provider metadata required to replay the checkpoint natively. */
+    vendor?: unknown;
+    timestamp: number;
+}
+
 export interface AssistantMessage {
     role: "assistant";
     content: readonly AssistantContent[];
@@ -143,7 +157,12 @@ export interface ToolResultMessage {
     timestamp: number;
 }
 
-export type Message = SystemMessage | UserMessage | AssistantMessage | ToolResultMessage;
+export type Message =
+    | SystemMessage
+    | UserMessage
+    | CompactionMessage
+    | AssistantMessage
+    | ToolResultMessage;
 
 export interface FunctionTool<TParameters extends TSchema = TSchema> {
     kind?: "function";
@@ -285,6 +304,13 @@ export interface Provider {
     readonly models: readonly Model[];
     /** Dedicated Auto permission review model, when this provider ships one. */
     readonly reviewerModel?: Model | undefined;
+    /**
+     * An independent provider for work that runs alongside the conversation.
+     *
+     * Titles and permission reviews are separate conversations and must not disturb the session's
+     * own provider session. Providers that hold no session return themselves.
+     */
+    isolate?(label: string): Provider;
     readonly serviceTiers: readonly ServiceTier[] | undefined;
     readonly extendProfilePromptContext:
         | ((context: ProfilePromptContext) => ProfilePromptContext | Promise<ProfilePromptContext>)

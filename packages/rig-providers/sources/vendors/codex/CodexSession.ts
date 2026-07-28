@@ -157,6 +157,7 @@ export class CodexSession extends BaseSession {
         this.beginTurn(`compaction:${randomUUID()}`);
         return this.compactContext(
             this.activeConfiguration,
+            options.context,
             model,
             effort,
             {
@@ -175,15 +176,75 @@ export class CodexSession extends BaseSession {
         this.client = undefined;
     }
 
+    /**
+     * Builds what compaction summarizes: the session's own preamble, then the caller's history.
+     *
+     * The caller compacts a slice of the conversation, and that slice need not begin the way this
+     * session began. It is often shorter, and it carries the system messages the conversation has
+     * collected since, so it is not always a continuation of the messages the session was built
+     * with. Prepending those messages regardless would say the opening of the conversation twice.
+     * When the caller does start from them, they are prepended whole and dropped from the caller's
+     * copy; otherwise only provider-added parts of the leading system messages come along. The
+     * caller's reordered copy remains authoritative, and system content it already carries must
+     * not be repeated.
+     */
+    private composeCompactionMessages(
+        configuration: SessionModelConfiguration,
+        requested: readonly SessionMessage[],
+    ): SessionMessage[] {
+        const stripped = stripCodexInitialMessages(requested, this.knownInitialMessageSets());
+        if (stripped.length !== requested.length) {
+            return [
+                ...configuration.context.messages.map((message) => structuredClone(message)),
+                ...stripped,
+            ];
+        }
+        const requestedSystemParts = requested.flatMap((message) =>
+            message.role === "system"
+                ? typeof message.content === "string"
+                    ? [message.content]
+                    : [...message.content]
+                : [],
+        );
+        const preamble: SessionMessage[] = [];
+        for (const message of configuration.context.messages) {
+            if (message.role !== "system") break;
+            const parts =
+                typeof message.content === "string" ? [message.content] : [...message.content];
+            const missing = parts.filter((part) => {
+                const index = requestedSystemParts.indexOf(part);
+                if (index < 0) return true;
+                requestedSystemParts.splice(index, 1);
+                return false;
+            });
+            if (missing.length === 0) continue;
+            preamble.push({
+                role: "system",
+                content: typeof message.content === "string" ? missing[0]! : missing,
+            });
+        }
+        return [...preamble, ...structuredClone([...requested])];
+    }
+
     private async compactContext(
         configuration: SessionModelConfiguration,
+        requested: SessionCompactionOptions["context"],
         model: string,
         effort: SessionReasoningEffort,
         metadata: CodexCompactionMetadata,
         signal?: AbortSignal,
     ): Promise<SessionCompaction> {
-        const context = this.context;
-        if (signal?.aborted) return { status: "cancelled", context };
+        // The caller owns the history. The session's own copy is only what it has already
+        // transmitted, so it still ends at the tool calls of the turn that just finished; compacting
+        // that would summarize a conversation whose tools never answered.
+        const context: SessionContext =
+            requested === undefined
+                ? this.context
+                : {
+                      instructions: configuration.context.instructions,
+                      messages: this.composeCompactionMessages(configuration, requested.messages),
+                  };
+        if (signal?.aborted) return { status: "cancelled", context: this.context };
         if (this.credential.name === "bedrock-bearer-token") {
             return this.compactBedrockContext(
                 context,
@@ -230,7 +291,7 @@ export class CodexSession extends BaseSession {
                     stream,
                     signal === undefined ? {} : { signal },
                 );
-                if (signal?.aborted) return { status: "cancelled", context };
+                if (signal?.aborted) return { status: "cancelled", context: this.context };
                 const compaction = {
                     role: "compaction" as const,
                     content: collected.item.encrypted_content,
@@ -251,7 +312,7 @@ export class CodexSession extends BaseSession {
                 };
             } catch (error) {
                 if (!useSse) this.websocketConnection.reset("compaction did not complete");
-                if (signal?.aborted) return { status: "cancelled", context };
+                if (signal?.aborted) return { status: "cancelled", context: this.context };
                 if (isCodexUnauthorizedError(error)) {
                     const recovered = await recoverCodexUnauthorizedCredential(
                         this.credential,
@@ -294,7 +355,7 @@ export class CodexSession extends BaseSession {
                     try {
                         await waitForCodexCompactionRetry(transportRetries, signal);
                     } catch (delayError) {
-                        if (signal?.aborted) return { status: "cancelled", context };
+                        if (signal?.aborted) return { status: "cancelled", context: this.context };
                         throw delayError;
                     }
                     continue;
@@ -368,7 +429,7 @@ export class CodexSession extends BaseSession {
                         break;
                     }
                 }
-                if (signal?.aborted) return { status: "cancelled", context };
+                if (signal?.aborted) return { status: "cancelled", context: this.context };
                 if (result === undefined || !("assistantText" in result)) {
                     throw new Error("Bedrock compaction completed without a summary.");
                 }
@@ -396,7 +457,7 @@ export class CodexSession extends BaseSession {
                     context: this.context,
                 };
             } catch (error) {
-                if (signal?.aborted) return { status: "cancelled", context };
+                if (signal?.aborted) return { status: "cancelled", context: this.context };
                 if (
                     isCodexContextWindowError(error) &&
                     contextWindowRetries < CODEX_COMPACTION_MAX_RETRIES

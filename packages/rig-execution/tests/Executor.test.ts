@@ -446,6 +446,49 @@ describe("Executor", () => {
         expect(selected.sessions[0]?.destroyed).toBe(true);
         expect(other.sessions).toHaveLength(0);
     });
+
+    it("isolates side inference without taking ownership of parent provider teardown", async () => {
+        const native = new RecordingProvider();
+        let teardownCount = 0;
+        const executor = new Executor(
+            [
+                {
+                    destroy: () => {
+                        teardownCount += 1;
+                    },
+                    id: "codex",
+                    native,
+                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
+                    sessionId: "conversation",
+                },
+            ],
+            { environment: TEST_ENVIRONMENT },
+        );
+        await collect(
+            executor.run({
+                context: { messages: [] },
+                selection: { modelId: "openai/sol", providerId: "codex" },
+            }),
+        );
+
+        const isolated = executor.isolate("title");
+        await collect(
+            isolated.run({
+                context: { messages: [] },
+                selection: { modelId: "openai/sol", providerId: "codex" },
+            }),
+        );
+        await isolated.close();
+
+        expect(native.sessions.map((session) => session.id)).toEqual([
+            "conversation",
+            "conversation:title",
+        ]);
+        expect(teardownCount).toBe(0);
+
+        await executor.close();
+        expect(teardownCount).toBe(1);
+    });
 });
 
 class RecordingProvider extends BaseProvider {

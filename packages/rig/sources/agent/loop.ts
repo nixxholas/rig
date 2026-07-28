@@ -982,7 +982,7 @@ export function toProviderMessages(
         }
 
         if (message.role === "user") {
-            providerMessages.push(toProviderUserMessage(message, options.now));
+            providerMessages.push(toProviderUserMessage(message, options.now, options.providerId));
             continue;
         }
 
@@ -992,7 +992,22 @@ export function toProviderMessages(
     return providerMessages;
 }
 
-function toProviderUserMessage(message: UserMessage, now: () => number): ProviderMessage {
+function toProviderUserMessage(
+    message: UserMessage,
+    now: () => number,
+    providerId?: string,
+): ProviderMessage {
+    // Only the provider that issued a checkpoint can read it, and it goes back exactly as it came.
+    // Anywhere else this message travels as the summary text it also carries.
+    const checkpoint = message.compactionCheckpoint;
+    if (checkpoint !== undefined && checkpoint.providerId === providerId) {
+        return {
+            role: "compaction",
+            content: checkpoint.content,
+            ...(checkpoint.vendor === undefined ? {} : { vendor: checkpoint.vendor }),
+            timestamp: now(),
+        };
+    }
     return {
         role: "user",
         content: message.blocks.map(toProviderUserContent),

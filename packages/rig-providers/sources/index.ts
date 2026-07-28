@@ -57,6 +57,7 @@ export {
     type ProviderModelFamily,
     type ProviderModelSelection,
 } from "@/core/ProviderModelCompatibility.js";
+export { providerModelFamily } from "@/core/providerModelFamily.js";
 export type { SessionOptions } from "@/core/SessionOptions.js";
 export type {
     SessionTool,

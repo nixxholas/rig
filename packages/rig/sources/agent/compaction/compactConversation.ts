@@ -55,6 +55,13 @@ export async function compactConversation(options: {
         return unchanged(options.messages, estimatedTokensBefore);
     }
 
+    // Summarizing a turn whose tools have not answered describes a broken conversation, and a
+    // provider replaying it sees calls with no results. The loop finishes every tool before it
+    // asks for compaction, so an unanswered call here means something else compacted too early.
+    // The retained tail is checked too: it survives into the new context, where an unanswered call
+    // is just as broken as one inside the summary.
+    assertToolCallsAnswered(options.messages);
+
     await options.onCompactionStart?.({ estimatedTokensBefore });
     const summary = await requestCompactionSummary({
         context: await options.createProviderContext([...systemMessages, ...messagesToCompact]),
@@ -76,9 +83,20 @@ export async function compactConversation(options: {
         blocks: [
             {
                 type: "text",
-                text: `<conversation_summary>\n${summary}\n</conversation_summary>`,
+                text: `<conversation_summary>\n${summary.summary}\n</conversation_summary>`,
             },
         ],
+        ...(summary.encrypted === undefined
+            ? {}
+            : {
+                  compactionCheckpoint: {
+                      content: summary.encrypted.content,
+                      ...(summary.encrypted.vendor === undefined
+                          ? {}
+                          : { vendor: summary.encrypted.vendor }),
+                      providerId: options.provider.id,
+                  },
+              }),
     };
     const contextMessages = [...systemMessages, summaryMessage, ...retainedMessages];
 
@@ -90,6 +108,26 @@ export async function compactConversation(options: {
         estimatedTokensBefore,
         retainedMessageCount: retainedMessages.length,
     };
+}
+
+function assertToolCallsAnswered(messages: readonly Message[]): void {
+    const answered = new Set<string>();
+    for (const message of messages) {
+        if (message.role !== "agent") continue;
+        for (const block of message.blocks) {
+            if (block.type === "tool_result") answered.add(block.toolCallId);
+        }
+    }
+    for (const message of messages) {
+        if (message.role !== "agent") continue;
+        for (const block of message.blocks) {
+            if (block.type === "tool_call" && !answered.has(block.id)) {
+                throw new Error(
+                    `Cannot compact while tool call '${block.name}' has no recorded result.`,
+                );
+            }
+        }
+    }
 }
 
 function findRetainedStart(messages: readonly Message[], contextWindow: number): number {
