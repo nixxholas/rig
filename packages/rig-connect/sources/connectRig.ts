@@ -21,8 +21,9 @@ import type {
     RemoteTerminalGroupState,
     SessionEvent,
     SessionTranscriptWindow,
+    GlobalStreamHello,
 } from "./protocol.js";
-import { streamGlobalEvents } from "./streamGlobalEvents.js";
+import { streamLiveEvents } from "./streamLiveEvents.js";
 import { streamSessionEvents } from "./streamSessionEvents.js";
 
 const INITIAL_MUTATION_RETRY_MS = 100;
@@ -921,39 +922,63 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const startGroupEntry = (entry: GroupEntry): void => {
         if (entry.started) return;
         entry.started = true;
-        void streamGlobalEvents({
+        // The stream opens first and the catalog loads second, so nothing that
+        // happens during the load can fall into a gap between them.
+        const loadCatalog = async (): Promise<void> => {
+            const hello = await fetchCatalog(
+                options.endpoint,
+                options.token,
+                request,
+                entry.controller.signal,
+            );
+            applyCatalog(entry, hello);
+        };
+
+        const applyCatalog = (target: GroupEntry, hello: GlobalStreamHello): void => {
+            for (const project of hello.projects) {
+                rememberGroupVersion(projectKey(project.id), project.version);
+            }
+            for (const workspace of hello.workspaces) {
+                rememberGroupVersion(
+                    workspaceKey(workspace.projectId, workspace.id),
+                    workspace.version,
+                );
+            }
+            for (const session of hello.sessions) {
+                if (session.lastEventId !== undefined) {
+                    rememberSessionCursor(session.id, session.lastEventId);
+                }
+            }
+            reconcile(
+                pendingOverlays.map((mutation) => mutation.entityKey),
+                undefined,
+                [],
+                true,
+                () => ({
+                    groupDeltas: [
+                        ...target.store.setConnection("live"),
+                        ...target.store.applyHello(hello),
+                    ],
+                }),
+            );
+        };
+
+        void streamLiveEvents({
             endpoint: options.endpoint,
             fetch: request,
             signal: entry.controller.signal,
             token: options.token,
             ...(options.wait === undefined ? {} : { wait }),
-            onHello: (hello) => {
-                for (const project of hello.projects) {
-                    rememberGroupVersion(projectKey(project.id), project.version);
-                }
-                for (const workspace of hello.workspaces) {
-                    rememberGroupVersion(
-                        workspaceKey(workspace.projectId, workspace.id),
-                        workspace.version,
-                    );
-                }
-                for (const session of hello.sessions) {
-                    if (session.lastEventId !== undefined) {
-                        rememberSessionCursor(session.id, session.lastEventId);
-                    }
-                }
-                reconcile(
-                    pendingOverlays.map((mutation) => mutation.entityKey),
-                    undefined,
-                    [],
-                    true,
-                    () => ({
-                        groupDeltas: [
-                            ...entry.store.setConnection("live"),
-                            ...entry.store.applyHello(hello),
-                        ],
-                    }),
-                );
+            onOpen: (hello) => {
+                // A clean resume replayed every missed event, so the entities this
+                // client holds are already current and re-fetching them is waste.
+                // A gap is what leaves them uncertain; a first open is the case
+                // where the client holds nothing at all.
+                if (hello.resumed && !hello.gap) return;
+                void loadCatalog().catch((error: unknown) => {
+                    if (closed || entry.controller.signal.aborted) return;
+                    for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                });
             },
             onEvent: (event) => {
                 rememberGlobalIdentity(event);
@@ -2089,6 +2114,28 @@ function defaultWait(ms: number, signal: AbortSignal): Promise<void> {
         }
         signal.addEventListener("abort", finish, { once: true });
     });
+}
+
+/**
+ * Loads the catalog by request-response.
+ *
+ * Entities never travel on the stream, so this is how a client learns what
+ * exists. It is called after the stream is open, which is what makes the load
+ * safe to rebase: anything that changes while it is in flight arrives on the
+ * stream carrying a cursor.
+ */
+async function fetchCatalog(
+    endpoint: string,
+    token: string,
+    request: typeof globalThis.fetch,
+    signal: AbortSignal,
+): Promise<GlobalStreamHello> {
+    const response = await request(endpointUrl(endpoint, "catalog"), {
+        headers: { accept: "application/json", authorization: `Bearer ${token}` },
+        signal,
+    });
+    if (!response.ok) throw new Error(`Rig answered with ${String(response.status)}.`);
+    return (await response.json()) as GlobalStreamHello;
 }
 
 async function fetchEarlier(

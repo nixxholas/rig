@@ -28,6 +28,7 @@ import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
 import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
+import { LiveGlobalEventQueue } from "./LiveGlobalEventQueue.js";
 import { ProjectRepository, type ProjectAvatarAsset } from "./ProjectRepository.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
@@ -59,6 +60,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly #createTerminalEventId = createEventIdFactory();
     readonly #projects: ProjectRepository;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
+    readonly liveEvents = new LiveGlobalEventQueue();
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
@@ -79,14 +81,16 @@ export class InMemorySessionStore implements SessionStore {
         });
         this.remoteTerminals = new ProjectRemoteTerminalStore({
             onChange: (scope, terminals) => {
-                this.globalEventQueue.publishLive({
+                const event = {
                     createdAt: Date.now(),
                     data: { terminals },
                     id: this.#createTerminalEventId(),
                     projectId: scope.projectId,
-                    type: "remote_terminals_changed",
+                    type: "remote_terminals_changed" as const,
                     ...(scope.workspaceId === undefined ? {} : { workspaceId: scope.workspaceId }),
-                });
+                };
+                this.globalEventQueue.publishLive(event);
+                this.liveEvents.publish(event);
             },
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
@@ -687,6 +691,9 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {
+        // Every event reaches the ephemeral stream, including the transient ones
+        // the durable log drops, because one subscription has to be enough.
+        this.#afterTransactionCommit(() => this.liveEvents.publish(event));
         if (isLiveGlobalEvent(event)) {
             this.#afterTransactionCommit(() => {
                 this.globalEventQueue.publishLive(event);

@@ -17,11 +17,14 @@ import type { InMemorySession } from "./InMemorySession.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
+import type { LiveGlobalEventQueue } from "./LiveGlobalEventQueue.js";
 import type { ProjectAvatarAsset } from "./ProjectRepository.js";
 import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 
 export interface SessionStore {
     readonly globalEventQueue: GlobalEventQueue;
+    /** The ephemeral stream every local client follows. Never persisted. */
+    readonly liveEvents: LiveGlobalEventQueue;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     attachSecret(
         sessionId: string,

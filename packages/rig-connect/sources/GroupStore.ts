@@ -31,6 +31,16 @@ export class GroupStore {
     #sessions = new Map<string, SessionSummary>();
     /** Newest event applied per session, so an out-of-order copy is ignored. */
     #sessionEventIds = new Map<string, string>();
+    /**
+     * Recent events per session, kept so a snapshot can be rebased onto them.
+     *
+     * A catalog is a snapshot taken at some position in the stream and delivered
+     * asynchronously, so by the time it lands the client may already have seen
+     * events after that position — or events for a session the snapshot is only
+     * now introducing. Holding them means the snapshot becomes the base and
+     * everything after it is replayed, instead of either side simply winning.
+     */
+    #recentSessionEvents = new Map<string, GlobalEvent[]>();
     #projectGit = new Map<string, GitChangeSnapshot>();
     #workspaceGit = new Map<string, GitChangeSnapshot>();
     #projectTerminals = new Map<string, GlobalStreamHello["terminalGroups"][number]["terminals"]>();
@@ -198,6 +208,12 @@ export class GroupStore {
         return [{ state: this.#state, type: "groups_state_changed" }];
     }
 
+    /**
+     * Takes a catalog snapshot as the new base for everything it names.
+     *
+     * `hello.cursor` is the stream position the snapshot was taken at, which is
+     * what lets each session be rebased onto the events that outran it.
+     */
     applyHello(hello: GlobalStreamHello): readonly GroupDelta[] {
         const previousTree = this.projects();
         const nextProjects = new Map<string, Project>();
@@ -239,11 +255,16 @@ export class GroupStore {
 
         for (const session of hello.sessions) {
             const known = this.#sessions.get(session.id);
-            if (known !== undefined && sameSessionSummary(known, session)) {
+            // The snapshot is the base, and anything that outran it is replayed on
+            // top. A catalog arrives asynchronously, so by now the client may hold
+            // events the snapshot predates — including events for a session this
+            // snapshot is only now introducing.
+            const rebased = this.#rebaseSession(session, hello.cursor);
+            if (known !== undefined && sameSessionSummary(known, rebased)) {
                 nextSessions.set(session.id, known);
             } else {
-                nextSessions.set(session.id, session);
-                changedProjectIds.add(session.projectId);
+                nextSessions.set(session.id, rebased);
+                changedProjectIds.add(rebased.projectId);
                 if (known !== undefined) changedProjectIds.add(known.projectId);
             }
         }
@@ -455,6 +476,10 @@ export class GroupStore {
         // of the same session is newer. Sessions carry no version of their own.
         const seen = this.#sessionEventIds.get(sessionId);
         if (seen !== undefined && seen >= event.id) return false;
+        // Held before it is applied, so an event for a session the client has not
+        // loaded yet survives to be replayed once a snapshot introduces it. Such
+        // an event used to be dropped, which lost the change outright.
+        this.#rememberSessionEvent(sessionId, event);
 
         if (event.type === "session_current") {
             const incoming = (event.data as { session: SessionSummary }).session;
@@ -518,6 +543,62 @@ export class GroupStore {
         }
         if (known === undefined) deltas.push({ sessionId: merged.id, type: "session_added" });
         return true;
+    }
+
+    /**
+     * Holds one event against its session, newest last.
+     *
+     * The queue is bounded on both axes: a long-lived client would otherwise
+     * accumulate every event it ever saw, for every session it ever heard of.
+     * Dropping the oldest is safe because a snapshot older than everything still
+     * held is a snapshot the client has already moved far past.
+     */
+    #rememberSessionEvent(sessionId: string, event: GlobalEvent): void {
+        const held = this.#recentSessionEvents.get(sessionId);
+        if (held === undefined) {
+            if (this.#recentSessionEvents.size >= PENDING_SESSION_LIMIT) {
+                const oldest = this.#recentSessionEvents.keys().next();
+                if (!oldest.done) this.#recentSessionEvents.delete(oldest.value);
+            }
+            this.#recentSessionEvents.set(sessionId, [event]);
+            return;
+        }
+        held.push(event);
+        while (held.length > PENDING_EVENTS_PER_SESSION) held.shift();
+    }
+
+    /**
+     * Replays everything that happened after a snapshot onto that snapshot.
+     *
+     * `observedAt` is the stream position that was current when the snapshot was
+     * taken, so the snapshot already reflects every event up to it. Events at or
+     * before that position are dropped; everything after is applied in order.
+     * That is what makes the decision unambiguous rather than a comparison of
+     * which copy looks newer — events enter the stream strictly in sequence, so
+     * one position separates what a snapshot contains from what it does not.
+     *
+     * The result carries both the fields only a snapshot has and the changes only
+     * the stream has.
+     */
+    #rebaseSession(snapshot: SessionSummary, observedAt: string): SessionSummary {
+        const held = this.#recentSessionEvents.get(snapshot.id);
+        const later = (held ?? []).filter((event) => event.id > observedAt);
+        if (later.length === 0) {
+            this.#recentSessionEvents.delete(snapshot.id);
+            // Nothing outran the snapshot, so its position is what the client has
+            // seen of this session.
+            this.#sessionEventIds.set(snapshot.id, snapshot.lastEventId ?? observedAt);
+            return snapshot;
+        }
+        this.#recentSessionEvents.set(snapshot.id, later);
+
+        let rebased = snapshot;
+        for (const event of later) {
+            const updated = sessionSummaryAfterEvent(rebased, event);
+            if (updated !== undefined) rebased = updated;
+        }
+        this.#sessionEventIds.set(snapshot.id, later[later.length - 1]!.id);
+        return rebased;
     }
 
     /**
@@ -782,6 +863,48 @@ function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {
  * run say what happened, and a list only needs to know whether the session is
  * busy.
  */
+/**
+ * The session as it stands after one event, or nothing if the event says nothing
+ * about it.
+ *
+ * This is the replay half of snapshot-plus-events. It is deliberately pure and
+ * deliberately shares `sessionPatch` with the live path, so a field the stream
+ * knows how to update cannot quietly stop being updated on a rebase.
+ */
+/**
+ * Bounds on the per-session event queues.
+ *
+ * A catalog load settles in well under a second, so these only have to cover the
+ * events that can outrun one request. They exist to stop a long-lived client
+ * from accumulating every event it ever saw, for every session it ever heard of.
+ */
+const PENDING_SESSION_LIMIT = 512;
+const PENDING_EVENTS_PER_SESSION = 64;
+
+function sessionSummaryAfterEvent(
+    session: SessionSummary,
+    event: GlobalEvent,
+): SessionSummary | undefined {
+    if (event.type === "session_current") {
+        const incoming = (event.data as { session: SessionSummary }).session;
+        return { ...session, ...incoming };
+    }
+    if (event.type === "session_archived") {
+        const { archived } = event.data as { archived: boolean };
+        return { ...session, archived, lastEventId: event.id };
+    }
+    if (event.type === "session_created" || event.type === "session_updated") {
+        const incoming = (event.data as { session?: Partial<SessionSummary> }).session;
+        if (incoming === undefined) return undefined;
+        return { ...session, ...incoming, lastEventId: event.id };
+    }
+    const patch = sessionPatch(event);
+    if (patch === undefined) return undefined;
+    const updated = { ...session, ...patch.set, lastEventId: event.id };
+    for (const key of patch.clear ?? []) delete updated[key];
+    return updated;
+}
+
 function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
     switch (event.type) {
         case "session_title_changed": {

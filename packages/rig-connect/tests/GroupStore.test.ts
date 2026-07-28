@@ -85,6 +85,104 @@ function event<TType extends string>(type: TType, data: unknown, scope: object =
     return { createdAt: clock, data, id: `g${clock}`, type, ...scope } as unknown as GlobalEvent;
 }
 
+describe("GroupStore holds recent events against their session", () => {
+    /** An event id that sorts after every `g<n>` the helper mints. */
+    const LATER = "z9";
+
+    it("keeps memory bounded when events name sessions that never load", () => {
+        const store = new GroupStore();
+        // Far more distinct sessions than the queue is allowed to track, none of
+        // which the client will ever be told about.
+        for (let index = 0; index < 5_000; index += 1) {
+            store.apply(
+                event(
+                    "session_title_changed",
+                    { status: "idle", title: `t${index}` },
+                    {
+                        sessionId: `ghost-${index}`,
+                    },
+                ),
+            );
+        }
+
+        store.applyHello(
+            hello({
+                cursor: "g0",
+                sessions: [
+                    { ...session("ghost-4999", "p1"), title: "snapshot" } as SessionSummary,
+                    { ...session("ghost-0", "p1"), title: "snapshot" } as SessionSummary,
+                ],
+            }),
+        );
+        const titleOf = (id: string) =>
+            store
+                .projects()
+                .flatMap((group) => group.sessions ?? [])
+                .find((entry) => entry.id === id)?.title;
+
+        // The newest ghost is still held, so it rebases onto its event.
+        expect(titleOf("ghost-4999")).toBe("t4999");
+        // The oldest was evicted long ago, which is the whole point of the bound:
+        // had every ghost been retained, this would read "t0" instead.
+        expect(titleOf("ghost-0")).toBe("snapshot");
+    });
+
+    it("keeps only recent events for one very busy session", () => {
+        const store = new GroupStore();
+        for (let index = 0; index < 1_000; index += 1) {
+            store.apply(
+                event(
+                    "session_title_changed",
+                    { status: "idle", title: `t${index}` },
+                    {
+                        sessionId: "busy",
+                    },
+                ),
+            );
+        }
+
+        // The newest event still wins over a snapshot that predates it, which is
+        // what trimming the oldest is allowed to cost and no more.
+        store.applyHello(
+            hello({
+                cursor: "g0",
+                sessions: [{ ...session("busy", "p1"), title: "snapshot" } as SessionSummary],
+            }),
+        );
+        const listed = store
+            .projects()
+            .flatMap((group) => group.sessions ?? [])
+            .find((entry) => entry.id === "busy");
+        expect(listed?.title).toBe("t999");
+    });
+
+    it("discards events the snapshot already contains", () => {
+        const store = new GroupStore();
+        store.apply(
+            event(
+                "session_title_changed",
+                { status: "idle", title: "stale" },
+                {
+                    sessionId: "s1",
+                },
+            ),
+        );
+
+        // The snapshot was taken after that event, so it must win.
+        store.applyHello(
+            hello({
+                cursor: LATER,
+                sessions: [{ ...session("s1", "p1"), title: "snapshot" } as SessionSummary],
+            }),
+        );
+        const listed = store
+            .projects()
+            .flatMap((group) => group.sessions ?? [])
+            .find((entry) => entry.id === "s1");
+        expect(listed?.title).toBe("snapshot");
+    });
+});
+
 describe("GroupStore", () => {
     it("projects daemon identity and the global model catalog from the opening frame", () => {
         const store = new GroupStore();

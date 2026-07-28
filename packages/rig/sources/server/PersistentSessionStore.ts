@@ -60,6 +60,7 @@ import type { ExternalToolCall, ExternalToolDefinition } from "../external-tools
 import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
 import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
+import { LiveGlobalEventQueue } from "./LiveGlobalEventQueue.js";
 import {
     ProjectRepository,
     type ProjectAvatarAsset,
@@ -124,6 +125,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     });
     #taskDrain: TaskDrain | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
+    readonly liveEvents = new LiveGlobalEventQueue();
     readonly remoteTerminals: ProjectRemoteTerminalStore;
 
     constructor(options: PersistentSessionStoreOptions) {
@@ -167,14 +169,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         this.remoteTerminals = new ProjectRemoteTerminalStore({
             onChange: (scope, terminals) => {
-                this.#globalEventQueue.publishLive({
+                const event = {
                     createdAt: this.#now(),
                     data: { terminals },
                     id: this.#createTerminalEventId(),
                     projectId: scope.projectId,
-                    type: "remote_terminals_changed",
+                    type: "remote_terminals_changed" as const,
                     ...(scope.workspaceId === undefined ? {} : { workspaceId: scope.workspaceId }),
-                });
+                };
+                this.#globalEventQueue.publishLive(event);
+                this.liveEvents.publish(event);
             },
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
         });
@@ -292,6 +296,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     close(): void {
         void this.remoteTerminals.close();
         this.#projects.close();
+        this.liveEvents.close();
         this.#globalEventQueue.deactivate();
         this.#database.close();
     }
@@ -1773,6 +1778,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     `,
                 )
                 .run(event.id, this.#now(), event.sessionId);
+            this.#publishLiveStream(event);
             this.#publishGlobalEvent(event);
             this.#notifySessionEvent(event);
             return;
@@ -1819,6 +1825,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 )
                 .run(event.id, this.#now(), event.sessionId);
         });
+        // The live stream carries this event whether or not the durable log
+        // keeps it, but never before the row it describes is committed.
+        this.#publishLiveStream(event);
         if (this.#globalEventQueue.durable && globalEntry !== undefined) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => queue.publish(globalEntry!));
@@ -1832,7 +1841,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#afterTransactionCommit(() => this.#notifySessionEvent(event));
     }
 
+    /**
+     * Puts an event on the ephemeral stream every local client follows.
+     *
+     * Session events arrive here through `#appendEvent`, which has already done
+     * this, so only the rest are forwarded from `#publishGlobalEvent`.
+     */
+    #publishLiveStream(event: GlobalEvent): void {
+        const queue = this.liveEvents;
+        this.#afterTransactionCommit(() => queue.publish(event));
+    }
+
     #publishGlobalEvent(event: GlobalEvent): void {
+        if (!("sessionId" in event)) this.#publishLiveStream(event);
         if (isLiveGlobalEvent(event)) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => {

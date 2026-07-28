@@ -86,6 +86,7 @@ import type { SessionEventLog } from "./SessionEventLog.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import { isSubmitMessageRequest } from "./isSubmitMessageRequest.js";
 import { limitProtocolSessionMessages } from "./limitProtocolSessionMessages.js";
+import type { GlobalStreamHello } from "../protocol/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import type { SessionStore } from "./SessionStore.js";
 import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
@@ -95,6 +96,7 @@ import { selectRecentSessionEvents } from "./selectRecentSessionEvents.js";
 import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
+import { streamLiveEvents } from "./streamLiveEvents.js";
 import type { GitStateTracker } from "./GitStateTracker.js";
 import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
 import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permissions/index.js";
@@ -921,6 +923,25 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "GET" && route.name === "catalog") {
+        // The position is read before the entities, and both happen in one
+        // synchronous pass, so the catalog states exactly the point in the stream
+        // that it reflects. A client can then say of any event whether this
+        // snapshot already contains it, instead of inferring it from what changed.
+        sendJson<GlobalStreamHello>(response, 200, {
+            cursor: store.liveEvents.cursor(),
+            ...buildGroupCatalog(store, modelCatalog, identity, sessionTerminals),
+        });
+        return;
+    }
+
+    // Outside the durable-log gate on purpose: the live stream is the one
+    // subscription a local client always has, whether or not events are stored.
+    if (request.method === "GET" && route.name === "live-events-stream") {
+        streamLiveEvents(request, response, store.liveEvents, url.searchParams.get("after"));
+        return;
+    }
+
     if (isGlobalEventRoute(route.name)) {
         const globalEventQueue = runtimeConfig.globalEventQueue;
 
@@ -1006,50 +1027,7 @@ async function handleRequest(
                         })),
                     ];
                 },
-                () => {
-                    const sessions = store
-                        .listActive()
-                        .map((summary) =>
-                            sessionSummaryWithTerminalPresence(summary, sessionTerminals),
-                        )
-                        .filter((summary) => !summary.archived);
-                    const projects = store
-                        .listProjects()
-                        .filter((project) => project.archivedAt === undefined);
-                    const projectIds = new Set(projects.map((project) => project.id));
-                    const workspaces = store
-                        .listWorkspaces()
-                        .filter(
-                            (workspace) =>
-                                projectIds.has(workspace.projectId) &&
-                                workspace.archivedAt === undefined &&
-                                workspace.status !== "archived",
-                        );
-                    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
-                    return {
-                        catalog: modelCatalog,
-                        identity,
-                        projects,
-                        terminalGroups: store.remoteTerminals.groups().flatMap((group) =>
-                            !projectIds.has(group.scope.projectId) ||
-                            (group.scope.workspaceId !== undefined &&
-                                !workspaceIds.has(group.scope.workspaceId))
-                                ? []
-                                : [
-                                      {
-                                          projectId: group.scope.projectId,
-                                          terminals: group.terminals,
-                                          ...(group.scope.workspaceId === undefined
-                                              ? {}
-                                              : { workspaceId: group.scope.workspaceId }),
-                                      },
-                                  ],
-                        ),
-                        sessions,
-                        sessionsComplete: true,
-                        workspaces,
-                    };
-                },
+                () => buildGroupCatalog(store, modelCatalog, identity, sessionTerminals),
             );
             return;
         }
@@ -2114,6 +2092,8 @@ function matchRoute(pathname: string):
               | "global-events"
               | "git-watch"
               | "global-events-stream"
+              | "live-events-stream"
+              | "catalog"
               | "global-events-trim"
               | "external-tool-calls"
               | "config"
@@ -2216,6 +2196,8 @@ function matchRoute(pathname: string):
     if (pathname === "/debug/inspector") return { name: "debug-inspector" };
     if (pathname === "/events") return { name: "global-events" };
     if (pathname === "/events/stream") return { name: "global-events-stream" };
+    if (pathname === "/events/live") return { name: "live-events-stream" };
+    if (pathname === "/catalog") return { name: "catalog" };
     if (pathname === "/events/trim") return { name: "global-events-trim" };
     if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };
@@ -2792,4 +2774,57 @@ function parseTurnLimit(value: string | null): number | undefined {
     const parsed = Number(value);
     if (!Number.isInteger(parsed) || parsed < 1) return undefined;
     return Math.min(parsed, SESSION_STREAM_TURN_LIMIT);
+}
+
+/**
+ * The whole local catalog in one answer: projects, their workspaces, the active
+ * sessions inside them, and the terminals attached to each group.
+ *
+ * This is the request-response half of sync. A client opens the live stream
+ * first and loads this second, so anything that changes while it loads still
+ * arrives on the stream with a cursor that says whether it is newer.
+ */
+function buildGroupCatalog(
+    store: SessionStore,
+    modelCatalog: ModelCatalog,
+    identity: DaemonIdentity,
+    sessionTerminals: SessionTerminalTracker,
+): Omit<GlobalStreamHello, "cursor"> {
+    const sessions = store
+        .listActive()
+        .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
+        .filter((summary) => !summary.archived);
+    const projects = store.listProjects().filter((project) => project.archivedAt === undefined);
+    const projectIds = new Set(projects.map((project) => project.id));
+    const workspaces = store
+        .listWorkspaces()
+        .filter(
+            (workspace) =>
+                projectIds.has(workspace.projectId) &&
+                workspace.archivedAt === undefined &&
+                workspace.status !== "archived",
+        );
+    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+    return {
+        catalog: modelCatalog,
+        identity,
+        projects,
+        terminalGroups: store.remoteTerminals.groups().flatMap((group) =>
+            !projectIds.has(group.scope.projectId) ||
+            (group.scope.workspaceId !== undefined && !workspaceIds.has(group.scope.workspaceId))
+                ? []
+                : [
+                      {
+                          projectId: group.scope.projectId,
+                          terminals: group.terminals,
+                          ...(group.scope.workspaceId === undefined
+                              ? {}
+                              : { workspaceId: group.scope.workspaceId }),
+                      },
+                  ],
+        ),
+        sessions,
+        sessionsComplete: true,
+        workspaces,
+    };
 }

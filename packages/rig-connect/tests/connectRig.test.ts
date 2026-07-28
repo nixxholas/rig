@@ -56,9 +56,8 @@ function hello(modelId = "old-model"): string {
     return `event: hello\ndata: ${JSON.stringify(value)}\n\n`;
 }
 
-function groupsHello(): string {
-    const value: GlobalStreamHello = {
-        cursor: "global-1",
+function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
+    return {
         projects: [
             {
                 createdAt: 1,
@@ -80,7 +79,11 @@ function groupsHello(): string {
         terminalGroups: [],
         workspaces: [],
     };
-    return `event: hello\ndata: ${JSON.stringify(value)}\n\n`;
+}
+
+/** The light hello the live stream opens with: a position, and nothing else. */
+function liveHello(cursor = "01900000-0000-7000-8000-000000000001"): string {
+    return `event: hello\ndata: ${JSON.stringify({ cursor, gap: false, resumed: false })}\n\n`;
 }
 
 function event(
@@ -754,7 +757,12 @@ describe("connectRig mutations", () => {
             endpoint: "http://daemon.test",
             fetch: (input, init) => {
                 const url = new URL(String(input));
-                if (url.pathname === "/events/stream") return Promise.resolve(stream.response);
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(groupsCatalog()), { status: 200 }),
+                    );
+                }
                 mutationRequest = { ...(init === undefined ? {} : { init }), url };
                 return Promise.resolve(
                     new Response(
@@ -770,7 +778,8 @@ describe("connectRig mutations", () => {
         });
         const connection = rig.connectGroups({ onChange: () => undefined });
         try {
-            stream.write(groupsHello());
+            // The stream opens first; the catalog is fetched in response to that.
+            stream.write(liveHello());
             await settle();
             const mutationId = rig.renameGroup(
                 { kind: "project", projectId: "project-1" },
