@@ -253,8 +253,7 @@ describe("background subagent completion routes to its parent", () => {
         gym.terminal.press("enter");
         const agents = await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes("Completed · Inspect workspace") &&
-                snapshot.scroll.atBottom,
+                snapshot.text.includes("Completed · Inspect workspace") && snapshot.scroll.atBottom,
             "completed delegated work status",
         );
         expect(agents.text).toContain("Subagents");

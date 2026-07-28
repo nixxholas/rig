@@ -81,9 +81,11 @@ describe("createGymProvider", () => {
     });
 
     it("keeps runtime model identity when a native provider prepares the prompt", async () => {
-        let payload: {
-            context: { systemPrompt?: string; systemPromptOverride?: string };
-        } | undefined;
+        let payload:
+            | {
+                  context: { systemPrompt?: string; systemPromptOverride?: string };
+              }
+            | undefined;
         const request = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
             payload = JSON.parse(String(init?.body)) as typeof payload;
             return new Response(

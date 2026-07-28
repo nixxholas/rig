@@ -128,7 +128,9 @@ export class MockInferenceServer {
             );
         } catch (error) {
             if (this.handlerFailures.length === 0) {
-                this.handlerFailures.push(error instanceof Error ? error : new Error(String(error)));
+                this.handlerFailures.push(
+                    error instanceof Error ? error : new Error(String(error)),
+                );
             }
             send(response, 500, error instanceof Error ? error.message : String(error));
         }

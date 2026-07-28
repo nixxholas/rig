@@ -67,12 +67,7 @@ export async function executePreapprovedToolCall(options: {
         const result = runWithFullAccess
             ? await options.context.permissions.runWithMode("full_access", run)
             : await run();
-        return createToolResultBlock(
-            tool,
-            options.toolCall.arguments,
-            result,
-            options.toolCall.id,
-        );
+        return createToolResultBlock(tool, options.toolCall.arguments, result, options.toolCall.id);
     } catch (error) {
         const message = errorToMessage(error);
         return createErrorToolResultBlock(

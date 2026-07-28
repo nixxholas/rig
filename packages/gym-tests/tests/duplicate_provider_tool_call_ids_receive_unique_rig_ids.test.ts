@@ -46,8 +46,7 @@ describe("duplicate model tool call identifier handling", () => {
                 expect(new Set(toolResults.map((message) => message.toolCallId)).size).toBe(2);
                 expect(
                     toolResults.every(
-                        (message) =>
-                            message.providerToolCallId === "compromised-model-reused-id",
+                        (message) => message.providerToolCallId === "compromised-model-reused-id",
                     ),
                 ).toBe(true);
                 return { content: [{ text: "DUPLICATE_BATCH_OK", type: "text" }] };

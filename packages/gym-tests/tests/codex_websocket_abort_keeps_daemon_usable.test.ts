@@ -35,9 +35,7 @@ describe("Codex WebSocket cancellation", () => {
 
         submit(gym, "Start a response that I will interrupt.");
         await gym.terminal.waitForText("esc to interrupt", 30_000);
-        await expect
-            .poll(() => codex.mainRequests(), { interval: 20, timeout: 30_000 })
-            .toBe(1);
+        await expect.poll(() => codex.mainRequests(), { interval: 20, timeout: 30_000 }).toBe(1);
         gym.terminal.press("escape");
         await gym.terminal.waitUntil(
             (snapshot) =>
