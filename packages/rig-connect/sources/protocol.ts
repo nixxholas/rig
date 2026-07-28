@@ -668,6 +668,8 @@ export interface SessionTranscriptWindow {
     messages: readonly Message[];
     messageCreatedAt?: Readonly<Record<string, number>>;
     messageEventId?: Readonly<Record<string, EventId>>;
+    /** When each steering message was actually applied to its run. */
+    messageSteeredAt?: Readonly<Record<string, number>>;
     permissionReviews?: readonly PermissionReviewState[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */

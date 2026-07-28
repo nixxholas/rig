@@ -108,7 +108,8 @@ describe("a chat that loses its place", () => {
             await fetch(`${endpoint}/sessions/${session.id}/state`, { headers: auth })
         ).json()) as SessionStateResponse;
         expect(full.append).toBeUndefined();
-        const messages = full.session!.snapshot.messages;
+        const messages = full.transcript!.messages;
+        expect(full.session!.snapshot.messages).toEqual([]);
         expect(messages.length).toBeGreaterThanOrEqual(4);
 
         // The client already holds everything up to the second message, and says

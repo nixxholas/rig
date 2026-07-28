@@ -72,6 +72,7 @@ export class ChatStore {
     #session: SessionState;
     #turnId: string | undefined;
     #turnStartedAt = new Map<string, number>();
+    #lastSteeredAt = new Map<string, number>();
     #openTurnIds: string[] = [];
     /** Elements by id, so a delta reaches its element without scanning the list. */
     #byId = new Map<string, ChatElement>();
@@ -912,14 +913,16 @@ export class ChatStore {
                 break;
             }
             case "steering_applied": {
-                const applied = new Set(
-                    (event.data as { messageIds: readonly string[] }).messageIds,
-                );
-                for (const messageId of applied) {
+                const data = event.data as { messageIds: readonly string[]; runId: string };
+                const applied = new Set(data.messageIds);
+                for (const messageId of data.messageIds) {
                     const elementId = `message:${messageId}`;
                     const element = this.#byId.get(elementId);
                     if (element?.kind === "user_message") {
-                        this.#update(elementId, { delivery: "sent" });
+                        this.#update(elementId, {
+                            delivery: "sent",
+                            ...this.#steeringTiming(data.runId, event.createdAt),
+                        });
                     }
                 }
                 this.#session = {
@@ -1279,6 +1282,7 @@ export class ChatStore {
         this.#streamingMessageId = undefined;
         this.#turnId = undefined;
         this.#turnStartedAt.clear();
+        this.#lastSteeredAt.clear();
         this.#openTurnIds = [];
         this.#turnUsage = undefined;
         this.#retrying = false;
@@ -1403,7 +1407,18 @@ export class ChatStore {
         for (const item of timeline) {
             this.#turnId = item.runId;
             if (item.kind === "message") {
-                this.#applyMessage(item.message, item.at, deltas, item.runId);
+                const steeredAt = transcript.messageSteeredAt?.[item.message.id];
+                this.#applyMessage(
+                    item.message,
+                    item.at,
+                    deltas,
+                    item.runId,
+                    "sent",
+                    undefined,
+                    steeredAt === undefined
+                        ? undefined
+                        : this.#steeringTiming(item.runId, steeredAt),
+                );
             } else if (item.kind === "retry") {
                 this.#appendRetry(
                     item.retry.id,
@@ -1513,6 +1528,7 @@ export class ChatStore {
         });
         this.#turnUsage = undefined;
         this.#turnStartedAt.delete(turnId);
+        this.#lastSteeredAt.delete(turnId);
         this.#openTurnIds = this.#openTurnIds.filter((openTurnId) => openTurnId !== turnId);
         if (this.#session.activeTurn?.turnId === turnId) {
             this.#session = withoutKeys(this.#session, ["activeTurn"]);
@@ -1726,6 +1742,7 @@ export class ChatStore {
         turnId = this.#turnId,
         delivery: UserMessageElement["delivery"] = "sent",
         source?: "notification",
+        steering?: Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs">,
     ): void {
         if (message.internal === true) return;
         if (this.#appliedMessageIds.has(message.id)) {
@@ -1749,7 +1766,7 @@ export class ChatStore {
             return;
         }
         if (message.role === "user") {
-            this.#appendUserMessage(message, at, turnId, delivery, source);
+            this.#appendUserMessage(message, at, turnId, delivery, source, steering);
             return;
         }
         this.#appendAgentBlocks(message, at, deltas, turnId);
@@ -1761,6 +1778,7 @@ export class ChatStore {
         turnId = this.#turnId,
         delivery: UserMessageElement["delivery"] = "sent",
         source?: "notification",
+        steering?: Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs">,
     ): void {
         const attachments = message.blocks
             .filter((block): block is Extract<ContentBlock, { type: "image" }> =>
@@ -1774,11 +1792,27 @@ export class ChatStore {
             kind: "user_message",
             messageId: message.id,
             ...(source === undefined ? {} : { source }),
+            ...(steering === undefined ? {} : steering),
             text: textOf(message.blocks),
             turnId: turnId ?? `history:${message.id}`,
             ...(attachments.length === 0 ? {} : { attachments }),
         };
         this.#append(element);
+    }
+
+    #steeringTiming(
+        turnId: string,
+        steeredAt: number,
+    ): Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs"> {
+        const startedAt = this.#turnStartedAt.get(turnId);
+        const previous =
+            this.#lastSteeredAt.get(turnId) ??
+            (startedAt === undefined || startedAt === 0 ? undefined : startedAt);
+        this.#lastSteeredAt.set(turnId, steeredAt);
+        return {
+            steeredAt,
+            steeringElapsedMs: previous === undefined ? 0 : Math.max(0, steeredAt - previous),
+        };
     }
 
     /**

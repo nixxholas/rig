@@ -57,6 +57,10 @@ export interface UserMessageElement extends BaseChatElement {
     messageId: string;
     /** Whether this bubble is still queued to steer the active run. */
     delivery: "pending_steering" | "sent";
+    /** When this message was actually applied as steering, not when it was queued. */
+    steeredAt?: number;
+    /** Time since the turn began or the preceding steering was applied. */
+    steeringElapsedMs?: number;
     /** Present for workflow/subagent news injected by Rig rather than typed by the user. */
     source?: "notification";
     text: string;

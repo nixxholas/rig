@@ -90,6 +90,18 @@ describe("SessionEventLog", () => {
         expect(log.messageSubmission("missing-message")).toBeUndefined();
     });
 
+    it("indexes when steering was applied rather than when its message was queued", () => {
+        const log = new SessionEventLog({
+            events: [steeringAppliedEvent(FIRST, ["steer-restored"], 1_700_000_010_000)],
+        });
+
+        log.append(steeringAppliedEvent(DURABLE, ["steer-one", "steer-two"], 1_700_000_020_000));
+
+        expect(log.messageSteeredAt("steer-restored")).toBe(1_700_000_010_000);
+        expect(log.messageSteeredAt("steer-one")).toBe(1_700_000_020_000);
+        expect(log.messageSteeredAt("steer-two")).toBe(1_700_000_020_000);
+    });
+
     it("forgets submission idempotency entries when their retained event expires", () => {
         const submission = messageSubmittedEvent(FIRST, "expired-message");
         const log = new SessionEventLog({ retentionLimit: 1 });
@@ -189,6 +201,20 @@ function messageSubmittedEvent(
         id,
         sessionId: "session-1",
         type: "message_submitted",
+    };
+}
+
+function steeringAppliedEvent(
+    id: string,
+    messageIds: readonly string[],
+    createdAt: number,
+): SessionEvent {
+    return {
+        createdAt,
+        data: { messageIds, runId: "run-1" },
+        id,
+        sessionId: "session-1",
+        type: "steering_applied",
     };
 }
 

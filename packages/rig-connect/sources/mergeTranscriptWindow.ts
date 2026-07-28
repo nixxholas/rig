@@ -43,6 +43,13 @@ export function mergeTranscriptWindow(
             return eventId === undefined ? [] : [[message.id, eventId]];
         }),
     );
+    const messageSteeredAt = Object.fromEntries(
+        messages.flatMap((message) => {
+            const steeredAt =
+                incoming.messageSteeredAt?.[message.id] ?? loaded.messageSteeredAt?.[message.id];
+            return steeredAt === undefined ? [] : [[message.id, steeredAt]];
+        }),
+    );
     const permissionReviews = [
         ...(loaded.permissionReviews ?? []),
         ...(incoming.permissionReviews ?? []),
@@ -56,6 +63,7 @@ export function mergeTranscriptWindow(
         complete: loaded.complete || incoming.complete,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
+        ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
         ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         messages,
         turns,

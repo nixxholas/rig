@@ -12,6 +12,7 @@ import { ProtocolHttpClient } from "../client/ProtocolHttpClient.js";
 import {
     createEventIdFactory,
     type SessionEvent,
+    type SessionStateResponse,
     type SessionStreamHello,
     type SessionSummary,
 } from "../protocol/index.js";
@@ -30,6 +31,79 @@ import type { ProviderQuota } from "@slopus/rig-providers";
 const execFile = promisify(execFileCallback);
 
 describe("createProtocolHttpServer", () => {
+    it("keeps private model context out of a bounded session state response", async () => {
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const privateMarker = "private-model-context:";
+        store.saveSession({
+            ...pausedGoalState(),
+            contextMessages: [
+                {
+                    blocks: [
+                        {
+                            text: `${privateMarker}${"x".repeat(512 * 1_024)}`,
+                            type: "text",
+                        },
+                    ],
+                    id: "private-context-message",
+                    role: "user",
+                },
+            ],
+        });
+        const session = store.get("goal-session");
+        if (session === undefined) throw new Error("Expected the restored session.");
+        const createEventId = createEventIdFactory();
+        session.events.append({
+            createdAt: 1,
+            data: {
+                command: "finished command",
+                commandId: "finished-command",
+                exitCode: 0,
+                output: `private-shell-output:${"y".repeat(512 * 1_024)}`,
+                timedOut: false,
+            },
+            id: createEventId(),
+            sessionId: session.id,
+            type: "shell_command_finished",
+        });
+        session.events.append({
+            createdAt: 2,
+            data: {
+                command: "running command",
+                commandId: "running-command",
+                sessionId: 42,
+            },
+            id: createEventId(),
+            sessionId: session.id,
+            type: "shell_command_started",
+        });
+        const { close, socketPath } = await startServer({ store });
+        try {
+            const response = await requestRawJson(socketPath, "/sessions/goal-session/state", {
+                body: "",
+                method: "GET",
+            });
+            const state = JSON.parse(response.body) as SessionStateResponse;
+
+            expect(response.statusCode).toBe(200);
+            expect(response.body).not.toContain(privateMarker);
+            expect(response.body).not.toContain("private-shell-output:");
+            expect(response.body.length).toBeLessThan(32 * 1_024);
+            expect(state.session?.snapshot.contextMessages).toBeUndefined();
+            expect(state.session?.snapshot.messages).toEqual([]);
+            expect(state.session?.shellCommands).toEqual([
+                {
+                    command: "running command",
+                    commandId: "running-command",
+                    sessionId: 42,
+                    status: "running",
+                },
+            ]);
+        } finally {
+            await close();
+            store.close();
+        }
+    });
+
     it("requires an entity version for workspace mutations", async () => {
         const projectDirectory = await mkdtemp(join(tmpdir(), "rig-workspace-version-"));
         await execFile("git", ["-C", projectDirectory, "init"]);

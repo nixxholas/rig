@@ -2657,11 +2657,13 @@ export class InMemorySession {
             (this.#transcriptRuns.get(runId) ?? []).map((entry): TranscriptEntry => {
                 const createdAt = this.events.messageCreatedAt(entry.message.id);
                 const eventId = this.events.messageEventId(entry.message.id);
+                const steeredAt = this.events.messageSteeredAt(entry.message.id);
                 return {
                     ...(createdAt === undefined ? {} : { createdAt }),
                     ...(eventId === undefined ? {} : { eventId }),
                     message: entry.message,
                     ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                    ...(steeredAt === undefined ? {} : { steeredAt }),
                 };
             }),
         );
@@ -2754,11 +2756,13 @@ export class InMemorySession {
             (this.#transcriptRuns.get(runId) ?? []).map((entry): TranscriptEntry => {
                 const createdAt = this.events.messageCreatedAt(entry.message.id);
                 const eventId = this.events.messageEventId(entry.message.id);
+                const steeredAt = this.events.messageSteeredAt(entry.message.id);
                 return {
                     ...(createdAt === undefined ? {} : { createdAt }),
                     ...(eventId === undefined ? {} : { eventId }),
                     message: entry.message,
                     ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                    ...(steeredAt === undefined ? {} : { steeredAt }),
                 };
             }),
         );

@@ -1370,7 +1370,7 @@ async function handleRequest(
         // position arrives on the global stream and is replayed on top of this.
         const cursor = store.liveEvents.cursor();
         const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
-        const hello = sessionStreamHello(session, false, turnLimit, store.listSubagents(sessionId));
+        const hello = sessionStateHello(session, turnLimit, store.listSubagents(sessionId));
         // A client catching up says which message it already holds, and receives
         // only the turns from there on. It still gets the whole current session,
         // because a gap leaves the rest of that state uncertain too — but the
@@ -1383,14 +1383,6 @@ async function handleRequest(
                 ...hello,
                 append: true,
                 cursor,
-                ...(hello.session === undefined
-                    ? {}
-                    : {
-                          session: {
-                              ...hello.session,
-                              snapshot: { ...hello.session.snapshot, messages: forward.messages },
-                          },
-                      }),
                 transcript: forward,
             });
             return;
@@ -2899,4 +2891,33 @@ function sessionStreamHello(
         ...(lastEventId === undefined ? {} : { lastEventId }),
     };
     return hello;
+}
+
+/**
+ * The request-response bootstrap has a dedicated transcript field, so its
+ * current-state snapshot carries no second copy of conversation history.
+ *
+ * The legacy session stream keeps its original complete hello for the terminal;
+ * this projection is only for rig-connect's `/state` endpoint.
+ */
+function sessionStateHello(
+    session: SessionEventSource,
+    turnLimit: number | undefined,
+    subagents: readonly SubagentSummary[],
+): SessionStreamHello {
+    const hello = sessionStreamHello(session, false, turnLimit, subagents);
+    if (hello.session === undefined) return hello;
+    const { contextMessages: _contextMessages, ...agentSnapshot } = hello.session.snapshot;
+    return {
+        ...hello,
+        session: {
+            ...hello.session,
+            // Completed commands are transcript history. Only commands that are
+            // still executing are part of the current state bootstrap.
+            shellCommands: (hello.session.shellCommands ?? []).filter(
+                (command) => command.status === "running",
+            ),
+            snapshot: { ...agentSnapshot, messages: [] },
+        },
+    };
 }

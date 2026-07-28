@@ -23,6 +23,8 @@ export class SessionEventLog {
     #listeners = new Set<SessionEventListener>();
     #messageCreatedAt = new Map<string, number>();
     #messageEventId = new Map<string, EventId>();
+    #messageSteeredAt = new Map<string, number>();
+    #messageSteeringEventId = new Map<string, EventId>();
     #permissionReviews = new Map<string, SessionPermissionReview>();
     #permissionReviewEventIds = new Map<string, EventId>();
     #messageSubmissions = new Map<string, SessionEvent & { type: "message_submitted" }>();
@@ -127,6 +129,10 @@ export class SessionEventLog {
         return this.#messageEventId.get(messageId);
     }
 
+    messageSteeredAt(messageId: string): number | undefined {
+        return this.#messageSteeredAt.get(messageId);
+    }
+
     permissionReviews(toolCallIds: ReadonlySet<string>): SessionPermissionReview[] {
         return [...toolCallIds].flatMap((toolCallId) => {
             const review = this.#permissionReviews.get(toolCallId);
@@ -198,10 +204,18 @@ export class SessionEventLog {
     }
 
     #recordMessageTime(event: SessionEvent): void {
-        if (event.type !== "message_submitted" && event.type !== "agent_message") return;
-        if (!this.#messageCreatedAt.has(event.data.message.id)) {
-            this.#messageCreatedAt.set(event.data.message.id, event.createdAt);
-            this.#messageEventId.set(event.data.message.id, event.id);
+        if (event.type === "steering_applied") {
+            for (const messageId of event.data.messageIds) {
+                this.#messageSteeredAt.set(messageId, event.createdAt);
+                this.#messageSteeringEventId.set(messageId, event.id);
+            }
+            return;
+        }
+        if (event.type === "message_submitted" || event.type === "agent_message") {
+            if (!this.#messageCreatedAt.has(event.data.message.id)) {
+                this.#messageCreatedAt.set(event.data.message.id, event.createdAt);
+                this.#messageEventId.set(event.data.message.id, event.id);
+            }
         }
     }
 
@@ -236,6 +250,13 @@ export class SessionEventLog {
             if (this.#messageEventId.get(messageId) === event.id) {
                 this.#messageCreatedAt.delete(messageId);
                 this.#messageEventId.delete(messageId);
+            }
+        }
+        if (event.type === "steering_applied") {
+            for (const messageId of event.data.messageIds) {
+                if (this.#messageSteeringEventId.get(messageId) !== event.id) continue;
+                this.#messageSteeredAt.delete(messageId);
+                this.#messageSteeringEventId.delete(messageId);
             }
         }
         if (event.type === "agent_event" && event.data.event.type === "permission_review") {

@@ -337,6 +337,8 @@ export interface SessionTranscriptWindow {
     messageCreatedAt?: Readonly<Record<string, number>>;
     /** Durable event order for messages sharing the same millisecond. */
     messageEventId?: Readonly<Record<string, EventId>>;
+    /** When each steering message was actually applied to its run. */
+    messageSteeredAt?: Readonly<Record<string, number>>;
     /** Resolved permission facts for tool calls contained in this page. */
     permissionReviews?: readonly SessionPermissionReview[];
     turns: readonly SessionTranscriptTurn[];

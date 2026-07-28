@@ -363,7 +363,8 @@ describe("ChatStore", () => {
     it("keeps multiple steering bubbles in queue order through back-to-back acceptance", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
-        store.apply(event("run_started", { runId: "run-1" }));
+        const started = event("run_started", { runId: "run-1" });
+        store.apply(started);
         for (const id of ["steer-1", "steer-2"]) {
             store.apply(
                 event("message_submitted", {
@@ -396,12 +397,20 @@ describe("ChatStore", () => {
                 ),
         ).toEqual(["steer-1", "steer-2"]);
 
-        store.apply(event("steering_applied", { messageIds: ["steer-1"], runId: "run-1" }));
+        const firstApplied = event("steering_applied", {
+            messageIds: ["steer-1"],
+            runId: "run-1",
+        });
+        store.apply(firstApplied);
         expect(store.elements().at(-1)).toMatchObject({
             delivery: "pending_steering",
             messageId: "steer-2",
         });
-        store.apply(event("steering_applied", { messageIds: ["steer-2"], runId: "run-1" }));
+        const secondApplied = event("steering_applied", {
+            messageIds: ["steer-2"],
+            runId: "run-1",
+        });
+        store.apply(secondApplied);
 
         const order = store
             .elements()
@@ -411,7 +420,68 @@ describe("ChatStore", () => {
             ["steer-1", "sent"],
             ["steer-2", "sent"],
         ]);
+        expect(
+            store
+                .elements()
+                .filter((element) => element.kind === "user_message")
+                .map((element) => ({
+                    elapsedMs: element.steeringElapsedMs,
+                    steeredAt: element.steeredAt,
+                })),
+        ).toEqual([
+            {
+                elapsedMs: firstApplied.createdAt - started.createdAt,
+                steeredAt: firstApplied.createdAt,
+            },
+            {
+                elapsedMs: secondApplied.createdAt - firstApplied.createdAt,
+                steeredAt: secondApplied.createdAt,
+            },
+        ]);
         expect(store.elements().at(-1)?.kind).toBe("agent_text");
+    });
+
+    it("gives a batch one steering time and measures it only once", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const started = event("run_started", { runId: "run-1" });
+        store.apply(started);
+        for (const id of ["steer-1", "steer-2"]) {
+            store.apply(
+                event("message_submitted", {
+                    delivery: "steer",
+                    displayText: id,
+                    message: {
+                        blocks: [{ text: id, type: "text" }],
+                        id,
+                        role: "user",
+                    },
+                    runId: "run-1",
+                }),
+            );
+        }
+        const applied = event("steering_applied", {
+            messageIds: ["steer-1", "steer-2"],
+            runId: "run-1",
+        });
+
+        store.apply(applied);
+
+        expect(
+            store
+                .elements()
+                .filter((element) => element.kind === "user_message")
+                .map((element) => ({
+                    elapsedMs: element.steeringElapsedMs,
+                    steeredAt: element.steeredAt,
+                })),
+        ).toEqual([
+            {
+                elapsedMs: applied.createdAt - started.createdAt,
+                steeredAt: applied.createdAt,
+            },
+            { elapsedMs: 0, steeredAt: applied.createdAt },
+        ]);
     });
 
     it("rebuilds pending steering once at the transcript tail on attach", () => {
@@ -2110,6 +2180,81 @@ describe("ChatStore", () => {
                 "run-2",
                 "run-2",
                 "run-2",
+            ]);
+        });
+
+        it("keeps every historical steering message at its own time inside one turn", () => {
+            const store = new ChatStore("session-1");
+            const base = hello();
+            const userMessages = [
+                {
+                    blocks: [{ text: "Initial request", type: "text" as const }],
+                    id: "initial",
+                    role: "user" as const,
+                },
+                ...Array.from({ length: 4 }, (_, index) => ({
+                    blocks: [{ text: `Steering ${String(index + 1)}`, type: "text" as const }],
+                    id: `steering-${String(index + 1)}`,
+                    role: "user" as const,
+                })),
+            ];
+            const answer = {
+                blocks: [{ text: "Finished", type: "text" as const }],
+                id: "answer",
+                role: "agent" as const,
+            };
+            const transcriptMessages = [...userMessages, answer];
+            store.applyHello({
+                ...base,
+                session: { ...base.session!, snapshot: { messages: [] } },
+                transcript: {
+                    complete: true,
+                    messageCreatedAt: Object.fromEntries(
+                        transcriptMessages.map((message, index) => [
+                            message.id,
+                            1_000 + index * 1_000,
+                        ]),
+                    ),
+                    messageSteeredAt: {
+                        "steering-1": 2_500,
+                        "steering-2": 3_600,
+                        "steering-3": 4_700,
+                        "steering-4": 5_800,
+                    },
+                    messages: transcriptMessages,
+                    turns: [
+                        {
+                            endedAt: 7_000,
+                            messageIds: transcriptMessages.map((message) => message.id),
+                            outcome: "success",
+                            runId: "one-run",
+                            startedAt: 1_000,
+                        },
+                    ],
+                },
+            });
+
+            const rebuiltUsers = store
+                .elements()
+                .filter((element) => element.kind === "user_message");
+            expect(rebuiltUsers.map((element) => element.createdAt)).toEqual([
+                1_000, 2_000, 3_000, 4_000, 5_000,
+            ]);
+            expect(
+                rebuiltUsers.map((element) => ({
+                    elapsedMs: element.steeringElapsedMs,
+                    steeredAt: element.steeredAt,
+                })),
+            ).toEqual([
+                { elapsedMs: undefined, steeredAt: undefined },
+                { elapsedMs: 1_500, steeredAt: 2_500 },
+                { elapsedMs: 1_100, steeredAt: 3_600 },
+                { elapsedMs: 1_100, steeredAt: 4_700 },
+                { elapsedMs: 1_100, steeredAt: 5_800 },
+            ]);
+            expect(rebuiltUsers.every((element) => element.turnId === "one-run")).toBe(true);
+            expect(store.elements().filter((element) => element.kind === "turn_end")).toEqual([
+                expect.objectContaining({ endedAt: 7_000, turnId: "one-run" }),
             ]);
         });
 

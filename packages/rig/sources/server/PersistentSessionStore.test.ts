@@ -128,11 +128,17 @@ describe("PersistentSessionStore", () => {
                 .get(sessionId) as { last_event_id: string };
             const createId = createEventIdFactory({ after: previous.last_event_id });
             const oldMessage = textUserMessage("old-message", "Old history");
+            const oldSteering = textUserMessage("old-steering", "Steer old history");
             database
                 .prepare(
                     "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 0, ?, 'user', 0, 'run-old', ?, ?)",
                 )
                 .run(sessionId, oldMessage.id, JSON.stringify(oldMessage), 1_700_000_000_000);
+            database
+                .prepare(
+                    "INSERT INTO session_messages (session_id, position, message_id, role, is_partial, run_id, message_json, updated_at_ms) VALUES (?, 1, ?, 'user', 0, 'run-old', ?, ?)",
+                )
+                .run(sessionId, oldSteering.id, JSON.stringify(oldSteering), 1_700_000_000_000);
             database
                 .prepare(
                     "INSERT INTO session_turns (session_id, run_id, first_position) VALUES (?, 'run-old', 0)",
@@ -142,6 +148,16 @@ describe("PersistentSessionStore", () => {
                 delivery: "run",
                 displayText: "Old history",
                 message: oldMessage,
+                runId: "run-old",
+            });
+            insertSessionEvent(database, sessionId, createId(), "message_submitted", {
+                delivery: "steer",
+                displayText: "Steer old history",
+                message: oldSteering,
+                runId: "run-old",
+            });
+            insertSessionEvent(database, sessionId, createId(), "steering_applied", {
+                messageIds: [oldSteering.id],
                 runId: "run-old",
             });
             insertSessionEvent(database, sessionId, createId(), "run_finished", {
@@ -176,6 +192,9 @@ describe("PersistentSessionStore", () => {
                         startedAt: 1_700_000_000_000,
                     }),
                 ]);
+                expect(restored?.transcriptWindow().messageSteeredAt).toEqual({
+                    [oldSteering.id]: 1_700_000_000_000,
+                });
             } finally {
                 restoredStore.close();
             }

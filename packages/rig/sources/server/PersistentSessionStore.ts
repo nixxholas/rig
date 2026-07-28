@@ -2507,11 +2507,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             .map((entry): TranscriptEntry => {
                 const createdAt = eventLog.messageCreatedAt(entry.message.id);
                 const eventId = eventLog.messageEventId(entry.message.id);
+                const steeredAt = eventLog.messageSteeredAt(entry.message.id);
                 return {
                     ...(createdAt === undefined ? {} : { createdAt }),
                     ...(eventId === undefined ? {} : { eventId }),
                     message: entry.message,
                     ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                    ...(steeredAt === undefined ? {} : { steeredAt }),
                 };
             });
         const window = sessionTranscriptWindow(

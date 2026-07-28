@@ -78,6 +78,11 @@ its final element, and the open tool call is closed as `interrupted`.
 Elements change by delta, not by replacement. Text grows as it is generated, tool-call arguments
 fill in as they stream, and a result lands on the tool-call element that was already there.
 
+A user message applied as steering carries `steeredAt` and `steeringElapsedMs`. The interval starts
+at the turn's `startedAt` for the first steering message and at the preceding `steeredAt` for each
+later one. A message still waiting at the transcript tail has `delivery: "pending_steering"` and
+does not gain steering timing until Rig reports that it was applied.
+
 ## Rendering from it
 
 The list is built for React. When it changes, every element that did not change comes back as the

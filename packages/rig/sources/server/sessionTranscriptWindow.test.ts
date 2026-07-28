@@ -142,6 +142,7 @@ describe("sessionTranscriptWindow", () => {
             ...entry,
             createdAt: 100 + index * 25,
             eventId: `event-${String(index)}`,
+            ...(index === 0 ? { steeredAt: 120 } : {}),
         }));
 
         const window = newest(entries, new Map(), 20);
@@ -154,6 +155,7 @@ describe("sessionTranscriptWindow", () => {
             "run-1-a": "event-1",
             "run-1-u": "event-0",
         });
+        expect(window.messageSteeredAt).toEqual({ "run-1-u": 120 });
     });
 
     it("leaves a still-running turn without an end", () => {

@@ -21,6 +21,7 @@ export interface TranscriptEntry {
     eventId?: EventId;
     message: Message;
     runId?: string;
+    steeredAt?: number;
 }
 
 export function transcriptRunFacts(
@@ -161,10 +162,16 @@ export function sessionTranscriptWindow(
             entry.eventId === undefined ? [] : [[entry.message.id, entry.eventId]],
         ),
     );
+    const messageSteeredAt = Object.fromEntries(
+        keptEntries.flatMap((entry) =>
+            entry.steeredAt === undefined ? [] : [[entry.message.id, entry.steeredAt]],
+        ),
+    );
     return {
         complete: kept.length === earlier.length,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
+        ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
         messages: keptEntries.map((entry) => entry.message),
         turns,
     };
