@@ -7,10 +7,9 @@ we build later — should get the live state of a session by embedding one small
 library and subscribing to one thing. That library is `rig-connect`.
 
 Today a client that wants to show a conversation has to do the work itself: open
-the session stream, learn from an event that _something_ changed, then issue more
-HTTP requests to find out _what_ changed, and finally reassemble a transcript.
-The events are notifications, not data. Every UI ends up reimplementing the same
-fragile reconstruction, and every UI pays for it in latency, requests, and bugs.
+the session stream, follow the updates, fetch what it is missing, and reassemble
+a transcript. Every UI ends up reimplementing the same fragile reconstruction,
+and every UI pays for it in bugs.
 
 `rig-connect` replaces that with a single correct implementation: it connects to
 a Rig endpoint, keeps a live chat state in memory, and hands it to the UI as an
@@ -54,6 +53,11 @@ Elements change by delta, not by replacement. Text arrives as it is generated,
 tool-call arguments fill in as they stream, a tool result lands on the element
 that was already there. The library applies those deltas; the consumer sees an
 element that is simply more complete than it was.
+
+History loads by turns, and it can load backwards. It must also load from the
+middle, so that on restart a client opens a chat exactly where the user left
+off, however large the chat is. Chats are assumed to be colossally huge — a
+chat may run for months or years — and all of them must be supported.
 
 ## The session state
 
@@ -152,41 +156,76 @@ ordered, and not lost across reconnects.
 
 ## How the protocol works
 
-Everything above must be reachable through one continuous stream of events. That
-is the design constraint, not an optimization.
+The protocol always rests on two mechanisms: request-response, and an ephemeral
+stream of updates. Sync is the two working together, and each carries only what
+it is good at.
 
-- **The stream is sufficient.** A client follows events and stays correct. There
-  is no repeated "get the difference" call, no polling loop, no fan-out of
-  requests after each notification. Whoever implements the protocol today makes
-  far too many requests, and that is exactly the outcome we are removing.
-- **Groups are complete.** The opening frame always carries every unarchived
-  project, workspace, and session. These lists are not paged and never need a
-  load-more action.
-- **Difference is a recovery path.** Asking for a difference exists only for the
-  case where a client has genuinely lost its state and Rig can no longer produce
-  a delta from memory. It is the exception, and it should be rare enough to
-  notice.
-- **Every payload is complete.** Each event, each object, each response carries
-  what a client needs to act on it. Nothing is a bare notification that
-  something changed.
-- **Everything merges by an ordered identity.** Several streams and requests run
-  in parallel, so a client must be able to combine two views of the same entity
-  without guessing which is newer. Every entity and every event carries an
-  identifier bound to time or version. We already use ordered UUIDv7 identifiers
-  and ordered events; continue with that rather than inventing a second scheme.
-- **A mutation carries its own identity.** A client changes its state locally and
-  sends the command; when Rig's version of that change arrives on the stream, the
-  client has to recognise it as the echo of its own action rather than applying
-  it a second time.
+- **The stream is a queue of light events.** The daemon keeps an in-memory queue
+  of events to send to clients, each numbered with a strictly monotonic id — a
+  UUIDv7, so they always sort. When a client connects it receives the current
+  cursor, and from then on a guaranteed continuous stream.
+- **Resume is a cursor.** After a drop, the client reconnects with the id of the
+  last event it received. The daemon keeps a small in-memory cache — on the
+  order of a thousand events — and either replays from that cursor, or answers
+  with the current cursor and reports that a gap was detected. A gap is not an
+  error; it tells the client to re-fetch what it holds.
+- **One subscription, exactly.** Every local client uses one single global
+  subscription; there is no session-scoped stream. A terminal subscribes to
+  the same global stream and filters it down to the session it is showing.
+- **No large packets.** Updates are light and tidy. Messages appear in the
+  stream as they are — they belong there. Session objects, group objects,
+  workspace objects, project objects, and user objects are never sent inside
+  an update: they would otherwise repeat identically a hundred times over,
+  and they change far more rarely than messages do.
+- **One event may carry several facts.** An update can relate to more than one
+  session, and one event can state two things at once: a final message that
+  completes a session in a particular state is one event, not two. Facts are
+  split into separate events only when they can genuinely happen at different
+  times — a final message can arrive without ending the session. Ideally,
+  maybe, a flag tells the client whether it did; something flexible along
+  those lines. The reason is the interface: it must update in one frame, from
+  one update, not from many. When the final message arrives, the client hides
+  the cursors, appends the last message, and marks it finished — all in a
+  single frame from a single update, not a burst of them.
+- **Request-response carries the entities.** A client loads users, agents,
+  sessions, workspaces, projects, and the rest by asking for them.
+- **Loading is flexible, but not too complex.** Loading projects, for
+  instance, can ask for only the active ones, only the inactive ones, or a
+  specific list of ids. The same request can include or leave out the
+  workspaces inside them, and within those workspaces fetch the sessions in
+  that one request or not — active ones or all of them, the same choice
+  again. The API stays at simple filters and simple modifications of the
+  request, so a client asks for exactly what it needs at that moment. At
+  application start it most likely loads everything; on a change or a
+  reconnect it probably refreshes the session it is looking at first, then
+  everything else. The client must be able to choose later what it needs,
+  and to optimize what turns out not to be optimal.
+- **Every entity states its identity and its version.** Identity is a cuid2, as
+  today. The version is the UUIDv7 id of the last event that touched the
+  entity — what `session.lastEventId` already is. Two views of the same entity
+  merge by comparing versions, never by guessing which is newer.
+- **Fetch once, then follow.** An update tells a client that something changed.
+  The client fetches the entity by request-response and from then on keeps it
+  synchronized live over the SSE connection.
+- **A mutation carries its own identity.** A client changes its state locally
+  and sends the command; when Rig's version of that change arrives on the
+  stream, the client has to recognise it as the echo of its own action rather
+  than applying it a second time.
+
+All of this is live sync for local client sessions, nothing more — it is not the
+durable event queue. And because everything is local for now, the rare case
+where a client must re-fetch everything is allowed to stay simple; it is not
+worth engineering around. The result should be the lightest, tidiest
+synchronization we can build.
 
 ## Requirements
 
 1. **Fast.** New state reaches the subscriber as soon as the daemon knows it.
    Nothing waits on a poll interval.
-2. **Cheap on the wire.** An event carries what changed. A client must not have
-   to issue follow-up requests to interpret an event it just received. This is
-   about ordinary live sync for terminals and other UIs; the durable event queue
-   is a separate concern.
+2. **Cheap on the wire.** Updates are small, and there are no large packets.
+   Entity objects never travel inside the stream; they travel by
+   request-response. This is about ordinary live sync for terminals and other
+   UIs; the durable event queue is a separate concern.
 3. **Cheap on the machine.** The library must not hold resources it does not
    need: bounded memory, no unbounded buffers or promise chains, no busy work
    when nothing is happening, everything released on unsubscribe. This is the
@@ -204,22 +243,24 @@ is the design constraint, not an optimization.
 
 ## The steps
 
-**A. Design the protocol we actually want.** Rebuild the session stream around
-what a client needs: self-describing events that carry what changed and enough
-content to apply it, deltas for growing elements, and the current session state.
-Replace what does not serve that. Groups are part of this step, not a later
-addition. Done when a client can build a complete transcript, an accurate
-session status, and current group state from the stream alone, without a single
-follow-up request beyond the initial snapshot.
+**A. Build the protocol.** Two mechanisms: request-response for entities, and
+the ephemeral stream of light updates with its UUIDv7 cursor, its small replay
+cache, and its honest gap report. One global subscription for every local
+client; a terminal filters it down to the session it is showing. Loading
+methods take simple filters, so a client asks for exactly what it needs.
+Groups are part of this step, not a later addition. Done when a client can
+connect, receive the current cursor, follow a continuous stream, resume after
+a drop or learn that a gap was detected, load entities over request-response,
+and keep everything it holds current from the stream.
 
-**B. Build the package.** `rig-connect` connects, snapshots, follows the stream,
-maintains the element list and the session state, applies presentation and
-grouping, applies mutations optimistically and delivers them in the background,
-and exposes the subscription, the actions, and the deltas. Done when the turn
-guarantee, the ordering, and the reference stability hold under test, including
-across reconnects and interruptions, and when a mutation survives a reconnect, a
-rejection, and a competing update without leaving the interface showing
-something untrue.
+**B. Build the package.** `rig-connect` connects, loads the entities it needs,
+follows the stream, maintains the element list and the session state, applies
+presentation and grouping, applies mutations optimistically and delivers them in
+the background, and exposes the subscription, the actions, and the deltas. Done
+when the turn guarantee, the ordering, and the reference stability hold under
+test, including across reconnects and interruptions, and when a mutation
+survives a reconnect, a rejection, and a competing update without leaving the
+interface showing something untrue.
 
 **C. Move the clients onto it.** The terminal and the web UI read their session
 state through `rig-connect` and delete their own reconstruction logic. Done when
@@ -228,8 +269,8 @@ no UI in the repository interprets session events on its own.
 ## Criteria for the whole plan
 
 - One implementation of sync in the product.
-- A UI subscribes once and renders; it never asks the daemon a follow-up
-  question to understand what it was just told.
+- A UI subscribes to the library once and renders; the fetching and following
+  behind that view is the library's problem, not the interface's.
 - Every action lands instantly, and the network is something the user never
   waits on except to load more.
 - The library runs identically in Node and in a browser.
