@@ -7,6 +7,8 @@
         "build:gym": "pnpm --filter @slopus/rig-gym run build:image",
         "check": "pnpm --filter @slopus/rig-providers build && pnpm --filter @slopus/rig-execution build && pnpm --filter @slopus/rig-codemode-codex build && pnpm run check:root && pnpm --recursive --filter './packages/**' run check",
         "check:root": "tsc --noEmit -p tsconfig.json",
+        "database:inspect": "tsx scripts/database/inspectRigDatabaseCli.ts",
+        "database:verify-upgrade": "tsx scripts/database/verifyRigDatabaseUpgrade.ts",
         "dev": "pnpm --filter @slopus/rig-dev dev",
         "format": "oxfmt --write .",
         "format:check": "oxfmt --check .",
