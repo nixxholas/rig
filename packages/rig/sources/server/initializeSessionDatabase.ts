@@ -7,9 +7,12 @@ import { createId } from "@paralleldrive/cuid2";
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import { folderProjectName, projectNameKey, projectStorageKey } from "./projectIdentity.js";
 import { initializePersistentGlobalEventQueueSchema } from "./PersistentGlobalEventQueue.js";
+import {
+    applySessionDatabaseMigrations,
+    CURRENT_SESSION_DATABASE_VERSION,
+    prepareSessionDatabaseMigrations,
+} from "./migrations/sessionDatabaseMigrations.js";
 import { generateKeyBetween, generateNKeysBetween } from "../utils/fractionalIndexing.js";
-
-const CURRENT_SCHEMA_VERSION = 11;
 
 const sessionColumnMigrations = [
     ["project_id", "TEXT"],
@@ -129,9 +132,9 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                       )
                       .get()
                 : undefined;
-        if (schemaVersion > CURRENT_SCHEMA_VERSION) {
+        if (schemaVersion > CURRENT_SESSION_DATABASE_VERSION) {
             throw new Error(
-                `The session database uses schema version ${String(schemaVersion)}, but this Rig version supports up to ${String(CURRENT_SCHEMA_VERSION)}.`,
+                `The session database uses schema version ${String(schemaVersion)}, but this Rig version supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}.`,
             );
         }
         if (schemaVersion > 0 && schemaVersion < 7) {
@@ -318,6 +321,12 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
             CREATE INDEX IF NOT EXISTS session_turns_order
                 ON session_turns(session_id, first_position);
 
+            CREATE TABLE IF NOT EXISTS session_database_migrations (
+                version INTEGER PRIMARY KEY,
+                cursor INTEGER NOT NULL,
+                completed INTEGER NOT NULL DEFAULT 0
+            );
+
             CREATE TABLE IF NOT EXISTS queued_runs (
                 session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
                 run_id TEXT NOT NULL,
@@ -412,6 +421,8 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 UNIQUE (session_id, local_id)
             );
         `);
+
+        prepareSessionDatabaseMigrations(database, schemaVersion);
 
         ensureColumn(database, "projects", "order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''");
         ensureColumn(database, "projects", "archived_at_ms", "INTEGER");
@@ -614,7 +625,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 ON durable_user_inputs(session_id, created_at_ms);
             CREATE INDEX IF NOT EXISTS happy_outbox_session_seq
                 ON happy_outbox(session_id, seq);
-            PRAGMA user_version = ${String(CURRENT_SCHEMA_VERSION)};
+            PRAGMA user_version = ${String(CURRENT_SESSION_DATABASE_VERSION)};
             COMMIT;
         `);
     } catch (error) {
@@ -625,6 +636,7 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         }
         throw error;
     }
+    applySessionDatabaseMigrations(database);
 }
 
 function ensureProject(database: DatabaseSync, path: string, canonicalHome: string): string {
