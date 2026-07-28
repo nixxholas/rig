@@ -1,17 +1,16 @@
-import { fileURLToPath } from "node:url";
-
 import { isAlreadyPublishedError } from "./release/isAlreadyPublishedError.js";
 import { readPackageManifest } from "./release/readPackageManifest.js";
+import { resolveReleasePackage } from "./release/resolveReleasePackage.js";
 import { runCommand } from "./release/runCommand.js";
 
-const PACKAGE_DIRECTORY = fileURLToPath(new URL("../packages/rig/", import.meta.url));
-const manifest = readPackageManifest();
+const releasePackage = resolveReleasePackage(process.env.RELEASE_PACKAGE);
+const manifest = readPackageManifest(releasePackage);
 
 console.log(`Publishing ${manifest.name}@${manifest.version}...`);
 const publishResult = runCommand("pnpm", ["publish", "--access", "public", "--no-git-checks"], {
     allowFailure: true,
     captureOutput: true,
-    cwd: PACKAGE_DIRECTORY,
+    cwd: releasePackage.directory,
 });
 
 if (publishResult.stdout.length > 0) {

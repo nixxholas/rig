@@ -19,4 +19,23 @@ describe("assertReleaseTagMatchesPackageVersion", () => {
             /Expected v1\.2\.3/u,
         );
     });
+
+    it("supports a package-specific tag namespace", () => {
+        assert.doesNotThrow(() =>
+            assertReleaseTagMatchesPackageVersion(
+                "rig-connect-v1.2.3",
+                { ...MANIFEST, name: "@slopus/rig-connect" },
+                "rig-connect-v",
+            ),
+        );
+        assert.throws(
+            () =>
+                assertReleaseTagMatchesPackageVersion(
+                    "v1.2.3",
+                    { ...MANIFEST, name: "@slopus/rig-connect" },
+                    "rig-connect-v",
+                ),
+            /Expected rig-connect-v1\.2\.3/u,
+        );
+    });
 });

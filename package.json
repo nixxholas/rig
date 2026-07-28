@@ -16,6 +16,7 @@
         "lint": "oxlint .",
         "release": "tsx scripts/release.ts",
         "release:patch": "pnpm release patch",
+        "release:rig-connect:patch": "pnpm release rig-connect patch",
         "start": "node packages/rig/dist/main.js",
         "start:build": "pnpm build && pnpm start",
         "test": "pnpm run test:scripts && pnpm --recursive --filter './packages/**' run test",

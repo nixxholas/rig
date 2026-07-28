@@ -1,10 +1,9 @@
-import { fileURLToPath } from "node:url";
-
 import { readPackageManifest } from "./release/readPackageManifest.js";
 import { assertHappyRuntimeDependencies } from "./release/assertHappyRuntimeDependencies.js";
+import { assertRegistryLatestMatchesManifest } from "./release/assertRegistryLatestMatchesManifest.js";
+import { resolveReleasePackage } from "./release/resolveReleasePackage.js";
 import { runCommand } from "./release/runCommand.js";
 
-const PACKAGE_DIRECTORY = fileURLToPath(new URL("../packages/rig/", import.meta.url));
 const VERSION_BUMPS = new Set([
     "major",
     "minor",
@@ -15,22 +14,28 @@ const VERSION_BUMPS = new Set([
     "prerelease",
 ]);
 const SEMANTIC_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
-const USAGE = `Usage: pnpm release <version>
+const USAGE = `Usage:
+  pnpm release <version>
+  pnpm release rig-connect <version>
 
 Examples:
   pnpm release 0.1.0
   pnpm release patch
-  pnpm release minor`;
+  pnpm release minor
+  pnpm release rig-connect patch`;
 
 async function release(): Promise<void> {
-    const releaseInput = process.argv[2];
+    const arguments_ = process.argv.slice(2);
+    const explicitPackage = arguments_[0] === "rig" || arguments_[0] === "rig-connect";
+    const releasePackage = resolveReleasePackage(explicitPackage ? arguments_.shift() : undefined);
+    const releaseInput = arguments_[0];
     if (releaseInput === "--help" || releaseInput === "-h") {
         console.log(USAGE);
         return;
     }
     if (
         releaseInput === undefined ||
-        process.argv.length !== 3 ||
+        arguments_.length !== 1 ||
         (!VERSION_BUMPS.has(releaseInput) && !SEMANTIC_VERSION.test(releaseInput))
     ) {
         throw new Error(USAGE);
@@ -43,14 +48,14 @@ async function release(): Promise<void> {
         throw new Error("The working tree must be clean before creating a release.");
     }
 
-    const initialManifest = readPackageManifest();
-    assertHappyRuntimeDependencies(initialManifest);
+    const initialManifest = readPackageManifest(releasePackage);
+    if (releasePackage.key === "rig") assertHappyRuntimeDependencies(initialManifest);
     const tagsAtHead = runCommand("git", ["tag", "--points-at", "HEAD"], {
         captureOutput: true,
     }).stdout.split("\n");
+    const releaseTag = `${releasePackage.tagPrefix}${initialManifest.version}`;
     const retryingRelease =
-        releaseInput === initialManifest.version &&
-        tagsAtHead.includes(`v${initialManifest.version}`);
+        releaseInput === initialManifest.version && tagsAtHead.includes(releaseTag);
     if (releaseInput === initialManifest.version && !retryingRelease) {
         throw new Error(
             `${initialManifest.name} is already version ${initialManifest.version}. Choose a newer version or a version bump.`,
@@ -79,35 +84,49 @@ async function release(): Promise<void> {
                 "HEAD must match origin/main. Update the worktree before creating a release.",
             );
         }
-        console.log(`Resuming the local v${initialManifest.version} release commit.`);
+        console.log(`Resuming the local ${releaseTag} release commit.`);
+    }
+    if (releasePackage.key === "rig-connect" && !retryingRelease) {
+        console.log("Checking the published rig-connect version...");
+        const latest = runCommand(
+            "pnpm",
+            ["view", initialManifest.name, "dist-tags.latest", "--json"],
+            { captureOutput: true },
+        ).stdout;
+        assertRegistryLatestMatchesManifest(initialManifest, latest);
     }
 
     console.log("Validating the release...");
     runCommand("pnpm", ["run", "check"]);
     runCommand("pnpm", ["test"]);
-    runCommand("pnpm", ["run", "build"]);
+    runCommand("pnpm", releasePackage.buildArguments);
 
     if (!retryingRelease) {
         console.log(`Creating the ${releaseInput} release commit and tag...`);
         runCommand("pnpm", ["version", releaseInput, "--no-git-tag-version"], {
-            cwd: PACKAGE_DIRECTORY,
+            cwd: releasePackage.directory,
         });
-        const versionedManifest = readPackageManifest();
-        runCommand("git", ["add", "packages/rig/package.json", "pnpm-lock.yaml"]);
-        runCommand("git", ["commit", "-m", `Release v${versionedManifest.version}`]);
-        runCommand("git", ["tag", `v${versionedManifest.version}`]);
+        const versionedManifest = readPackageManifest(releasePackage);
+        runCommand("git", ["add", releasePackage.manifestPath, "pnpm-lock.yaml"]);
+        runCommand("git", [
+            "commit",
+            "-m",
+            `${releasePackage.commitPrefix}${versionedManifest.version}`,
+        ]);
+        runCommand("git", ["tag", `${releasePackage.tagPrefix}${versionedManifest.version}`]);
     }
 
-    const releaseManifest = readPackageManifest();
+    const releaseManifest = readPackageManifest(releasePackage);
     console.log(`Previewing ${releaseManifest.name}@${releaseManifest.version}...`);
     runCommand("pnpm", ["publish", "--access", "public", "--dry-run", "--no-git-checks"], {
-        cwd: PACKAGE_DIRECTORY,
+        cwd: releasePackage.directory,
     });
 
     console.log("Pushing the release commit and tag...");
-    runCommand("git", ["push", "origin", "HEAD:main", `v${releaseManifest.version}`, "--atomic"]);
+    const tag = `${releasePackage.tagPrefix}${releaseManifest.version}`;
+    runCommand("git", ["push", "origin", "HEAD:main", tag, "--atomic"]);
     console.log(
-        `Pushed v${releaseManifest.version}. GitHub Actions will publish ${releaseManifest.name}@${releaseManifest.version}.`,
+        `Pushed ${tag}. GitHub Actions will publish ${releaseManifest.name}@${releaseManifest.version}.`,
     );
 }
 

@@ -205,13 +205,17 @@ reconnect.
 Everything above is reachable through one continuous stream of events. That is the design
 constraint, not an optimization.
 
-The library opens `GET /sessions/:id/stream` with a bearer token and reads Server-Sent Events.
+The shared connection first opens `GET /events/live` with a bearer token and reads Server-Sent
+Events. Its `hello` frame is deliberately light: it reports only the global cursor, whether the
+requested cursor was resumed, and whether a gap was detected. The stream carries every project,
+worktree, session, terminal, and presence update, so adding another view never adds another event
+subscription.
 
-**The first frame is `hello`,** and it is what makes attaching a single request. Connecting without
-a cursor, it carries the live facts, the current activity, the assistant message the model is
-part-way through generating, and a bounded window of the transcript. Committed transcripts exclude
-in-flight messages, so without that third part a client attaching mid-turn would show nothing until
-the message completed.
+Entities load by request-response after the stream is open. `GET /catalog` loads projects,
+worktrees, sessions, and terminals; `GET /sessions/:id/state` loads one conversation and its recent
+transcript. Each answer carries the global cursor at which it was taken. Events that arrive while a
+load is in flight are held in a bounded buffer and replayed over that answer, so neither a slow
+snapshot nor an out-of-order response can move an entity backwards.
 
 **The transcript window is measured in turns, not messages.** It carries the most recent
 `SESSION_STREAM_TURN_LIMIT` turns, currently 20, together with the boundaries and outcome of each
@@ -226,12 +230,11 @@ the window is replayed with its real duration and outcome, so a turn read from h
 same `turn_end` element a client watching live would have seen.
 
 When the conversation began before the window, `session.transcriptComplete` is `false`. A UI that
-scrolls back past it needs a paging call — a deliberate exception to the rule below, and the only
-one.
+scrolls back past it loads whole earlier turns through `GET /sessions/:id/transcript?before=`.
 
-**After that come session events,** each carrying what changed and enough content to apply it.
-Nothing is a bare notification that something changed, so there is no polling loop and no fan-out
-of requests after each event.
+Every global update carries what changed and enough content to apply it. Nothing is a bare
+notification that something changed, so there is no polling loop and no fan-out of requests after
+each event.
 
 The interpreted events include activity, context, Git, configuration, permissions, title, draft,
 secrets, MCP, workflows, external calls, structured input, tasks, goals, subagents, shell commands,
@@ -241,17 +244,15 @@ break a client that has not learned it yet.
 
 ### Reconnection
 
-Every event carries an ordered UUIDv7 identifier. The library remembers the last event it actually
-delivered to the subscriber and resumes from it with `?after=`, so a dropped connection produces no
-gap, no duplicate, and no reordering that the subscriber can observe.
+Every delivery carries an ordered UUIDv7 cursor. The library reconnects the one global stream with
+`?after=`. If its bounded replay cache still serves that position, every missed event is delivered
+without duplication. If not, the next `hello` reports a gap; rig-connect reloads only the entities
+it currently holds and asks each conversation forward from the newest message already present.
+Those forward pages overlap their anchor turn, making a partial final turn safe to replace without
+resending the conversation from the beginning.
 
-The `hello` frame is current state rather than a logged event, so it never becomes the cursor. On
-resume it omits the session — the caller already has the transcript, and the event log replays the
-rest — and carries only what the log cannot reproduce.
-
-Reconnection is automatic, with a backoff that starts at 50ms and grows to a five-second cap. A
-response the daemon refuses is not retried: retrying it unchanged cannot help, so it surfaces as a
-`SessionStreamRefused` through `onError`.
+Reconnection is automatic, with a short exponential backoff capped at one second. A response the
+daemon refuses is not retried unchanged, and surfaces as `LiveStreamRefused` through `onError`.
 
 ## Protocol types
 
@@ -275,5 +276,22 @@ the state directly:
   value a `tool_call` element carries.
 - `GroupStore` does the same for the project tree: it joins projects, worktrees, and sessions,
   merges by ordered identity, and knows nothing about transport.
-- `streamSessionEvents` and `streamGlobalEvents` follow a stream with cursor-based resume, and
-  report frames to callbacks.
+- `streamLiveEvents` follows the global stream with cursor-based resume and reports frames to
+  callbacks.
+
+## Releasing
+
+From a clean `main` worktree whose `HEAD` matches `origin/main`, run:
+
+```sh
+pnpm release:rig-connect:patch
+```
+
+The command verifies that the checked-in version matches npm `latest`, runs the workspace checks
+and tests, builds and previews the package, creates a `Release rig-connect vX.Y.Z` commit and a
+`rig-connect-vX.Y.Z` tag, then atomically pushes both to `main`. The shared publish workflow selects
+rig-connect from that tag prefix and publishes it through npm trusted publishing.
+
+Before the first automated release, the npm settings for `@slopus/rig-connect` must name
+`slopus/rig` and `.github/workflows/publish.yml` as its trusted publisher, using the `npm` GitHub
+environment.

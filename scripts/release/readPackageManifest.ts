@@ -1,9 +1,13 @@
 import { readFileSync } from "node:fs";
 
 import type { PackageManifest } from "./PackageManifest.js";
+import type { ReleasePackage } from "./ReleasePackage.js";
+import { resolveReleasePackage } from "./resolveReleasePackage.js";
 
-export function readPackageManifest(): PackageManifest {
+export function readPackageManifest(
+    releasePackage: ReleasePackage = resolveReleasePackage("rig"),
+): PackageManifest {
     return JSON.parse(
-        readFileSync(new URL("../../packages/rig/package.json", import.meta.url), "utf8"),
+        readFileSync(`${releasePackage.directory}/package.json`, "utf8"),
     ) as PackageManifest;
 }
