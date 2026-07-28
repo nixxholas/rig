@@ -12,15 +12,12 @@ export interface TerminalCrashCleanup {
     uninstall(): void;
 }
 
+export type TerminalCrashCleanupEvent = "uncaughtExceptionMonitor" | "unhandledRejection";
+
 export interface TerminalCrashCleanupProcessEvents {
-    off(
-        event: "uncaughtExceptionMonitor",
-        listener: (error: Error, origin: NodeJS.UncaughtExceptionOrigin) => void,
-    ): void;
-    on(
-        event: "uncaughtExceptionMonitor",
-        listener: (error: Error, origin: NodeJS.UncaughtExceptionOrigin) => void,
-    ): void;
+    off(event: TerminalCrashCleanupEvent, listener: () => void): void;
+    on(event: "uncaughtExceptionMonitor", listener: () => void): void;
+    prependListener(event: "unhandledRejection", listener: () => void): void;
 }
 
 export function installTerminalCrashCleanup(options: {
@@ -89,11 +86,14 @@ export function installTerminalCrashCleanup(options: {
         stopRendering();
     };
 
-    const onUncaughtException = (): void => {
+    const onFatal = (): void => {
         restore();
     };
 
-    processEvents.on("uncaughtExceptionMonitor", onUncaughtException);
+    processEvents.on("uncaughtExceptionMonitor", onFatal);
+    // A rejection has no monitor event, and Rig's failure reporting exits from its own
+    // `unhandledRejection` listener. Restoring first is the only way to run before that exit.
+    processEvents.prependListener("unhandledRejection", onFatal);
 
     return {
         restore,
@@ -101,7 +101,8 @@ export function installTerminalCrashCleanup(options: {
         uninstall: () => {
             if (!installed) return;
             installed = false;
-            processEvents.off("uncaughtExceptionMonitor", onUncaughtException);
+            processEvents.off("uncaughtExceptionMonitor", onFatal);
+            processEvents.off("unhandledRejection", onFatal);
         },
     };
 }

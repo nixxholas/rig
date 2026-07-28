@@ -12,6 +12,9 @@ describe("installTerminalCrashCleanup", () => {
             on: vi.fn((_event: "uncaughtExceptionMonitor", listener: () => void) => {
                 listeners.add(listener);
             }),
+            prependListener: vi.fn((_event: "unhandledRejection", listener: () => void) => {
+                listeners.add(listener);
+            }),
         };
         const terminal = {
             stop: vi.fn(),
@@ -22,6 +25,12 @@ describe("installTerminalCrashCleanup", () => {
         };
 
         const cleanup = installTerminalCrashCleanup({ processEvents, terminal, tui });
+        // One restoration serves both fatal paths: a thrown error and a rejected promise.
+        expect(listeners).toHaveLength(1);
+        expect(processEvents.prependListener).toHaveBeenCalledWith(
+            "unhandledRejection",
+            expect.any(Function),
+        );
         const [onFatalError] = listeners;
         expect(onFatalError).toBeDefined();
 
@@ -39,13 +48,13 @@ describe("installTerminalCrashCleanup", () => {
 
         cleanup.uninstall();
         cleanup.uninstall();
-        expect(processEvents.off).toHaveBeenCalledTimes(1);
+        expect(processEvents.off).toHaveBeenCalledTimes(2);
         expect(listeners).toHaveLength(0);
     });
 
     it("swallows late terminal answers before the terminal stops", async () => {
         const order: string[] = [];
-        const processEvents = { off: vi.fn(), on: vi.fn() };
+        const processEvents = { off: vi.fn(), on: vi.fn(), prependListener: vi.fn() };
         const terminal = {
             drainInput: vi.fn(async () => {
                 order.push("drain");
@@ -70,7 +79,7 @@ describe("installTerminalCrashCleanup", () => {
     });
 
     it("still restores a terminal that cannot drain", async () => {
-        const processEvents = { off: vi.fn(), on: vi.fn() };
+        const processEvents = { off: vi.fn(), on: vi.fn(), prependListener: vi.fn() };
         const terminal = {
             drainInput: vi.fn(async () => {
                 throw new Error("stdin went away");
@@ -93,6 +102,7 @@ describe("installTerminalCrashCleanup", () => {
             on: vi.fn((_event: "uncaughtExceptionMonitor", value: () => void) => {
                 listener.mockImplementation(value);
             }),
+            prependListener: vi.fn(),
         };
         const terminal = {
             stop: vi.fn(),

@@ -1,0 +1,100 @@
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { afterEach, describe, expect, it } from "vitest";
+
+import { createGym, type Gym } from "@slopus/rig-gym";
+
+const repositoryRoot = join(dirname(fileURLToPath(import.meta.url)), "../../..");
+const typeScriptHook = join(
+    repositoryRoot,
+    "packages/gym/sources/registerTypeScriptSourceHooks.mjs",
+);
+const runAppUrl = pathToFileURL(join(repositoryRoot, "packages/rig/sources/app/runApp.ts")).href;
+const failureReportingUrl = pathToFileURL(
+    join(repositoryRoot, "packages/rig/sources/installCliFailureReporting.ts"),
+).href;
+const running = new Set<Gym>();
+
+afterEach(async () => {
+    await Promise.all([...running].map((gym) => gym.dispose()));
+    running.clear();
+});
+
+/**
+ * Losing the resume instructions loses the session: the id is the only way back into it. Every
+ * exit that happens once a session exists has to leave those instructions on the screen.
+ */
+describe("resume instructions after an abrupt exit", () => {
+    it("reports the session when the terminal hangs up", async () => {
+        const gym = await createGym({
+            entrypoint: ["bash", "run-tui.sh"],
+            files: {
+                "run-tui.sh": shellHarnessSource,
+                "tui.mjs": tuiSource("trigger-hangup", 'process.kill(process.pid, "SIGHUP");'),
+            },
+            mode: "just-bash",
+        });
+        running.add(gym);
+
+        await gym.runInContainer("touch", ["trigger-hangup"]);
+        const exited = await gym.terminal.waitUntil(
+            (snapshot) => snapshot.text.includes("RIG_TUI_FINISHED"),
+            "the TUI to exit after the hangup",
+            30_000,
+        );
+
+        expect(exited.text).toContain("Resume: rig resume ");
+    }, 60_000);
+
+    it("reports the session when a rejection kills the process", async () => {
+        const gym = await createGym({
+            entrypoint: ["bash", "run-tui.sh"],
+            files: {
+                "run-tui.sh": shellHarnessSource,
+                "tui.mjs": tuiSource(
+                    "trigger-rejection",
+                    'void Promise.reject(new Error("GYM_FATAL_REJECTION"));',
+                ),
+            },
+            mode: "just-bash",
+        });
+        running.add(gym);
+
+        await gym.runInContainer("touch", ["trigger-rejection"]);
+        const exited = await gym.terminal.waitUntil(
+            (snapshot) => snapshot.text.includes("RIG_TUI_FINISHED"),
+            "the TUI to exit after the rejection",
+            30_000,
+        );
+
+        expect(exited.text).toContain("Resume: rig resume ");
+    }, 60_000);
+});
+
+function tuiSource(triggerName: string, fatalAction: string): string {
+    return String.raw`
+import { existsSync } from "node:fs";
+import { join } from "node:path";
+import { runApp } from ${JSON.stringify(runAppUrl)};
+import { installCliFailureReporting } from ${JSON.stringify(failureReportingUrl)};
+
+// The real entry point installs this before starting the TUI, and it owns the fatal exit.
+installCliFailureReporting();
+
+const triggerPath = join(process.cwd(), ${JSON.stringify(triggerName)});
+const timer = setInterval(() => {
+    if (!existsSync(triggerPath)) return;
+    clearInterval(timer);
+    ${fatalAction}
+}, 10);
+
+await runApp();
+// The gym runs the daemon in this process, so the real entry point exits explicitly too.
+process.exit(0);
+`;
+}
+
+const shellHarnessSource = String.raw`
+node --import ${JSON.stringify(typeScriptHook)} tui.mjs
+printf '\r\nRIG_TUI_FINISHED\r\n'
+`;

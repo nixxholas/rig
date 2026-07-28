@@ -25,6 +25,7 @@ import { createSerialTaskQueue } from "./createSerialTaskQueue.js";
 import { createStopOnceHandler } from "./createStopOnceHandler.js";
 import { createStartupStatusCardModel } from "./createStartupStatusCardModel.js";
 import { ensureSessionCanResume } from "./ensureSessionCanResume.js";
+import { installResumeInstructions } from "./installResumeInstructions.js";
 import { installTerminalCrashCleanup } from "./installTerminalCrashCleanup.js";
 import { providerQuotaToStartupStatusUsage } from "./providerQuotaToStartupStatusUsage.js";
 import { readPackageVersion } from "../readPackageVersion.js";
@@ -224,6 +225,12 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         return { action: "exit" };
     }
     const { history, localServer, modelCatalog, resumed, session, sessionTerminal } = opened;
+    const resumeCommand = `rig resume ${session.session.id}`;
+    // Installed the moment the session exists, so every later exit can still report the way back.
+    const resumeInstructions = installResumeInstructions({
+        resumeCommand,
+        sessionId: session.session.id,
+    });
     try {
         const processManager = new NativeProcessManager();
         const theme = resolveTerminalTheme(loadedConfig.config.theme, await terminalBackground);
@@ -258,7 +265,6 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             modelCatalog,
             session: session.session,
         });
-        const resumeCommand = `rig resume ${session.session.id}`;
         const version = readPackageVersion();
         const activeAgentLabel = sessionAgentFooterLabel(session.session.agent);
         const startupUsage = providerQuotaToStartupStatusUsage(
@@ -510,6 +516,8 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
         };
         process.on("SIGINT", stop);
         process.on("SIGTERM", stop);
+        // Node terminates on an unhandled hangup, which would skip shutdown entirely.
+        process.on("SIGHUP", stop);
 
         let appExitedNormally = false;
         try {
@@ -522,15 +530,14 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             stopWatchingTerminalTheme();
             process.off("SIGINT", stop);
             process.off("SIGTERM", stop);
+            process.off("SIGHUP", stop);
             followController.abort();
             terminal.write("\x1b[?1004l");
             // Nothing Rig started outlives Rig, background work included.
             await processManager.killAll({ forceAfterMs: 500, includeDetached: true });
-            if (exitReason !== "reload") {
-                console.error("");
-                console.error(`Session: ${session.session.id}`);
-                console.error(`Resume: ${resumeCommand}`);
-            }
+            // A reload reopens this same session, so its instructions would only be noise.
+            if (exitReason === "reload") resumeInstructions.suppress();
+            else resumeInstructions.report();
         }
     } catch (error) {
         await terminalCrashCleanup.restoreAndDrain();
