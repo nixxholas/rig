@@ -14,6 +14,22 @@ describe("Claude Code Write tool", () => {
         });
 
         expect(result.text).toContain("File created successfully");
+        expect(claudeWriteTool.toPresentation?.(result, {} as never)).toMatchObject({
+            files: [
+                {
+                    hunks: [
+                        {
+                            lines: [{ kind: "add", text: "written" }],
+                            newStart: 1,
+                            oldStart: 0,
+                        },
+                    ],
+                    kind: "add",
+                    path: "/workspace/write.txt",
+                },
+            ],
+            type: "file_diff",
+        });
         expect(await harness.readFile("/workspace/write.txt")).toBe("written");
     });
 
@@ -43,6 +59,25 @@ describe("Claude Code Write tool", () => {
         });
 
         expect(result.text).toContain("File updated successfully");
+        expect(claudeWriteTool.toPresentation?.(result, {} as never)).toMatchObject({
+            files: [
+                {
+                    hunks: [
+                        {
+                            lines: [
+                                { kind: "delete", text: "original" },
+                                { kind: "add", text: "overwritten" },
+                            ],
+                            newStart: 1,
+                            oldStart: 1,
+                        },
+                    ],
+                    kind: "update",
+                    path: "/workspace/existing.txt",
+                },
+            ],
+            type: "file_diff",
+        });
         expect(await harness.readFile("/workspace/existing.txt")).toBe("overwritten");
     });
 

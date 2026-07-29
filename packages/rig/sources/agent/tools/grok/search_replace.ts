@@ -52,6 +52,10 @@ export const grokSearchReplaceTool = defineTool({
             text: `Successfully replaced ${result.replacements} occurrence${result.replacements === 1 ? "" : "s"} in ${result.path}.`,
         },
     ],
+    toPresentation: (result) => ({
+        files: [result.fileDiff],
+        type: "file_diff",
+    }),
     toUI: (result) =>
         `Edited ${result.path} (${result.replacements} replacement${result.replacements === 1 ? "" : "s"})`,
     locks: [(args) => args.file_path],

@@ -2,6 +2,7 @@ import type { EditFileOptions, TextEditPlan } from "./editFileTypes.js";
 import { findAllOccurrences } from "./findAllOccurrences.js";
 import { findEditMatch } from "./findEditMatch.js";
 import { preserveQuoteStyle } from "./preserveQuoteStyle.js";
+import { createTextEditFileDiff } from "./createTextEditFileDiff.js";
 
 export function planTextEditInContent(
     content: string,
@@ -22,6 +23,15 @@ export function planTextEditInContent(
             nextContent: content.split(options.oldString).join(options.newString),
             replacements: allExactPositions.length,
             fuzzy: false,
+            fileDiff: createTextEditFileDiff(
+                filePath,
+                content,
+                allExactPositions.map((start) => ({
+                    start,
+                    oldText: options.oldString,
+                    newText: options.newString,
+                })),
+            ),
         };
     }
 
@@ -37,5 +47,8 @@ export function planTextEditInContent(
         nextContent: content.slice(0, match.start) + nextString + content.slice(match.end),
         replacements: match.replacements,
         fuzzy: match.fuzzy,
+        fileDiff: createTextEditFileDiff(filePath, content, [
+            { start: match.start, oldText: actualOldString, newText: nextString },
+        ]),
     };
 }

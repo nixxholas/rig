@@ -1,3 +1,13 @@
+import type { FileDiff } from "../../agent/ToolResultPresentation.js";
+
+type Mutable<Value> = Value extends readonly (infer Item)[]
+    ? Mutable<Item>[]
+    : Value extends object
+      ? { -readonly [Key in keyof Value]: Mutable<Value[Key]> }
+      : Value;
+
+export type MutableFileDiff = Mutable<FileDiff>;
+
 export interface EditFileOptions {
     path: string;
     oldString: string;
@@ -13,6 +23,7 @@ export interface EditFileResult {
     fuzzy: boolean;
     oldString: string;
     newString: string;
+    fileDiff: MutableFileDiff;
 }
 
 export interface TextEditPlan {
@@ -20,6 +31,7 @@ export interface TextEditPlan {
     nextContent: string;
     replacements: number;
     fuzzy: boolean;
+    fileDiff: MutableFileDiff;
 }
 
 export interface EditMatch {

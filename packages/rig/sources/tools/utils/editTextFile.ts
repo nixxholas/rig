@@ -8,12 +8,37 @@ import { recordWriteAsRead } from "./recordWriteAsRead.js";
 
 export type { EditFileOptions, EditFileResult } from "./editFileTypes.js";
 
+export const fileDiffReturnSchema = Type.Object({
+    hunks: Type.Array(
+        Type.Object({
+            lines: Type.Array(
+                Type.Object({
+                    kind: Type.Union([
+                        Type.Literal("add"),
+                        Type.Literal("context"),
+                        Type.Literal("delete"),
+                    ]),
+                    text: Type.String(),
+                }),
+            ),
+            newStart: Type.Number(),
+            oldStart: Type.Number(),
+        }),
+    ),
+    kind: Type.Union([Type.Literal("add"), Type.Literal("delete"), Type.Literal("update")]),
+    path: Type.String(),
+    added: Type.Optional(Type.Number()),
+    deleted: Type.Optional(Type.Number()),
+    omittedLines: Type.Optional(Type.Number()),
+});
+
 export const editFileReturnSchema = Type.Object({
     path: Type.String(),
     replacements: Type.Number(),
     fuzzy: Type.Boolean(),
     oldString: Type.String(),
     newString: Type.String(),
+    fileDiff: fileDiffReturnSchema,
 });
 
 export async function editTextFile(
@@ -31,5 +56,6 @@ export async function editTextFile(
         fuzzy: plan.fuzzy,
         oldString: options.oldString,
         newString: options.newString,
+        fileDiff: plan.fileDiff,
     };
 }

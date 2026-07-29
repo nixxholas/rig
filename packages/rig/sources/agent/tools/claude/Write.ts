@@ -3,7 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../types.js";
 import { describeFileAutoPermissionAction } from "../../../permissions/describeFileAutoPermissionAction.js";
 import { shouldReviewPathInAutoMode } from "../../../permissions/shouldReviewPathInAutoMode.js";
-import { textOutputSchema, toTextBlocks, writeTextFile } from "../../../tools/utils/index.js";
+import { fileDiffReturnSchema, toTextBlocks, writeTextFile } from "../../../tools/utils/index.js";
 
 const CLAUDE_WRITE_DESCRIPTION = `Writes a file to the local filesystem.
 
@@ -28,7 +28,10 @@ export const claudeWriteTool = defineTool({
         },
         { additionalProperties: false },
     ),
-    returnType: textOutputSchema,
+    returnType: Type.Object({
+        fileDiff: fileDiffReturnSchema,
+        text: Type.String(),
+    }),
     describeAutoPermissionAction: ({ file_path }, context) =>
         describeFileAutoPermissionAction(file_path, context, "writing"),
     shouldReviewInAutoMode: ({ file_path }, context) =>
@@ -38,10 +41,15 @@ export const claudeWriteTool = defineTool({
     execute: async ({ file_path, content }, context) => {
         const result = await writeTextFile({ path: file_path, content }, context);
         return {
+            fileDiff: result.fileDiff,
             text: `File ${result.created ? "created" : "updated"} successfully at: ${result.path}`,
         };
     },
     toLLM: toTextBlocks,
+    toPresentation: (result) => ({
+        files: [result.fileDiff],
+        type: "file_diff",
+    }),
     toUI: (_result, args) => `Wrote ${args.file_path}`,
     locks: [(args) => args.file_path],
 });
