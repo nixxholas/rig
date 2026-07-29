@@ -11,7 +11,7 @@ afterEach(async () => {
 });
 
 describe("session terminal presence", () => {
-    it("reports a completed open TUI session and archives it when the terminal disconnects", async () => {
+    it("reports a completed open TUI session and shows it idle when the terminal disconnects", async () => {
         const gym = await createGym({
             entrypoint: [
                 "bash",
@@ -41,10 +41,11 @@ describe("session terminal presence", () => {
         const afterDisconnect = await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("TERMINAL_DISCONNECTED") &&
-                /^Archived\s+/m.test(snapshot.text),
-            "the disconnected TUI session to appear archived",
+                /^Idle\s+/m.test(snapshot.text),
+            "the disconnected TUI session to appear idle",
             30_000,
         );
         expect(afterDisconnect.text).not.toMatch(/^Completed\s+/m);
+        expect(afterDisconnect.text).not.toMatch(/^Archived\s+/m);
     }, 60_000);
 });

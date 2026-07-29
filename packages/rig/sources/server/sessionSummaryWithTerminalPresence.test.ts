@@ -5,18 +5,16 @@ import { SessionTerminalTracker } from "./SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminalPresence.js";
 
 describe("sessionSummaryWithTerminalPresence", () => {
-    it("keeps run status separate while deriving archive presentation for settled sessions", () => {
+    it("presents settled sessions as idle without changing their archive state", () => {
         const tracker = new SessionTerminalTracker({
             isTargetAlive: () => true,
             sweepIntervalMs: 60_000,
         });
         try {
-            expect(
-                sessionSummaryWithTerminalPresence(summary({ archiveOnIdle: false }), tracker),
-            ).toMatchObject({ archived: false, status: "idle" });
-            expect(
-                sessionSummaryWithTerminalPresence(summary({ archiveOnIdle: true }), tracker),
-            ).toMatchObject({ archived: true, status: "idle" });
+            expect(sessionSummaryWithTerminalPresence(summary(), tracker)).toMatchObject({
+                archived: false,
+                status: "idle",
+            });
             expect(
                 sessionSummaryWithTerminalPresence(summary({ archived: true }), tracker),
             ).toMatchObject({ archived: true, status: "idle" });
@@ -83,7 +81,6 @@ describe("sessionSummaryWithTerminalPresence", () => {
 function summary(overrides: Partial<SessionSummary> = {}): SessionSummary {
     return {
         archived: false,
-        archiveOnIdle: false,
         createdAt: 1,
         cwd: "/workspace",
         id: "session-1",

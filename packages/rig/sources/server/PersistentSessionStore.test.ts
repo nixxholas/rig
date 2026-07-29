@@ -2242,7 +2242,6 @@ describe("PersistentSessionStore", () => {
             const store = new PersistentSessionStore({ databasePath });
             const state = sessionState({
                 archived: true,
-                archiveOnIdle: true,
                 trackUnread: true,
                 unread: { reason: "turn_finished", since: 1_700_000_000_000 },
             });
@@ -2253,15 +2252,13 @@ describe("PersistentSessionStore", () => {
             try {
                 expect(restoredStore.get(state.id)?.snapshot()).toMatchObject({
                     archived: true,
-                    archiveOnIdle: true,
-                    trackUnread: true,
+                        trackUnread: true,
                     unread: state.unread,
                 });
                 expect(restoredStore.list()).toMatchObject([
                     {
                         archived: true,
-                        archiveOnIdle: true,
-                        id: state.id,
+                                id: state.id,
                         trackUnread: true,
                         unread: state.unread,
                     },

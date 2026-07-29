@@ -2104,15 +2104,11 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
-    it("reports disconnected settled sessions as idle or archived and restores live status", async () => {
+    it("reports disconnected settled sessions as idle and restores live status", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        store.saveSession(completedPrimaryState("idle-session", false));
-        store.saveSession(completedPrimaryState("archived-session", true));
+        store.saveSession(completedPrimaryState("idle-session"));
         const { client, close } = await startServer({ store });
         let idleTerminal:
-            | Awaited<ReturnType<ProtocolHttpClient["connectSessionTerminal"]>>
-            | undefined;
-        let archivedTerminal:
             | Awaited<ReturnType<ProtocolHttpClient["connectSessionTerminal"]>>
             | undefined;
         try {
@@ -2120,37 +2116,41 @@ describe("createProtocolHttpServer", () => {
                 archived: false,
                 status: "idle",
             });
-            expect(await listedSession(client, "archived-session")).toMatchObject({
-                archived: true,
-                status: "idle",
-            });
 
             idleTerminal = await client.connectSessionTerminal("idle-session");
-            archivedTerminal = await client.connectSessionTerminal("archived-session");
             expect(await listedSession(client, "idle-session")).toMatchObject({
-                archived: false,
-                status: "completed",
-            });
-            expect(await listedSession(client, "archived-session")).toMatchObject({
                 archived: false,
                 status: "completed",
             });
 
             await idleTerminal.close();
             idleTerminal = undefined;
-            await archivedTerminal.close();
-            archivedTerminal = undefined;
             expect(await listedSession(client, "idle-session")).toMatchObject({
                 archived: false,
                 status: "idle",
             });
-            expect(await listedSession(client, "archived-session")).toMatchObject({
-                archived: true,
-                status: "idle",
-            });
         } finally {
             await idleTerminal?.close();
-            await archivedTerminal?.close();
+            await close();
+            store.close();
+        }
+    });
+
+    it("keeps settled sessions in the default listing so resume can find them", async () => {
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        store.saveSession(completedPrimaryState("settled-session"));
+        store.saveSession({ ...completedPrimaryState("shelved-session"), archived: true });
+        const { client, close } = await startServer({ store });
+        try {
+            const listed = await client.listSessions();
+            expect(listed.sessions.map((session) => session.id)).toEqual(["settled-session"]);
+            expect(listed.sessions[0]).toMatchObject({ archived: false, status: "idle" });
+            expect(
+                (await client.listSessions({ archived: true })).sessions.map(
+                    (session) => session.id,
+                ),
+            ).toEqual(["shelved-session"]);
+        } finally {
             await close();
             store.close();
         }
@@ -2159,7 +2159,7 @@ describe("createProtocolHttpServer", () => {
     it("keeps unread state for background clients and clears it when any client is focused", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         store.saveSession({
-            ...completedPrimaryState("unread-session", false),
+            ...completedPrimaryState("unread-session"),
             trackUnread: true,
             unread: { reason: "attention_needed", since: 123 },
         });
@@ -2573,11 +2573,10 @@ function readOnlySubagentState(): PersistedSessionState {
     };
 }
 
-function completedPrimaryState(id: string, archiveOnIdle: boolean): PersistedSessionState {
+function completedPrimaryState(id: string): PersistedSessionState {
     return {
         agent: { depth: 0, rootSessionId: id, type: "primary" },
         agentId: `${id}-agent`,
-        archiveOnIdle,
         cwd: "/tmp/rig-protocol-test",
         id,
         messages: [],

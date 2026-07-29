@@ -219,7 +219,6 @@ export interface PersistedSessionState {
     agent: SessionAgentMetadata;
     agentId: string;
     archived?: boolean;
-    archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     appendSystemPrompt?: string;
@@ -551,7 +550,6 @@ export class InMemorySession {
         this.#persistence = options.persistence;
         this.#request = {
             ...options.request,
-            archiveOnIdle: options.restore?.archiveOnIdle ?? options.request.archiveOnIdle ?? false,
             trackUnread: options.restore?.trackUnread ?? options.request.trackUnread ?? false,
             ...(options.request.secretIds === undefined
                 ? {}
@@ -2852,7 +2850,6 @@ export class InMemorySession {
             archived: this.#archived,
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
-            archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             ...(this.#appendSystemPrompt !== undefined
@@ -2926,7 +2923,6 @@ export class InMemorySession {
             archived: this.#archived,
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
-            archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             cwd: this.#request.cwd,
@@ -2974,7 +2970,6 @@ export class InMemorySession {
             agent: this.agentMetadata(),
             agentId: this.#agentId,
             archived: this.#archived,
-            archiveOnIdle: this.#request.archiveOnIdle === true,
             trackUnread: this.#request.trackUnread === true,
             ...(this.#unread === undefined ? {} : { unread: { ...this.#unread } }),
             ...(this.#appendSystemPrompt !== undefined

@@ -77,7 +77,6 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     );
     const projectMcpNotice = createProjectMcpSecurityNotice(mcpConfigEntries);
     const agentOptions: CreateSessionRequest = {
-        archiveOnIdle: true,
         trackUnread: true,
         cwd,
         modelId: loadedConfig.config.defaults.modelId,

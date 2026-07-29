@@ -19,11 +19,7 @@ export function sessionSummaryWithTerminalPresence(
     ) {
         return presentedSummary;
     }
-    return {
-        ...presentedSummary,
-        archived: summary.archived || summary.archiveOnIdle === true,
-        status: "idle",
-    };
+    return { ...presentedSummary, status: "idle" };
 }
 
 function withoutUnread(summary: SessionSummary): SessionSummary {

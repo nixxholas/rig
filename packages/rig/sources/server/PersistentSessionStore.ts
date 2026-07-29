@@ -626,7 +626,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         project_id,
                         workspace_id,
                         order_key,
-                        archive_on_idle,
                         archived,
                         track_unread,
                         unread_reason,
@@ -698,7 +697,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 projectId: readString(row, "project_id"),
                 orderKey: readString(row, "order_key"),
                 ...(workspaceId === undefined ? {} : { workspaceId }),
-                archiveOnIdle: readNumber(row, "archive_on_idle") !== 0,
                 trackUnread: readNumber(row, "track_unread") !== 0,
                 ...(unreadReason !== undefined && unreadSince !== undefined
                     ? {
@@ -1328,7 +1326,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     parent_tool_call_id,
                     task_name,
                     description,
-                    archive_on_idle,
                     archived,
                     track_unread,
                     unread_reason,
@@ -1375,7 +1372,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     created_at_ms,
                     updated_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     project_id = excluded.project_id,
@@ -1388,7 +1385,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     parent_tool_call_id = excluded.parent_tool_call_id,
                     task_name = excluded.task_name,
                     description = excluded.description,
-                    archive_on_idle = excluded.archive_on_idle,
                     archived = excluded.archived,
                     track_unread = excluded.track_unread,
                     unread_reason = excluded.unread_reason,
@@ -1448,7 +1444,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 state.agent.parentToolCallId ?? null,
                 state.agent.taskName ?? null,
                 state.agent.description ?? null,
-                state.archiveOnIdle === true ? 1 : 0,
                 state.archived === true ? 1 : 0,
                 state.trackUnread === true ? 1 : 0,
                 state.unread?.reason ?? null,
@@ -2132,7 +2127,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
 
         const effort = readOptionalString(row, "effort");
-        const archiveOnIdle = readNumber(row, "archive_on_idle") !== 0;
         const archived = readNumber(row, "archived") !== 0;
         const trackUnread = readNumber(row, "track_unread") !== 0;
         const unreadReason = readOptionalString(row, "unread_reason");
@@ -2211,7 +2205,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             agent,
             agentId: readString(row, "agent_id"),
             archived,
-            archiveOnIdle,
             trackUnread,
             ...(unreadReason !== undefined && unreadSince !== undefined
                 ? {
@@ -2297,7 +2290,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(restore.appendSystemPrompt !== undefined
                 ? { appendSystemPrompt: restore.appendSystemPrompt }
                 : {}),
-            archiveOnIdle: restore.archiveOnIdle === true,
             trackUnread: restore.trackUnread === true,
             cwd: restore.cwd,
             ...(restore.docker === undefined ? {} : { docker: restore.docker }),

@@ -1135,12 +1135,6 @@ async function handleRequest(
             });
             return;
         }
-        if (body.archiveOnIdle !== undefined && typeof body.archiveOnIdle !== "boolean") {
-            sendJson(response, 400, {
-                error: "Archive on idle must be true or false.",
-            });
-            return;
-        }
         if (body.trackUnread !== undefined && typeof body.trackUnread !== "boolean") {
             sendJson(response, 400, {
                 error: "Unread tracking must be true or false.",
@@ -1190,15 +1184,14 @@ async function handleRequest(
             });
             return;
         }
-        // Explicit archive state is independent from archiveOnIdle. The presentation helper
-        // combines them only after an archiveOnIdle session settles without a connected terminal.
-        const presented = store
-            .list()
-            .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals));
-        const sessions =
+        const summaries = store.list();
+        const filtered =
             archived === "all"
-                ? presented
-                : presented.filter((summary) => summary.archived === (archived ?? false));
+                ? summaries
+                : summaries.filter((summary) => summary.archived === (archived ?? false));
+        const sessions = filtered.map((summary) =>
+            sessionSummaryWithTerminalPresence(summary, sessionTerminals),
+        );
         sendJson<ListSessionsResponse>(response, 200, {
             sessions: limit === undefined ? sessions : sessions.slice(0, limit),
         });

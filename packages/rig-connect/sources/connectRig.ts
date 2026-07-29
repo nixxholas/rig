@@ -115,7 +115,6 @@ export interface ShellCommandInput {
 
 export interface CreateSessionInput {
     appendSystemPrompt?: string;
-    archiveOnIdle?: boolean;
     cwd: string;
     effort?: string;
     local?: boolean;

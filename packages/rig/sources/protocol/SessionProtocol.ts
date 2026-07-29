@@ -238,7 +238,6 @@ export interface ProtocolSession {
     archived: boolean;
     projectId: string;
     workspaceId?: string;
-    archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     appendSystemPrompt?: string;
@@ -487,7 +486,6 @@ export interface SessionSummary {
     archived: boolean;
     projectId: string;
     workspaceId?: string;
-    archiveOnIdle?: boolean;
     trackUnread?: boolean;
     unread?: SessionUnreadState;
     cwd: string;
@@ -526,7 +524,6 @@ export interface SessionSummary {
 export interface CreateSessionRequest {
     apiKey?: string;
     appendSystemPrompt?: string;
-    archiveOnIdle?: boolean;
     trackUnread?: boolean;
     cwd: string;
     effort?: string;
