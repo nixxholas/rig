@@ -9,6 +9,7 @@ import {
     unifiedExecOutputSchema,
 } from "./impl/unifiedExecOutput.js";
 import { readSessionWithProgress } from "../../../tools/utils/readSessionWithProgress.js";
+import { parseShellExplorationPresentation } from "../../../tools/utils/parseShellExplorationPresentation.js";
 
 export const codexExecCommandTool = defineTool({
     name: "exec_command",
@@ -145,10 +146,11 @@ export const codexExecCommandTool = defineTool({
             max_output_tokens,
         );
     },
-    toCallPresentation: ({ cmd }) => ({
-        command: cmd,
-        type: "exec_command",
-    }),
+    toCallPresentation: ({ cmd }) =>
+        parseShellExplorationPresentation(cmd) ?? {
+            command: cmd,
+            type: "exec_command",
+        },
     isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,
     toLLM: (result) => [{ type: "text", text: formatUnifiedExecOutput(result) }],
     toPresentation: (result) => ({

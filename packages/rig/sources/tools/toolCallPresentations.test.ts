@@ -17,7 +17,7 @@ describe("tool call presentations", () => {
     const present = (tool: AnyDefinedTool, args: Record<string, unknown>) =>
         tool.toCallPresentation?.(args as never, context);
 
-    it("presents every Claude Bash call as the command that will execute", () => {
+    it("presents ordinary Claude Bash calls as the command that will execute", () => {
         expect(present(claudeBashTool, { command: "pnpm test" })).toEqual({
             command: "pnpm test",
             type: "exec_command",
@@ -33,19 +33,46 @@ describe("tool call presentations", () => {
         });
     });
 
-    it("presents every provider shell call as the command that will execute", () => {
-        expect(present(codexExecCommandTool, { cmd: "rg needle src" })).toEqual({
-            command: "rg needle src",
-            type: "exec_command",
-        });
+    it("presents exploration-shaped shell calls as structured exploration", () => {
+        const exploration = {
+            operations: [
+                { command: "rg needle src", kind: "search", path: "src", query: "needle" },
+            ],
+            type: "exploration",
+        };
+        expect(present(codexExecCommandTool, { cmd: "rg needle src" })).toEqual(exploration);
+        expect(present(claudeBashTool, { command: "rg needle src" })).toEqual(exploration);
         expect(
             present(grokRunTerminalCommandTool, {
                 background: false,
                 command: "rg needle src",
                 description: "Search source",
             }),
+        ).toEqual(exploration);
+        // Background commands keep the plain command presentation even when they look
+        // like exploration, because their output arrives later.
+        expect(
+            present(grokRunTerminalCommandTool, {
+                background: true,
+                command: "rg needle src",
+                description: "Search source",
+            }),
+        ).toEqual({ command: "rg needle src", type: "exec_command" });
+    });
+
+    it("presents mutating shell calls as the command that will execute", () => {
+        expect(present(codexExecCommandTool, { cmd: "pnpm test" })).toEqual({
+            command: "pnpm test",
+            type: "exec_command",
+        });
+        expect(
+            present(grokRunTerminalCommandTool, {
+                background: false,
+                command: "pnpm test",
+                description: "Run tests",
+            }),
         ).toEqual({
-            command: "rg needle src",
+            command: "pnpm test",
             type: "exec_command",
         });
     });
