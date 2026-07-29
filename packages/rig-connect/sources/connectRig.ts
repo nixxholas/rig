@@ -1546,6 +1546,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const input = typeof message === "string" ? { text: message } : message;
         const id = nextMutationId();
         const key = sessionKey(sessionId);
+        const expectedRunId = sessionEntries.get(sessionId)?.store.session().activeTurn?.runId;
         let expectedEventId: string | undefined;
         const mutation: PendingMutation = {
             acknowledged: false,
@@ -1565,7 +1566,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (groupsEntry !== undefined) {
                     const changed = groupsEntry.store.applyOptimisticSessionPatch(sessionId, {
                         lastMessageAt: now(),
-                        status: "queued",
+                        status: expectedRunId === undefined ? "queued" : "running",
                     });
                     undos.push(changed.undo);
                     if (publish) publishGroups(groupsEntry, changed.deltas);
@@ -1581,6 +1582,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         ...(input.displayText === undefined
                             ? {}
                             : { displayText: input.displayText }),
+                        ...(expectedRunId === undefined ? {} : { expectedRunId }),
                         mutationId: id,
                         text: input.text,
                     },
@@ -1588,7 +1590,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     method: "POST",
                     url: endpointUrl(
                         options.endpoint,
-                        `sessions/${encodeURIComponent(sessionId)}/messages`,
+                        `sessions/${encodeURIComponent(sessionId)}/${expectedRunId === undefined ? "messages" : "steer"}`,
                     ),
                 };
             },

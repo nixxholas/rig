@@ -439,6 +439,69 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("steers the active run when sending a message during work", async () => {
+        const stream = streamResponse();
+        const calls: { init?: RequestInit; url: URL }[] = [];
+        const active = sessionState();
+        const fetch = vi.fn((input: string | URL | Request, init?: RequestInit) => {
+            const url = new URL(String(input));
+            calls.push({ ...(init === undefined ? {} : { init }), url });
+            if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+            if (url.pathname.endsWith("/state")) {
+                return Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            ...active,
+                            activity: { kind: "thinking", label: "Thinking", since: 10 },
+                            session: {
+                                ...active.session!,
+                                activeTurn: { runId: "run-active", startedAt: 10 },
+                                activity: { kind: "thinking", label: "Thinking", since: 10 },
+                                status: "running",
+                            },
+                        }),
+                        { status: 200 },
+                    ),
+                );
+            }
+            return Promise.resolve(
+                new Response(JSON.stringify({ delivery: "steer", eventId: "event-steer" }), {
+                    status: 202,
+                }),
+            );
+        });
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch,
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: "session-1",
+        });
+
+        try {
+            stream.write(liveHello());
+            await settle();
+            const mutationId = rig.sendMessage("session-1", "Change direction");
+            await settle();
+
+            const sent = calls.find((call) => call.url.pathname.endsWith("/steer"));
+            expect(sent).toBeDefined();
+            expect(calls.some((call) => call.url.pathname.endsWith("/messages"))).toBe(false);
+            expect(JSON.parse(String(sent?.init?.body))).toMatchObject({
+                clientSubmissionId: mutationId,
+                expectedRunId: "run-active",
+                mutationId,
+                text: "Change direction",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("retries a lost response with the same mutation identity", async () => {
         const stream = streamResponse();
         const bodies: Record<string, unknown>[] = [];
