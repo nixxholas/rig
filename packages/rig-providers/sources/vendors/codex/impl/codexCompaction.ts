@@ -17,11 +17,12 @@ import type { ResponseInputItem } from "openai/resources/responses/responses.js"
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionMessage, SessionUserMessage } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
+import { responseInputItems } from "@/protocol/responses/responseInputItems.js";
+import { createResponsesLiteSseRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import { context_checkpoint_summary_prefix } from "@/vendors/codex/prompts/context_checkpoint_compaction_instructions.js";
-import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
-import { responseInputItems } from "@/vendors/codex/impl/responseInputItems.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
-import { toSessionCacheUsage } from "@/core/responses/toSessionCacheUsage.js";
+import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
+import { toSessionCacheUsage } from "@/protocol/responses/toSessionCacheUsage.js";
 
 export interface CodexCompactionMetadata {
     readonly trigger: "manual";
@@ -155,7 +156,12 @@ function estimate(
     tools: readonly SessionTool[],
     limit: number,
 ): number {
-    return estimateCodexContextTokens(createCodexCliSseRequest(request, tools), limit);
+    return estimateCodexContextTokens(
+        request.tools === undefined
+            ? createResponsesLiteSseRequest(request, toCodexToolDefinitions(tools))
+            : request,
+        limit,
+    );
 }
 
 function messageText(item: ResponseInputItem): string | undefined {

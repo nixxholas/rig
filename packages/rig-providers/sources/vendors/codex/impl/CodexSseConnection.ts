@@ -2,12 +2,13 @@ import type OpenAI from "openai";
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 
 import type { SessionTool } from "@/core/SessionTool.js";
+import { createResponsesLiteSseRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import type { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
 import { createCodexBedrockRequest } from "@/vendors/codex/impl/createCodexBedrockRequest.js";
-import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
 import { createCodexRequestHeaders } from "@/vendors/codex/impl/createCodexRequestHeaders.js";
 import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
+import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 
 /**
@@ -36,7 +37,13 @@ export class CodexSseConnection {
     }): Promise<AsyncGenerator<ResponseStreamEvent>> {
         const { signal } = options;
         const turnState = this.options.turnState;
-        const request = createCodexCliSseRequest(options.request, options.tools);
+        const request =
+            options.request.tools === undefined
+                ? createResponsesLiteSseRequest(
+                      options.request,
+                      toCodexToolDefinitions(options.tools),
+                  )
+                : options.request;
         const turnMetadata = request.client_metadata?.["x-codex-turn-metadata"];
         const { data: stream, response } = await this.options
             .client()

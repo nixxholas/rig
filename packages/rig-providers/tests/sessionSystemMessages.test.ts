@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import type { SessionContext } from "@/core/SessionContext.js";
-import { toOpenAIResponseInput } from "@/core/responses/toOpenAIResponseInput.js";
-import { toAnthropicBedrockMessages } from "@/vendors/bedrock/impl/toAnthropicBedrockMessages.js";
-import { toAnthropicBedrockSystem } from "@/vendors/bedrock/impl/toAnthropicBedrockSystem.js";
+import { toOpenAIResponseInput } from "@/protocol/responses/toOpenAIResponseInput.js";
+import { toAnthropicMessages } from "@/protocol/anthropic/toAnthropicMessages.js";
+import { toAnthropicSystem } from "@/protocol/anthropic/toAnthropicSystem.js";
 import { createClaudeSessionReplay } from "@/vendors/claude/impl/createClaudeSessionReplay.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 
@@ -33,10 +33,10 @@ describe("Session system messages", () => {
     });
 
     it("keeps a Bedrock notice in position instead of folding it into the prompt", () => {
-        expect(toAnthropicBedrockSystem({ context: CONTEXT })).toEqual([
+        expect(toAnthropicSystem({ context: CONTEXT })).toEqual([
             { type: "text", text: "Base instructions.", cache_control: { type: "ephemeral" } },
         ]);
-        expect(toAnthropicBedrockMessages(CONTEXT.messages)[2]).toEqual({
+        expect(toAnthropicMessages(CONTEXT.messages)[2]).toEqual({
             role: "user",
             content: REMINDER,
         });

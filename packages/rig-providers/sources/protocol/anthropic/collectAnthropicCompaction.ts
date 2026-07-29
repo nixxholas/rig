@@ -7,15 +7,15 @@ import { APIConnectionError } from "@anthropic-ai/sdk/error";
 
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 
-export interface CollectedAnthropicBedrockCompaction {
+export interface CollectedAnthropicCompaction {
     readonly block: BetaCompactionBlock | undefined;
     readonly usage: SessionCacheUsage;
 }
 
-export async function collectAnthropicBedrockCompaction(
+export async function collectAnthropicCompaction(
     stream: AsyncIterable<BetaRawMessageStreamEvent>,
     options: { onOutputStarted?: () => void; signal?: AbortSignal } = {},
-): Promise<CollectedAnthropicBedrockCompaction> {
+): Promise<CollectedAnthropicCompaction> {
     let block: BetaCompactionBlock | undefined;
     let iterations: BetaIterationsUsage | null = null;
     let usage: SessionCacheUsage = {
@@ -60,7 +60,7 @@ export async function collectAnthropicBedrockCompaction(
         }
     }
     throw new APIConnectionError({
-        message: "Anthropic Bedrock compaction stream closed before returning message_stop.",
+        message: "Anthropic compaction stream closed before returning message_stop.",
     });
 }
 

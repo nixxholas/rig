@@ -1333,6 +1333,34 @@ describe("Agent", () => {
         expect(agent.snapshot().lastRunId).toBeUndefined();
     });
 
+    it("resets the provider session with the local conversation", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const resetProvider = vi.fn();
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            reset: resetProvider,
+            stream: () => streamFor(stoppedMessage(model.id)),
+        });
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: createJustBashToolHarness().context,
+            printToConsole: false,
+        });
+
+        await agent.send("hello");
+        await agent.reset();
+
+        expect(resetProvider).toHaveBeenCalledOnce();
+        expect(agent.messages).toEqual([]);
+    });
+
     it("closes the agent-scoped provider", async () => {
         const model = defineModel({
             id: "openai/gpt-test",

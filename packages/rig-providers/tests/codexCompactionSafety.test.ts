@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 
 import type { SessionTool } from "@/core/SessionTool.js";
-import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
+import { createResponsesLiteSseRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
+import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import {
     estimateCodexContextTokens,
     fitCodexCompactionRequest,
@@ -71,7 +72,7 @@ describe("Codex compaction request safety", () => {
         expect(envelope).toContain("current request");
         expect(
             estimateCodexContextTokens(
-                createCodexCliSseRequest(fitted, tools),
+                createResponsesLiteSseRequest(fitted, toCodexToolDefinitions(tools)),
                 Number.MAX_SAFE_INTEGER,
             ),
         ).toBeLessThan(300);

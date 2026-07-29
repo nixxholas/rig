@@ -20,8 +20,8 @@ import {
 import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
 import { AnthropicBedrockConnection } from "@/vendors/bedrock/impl/AnthropicBedrockConnection.js";
 import type { AnthropicBedrockClient as CreatedAnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
-import { createAnthropicBedrockRequest } from "@/vendors/bedrock/impl/createAnthropicBedrockRequest.js";
-import { mapAnthropicBedrockStream } from "@/vendors/bedrock/impl/mapAnthropicBedrockStream.js";
+import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
+import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
 import { requestAnthropicBedrockCompaction } from "@/vendors/bedrock/impl/requestAnthropicBedrockCompaction.js";
 import { resolveAnthropicBedrockModelId } from "@/vendors/bedrock/impl/resolveAnthropicBedrockModelId.js";
 import { restoreAnthropicBedrockCompaction } from "@/vendors/bedrock/impl/restoreAnthropicBedrockCompaction.js";
@@ -325,7 +325,7 @@ export class AnthropicBedrockSession extends BaseSession {
                         request,
                         ...(options.signal === undefined ? [] : ([options.signal] as const)),
                     );
-                    for await (const event of mapAnthropicBedrockStream(response, { tools })) {
+                    for await (const event of mapAnthropicStream(response, { tools })) {
                         if (event.type === "block_start") blockStarted = true;
                         if (isAnthropicResponseContentEvent(event)) {
                             responseContentStarted = true;
@@ -388,7 +388,7 @@ export class AnthropicBedrockSession extends BaseSession {
                           options.context.messages,
                       ),
                   };
-        return createAnthropicBedrockRequest({
+        return createAnthropicRequest({
             context,
             model: resolveAnthropicBedrockModelId(options.model, this.region, this.transport),
             tools,

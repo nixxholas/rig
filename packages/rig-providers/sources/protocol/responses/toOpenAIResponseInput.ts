@@ -1,9 +1,9 @@
 import type { ResponseInput, ResponseInputItem } from "openai/resources/responses/responses.js";
 
 import type { SessionContext } from "@/core/SessionContext.js";
-import { createCodexCallIdMapper } from "@/core/responses/createCodexCallIdMapper.js";
-import { toOpenAIInputContent } from "@/core/responses/toOpenAIInputContent.js";
-import type { CodexToolVendor } from "@/vendors/codex/CodexToolVendor.js";
+import { createCodexCallIdMapper } from "@/protocol/responses/createCodexCallIdMapper.js";
+import { toOpenAIInputContent } from "@/protocol/responses/toOpenAIInputContent.js";
+import type { ResponsesToolCallType } from "@/protocol/responses/ResponsesToolVendor.js";
 
 export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
     const input: ResponseInput = [];
@@ -169,7 +169,7 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
     return input;
 }
 
-function toolVendorType(vendor: any): CodexToolVendor["type"] | undefined {
+function toolVendorType(vendor: any): ResponsesToolCallType | undefined {
     if (typeof vendor !== "object" || vendor === null || vendor.provider !== "codex")
         return undefined;
     return vendor.type === "function_call" ||

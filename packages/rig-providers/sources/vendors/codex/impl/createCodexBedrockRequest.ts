@@ -5,7 +5,7 @@ import type {
 } from "openai/resources/responses/responses.js";
 
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
-import { responseInputItems } from "@/vendors/codex/impl/responseInputItems.js";
+import { responseInputItems } from "@/protocol/responses/responseInputItems.js";
 
 export function createCodexBedrockRequest(request: CodexResponseRequest): CodexResponseRequest {
     const output: CodexResponseRequest = structuredClone(request);

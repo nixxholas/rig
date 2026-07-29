@@ -2,8 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { toOpenAIResponseInput } from "@/core/responses/toOpenAIResponseInput.js";
-import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
+import { toOpenAIResponseInput } from "@/protocol/responses/toOpenAIResponseInput.js";
+import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import { tool_search } from "@/vendors/codex/tools/tool_search.js";

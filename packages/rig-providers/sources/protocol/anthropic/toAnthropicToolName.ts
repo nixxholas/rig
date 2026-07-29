@@ -1,4 +1,4 @@
-export function toAnthropicBedrockToolName(tool: {
+export function toAnthropicToolName(tool: {
     readonly name: string;
     readonly namespace?: string;
 }): string {

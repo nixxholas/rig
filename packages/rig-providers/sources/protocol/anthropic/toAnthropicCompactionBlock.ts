@@ -2,7 +2,7 @@ import type { BetaCompactionBlockParam } from "@anthropic-ai/sdk/resources/beta/
 
 import type { SessionCompactionMessage } from "@/core/SessionContext.js";
 
-export function toAnthropicBedrockCompactionBlock(
+export function toAnthropicCompactionBlock(
     message: SessionCompactionMessage,
 ): BetaCompactionBlockParam {
     const vendor: unknown = message.vendor;

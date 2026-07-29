@@ -1,8 +1,8 @@
-import type { AnthropicBedrockRequest } from "@/vendors/bedrock/impl/createAnthropicBedrockRequest.js";
+import type { AnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
 import {
-    collectAnthropicBedrockCompaction,
-    type CollectedAnthropicBedrockCompaction,
-} from "@/vendors/bedrock/impl/collectAnthropicBedrockCompaction.js";
+    collectAnthropicCompaction,
+    type CollectedAnthropicCompaction,
+} from "@/protocol/anthropic/collectAnthropicCompaction.js";
 import type { AnthropicBedrockClient } from "@/vendors/bedrock/impl/createAnthropicBedrockClient.js";
 import {
     resolveAnthropicBedrockRetryDelay,
@@ -12,9 +12,9 @@ import {
 
 export async function requestAnthropicBedrockCompaction(options: {
     client: AnthropicBedrockClient;
-    request: AnthropicBedrockRequest;
+    request: AnthropicRequest;
     signal?: AbortSignal;
-}): Promise<CollectedAnthropicBedrockCompaction> {
+}): Promise<CollectedAnthropicCompaction> {
     let failedAttempts = 0;
     for (;;) {
         let responseContentStarted = false;
@@ -23,7 +23,7 @@ export async function requestAnthropicBedrockCompaction(options: {
                 options.request,
                 options.signal === undefined ? undefined : { signal: options.signal },
             );
-            return await collectAnthropicBedrockCompaction(response, {
+            return await collectAnthropicCompaction(response, {
                 onOutputStarted: () => {
                     responseContentStarted = true;
                 },

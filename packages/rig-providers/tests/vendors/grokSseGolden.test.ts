@@ -8,7 +8,7 @@ import { GrokApiKeyCredential } from "@/vendors/grok/GrokApiKeyCredential.js";
 import { GrokProvider } from "@/vendors/grok/GrokProvider.js";
 import { GROK_DEFAULT_ENDPOINT } from "@/vendors/grok/impl/grokConstants.js";
 import { createGrokRequestHeaders } from "@/vendors/grok/impl/createGrokRequestHeaders.js";
-import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
+import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { toGrokToolDefinitions } from "@/vendors/grok/impl/toGrokToolDefinitions.js";
 import { grok_4_5_system_prompt } from "@/vendors/grok/prompts/grok_4_5_system_prompt.js";
 import { grok_4_5_tools } from "@/vendors/grok/tools/index.js";

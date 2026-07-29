@@ -7,19 +7,19 @@ import { APIConnectionError } from "@anthropic-ai/sdk/error";
 import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { toAnthropicBedrockToolName } from "@/vendors/bedrock/impl/toAnthropicBedrockToolName.js";
+import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js";
 import {
     type AnthropicReasoningState,
     encodeAnthropicReasoning,
     encodeAnthropicResponseItem,
-} from "@/vendors/bedrock/impl/toAnthropicBedrockMessages.js";
+} from "@/protocol/anthropic/toAnthropicMessages.js";
 
 type AnthropicReplayBlock =
     | AnthropicReasoningState
     | { type: "text"; text: string }
     | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
 
-export async function* mapAnthropicBedrockStream(
+export async function* mapAnthropicStream(
     stream: AsyncIterable<BetaRawMessageStreamEvent>,
     options: { tools?: readonly SessionTool[] } = {},
 ): AsyncGenerator<SessionEvent> {
@@ -57,7 +57,7 @@ export async function* mapAnthropicBedrockStream(
             if (event.content_block.type === "tool_use") {
                 const wireName = event.content_block.name;
                 const configured = options.tools?.find(
-                    (tool) => toAnthropicBedrockToolName(tool) === wireName,
+                    (tool) => toAnthropicToolName(tool) === wireName,
                 );
                 const tool = {
                     callId: event.content_block.id,
@@ -183,7 +183,7 @@ export async function* mapAnthropicBedrockStream(
             }
             yield { type: "token_usage", usage };
             yield { type: "block_stop" };
-            yield { type: "done", state: toDoneState(stopReason, tools.size > 0) };
+            yield toDoneEvent(stopReason, tools.size > 0);
             return;
         }
     }
@@ -254,13 +254,22 @@ function mergeUsage(
     };
 }
 
-function toDoneState(
+function toDoneEvent(
     stopReason: BetaStopReason | null,
     sawTool: boolean,
-): "normal" | "tool_call" | "length" {
+): Extract<SessionEvent, { type: "done" }> {
     if (stopReason === "max_tokens" || stopReason === "model_context_window_exceeded") {
-        return "length";
+        return { type: "done", state: "length" };
     }
-    if (sawTool || stopReason === "tool_use" || stopReason === "pause_turn") return "tool_call";
-    return "normal";
+    if (stopReason === "refusal") {
+        return {
+            type: "done",
+            state: "error",
+            kind: "unknown",
+            message: "The model refused to complete the request.",
+            providerError: { type: "unclassified" },
+        };
+    }
+    if (sawTool || stopReason === "tool_use") return { type: "done", state: "tool_call" };
+    return { type: "done", state: "normal" };
 }

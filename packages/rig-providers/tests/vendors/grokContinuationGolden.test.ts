@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
 import { createGrokOpenAIRequest } from "@/vendors/grok/impl/createGrokOpenAIRequest.js";
-import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
+import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { toGrokResponseInput } from "@/vendors/grok/impl/toGrokResponseInput.js";
 import { grok_compaction_prompt } from "@/vendors/grok/prompts/grok_compaction_prompt.js";
 

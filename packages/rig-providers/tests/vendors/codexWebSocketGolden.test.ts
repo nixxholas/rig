@@ -428,11 +428,13 @@ vi.mock("openai/resources/responses/ws", () => ({
     },
 }));
 
+import { createCodexCliRequest } from "@/vendors/codex/impl/createCodexCliRequest.js";
 import {
-    createCodexCliRequest,
-    createCodexCliWarmupRequest,
-} from "@/vendors/codex/impl/createCodexCliRequest.js";
-import { createCodexCliWebSocketInferenceRequest } from "@/vendors/codex/impl/createCodexCliWebSocketInferenceRequest.js";
+    createResponsesLiteWarmupRequest,
+    createResponsesLiteWebSocketInferenceRequest,
+} from "@/protocol/responsesLite/createResponsesLiteRequest.js";
+import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
+import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import { codexCliTools } from "./codexCliTools.js";
 import { codexCliPrompt } from "./codexCliPrompt.js";
 import { withCodexSkills } from "@/vendors/codex/impl/withCodexSkills.js";
@@ -498,8 +500,18 @@ describe("Codex CLI mode WebSocket goldens", () => {
             promptCacheKey: "<SESSION_ID>",
             tools: codexCliTools(model),
         });
-        const warmup = createCodexCliWarmupRequest(request, codexCliTools(model));
-        const inference = createCodexCliWebSocketInferenceRequest(request);
+        const warmup =
+            request.tools === undefined
+                ? createResponsesLiteWarmupRequest(
+                      request,
+                      toCodexToolDefinitions(codexCliTools(model)),
+                  )
+                : { ...structuredClone(request), input: [], generate: false };
+        setCodexRequestKind(warmup, "prewarm");
+        const inference =
+            request.tools === undefined
+                ? createResponsesLiteWebSocketInferenceRequest(request)
+                : request;
         const warmupRecord = Object.fromEntries(Object.entries(warmup));
         const inferenceRecord = Object.fromEntries(Object.entries(inference));
 

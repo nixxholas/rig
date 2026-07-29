@@ -3,13 +3,13 @@ import type { MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/b
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { toAnthropicBedrockMessages } from "@/vendors/bedrock/impl/toAnthropicBedrockMessages.js";
-import { toAnthropicBedrockSystem } from "@/vendors/bedrock/impl/toAnthropicBedrockSystem.js";
-import { toAnthropicBedrockTools } from "@/vendors/bedrock/impl/toAnthropicBedrockTools.js";
+import { toAnthropicMessages } from "@/protocol/anthropic/toAnthropicMessages.js";
+import { toAnthropicSystem } from "@/protocol/anthropic/toAnthropicSystem.js";
+import { toAnthropicTools } from "@/protocol/anthropic/toAnthropicTools.js";
 
-export type AnthropicBedrockRequest = MessageCreateParamsStreaming;
+export type AnthropicRequest = MessageCreateParamsStreaming;
 
-export function createAnthropicBedrockRequest(options: {
+export function createAnthropicRequest(options: {
     compaction?: {
         instructions: string;
     };
@@ -17,22 +17,28 @@ export function createAnthropicBedrockRequest(options: {
     effort?: SessionReasoningEffort;
     model: string;
     tools: readonly SessionTool[];
-}): AnthropicBedrockRequest {
+}): AnthropicRequest {
     const effort = resolveEffort(options.effort);
-    const system = toAnthropicBedrockSystem(options);
-    const tools = toAnthropicBedrockTools(options.tools);
+    const system = toAnthropicSystem(options);
+    const tools = toAnthropicTools(options.tools);
+    const hasCompaction = options.context.messages.some(
+        (message) => message.role === "compaction",
+    );
+    const usesCompaction = options.compaction !== undefined || hasCompaction;
     const betas = ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"];
-    if (options.compaction !== undefined) betas.push("compact-2026-01-12");
+    if (usesCompaction) betas.push("compact-2026-01-12");
     return {
         betas,
-        ...(options.compaction === undefined
+        ...(!usesCompaction
             ? {}
             : {
                   context_management: {
                       edits: [
                           {
                               type: "compact_20260112" as const,
-                              instructions: options.compaction.instructions,
+                              instructions:
+                                  options.compaction?.instructions ??
+                                  "Preserve the conversation for continuation.",
                               pause_after_compaction: true,
                               trigger: { type: "input_tokens" as const, value: 50_000 },
                           },
@@ -40,7 +46,7 @@ export function createAnthropicBedrockRequest(options: {
                   },
               }),
         max_tokens: 64_000,
-        messages: toAnthropicBedrockMessages(options.context.messages),
+        messages: toAnthropicMessages(options.context.messages),
         model: options.model,
         stream: true,
         ...(system.length === 0 ? {} : { system }),

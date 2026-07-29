@@ -31,7 +31,7 @@ import { isGrokImageStripError } from "@/vendors/grok/errors/grokErrors.js";
 import { isGrokStateReminderMessage } from "@/vendors/grok/impl/grokMessages.js";
 import { isGrokUserInfoMessage } from "@/vendors/grok/impl/grokMessages.js";
 import { isRetryableGrokCompactionError } from "@/vendors/grok/errors/grokErrors.js";
-import type { OpenAIResponseRunResult } from "@/core/responses/mapOpenAIResponseStream.js";
+import type { OpenAIResponseRunResult } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { waitForGrokCompactionRetry } from "@/vendors/grok/impl/waitForGrokCompactionRetry.js";
 import { wrapGrokUserQuery } from "@/vendors/grok/impl/grokMessages.js";
 import { resolveGrokModelConfiguration } from "@/vendors/grok/impl/resolveGrokModelConfiguration.js";

@@ -11,6 +11,7 @@ export interface GymInferenceRequest {
     context: Context;
     modelId: string;
     options: StreamOptions;
+    providerSessionGeneration: number;
     providerId: string;
 }
 

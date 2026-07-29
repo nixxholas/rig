@@ -3,9 +3,11 @@ import type { ResponseStreamEvent } from "openai/resources/responses/responses.j
 import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionToolCall } from "@/core/SessionContext.js";
 import type { SessionEvent } from "@/core/SessionEvent.js";
-import { toSessionCacheUsage } from "@/core/responses/toSessionCacheUsage.js";
-import type { CodexToolVendor } from "@/vendors/codex/CodexToolVendor.js";
-import type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
+import { toSessionCacheUsage } from "@/protocol/responses/toSessionCacheUsage.js";
+import type {
+    ResponsesToolCallType,
+    ResponsesToolVendor,
+} from "@/protocol/responses/ResponsesToolVendor.js";
 
 interface ActiveOutputItem {
     callId?: string;
@@ -38,7 +40,7 @@ export async function* mapOpenAIResponseStream(
         signal?: AbortSignal;
         failureMessage: string;
         requireTerminalEvent?: boolean;
-        vendor?: "codex" | "grok";
+        vendor?: "codex" | "grok" | "responses";
     },
 ): AsyncGenerator<SessionEvent, OpenAIResponseRunResult> {
     const activeItems = new Map<number, ActiveOutputItem>();
@@ -465,9 +467,9 @@ export async function* mapOpenAIResponseStream(
 }
 
 function responseToolVendor(
-    vendor: "codex" | "grok" | undefined,
-    type: CodexToolVendor["type"],
-): CodexToolVendor | GrokToolVendor {
+    vendor: "codex" | "grok" | "responses" | undefined,
+    type: ResponsesToolCallType,
+): ResponsesToolVendor {
     const provider = vendor ?? "grok";
     return type === "tool_search_call"
         ? { provider, type, execution: "client" }

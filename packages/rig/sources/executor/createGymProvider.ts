@@ -39,6 +39,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
     const models = options.models ?? [gymModel];
     const providerId = options.providerId ?? "gym";
     const contextWindow = options.contextWindow;
+    let providerSessionGeneration = 0;
     const configuredModels =
         contextWindow === undefined ? models : models.map((model) => ({ ...model, contextWindow }));
     return defineProvider({
@@ -53,6 +54,9 @@ export function createGymProvider(options: CreateGymProviderOptions) {
             : options.serviceTiers === undefined
               ? {}
               : { serviceTiers: options.serviceTiers }),
+        reset() {
+            providerSessionGeneration += 1;
+        },
         stream(model, context, streamOptions = {}) {
             return createInferenceStream(async function* () {
                 const runtimeModel = `# Runtime model\nModel ID: ${model.id}\nProvider ID: ${providerId}`;
@@ -85,6 +89,7 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                         context: preparedContext,
                         modelId: model.id,
                         options: streamOptions,
+                        providerSessionGeneration,
                         providerId,
                     } satisfies GymInferenceRequest),
                     headers: {

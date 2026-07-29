@@ -9,7 +9,7 @@ import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { mapOpenAIResponseStream } from "@/core/responses/mapOpenAIResponseStream.js";
+import { mapOpenAIResponseStream } from "@/protocol/responses/mapOpenAIResponseStream.js";
 import type { CodexProviderCredential } from "@/vendors/VendorCredential.js";
 import { classifyCodexError, codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
 import { codexModelsShareConfiguration } from "@/vendors/codex/impl/codexModelsShareConfiguration.js";

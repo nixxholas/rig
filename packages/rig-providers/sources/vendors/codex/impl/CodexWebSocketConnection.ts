@@ -6,13 +6,17 @@ import type {
 import { ResponsesWS } from "openai/resources/responses/ws";
 
 import type { SessionTool } from "@/core/SessionTool.js";
+import {
+    createResponsesLiteSseRequest,
+    createResponsesLiteWarmupRequest,
+    createResponsesLiteWebSocketInferenceRequest,
+} from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import type { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
-import { createCodexCliWarmupRequest } from "@/vendors/codex/impl/createCodexCliRequest.js";
-import { createCodexCliSseRequest } from "@/vendors/codex/impl/createCodexCliSseRequest.js";
-import { createCodexCliWebSocketInferenceRequest } from "@/vendors/codex/impl/createCodexCliWebSocketInferenceRequest.js";
 import { createCodexWebSocketStream } from "@/vendors/codex/impl/createCodexWebSocketStream.js";
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
+import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
+import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
 import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
 
 /**
@@ -60,9 +64,17 @@ export class CodexWebSocketConnection {
         const client = this.options.client();
         this.ensureSocket(client);
         if (!this.started) {
+            const warmup =
+                request.tools === undefined
+                    ? createResponsesLiteWarmupRequest(
+                          request,
+                          toCodexToolDefinitions(tools),
+                      )
+                    : { ...structuredClone(request), input: [], generate: false };
+            setCodexRequestKind(warmup, "prewarm");
             for await (const event of this.send(
                 client,
-                createCodexCliWarmupRequest(request, tools),
+                warmup,
                 signal,
             )) {
                 turnState.observe(event);
@@ -86,8 +98,12 @@ export class CodexWebSocketConnection {
         // ownership boundary even when a request-shaping helper has no transformations to apply.
         const inferenceRequest = structuredClone(
             canContinue
-                ? createCodexCliWebSocketInferenceRequest(request)
-                : createCodexCliSseRequest(request, tools),
+                ? request.tools === undefined
+                    ? createResponsesLiteWebSocketInferenceRequest(request)
+                    : request
+                : request.tools === undefined
+                  ? createResponsesLiteSseRequest(request, toCodexToolDefinitions(tools))
+                  : request,
         );
         if (incrementalInput !== undefined) inferenceRequest.input = incrementalInput;
         if (canContinue && this.previousResponseId !== undefined) {

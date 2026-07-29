@@ -315,6 +315,7 @@ export interface Provider {
     readonly extendProfilePromptContext:
         | ((context: ProfilePromptContext) => ProfilePromptContext | Promise<ProfilePromptContext>)
         | undefined;
+    reset?(): Promise<void> | void;
     close?(): Promise<void> | void;
     quota: ((options?: { fresh?: boolean }) => Promise<ProviderQuota>) | undefined;
     runClaudeAuxiliaryQuery?(
@@ -356,6 +357,7 @@ export function defineProvider(provider: {
     extendProfilePromptContext?: (
         context: ProfilePromptContext,
     ) => ProfilePromptContext | Promise<ProfilePromptContext>;
+    reset?(): Promise<void> | void;
     close?(): Promise<void> | void;
     quota?: (options?: { fresh?: boolean }) => Promise<ProviderQuota>;
     runClaudeAuxiliaryQuery?(

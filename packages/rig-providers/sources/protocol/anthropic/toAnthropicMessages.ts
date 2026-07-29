@@ -14,14 +14,14 @@ import type {
     SessionToolResultMessage,
 } from "@/core/SessionContext.js";
 import { toSessionReminderMessage } from "@/core/toSessionReminderMessage.js";
-import { toAnthropicBedrockCompactionBlock } from "@/vendors/bedrock/impl/toAnthropicBedrockCompactionBlock.js";
-import { toAnthropicBedrockToolName } from "@/vendors/bedrock/impl/toAnthropicBedrockToolName.js";
+import { toAnthropicCompactionBlock } from "@/protocol/anthropic/toAnthropicCompactionBlock.js";
+import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js";
 
 export type AnthropicReasoningState =
     | { type: "thinking"; thinking: string; signature: string }
     | { type: "redacted_thinking"; data: string };
 
-export function toAnthropicBedrockMessages(
+export function toAnthropicMessages(
     messages: readonly SessionMessage[],
 ): BetaMessageParam[] {
     const converted = messages.flatMap((message): BetaMessageParam[] => {
@@ -32,7 +32,7 @@ export function toAnthropicBedrockMessages(
             return [{ role: "user", content: toInputContent(reminder.content, reminder.input) }];
         }
         if (message.role === "compaction") {
-            return [{ role: "assistant", content: [toAnthropicBedrockCompactionBlock(message)] }];
+            return [{ role: "assistant", content: [toAnthropicCompactionBlock(message)] }];
         }
         if (message.role === "user") {
             return [{ role: "user", content: toInputContent(message.content, message.input) }];
@@ -89,7 +89,7 @@ function toAssistantContent(message: SessionAssistantMessage): BetaContentBlockP
         ...(message.toolCalls ?? []).map((call) => ({
             type: "tool_use" as const,
             id: call.callId,
-            name: toAnthropicBedrockToolName(call),
+            name: toAnthropicToolName(call),
             input: parseArguments(call.arguments),
         })),
     ];

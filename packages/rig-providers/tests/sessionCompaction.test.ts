@@ -1,39 +1,28 @@
 import { describe, expect, it } from "vitest";
 
-import { ResponsesSession } from "@/core/responses/ResponsesSession.js";
+import { ResponsesSession } from "@/protocol/responses/ResponsesSession.js";
 
 describe("SessionCompaction", () => {
-    it("returns a structural completed result", async () => {
+    it("reports that a standard endpoint has no native compaction", async () => {
         const session = new ResponsesSession("session", {
+            apiKey: "test-key",
+            endpoint: "http://127.0.0.1:1/v1",
+            nativeCompaction: false,
             context: {
                 instructions: "System prompt.",
                 messages: [{ role: "system", content: "Preserved metadata." }],
             },
         });
-        for await (const _event of session.run({
-            context: {
-                messages: [{ role: "user", content: "Keep this state." }],
-            },
-        })) {
-            // Drain the session.
-        }
 
         const result = await session.compact();
 
         expect(result).toEqual({
-            status: "completed",
-            summary: "Keep this state.",
-            preservedMessages: [{ role: "system", content: "Preserved metadata." }],
+            status: "failed",
+            kind: "inference_error",
+            message: "This Responses API endpoint does not provide native compaction.",
             context: {
                 instructions: "System prompt.",
-                messages: [
-                    { role: "system", content: "Preserved metadata." },
-                    {
-                        role: "user",
-                        content:
-                            "<conversation_summary>\nKeep this state.\n</conversation_summary>",
-                    },
-                ],
+                messages: [{ role: "system", content: "Preserved metadata." }],
             },
         });
     });
@@ -43,7 +32,11 @@ describe("SessionCompaction", () => {
             instructions: "System prompt.",
             messages: [{ role: "user" as const, content: "Original state." }],
         };
-        const session = new ResponsesSession("session", { context });
+        const session = new ResponsesSession("session", {
+            apiKey: "test-key",
+            endpoint: "http://127.0.0.1:1/v1",
+            context,
+        });
         const controller = new AbortController();
         controller.abort();
 

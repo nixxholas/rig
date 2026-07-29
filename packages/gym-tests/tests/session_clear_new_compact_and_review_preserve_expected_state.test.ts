@@ -22,8 +22,10 @@ describe("session clear, new, compact, and review preserve expected state", () =
             inference(request, callIndex) {
                 const context = JSON.stringify(request.context.messages);
                 const lastMessage = JSON.stringify(request.context.messages.at(-1));
+                const providerSessionGeneration = request.providerSessionGeneration;
 
                 if (callIndex === 0) {
+                    expect(providerSessionGeneration).toBe(0);
                     expect(lastMessage).toContain("FIRST_CONTEXT_SENTINEL");
                     return {
                         content: [{ text: "FIRST_RESPONSE_SENTINEL", type: "text" }],
@@ -45,6 +47,7 @@ describe("session clear, new, compact, and review preserve expected state", () =
                 }
 
                 if (callIndex === 1) {
+                    expect(providerSessionGeneration).toBe(0);
                     expect(lastMessage).toContain("SECOND_CONTEXT_CHECK");
                     expect(context).toContain("FIRST_CONTEXT_SENTINEL");
                     expect(context).toContain("FIRST_RESPONSE_SENTINEL");
@@ -68,6 +71,7 @@ describe("session clear, new, compact, and review preserve expected state", () =
                 }
 
                 if (callIndex === 2) {
+                    expect(providerSessionGeneration).toBe(1);
                     expect(lastMessage).toContain("POST_NEW_CONTEXT_CHECK");
                     expect(context).not.toContain("FIRST_CONTEXT_SENTINEL");
                     expect(context).not.toContain("FIRST_RESPONSE_SENTINEL");
@@ -79,6 +83,7 @@ describe("session clear, new, compact, and review preserve expected state", () =
                 }
 
                 if (callIndex === 3) {
+                    expect(providerSessionGeneration).toBe(1);
                     expect(lastMessage).toContain(
                         "Review the current workspace changes and identify actionable issues.",
                     );

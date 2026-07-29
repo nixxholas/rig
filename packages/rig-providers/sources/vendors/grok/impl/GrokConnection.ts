@@ -5,7 +5,7 @@ import type { SessionTool } from "@/core/SessionTool.js";
 import {
     mapOpenAIResponseStream,
     type OpenAIResponseRunResult,
-} from "@/core/responses/mapOpenAIResponseStream.js";
+} from "@/protocol/responses/mapOpenAIResponseStream.js";
 import { createGrokOpenAIRequest } from "@/vendors/grok/impl/createGrokOpenAIRequest.js";
 import { createGrokRequestHeaders } from "@/vendors/grok/impl/createGrokRequestHeaders.js";
 import {
@@ -72,6 +72,7 @@ export class GrokConnection {
             ...(abort === undefined ? {} : { signal: abort }),
             failureMessage: `${options.model} failed to generate a response.`,
             requireTerminalEvent: true,
+            vendor: "grok",
         });
     }
 

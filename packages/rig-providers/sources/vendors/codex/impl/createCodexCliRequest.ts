@@ -1,14 +1,11 @@
-import type { ResponseInputItem } from "openai/resources/responses/responses.js";
-
 import type { SessionContext } from "@/core/SessionContext.js";
 import type { SessionReasoningEffort, SessionServiceTier } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { createOpenAIResponseRequest } from "@/core/responses/createOpenAIResponseRequest.js";
+import { createOpenAIResponseRequest } from "@/protocol/responses/createOpenAIResponseRequest.js";
+import { createResponsesLiteRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import { isCodexV2Model } from "@/vendors/codex/impl/isCodexV2Model.js";
-import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
-import { responseInputItems } from "@/vendors/codex/impl/responseInputItems.js";
 
 export function createCodexCliRequest(options: {
     context: SessionContext;
@@ -26,52 +23,10 @@ export function createCodexCliRequest(options: {
     if (options.serviceTier !== undefined) request.service_tier = options.serviceTier;
     const useResponsesLite = isCodexV2Model(options.model) && options.parallelToolCalls !== true;
     if (useResponsesLite) {
-        request.parallel_tool_calls = false;
-        if (request.reasoning !== undefined)
-            request.reasoning = { ...request.reasoning, context: "all_turns" };
-        delete request.instructions;
-        request.input = [
-            {
-                type: "message",
-                role: "developer",
-                content: [{ type: "input_text", text: options.context.instructions }],
-            },
-            ...responseInputItems(request.input),
-        ];
-        delete request.tools;
+        return createResponsesLiteRequest(request, options.context.instructions);
     } else {
         request.parallel_tool_calls = options.parallelToolCalls ?? true;
         request.tools = toCodexToolDefinitions(options.tools) as never;
     }
     return request;
-}
-
-export function createCodexCliWarmupRequest(
-    request: CodexResponseRequest,
-    tools: readonly SessionTool[],
-): CodexResponseRequest {
-    const warmup: CodexResponseRequest = structuredClone(request);
-    setCodexRequestKind(warmup, "prewarm");
-    warmup.generate = false;
-    const model = String(warmup.model);
-    if (isCodexV2Model(model) && warmup.tools === undefined) {
-        const instructions = responseInputItems(warmup.input).filter(
-            (item) =>
-                typeof item === "object" &&
-                item !== null &&
-                (item as { role?: unknown }).role === "developer",
-        );
-        const warmupInput: ResponseInputItem[] = [
-            {
-                type: "additional_tools",
-                role: "developer",
-                tools: toCodexToolDefinitions(tools),
-            },
-            ...instructions.slice(0, 1),
-        ];
-        warmup.input = warmupInput;
-    } else {
-        warmup.input = [];
-    }
-    return warmup;
 }

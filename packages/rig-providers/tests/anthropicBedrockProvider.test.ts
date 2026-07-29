@@ -14,12 +14,12 @@ import {
 } from "@/vendors/bedrock/AnthropicBedrockProvider.js";
 import { resolveAnthropicBedrockRetryDelay } from "@/vendors/bedrock/impl/anthropicBedrockRetry.js";
 import { classifyAnthropicBedrockError } from "@/vendors/bedrock/errors/anthropicBedrockErrors.js";
-import { createAnthropicBedrockRequest } from "@/vendors/bedrock/impl/createAnthropicBedrockRequest.js";
-import { mapAnthropicBedrockStream } from "@/vendors/bedrock/impl/mapAnthropicBedrockStream.js";
+import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequest.js";
+import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
 import {
     encodeAnthropicReasoningBlocks,
-    toAnthropicBedrockMessages,
-} from "@/vendors/bedrock/impl/toAnthropicBedrockMessages.js";
+    toAnthropicMessages,
+} from "@/protocol/anthropic/toAnthropicMessages.js";
 import { resolveAnthropicBedrockModelId } from "@/vendors/bedrock/impl/resolveAnthropicBedrockModelId.js";
 import { claude_tools } from "@/vendors/claude/tools/index.js";
 
@@ -243,7 +243,7 @@ describe("AnthropicBedrockProvider", () => {
         if (result.status !== "completed" || result.compaction === undefined) {
             throw new Error("Expected native Anthropic Bedrock compaction.");
         }
-        expect(toAnthropicBedrockMessages([result.compaction])).toEqual([
+        expect(toAnthropicMessages([result.compaction])).toEqual([
             {
                 role: "assistant",
                 content: [
@@ -511,7 +511,7 @@ describe("AnthropicBedrockProvider", () => {
     });
 
     it("omits the system field when every system prompt source is empty", () => {
-        const request = createAnthropicBedrockRequest({
+        const request = createAnthropicRequest({
             context: {
                 instructions: "",
                 messages: [{ role: "user", content: "hello" }],
@@ -524,7 +524,7 @@ describe("AnthropicBedrockProvider", () => {
     });
 
     it("disables thinking without sending a conflicting effort", () => {
-        const request = createAnthropicBedrockRequest({
+        const request = createAnthropicRequest({
             context: {
                 instructions: "system",
                 messages: [{ role: "user", content: "hello" }],
@@ -615,7 +615,7 @@ describe("AnthropicBedrockProvider", () => {
     });
 
     it("replays signed thinking, tool calls, tool results, and images without flattening", () => {
-        const messages = toAnthropicBedrockMessages([
+        const messages = toAnthropicMessages([
             {
                 role: "assistant",
                 content: "I will inspect it.",
@@ -695,7 +695,7 @@ describe("AnthropicBedrockProvider", () => {
 
     it("does not replay Codex-native agent messages through Anthropic Bedrock", () => {
         expect(
-            toAnthropicBedrockMessages([
+            toAnthropicMessages([
                 {
                     role: "agent",
                     author: "root",
@@ -975,7 +975,7 @@ describe("AnthropicBedrockProvider", () => {
 
     it("preserves interleaved response blocks and treats truncated tools as length", async () => {
         const events: SessionEvent[] = [];
-        for await (const event of mapAnthropicBedrockStream(
+        for await (const event of mapAnthropicStream(
             streamEvents([
                 {
                     type: "message_start",
@@ -1050,7 +1050,7 @@ describe("AnthropicBedrockProvider", () => {
         if (responseItems?.type !== "response_items") {
             throw new Error("Missing Anthropic response items.");
         }
-        const replay = toAnthropicBedrockMessages([
+        const replay = toAnthropicMessages([
             {
                 role: "assistant",
                 content: "flattened",

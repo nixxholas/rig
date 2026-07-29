@@ -122,8 +122,19 @@ export {
     bedrockMantleEndpoint,
     bedrockRuntimeEndpoint,
 } from "@/vendors/bedrock/impl/bedrockConstants.js";
-export { ResponsesProvider } from "@/core/responses/ResponsesProvider.js";
-export { ResponsesSession } from "@/core/responses/ResponsesSession.js";
+export {
+    ResponsesProvider,
+    type ResponsesProviderOptions,
+} from "@/protocol/responses/ResponsesProvider.js";
+export {
+    MINIMAL_RESPONSES_CAPABILITIES,
+    OPENAI_RESPONSES_CAPABILITIES,
+    type ResponsesCapabilities,
+} from "@/protocol/responses/ResponsesCapabilities.js";
+export {
+    ResponsesSession,
+    type ResponsesSessionOptions,
+} from "@/protocol/responses/ResponsesSession.js";
 export {
     BedrockBearerTokenCredential,
     type BedrockBearerTokenCredentialLoadOptions,

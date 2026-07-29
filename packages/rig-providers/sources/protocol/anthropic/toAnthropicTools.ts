@@ -2,9 +2,9 @@ import { Type } from "@sinclair/typebox";
 import type { BetaTool } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 
 import type { SessionTool } from "@/core/SessionTool.js";
-import { toAnthropicBedrockToolName } from "@/vendors/bedrock/impl/toAnthropicBedrockToolName.js";
+import { toAnthropicToolName } from "@/protocol/anthropic/toAnthropicToolName.js";
 
-export function toAnthropicBedrockTools(tools: readonly SessionTool[]): BetaTool[] {
+export function toAnthropicTools(tools: readonly SessionTool[]): BetaTool[] {
     return tools.map((tool) => {
         if (tool.type !== "local") {
             throw new Error(`Anthropic Bedrock tools must execute locally: '${tool.name}'.`);
@@ -14,7 +14,7 @@ export function toAnthropicBedrockTools(tools: readonly SessionTool[]): BetaTool
             throw new Error(`Anthropic Bedrock tool '${tool.name}' must use an object schema.`);
         }
         return {
-            name: toAnthropicBedrockToolName(tool),
+            name: toAnthropicToolName(tool),
             description: tool.description ?? "",
             input_schema: { ...schema, type: "object" },
         };
