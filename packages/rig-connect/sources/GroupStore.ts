@@ -52,6 +52,8 @@ export class GroupStore {
     #groups = new Map<string, ProjectGroup>();
     #workspaceGroups = new Map<string, WorkspaceGroup>();
     #workspaceGroupSources = new Map<string, ProjectWorkspace>();
+    /** Irreversible local archive decisions that snapshots may never resurrect. */
+    #archivedWorkspaceIds = new Set<string>();
     #groupSessions = new Map<string, { source: SessionSummary; value: GroupSession }>();
     #dirty = new Set<string>();
     #tree: readonly ProjectGroup[] = [];
@@ -76,6 +78,7 @@ export class GroupStore {
                 const project =
                     workspace === undefined ? undefined : this.#projects.get(workspace.projectId);
                 return workspace === undefined ||
+                    this.#archivedWorkspaceIds.has(workspaceId) ||
                     isArchivedWorkspace(workspace) ||
                     project === undefined ||
                     project.archivedAt !== undefined
@@ -202,6 +205,63 @@ export class GroupStore {
         };
     }
 
+    /** Adds the single local row that the response and stream echo later replace. */
+    applyOptimisticWorkspaceCreate(workspace: ProjectWorkspace): {
+        deltas: readonly GroupDelta[];
+        undo: () => void;
+    } {
+        if (this.#workspaces.has(workspace.id)) return { deltas: [], undo: () => undefined };
+        const previousTree = this.projects();
+        this.#workspaces.set(workspace.id, workspace);
+        this.#markDirty(workspace.projectId);
+        const projects = this.projects();
+        return {
+            deltas: [
+                ...(projects === previousTree
+                    ? []
+                    : ([{ projects, type: "projects_changed" }] as const)),
+                {
+                    projectId: workspace.projectId,
+                    type: "workspace_added",
+                    workspaceId: workspace.id,
+                },
+            ],
+            undo: () => {
+                if (this.#workspaces.get(workspace.id) !== workspace) return;
+                this.#workspaces.delete(workspace.id);
+                this.#workspaceGroups.delete(workspace.id);
+                this.#workspaceGroupSources.delete(workspace.id);
+                this.#markDirty(workspace.projectId);
+            },
+        };
+    }
+
+    /**
+     * Commits a local workspace archive.
+     *
+     * There is intentionally no inverse. Archival is a user decision, while
+     * daemon cleanup is only a best-effort consequence of that decision.
+     */
+    applyOptimisticWorkspaceArchived(
+        projectId: string,
+        workspaceId: string,
+    ): { deltas: readonly GroupDelta[]; undo: () => void } {
+        if (this.#archivedWorkspaceIds.has(workspaceId)) {
+            return { deltas: [], undo: () => undefined };
+        }
+        const previousTree = this.projects();
+        this.#archivedWorkspaceIds.add(workspaceId);
+        this.#workspaceTerminals.delete(workspaceId);
+        this.#workspaceGroups.delete(workspaceId);
+        this.#workspaceGroupSources.delete(workspaceId);
+        this.#markDirty(projectId);
+        const projects = this.projects();
+        return {
+            deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
+            undo: () => undefined,
+        };
+    }
+
     setConnection(connection: ConnectionState): readonly GroupDelta[] {
         if (this.#state.connection === connection) return [];
         this.#state = { ...this.#state, connection };
@@ -254,6 +314,8 @@ export class GroupStore {
         }
 
         for (const session of hello.sessions) {
+            // Same rule as the stream: no position, no place in the list.
+            if (session.orderKey === undefined) continue;
             const known = this.#sessions.get(session.id);
             // The snapshot is the base, and anything that outran it is replayed on
             // top. A catalog arrives asynchronously, so by now the client may hold
@@ -535,6 +597,9 @@ export class GroupStore {
 
         const known = this.#sessions.get(incoming.id);
         const merged = { ...known, ...incoming, lastEventId: event.id } as SessionSummary;
+        // A session with no position is not in this list. A subagent is the case
+        // that matters: it syncs and can be opened by id, but it belongs to the
+        // session that started it, so the stream must not put it in the sidebar.
         if (merged.projectId === undefined || merged.orderKey === undefined) return false;
         this.#sessions.set(merged.id, merged);
         this.#markDirty(merged.projectId);
@@ -641,7 +706,9 @@ export class GroupStore {
         }
         const workspacesByProject = new Map<string, ProjectWorkspace[]>();
         for (const workspace of this.#workspaces.values()) {
-            if (isArchivedWorkspace(workspace)) continue;
+            if (this.#archivedWorkspaceIds.has(workspace.id) || isArchivedWorkspace(workspace)) {
+                continue;
+            }
             mapList(workspacesByProject, workspace.projectId).push(workspace);
         }
 
@@ -737,7 +804,7 @@ export class GroupStore {
             cwd: session.cwd,
             id: session.id,
             modelId: session.modelId,
-            orderKey: session.orderKey,
+            orderKey: session.orderKey ?? "",
             permissionMode: session.permissionMode,
             projectId: session.projectId,
             providerId: session.providerId,
@@ -772,8 +839,18 @@ function mapList<T>(into: Map<string, T[]>, key: string): T[] {
     return created;
 }
 
-function byOrderKey(left: { orderKey: string }, right: { orderKey: string }): number {
-    return left.orderKey < right.orderKey ? -1 : left.orderKey > right.orderKey ? 1 : 0;
+/**
+ * Orders siblings by their position, and by identity when two share one.
+ *
+ * Without the second comparison, equal keys leave the order to whatever the
+ * sort happened to do, and the list reshuffles under the reader.
+ */
+function byOrderKey(
+    left: { id: string; orderKey: string },
+    right: { id: string; orderKey: string },
+): number {
+    if (left.orderKey !== right.orderKey) return left.orderKey < right.orderKey ? -1 : 1;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
 }
 
 /**
@@ -842,7 +919,11 @@ function sameProtocolValue(left: unknown, right: unknown): boolean {
 }
 
 function isArchivedWorkspace(workspace: ProjectWorkspace): boolean {
-    return workspace.archivedAt !== undefined || workspace.status === "archived";
+    return (
+        workspace.archivedAt !== undefined ||
+        workspace.status === "archiving" ||
+        workspace.status === "archived"
+    );
 }
 
 function applicationGit(git: GitChangeSnapshot): GitChangeSnapshot {

@@ -10,6 +10,12 @@ import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
 import { GroupStore } from "./GroupStore.js";
 import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
 import { orderedUuidV7, type RandomValues } from "./orderedUuidV7.js";
+import {
+    CHECKING_SERVER_COMPATIBILITY,
+    describeServerCompatibility,
+    serverCompatibility,
+    type ServerCompatibility,
+} from "./ServerCompatibility.js";
 import type {
     ContentBlock,
     BackgroundProcessSnapshot,
@@ -46,6 +52,8 @@ export interface ConnectRigOptions {
     mutationRetryDelayMs?: number;
     /** Receives rejected actions even when their entity has no active subscriber. */
     onMutationRejected?: (delta: MutationRejectedDelta) => void;
+    /** Reports the result of the daemon protocol handshake. */
+    onCompatibilityChange?: (compatibility: ServerCompatibility) => void;
 }
 
 export interface RigSessionSubscriptionOptions {
@@ -121,6 +129,12 @@ export interface CreateSessionInput {
     workspaceId?: string;
 }
 
+export interface CreateWorkspaceInput {
+    baseRef: string;
+    name: string;
+    projectId: string;
+}
+
 export interface TerminalPresence {
     connectionId: string;
     close: () => Promise<void>;
@@ -139,8 +153,12 @@ export type GroupTarget =
  * handled in the background.
  */
 export interface RigConnection {
+    /** Current result of the daemon protocol handshake. */
+    compatibility: () => ServerCompatibility;
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
+    createWorkspace: (input: CreateWorkspaceInput) => MutationId;
+    archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
     createSession: (input: CreateSessionInput) => MutationId;
     forkSession: (sessionId: string) => MutationId;
     sendMessage: (sessionId: string, message: string | SendMessageInput) => MutationId;
@@ -295,6 +313,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let groupsEntry: GroupEntry | undefined;
     let liveStreamStarted = false;
     let liveStreamOpen = false;
+    let compatibility = CHECKING_SERVER_COMPATIBILITY;
     let closed = false;
 
     const publishSession = (entry: SessionEntry, deltas: readonly ChatDelta[]): void => {
@@ -980,6 +999,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             throw error;
         }
         if (version !== entry.bootstrapVersion) return;
+        const catalogCompatibility = serverCompatibility(hello.protocolVersion);
+        if (catalogCompatibility.status !== "compatible") {
+            throw new Error(describeServerCompatibility(catalogCompatibility));
+        }
         for (const project of hello.projects) {
             rememberGroupVersion(projectKey(project.id), project.version);
         }
@@ -1036,6 +1059,18 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             token: options.token,
             ...(options.wait === undefined ? {} : { wait }),
             onOpen: (hello) => {
+                const nextCompatibility = serverCompatibility(hello.protocolVersion);
+                if (
+                    nextCompatibility.status !== compatibility.status ||
+                    ("serverProtocolVersion" in nextCompatibility &&
+                        (!("serverProtocolVersion" in compatibility) ||
+                            nextCompatibility.serverProtocolVersion !==
+                                compatibility.serverProtocolVersion))
+                ) {
+                    compatibility = nextCompatibility;
+                    options.onCompatibilityChange?.(compatibility);
+                }
+                if (nextCompatibility.status !== "compatible") return false;
                 liveStreamOpen = true;
                 // A clean resume replayed every missed event, so what this client
                 // holds is already current. A gap is what leaves it uncertain, and
@@ -1052,7 +1087,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
                     }
-                    return;
+                    return true;
                 }
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
@@ -1072,6 +1107,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         }
                     });
                 }
+                return true;
             },
             onEvent: (event, cursor) => {
                 rememberGlobalIdentity(event);
@@ -1087,6 +1123,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         entry.pending.push({ cursor, event: event as SessionEvent });
                     }
                 }
+                const mutationId = mutationIdOf(event);
+                const mutationKey = pendingOverlays.find(
+                    (mutation) => mutation.id === mutationId,
+                )?.entityKey;
                 const key = globalEventKey(event);
                 const sessionId =
                     "sessionId" in event && typeof event.sessionId === "string"
@@ -1094,8 +1134,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         : undefined;
                 const session = sessionId === undefined ? undefined : sessionEntries.get(sessionId);
                 reconcile(
-                    [key],
-                    mutationIdOf(event),
+                    mutationKey === undefined ? [key] : [key, mutationKey],
+                    mutationId,
                     sessionId === undefined ? [] : [sessionId],
                     true,
                     () => ({
@@ -1374,6 +1414,106 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
+    const createWorkspace = (input: CreateWorkspaceInput): MutationId => {
+        const id = nextMutationId();
+        const optimisticId = `pending:${id}`;
+        const key = `workspace-create:${input.projectId}:${id}`;
+        const createdAt = now();
+        const optimistic: ProjectWorkspace = {
+            baseRef: input.baseRef,
+            createdAt,
+            id: optimisticId,
+            kind: "git_worktree",
+            name: input.name,
+            orderKey: "",
+            path: "",
+            presence: "missing",
+            projectId: input.projectId,
+            status: "initializing",
+            updatedAt: createdAt,
+            version: 0,
+        };
+        return enqueue({
+            acknowledged: false,
+            action: "create_workspace",
+            applyOptimistic: (publish) => {
+                if (groupsEntry === undefined) return () => undefined;
+                const changed = groupsEntry.store.applyOptimisticWorkspaceCreate(optimistic);
+                if (publish) publishGroups(groupsEntry, changed.deltas);
+                return changed.undo;
+            },
+            entityKey: key,
+            id,
+            matchesAuthoritative: (data) => {
+                const workspace = responseEntity(data, "workspace");
+                return (
+                    workspace?.projectId === input.projectId &&
+                    workspace.baseRef === input.baseRef &&
+                    workspace.name === input.name
+                );
+            },
+            prepare: () => ({
+                body: {
+                    baseRef: input.baseRef,
+                    clientRequestId: id,
+                    name: input.name,
+                },
+                headers: { "x-rig-mutation-id": id },
+                method: "POST",
+                url: endpointUrl(
+                    options.endpoint,
+                    `projects/${encodeURIComponent(input.projectId)}/workspaces`,
+                ),
+            }),
+            undo: () => undefined,
+        });
+    };
+
+    const archiveWorkspace = (projectId: string, workspaceId: string): MutationId => {
+        const id = nextMutationId();
+        const target: GroupTarget = { kind: "workspace", projectId, workspaceId };
+        let expectedVersion: number | undefined;
+        return enqueue({
+            acknowledged: false,
+            action: "archive_workspace",
+            applyOptimistic: (publish) => {
+                if (groupsEntry === undefined) return () => undefined;
+                const changed = groupsEntry.store.applyOptimisticWorkspaceArchived(
+                    projectId,
+                    workspaceId,
+                );
+                if (publish) publishGroups(groupsEntry, changed.deltas);
+                return changed.undo;
+            },
+            entityKey: groupKey(target),
+            id,
+            matchesAuthoritative: (data) => {
+                const workspace = responseEntity(data, "workspace");
+                return (
+                    workspace === undefined ||
+                    workspace.status === "archiving" ||
+                    workspace.status === "archived"
+                );
+            },
+            prepare: () => {
+                expectedVersion ??= groupVersion(target);
+                return {
+                    headers: {
+                        ...ifMatchHeader(expectedVersion),
+                        "x-rig-mutation-id": id,
+                    },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `projects/${encodeURIComponent(projectId)}/workspaces/${encodeURIComponent(workspaceId)}/archive`,
+                    ),
+                };
+            },
+            retryOnConflict: true,
+            undo: () => undefined,
+        });
+    };
+
     const forkSession = (sourceSessionId: string): MutationId => {
         const id = nextMutationId();
         return enqueue({
@@ -1460,7 +1600,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const stopRun = (sessionId: string): MutationId => {
         const id = nextMutationId();
         const key = sessionKey(sessionId);
-        const expectedRunId = sessionEntries.get(sessionId)?.store.session().activeTurn?.turnId;
+        const expectedRunId = sessionEntries.get(sessionId)?.store.session().activeTurn?.runId;
         let expectedEventId: string | undefined;
         const mutation: PendingMutation = {
             acknowledged: false,
@@ -1480,7 +1620,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                             label: "Stopping",
                             ...(current.activeTurn === undefined
                                 ? {}
-                                : { runId: current.activeTurn.turnId }),
+                                : { runId: current.activeTurn.runId }),
                             since: now(),
                         },
                     });
@@ -2045,6 +2185,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     return {
+        archiveWorkspace,
+        compatibility: () => compatibility,
         close: () => {
             if (closed) return;
             for (const closePresence of [...presenceClosers]) closePresence();
@@ -2073,6 +2215,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectGroups,
         connectSession,
         connectTerminalPresence,
+        createWorkspace,
         createSession,
         detachSecret,
         forkSession,

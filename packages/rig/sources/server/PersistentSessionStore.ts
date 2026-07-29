@@ -67,7 +67,6 @@ import {
     type ProjectGitRunner,
 } from "./ProjectRepository.js";
 import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
-import { errorToMessage } from "../errorToMessage.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import {
@@ -94,6 +93,7 @@ export interface PersistentSessionStoreOptions {
     now?: () => number;
     onSessionAccess?: (session: InMemorySession) => void;
     onSessionEvent?: (event: SessionEvent, session: InMemorySession | undefined) => void;
+    onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     projectGit?: ProjectGitRunner;
     taskDrain?: TaskDrain;
     secrets?: readonly SecretRegistration[];
@@ -112,6 +112,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #onSessionAccess: ((session: InMemorySession) => void) | undefined;
     #onSessionEvent:
         | ((event: SessionEvent, session: InMemorySession | undefined) => void)
+        | undefined;
+    #onWorkspaceCleanupError:
+        | ((error: unknown, projectId: string, workspaceId: string) => void)
         | undefined;
     #globalEventQueue: GlobalEventQueue;
     #projects: ProjectRepository;
@@ -136,6 +139,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#now = options.now ?? Date.now;
         this.#onSessionAccess = options.onSessionAccess;
         this.#onSessionEvent = options.onSessionEvent;
+        this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#taskDrain = options.taskDrain;
         if (options.databasePath !== ":memory:") {
             mkdirSync(dirname(options.databasePath), { mode: 0o700, recursive: true });
@@ -159,6 +163,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#publishGlobalEvent(event),
+            ...(options.onWorkspaceCleanupError === undefined
+                ? {}
+                : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
             transaction: (body) => this.#transaction(body),
             ...(options.stateDirectory !== undefined
@@ -1020,11 +1027,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         workspaceId: string,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        const archive = () => this.#archiveWorkspace(projectId, workspaceId, expectedVersion);
-        return this.#taskDrain?.run(archive) ?? archive();
+        return this.#archiveWorkspace(projectId, workspaceId, expectedVersion);
     }
 
-    async #archiveWorkspace(
+    #archiveWorkspace(
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
@@ -1044,9 +1050,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .map((row) => this.get(readString(row, "id"))?.archiveForWorkspace(workspaceId))
                 .filter((task): task is Promise<void> => task !== undefined);
         });
-        if (workspace === undefined || workspace.status === "archived") return workspace;
-        await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
-        return this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
+        if (workspace === undefined || workspace.status === "archived") {
+            return Promise.resolve(workspace);
+        }
+        cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
+        const finish = () => this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
+        const background = this.#taskDrain?.run(finish) ?? finish();
+        void background.catch((error: unknown) =>
+            this.#onWorkspaceCleanupError?.(error, projectId, workspaceId),
+        );
+        // Logical archival is already durable. Physical cleanup must never hold
+        // the request open or make the workspace visible again.
+        return Promise.resolve(workspace);
     }
 
     async #completeWorkspaceArchive(
@@ -1055,15 +1070,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         cleanup: readonly Promise<void>[],
     ): Promise<ProjectWorkspace | undefined> {
         const results = await Promise.allSettled(cleanup);
-        const failure = results.find(
-            (result): result is PromiseRejectedResult => result.status === "rejected",
-        );
-        if (failure !== undefined) {
-            return this.#projects.failWorkspaceArchive(
-                projectId,
-                workspaceId,
-                errorToMessage(failure.reason),
-            );
+        for (const result of results) {
+            if (result.status === "rejected") {
+                this.#onWorkspaceCleanupError?.(result.reason, projectId, workspaceId);
+            }
         }
         return this.#projects.removeArchivedWorkspace(projectId, workspaceId);
     }

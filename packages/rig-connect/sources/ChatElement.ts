@@ -35,20 +35,29 @@ import type {
 export type ChatElement =
     | UserMessageElement
     | SystemNoticeElement
+    | InferenceElement
     | AgentTextElement
     | ThinkingElement
     | ToolCallElement
     | CompactionElement
-    | RetryElement
-    | TurnEndElement;
+    | FailureElement
+    | GroupEndElement;
 
 interface BaseChatElement {
     /** Stable for the life of the element; deltas never change it. */
     id: string;
-    /** The turn this element belongs to. */
-    turnId: string;
+    /** Stable identity of the inference segment this element belongs to. */
+    groupId: string;
+    /** Daemon run that contains the group. One run may contain several groups. */
+    runId: string;
     /** When the element first appeared, in milliseconds since the epoch. */
     createdAt: number;
+}
+
+/** Visible immediately after inference starts, before its first output exists. */
+export interface InferenceElement extends BaseChatElement {
+    kind: "inference";
+    state: "waiting";
 }
 
 export interface UserMessageElement extends BaseChatElement {
@@ -59,8 +68,10 @@ export interface UserMessageElement extends BaseChatElement {
     delivery: "pending_steering" | "sent";
     /** When this message was actually applied as steering, not when it was queued. */
     steeredAt?: number;
-    /** Time since the turn began or the preceding steering was applied. */
+    /** Time since the preceding steering or compaction, or since the turn began. */
     steeringElapsedMs?: number;
+    /** Time since the real start of the turn, before any steering or compaction. */
+    turnElapsedMs?: number;
     /** Present for workflow/subagent news injected by Rig rather than typed by the user. */
     source?: "notification";
     text: string;
@@ -111,8 +122,8 @@ export interface ToolCallElement extends BaseChatElement {
     presentation?: ToolPresentation;
     /** The complete automatic review associated with this action, when one was required. */
     permissionReview?: PermissionReviewState;
-    /** Set when related calls were issued together, so a UI can draw one unit. */
-    groupId?: string;
+    /** Set when adjacent calls were issued together, so a UI can draw one unit. */
+    toolCallGroupId?: string;
 }
 
 export interface CompactionElement extends BaseChatElement {
@@ -127,38 +138,75 @@ export interface CompactionElement extends BaseChatElement {
     /** Estimated until the first following inference reports its input/cache usage. */
     tokensAfter?: number;
     tokensAfterExact?: boolean;
-}
-
-/** One provider retry retained in the transcript at the moment it occurred. */
-export interface RetryElement extends BaseChatElement {
-    kind: "retry";
-    attempt: number;
-    reason: string;
+    /** Time since the preceding steering or compaction, or since the turn began. */
+    steeringElapsedMs?: number;
+    /** Time since the real start of the turn, before any steering or compaction. */
+    turnElapsedMs?: number;
 }
 
 /**
- * The last element of a turn.
+ * One failure inside a group, at the moment it occurred.
  *
- * Every turn has exactly one, and it states how the turn ended. A consumer never
- * has to infer completion from silence.
+ * A failed attempt and the failure that ends the work read as the same line, so
+ * they are the same element; `outcome` is what tells them apart. Both belong to
+ * the group they happened in, because they are part of the story of answering
+ * that one question.
  */
-export interface TurnEndElement extends BaseChatElement {
-    kind: "turn_end";
+export interface FailureElement extends BaseChatElement {
+    kind: "failure";
+    /** Whether the run tried again after this, or gave up here. */
+    outcome: "retried" | "failed";
+    /** Which attempt this was. Absent for a failure that ended the group. */
+    attempt?: number;
+    reason: string;
+}
+
+/** Why an inference group stopped: it finished, or the user or a failure ended it. */
+export type GroupEndReason = "completed" | "steering" | "compaction" | "abort" | "error";
+
+/**
+ * The last element of a group.
+ *
+ * Every group has exactly one, and it states how the group ended. A consumer
+ * never has to infer completion from silence. A run steered or compacted part
+ * way through holds several groups, and so several of these.
+ */
+export interface GroupEndElement extends BaseChatElement {
+    kind: "group_end";
     outcome: "success" | "error" | "stopped";
-    /** Present when the turn ended in an error. */
+    reason: GroupEndReason;
+    /** Present when the group ended in an error. */
     errorMessage?: string;
-    /** Authoritative wall-clock start from the original run submission. */
+    /** Wall-clock start of this group: the inference, or the boundary before it. */
     startedAt: number;
     /** Authoritative wall-clock completion time. */
     endedAt: number;
     /** Convenience duration derived from `startedAt` and `endedAt`. */
     elapsedMs: number;
+    /**
+     * Wall-clock start of the whole turn, before any steering or compaction.
+     *
+     * A group starts over at every boundary, so `elapsedMs` measures only the
+     * stretch since the last one. This measures the turn a reader thinks of as
+     * one question, and the two differ once a turn has been steered or
+     * compacted. A UI shows whichever of the two fits where it is drawing.
+     */
+    turnStartedAt: number;
+    /** Convenience duration derived from `turnStartedAt` and `endedAt`. */
+    turnElapsedMs: number;
     usage?: Usage;
+}
+
+/** The inference segment currently occupying the session. */
+export interface ActiveGroup {
+    groupId: string;
+    runId: string;
+    startedAt: number;
 }
 
 /** The turn currently occupying the session. */
 export interface ActiveTurn {
-    turnId: string;
+    runId: string;
     /** Stable across every activity transition, reconnect, retry, and steering segment. */
     startedAt: number;
 }
@@ -173,6 +221,7 @@ export interface SessionUsage extends SessionUsageSnapshot {
 /** Live facts a UI shows next to the conversation. */
 export interface SessionState {
     activity: SessionActivity;
+    activeGroup?: ActiveGroup;
     activeTurn?: ActiveTurn;
     /**
      * The durable lifecycle status, as opposed to `activity`, which describes
@@ -189,7 +238,13 @@ export interface SessionState {
     lastEventId?: string;
     projectId: string;
     workspaceId?: string;
-    orderKey: string;
+    /**
+     * Position in the ordered list of the project's chats.
+     *
+     * Absent for a session that is not in that list. A subagent can be opened
+     * and read, but it belongs to the session that started it, not the sidebar.
+     */
+    orderKey?: string;
     cwd: string;
     draft?: string;
     draftUpdatedAt?: number;
@@ -253,6 +308,8 @@ export interface SessionState {
 export type ConnectionState = "connecting" | "live" | "reconnecting" | "closed";
 
 export type MutationAction =
+    | "create_workspace"
+    | "archive_workspace"
     | "create_session"
     | "fork_session"
     | "send_message"
@@ -293,11 +350,21 @@ export interface MutationRejectedDelta {
 export type ChatDelta =
     | { type: "elements_changed"; elements: readonly ChatElement[] }
     | { type: "session_changed"; session: SessionState }
-    | { type: "turn_started"; turnId: string; startedAt: number }
+    | { type: "turn_started"; runId: string; startedAt: number }
     | {
           type: "turn_ended";
-          turnId: string;
-          outcome: TurnEndElement["outcome"];
+          runId: string;
+          outcome: GroupEndElement["outcome"];
+          startedAt: number;
+          endedAt: number;
+      }
+    | { type: "group_started"; groupId: string; runId: string; startedAt: number }
+    | {
+          type: "group_ended";
+          groupId: string;
+          runId: string;
+          outcome: GroupEndElement["outcome"];
+          reason: GroupEndReason;
           startedAt: number;
           endedAt: number;
       }

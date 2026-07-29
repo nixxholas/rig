@@ -32,7 +32,6 @@ import { LiveGlobalEventQueue } from "./LiveGlobalEventQueue.js";
 import { ProjectRepository, type ProjectAvatarAsset } from "./ProjectRepository.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
-import { errorToMessage } from "../errorToMessage.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import {
@@ -45,6 +44,7 @@ export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
+    onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     secrets?: readonly SecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
@@ -55,6 +55,9 @@ export class InMemorySessionStore implements SessionStore {
     #createRuntime: InMemorySessionOptions["createRuntime"];
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
+    #onWorkspaceCleanupError:
+        | ((error: unknown, projectId: string, workspaceId: string) => void)
+        | undefined;
     #projectSecretIds = new Map<string, Set<string>>();
     #database = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
     readonly #createTerminalEventId = createEventIdFactory();
@@ -74,6 +77,9 @@ export class InMemorySessionStore implements SessionStore {
                 ? {}
                 : { homeDirectory: options.homeDirectory }),
             onEvent: (event) => this.#publishGlobalEvent(event),
+            ...(options.onWorkspaceCleanupError === undefined
+                ? {}
+                : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
             ...(options.stateDirectory === undefined
                 ? {}
                 : { stateDirectory: options.stateDirectory }),
@@ -96,6 +102,7 @@ export class InMemorySessionStore implements SessionStore {
         });
         this.#secrets = new SecretRegistry(options.secrets);
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
+        this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#createRuntime = options.createRuntime;
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#agentManager = new AgentSessionManager({
@@ -309,10 +316,12 @@ export class InMemorySessionStore implements SessionStore {
             ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
             ...(id === undefined ? {} : { id }),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
+            // A subagent belongs to the session that started it, not to the
+            // sidebar. Giving it a position would put it in a list it is not in.
             orderKey:
-                inherited === undefined
-                    ? this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id)
-                    : generateKeyBetween(null, null),
+                metadata?.type === "subagent"
+                    ? ""
+                    : this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
             projectId: ownership.project.id,
             projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,
@@ -366,10 +375,11 @@ export class InMemorySessionStore implements SessionStore {
         const workspaceOrder = new Map(
             this.#projects.listWorkspaces().map((workspace) => [workspace.id, workspace.orderKey]),
         );
-        const sessions = [...this.#sessions.values()]
-            .filter((session) => !session.isSubagent())
-            .map((session) => session.summary())
-            .sort((left, right) => sortSummariesByOrder(left, right, projectOrder, workspaceOrder));
+        const sessions = positioned(
+            [...this.#sessions.values()]
+                .filter((session) => !session.isSubagent())
+                .map((session) => session.summary()),
+        ).sort((left, right) => sortSummariesByOrder(left, right, projectOrder, workspaceOrder));
         return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
     }
 
@@ -486,7 +496,7 @@ export class InMemorySessionStore implements SessionStore {
                 );
             })
             .map((candidate) => candidate.summary());
-        session.setOrderKey(orderKeyAfter(siblings, sessionId, request.afterId));
+        session.setOrderKey(orderKeyAfter(positioned(siblings), sessionId, request.afterId));
         return session;
     }
 
@@ -576,7 +586,7 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.unarchiveProject(projectId);
     }
 
-    async archiveWorkspace(
+    archiveWorkspace(
         projectId: string,
         workspaceId: string,
         expectedVersion?: number,
@@ -586,12 +596,17 @@ export class InMemorySessionStore implements SessionStore {
             workspaceId,
             expectedVersion,
         );
-        if (workspace === undefined || workspace.status === "archived") return workspace;
+        if (workspace === undefined || workspace.status === "archived") {
+            return Promise.resolve(workspace);
+        }
         const cleanup = [...this.#sessions.values()]
             .filter((session) => session.snapshot().workspaceId === workspaceId)
             .map((session) => session.archiveForWorkspace(workspaceId));
-        await this.remoteTerminals.closeWorkspace(projectId, workspaceId);
-        return this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
+        cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
+        void this.#completeWorkspaceArchive(projectId, workspaceId, cleanup).catch(
+            (error: unknown) => this.#onWorkspaceCleanupError?.(error, projectId, workspaceId),
+        );
+        return Promise.resolve(workspace);
     }
 
     async #completeWorkspaceArchive(
@@ -600,15 +615,10 @@ export class InMemorySessionStore implements SessionStore {
         cleanup: readonly Promise<void>[],
     ): Promise<ProjectWorkspace | undefined> {
         const results = await Promise.allSettled(cleanup);
-        const failure = results.find(
-            (result): result is PromiseRejectedResult => result.status === "rejected",
-        );
-        if (failure !== undefined) {
-            return this.#projects.failWorkspaceArchive(
-                projectId,
-                workspaceId,
-                errorToMessage(failure.reason),
-            );
+        for (const result of results) {
+            if (result.status === "rejected") {
+                this.#onWorkspaceCleanupError?.(result.reason, projectId, workspaceId);
+            }
         }
         return this.#projects.removeArchivedWorkspace(projectId, workspaceId);
     }
@@ -678,13 +688,14 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {
-        const last = [...this.#sessions.values()]
+        const candidates = [...this.#sessions.values()]
             .filter((session) => {
                 if (session.isSubagent()) return false;
                 const snapshot = session.snapshot();
                 return snapshot.projectId === projectId && snapshot.workspaceId === workspaceId;
             })
-            .map((session) => session.summary())
+            .map((session) => session.summary());
+        const last = positioned(candidates)
             .sort((left, right) => compareOrderKeys(left.orderKey, right.orderKey))
             .at(-1);
         return generateKeyBetween(last?.orderKey ?? null, null);
@@ -750,9 +761,19 @@ function compareOrderKeys(left: string, right: string): number {
     return left < right ? -1 : left > right ? 1 : 0;
 }
 
+/** Keeps only the sessions that have a place in a project's ordered list. */
+function positioned(
+    summaries: readonly SessionSummary[],
+): (SessionSummary & { orderKey: string })[] {
+    return summaries.filter(
+        (summary): summary is SessionSummary & { orderKey: string } =>
+            summary.orderKey !== undefined,
+    );
+}
+
 function sortSummariesByOrder(
-    left: SessionSummary,
-    right: SessionSummary,
+    left: SessionSummary & { orderKey: string },
+    right: SessionSummary & { orderKey: string },
     projectOrder: ReadonlyMap<string, string>,
     workspaceOrder: ReadonlyMap<string, string>,
 ): number {

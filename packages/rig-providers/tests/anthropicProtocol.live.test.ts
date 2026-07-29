@@ -37,9 +37,7 @@ describeLive("Anthropic protocol through the native API", () => {
         }
 
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
-        expect(textFromSessionEvents(events).toLowerCase()).toContain(
-            "anthropic protocol live ok",
-        );
+        expect(textFromSessionEvents(events).toLowerCase()).toContain("anthropic protocol live ok");
         expect(events.some((event) => event.type === "token_usage")).toBe(true);
     }, 120_000);
 

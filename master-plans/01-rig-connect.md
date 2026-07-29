@@ -42,30 +42,104 @@ reconstruct turns or infer presentation boundaries from the provider context.
 
 - One element per message, per block, and per tool call. A tool call is not
   nested inside the message that produced it; it is its own element.
-- Every element carries a group ID. A group is one inference segment: it starts
-  whenever inference starts and ends at steering, abort, or completion.
+- Every element carries a group ID. A group is one stretch of work the person
+  is waiting on: the question and everything the agent did answering it — text,
+  thinking, and every tool call. It opens when the agent starts working and
+  closes exactly once. Reaching the model again to work through a tool result is
+  not a boundary; every iteration of the tool loop stays in the same group.
+- A group closes for exactly five reasons: completed, steering, abort,
+  compaction, or error. The reason answers "why did it stop". The outcome —
+  success, error, or stopped — answers "what did it come to". They are separate
+  questions and do not overlap. A group closed by compaction has outcome
+  success: the work up to that point really was done, the group merely does not
+  continue past the boundary.
 - Group IDs need not be durable protocol identities. They may exist only in
   memory, but they stay stable for the life of the `rig-connect` instance and
   the same messages keep the same group ID when a reconnect rebuilds the list.
+  History rebuilt from the daemon produces the identical list to what a live
+  client saw.
 - Starting inference immediately creates the group's first, initially empty
   element. This lets the UI show that work has begun before the first token or
   tool call. Streaming the first token is not the boundary problem: the empty
   element must already be present in history, and the first text, thinking, or
   tool-call update turns that same object into the first real content while
   preserving its identity instead of adding a second beginning.
-- A group always ends with a final element. It states the outcome, elapsed time,
-  and why the group ended, including steering, abort, success, and error. This
-  is a guarantee the library makes, not something the consumer infers from
-  silence.
+- A group always ends with exactly one final element. It states the outcome,
+  the elapsed times, the reason the group ended, and the cost — the sum of every
+  inference the group needed, starting over at the next group. This is a
+  guarantee the library makes, not something the consumer infers from silence.
+- Failures live in the list too. A failed attempt and the failure that ends the
+  work are the same kind of element, told apart by one flag: whether the run
+  went on to try again, or stopped there. Every attempt belongs to the group it
+  happened in, including every attempt to reconnect — a run fighting its way
+  through failures is still answering the one question the group is about, so
+  nothing about it belongs outside the group. A group that ends in a real error
+  gains one such element just before its final element; a group stopped by
+  steering, compaction, or an abort does not, because those stop the group
+  without failing it.
 - Everything between the group's start and final element is ordered by time.
 - State that is not model output is in the list too, in its time position —
   compaction, for instance, appears as an element and reflects its current
   state.
 
+One question, three inference iterations, two tool calls — one group, one
+footer:
+
+```
+group:m1 | user_message | "Ask"
+group:m1 | agent_text   | "Step 1."
+group:m1 | tool_call    | Bash succeeded
+group:m1 | agent_text   | "Step 2."
+group:m1 | tool_call    | Bash succeeded
+group:m1 | agent_text   | "Step 3."
+group:m1 | group_end    | reason=completed 3->19
+```
+
+Two failed attempts in one group — the first retried, the second the end of the
+run:
+
+```
+group:m1 | user_message | "Ask"
+group:m1 | agent_text   | "Working."
+group:m1 | failure      | connection lost — retried
+group:m1 | failure      | connection lost — stopped here
+group:m1 | group_end    | reason=error 3->12
+```
+
 Steering is an explicit boundary. First the current group ends with its elapsed
-time and steering as the reason. Then all user messages that caused the
-steering appear. Only after them does the next inference group start. Abort
-also closes the current group before anything later can begin.
+times and steering as the reason. Then the user messages that caused the
+steering appear, inserted after the ended group's final element and before the
+first element of the next group. A steering message carries the next group's
+group ID, so in the UI it reads as the header of the new block. Only after it
+does the next inference group start. Compaction is the same kind of boundary:
+it closes the current group with compaction as the reason, and the compaction
+element carries the next group's group ID, so it too reads as the header of the
+block that follows it. What comes after it is a new group. Abort also closes
+the current group before anything later can begin.
+
+```
+group:m1 | tool_call    | Bash succeeded
+group:m1 | group_end    | reason=steering 22->30
+group:m3 | user_message | "Also do this"
+group:m3 | agent_text   | "Done."
+group:m3 | group_end    | reason=completed 31->35
+```
+
+```
+group:m1 | tool_call    | Bash succeeded
+group:m1 | group_end    | reason=compaction 22->30
+group:m3 | compaction   | context compacted
+group:m3 | agent_text   | "Done."
+group:m3 | group_end    | reason=completed 31->35
+```
+
+Wherever a steering or a compaction happens, there is more than one elapsed
+time. The first is measured from the real start of the turn — the original
+beginning, before any steering or compaction — up to this steering or
+compaction. The second is measured from the most recent steering or compaction.
+The UI can show either the absolute time or the time relative to the previous
+boundary; different places will show different ones, so the library always
+tracks both rather than choosing.
 
 Elements change by delta, not by replacement. Text arrives as it is generated,
 tool-call arguments fill in as they stream, a tool result lands on the element

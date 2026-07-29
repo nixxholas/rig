@@ -21,9 +21,7 @@ export function createAnthropicRequest(options: {
     const effort = resolveEffort(options.effort);
     const system = toAnthropicSystem(options);
     const tools = toAnthropicTools(options.tools);
-    const hasCompaction = options.context.messages.some(
-        (message) => message.role === "compaction",
-    );
+    const hasCompaction = options.context.messages.some((message) => message.role === "compaction");
     const usesCompaction = options.compaction !== undefined || hasCompaction;
     const betas = ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"];
     if (usesCompaction) betas.push("compact-2026-01-12");

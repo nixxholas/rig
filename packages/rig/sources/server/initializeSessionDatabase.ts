@@ -737,8 +737,11 @@ function backfillWorkspaceOrderKeys(database: DatabaseSync): void {
 }
 
 function backfillSessionOrderKeys(database: DatabaseSync): void {
+    // A subagent is not in any ordered list, so it holds no position. It used to
+    // be given the first key, which tied it with every other subagent and with
+    // the first real chat of every project.
     database
-        .prepare("UPDATE sessions SET order_key = 'a0' WHERE parent_session_id IS NOT NULL")
+        .prepare("UPDATE sessions SET order_key = '' WHERE parent_session_id IS NOT NULL")
         .run();
     const scopes = database
         .prepare(

@@ -1,6 +1,11 @@
 import type { RequestListener } from "node:http";
 
-import type { DaemonIdentity, HealthResponse, ShutdownServerResponse } from "../protocol/index.js";
+import {
+    RIG_PROTOCOL_VERSION,
+    type DaemonIdentity,
+    type HealthResponse,
+    type ShutdownServerResponse,
+} from "../protocol/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { sendJson } from "./sendJson.js";
 
@@ -34,12 +39,14 @@ export function createDaemonStartupRequestListener(
                           error: state.error ?? "The local daemon could not start.",
                           healthy: false,
                           identity: options.identity,
+                          protocolVersion: RIG_PROTOCOL_VERSION,
                           ready: false,
                           status: "error",
                       }
                     : {
                           healthy: true,
                           identity: options.identity,
+                          protocolVersion: RIG_PROTOCOL_VERSION,
                           ready: false,
                           status: "starting",
                       };

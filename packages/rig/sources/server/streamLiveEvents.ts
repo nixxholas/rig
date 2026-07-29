@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
+import { RIG_PROTOCOL_VERSION } from "../protocol/index.js";
 import {
     LIVE_GLOBAL_EVENT_GAP,
     type LiveGlobalEventEntry,
@@ -65,6 +66,7 @@ export function streamLiveEvents(
     writeFrame(response, "hello", {
         cursor: gap || after === undefined ? queue.cursor() : after,
         gap,
+        protocolVersion: RIG_PROTOCOL_VERSION,
         resumed: after !== undefined && !gap,
     });
 

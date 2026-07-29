@@ -470,7 +470,8 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 now,
                 onEvent: options.onEvent,
                 onMessage: options.onMessage,
-                message: "The tool call was interrupted because the model reached its output limit.",
+                message:
+                    "The tool call was interrupted because the model reached its output limit.",
             });
         }
 
@@ -1080,10 +1081,7 @@ export function toProviderMessages(
     return providerMessages;
 }
 
-function toProviderUserMessage(
-    message: UserMessage,
-    now: () => number,
-): ProviderMessage {
+function toProviderUserMessage(message: UserMessage, now: () => number): ProviderMessage {
     return {
         role: "user",
         content: message.blocks.map(toProviderUserContent),

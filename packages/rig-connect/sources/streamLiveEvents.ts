@@ -12,12 +12,22 @@ export class LiveStreamRefused extends Error {
     }
 }
 
+/** The stream opened, but its wire contract cannot be read by this client. */
+export class LiveStreamUnsupportedProtocol extends Error {
+    constructor() {
+        super("The Rig server protocol is not compatible with this rig-connect build.");
+        this.name = "LiveStreamUnsupportedProtocol";
+    }
+}
+
 /** What the daemon says when the stream opens. */
 export interface LiveStreamHello {
     /** The position the stream continues from. */
     cursor: string;
     /** The requested cursor could not be served, so held state is stale. */
     gap: boolean;
+    /** Version of the HTTP/SSE contract spoken by the daemon. */
+    protocolVersion: number;
     /** The stream continued from the requested cursor. */
     resumed: boolean;
 }
@@ -33,7 +43,8 @@ export interface LiveStreamOptions {
      * means anything that changes during the load still arrives here, carrying a
      * cursor that says whether it is newer than what was loaded.
      */
-    onOpen: (hello: LiveStreamHello) => void;
+    /** Return false to close permanently without accepting state from this daemon. */
+    onOpen: (hello: LiveStreamHello) => unknown;
     onEvent: (event: GlobalEvent, cursor: string) => void;
     /** Reports that the connection dropped and a retry is coming. */
     onDisconnected: (error: unknown) => void;
@@ -86,7 +97,12 @@ export async function streamLiveEvents(options: LiveStreamOptions): Promise<void
             if (options.signal.aborted) return;
             // A refused cursor is answered with a gap rather than a status, so
             // any refusal here would refuse the retry too.
-            if (error instanceof LiveStreamRefused) throw error;
+            if (
+                error instanceof LiveStreamRefused ||
+                error instanceof LiveStreamUnsupportedProtocol
+            ) {
+                throw error;
+            }
             options.onDisconnected(error);
         }
         await wait(retryDelay, options.signal);
@@ -123,7 +139,7 @@ async function readStreamOnce(
             // Recorded before the caller is told, so a reload triggered from
             // `onOpen` cannot be followed by a reconnect to a stale position.
             onCursor(hello.cursor);
-            options.onOpen(hello);
+            if (options.onOpen(hello) === false) throw new LiveStreamUnsupportedProtocol();
             continue;
         }
         const update = frame.data as { cursor: string; event: GlobalEvent };

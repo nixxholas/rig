@@ -71,6 +71,7 @@ function session(id: string, projectId: string, workspaceId?: string): SessionSu
 function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
     return {
         cursor: "c1",
+        protocolVersion: 1,
         projects: [project("p1")],
         sessions: [session("s1", "p1")],
         sessionsComplete: true,
@@ -79,6 +80,96 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
         ...overrides,
     };
 }
+
+describe("GroupStore and sessions that are not in the list", () => {
+    it("keeps a subagent out of the sidebar however it arrives", () => {
+        const store = new GroupStore();
+        // Absent, not present-and-empty: the session has no position at all.
+        const { orderKey: _position, ...subagent } = session("sub-1", "p1");
+
+        // The catalog is one way in.
+        store.applyHello(hello({ sessions: [session("s1", "p1"), subagent] }));
+        expect(store.projects()[0]?.sessions.map((entry) => entry.id)).toEqual(["s1"]);
+
+        // The live stream is the other, and it is the one that used to leak.
+        store.apply(event("session_created", { session: subagent }, { sessionId: subagent.id }));
+        expect(store.projects()[0]?.sessions.map((entry) => entry.id)).toEqual(["s1"]);
+
+        store.apply(
+            event(
+                "session_updated",
+                { session: { ...subagent, title: "Reviewing the diff" } },
+                { sessionId: subagent.id },
+            ),
+        );
+        expect(store.projects()[0]?.sessions.map((entry) => entry.id)).toEqual(["s1"]);
+    });
+
+    it("holds an order two sessions cannot argue about", () => {
+        const store = new GroupStore();
+        // Sessions that share a position must still have one settled order, or
+        // the sidebar reshuffles under the reader on every rebuild.
+        const first = { ...session("b-session", "p1"), orderKey: "a0" };
+        const second = { ...session("a-session", "p1"), orderKey: "a0" };
+
+        store.applyHello(hello({ sessions: [first, second] }));
+        expect(store.projects()[0]?.sessions.map((entry) => entry.id)).toEqual([
+            "a-session",
+            "b-session",
+        ]);
+
+        const rebuilt = new GroupStore();
+        rebuilt.applyHello(hello({ sessions: [second, first] }));
+        expect(rebuilt.projects()[0]?.sessions.map((entry) => entry.id)).toEqual([
+            "a-session",
+            "b-session",
+        ]);
+    });
+});
+
+describe("GroupStore workspace predictions", () => {
+    it("keeps an archived workspace absent across a newer reconnect snapshot", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ workspaces: [workspace("w1", "p1")] }));
+
+        store.applyOptimisticWorkspaceArchived("p1", "w1");
+        expect(store.projects()[0]?.workspaces).toEqual([]);
+
+        store.applyHello(
+            hello({
+                cursor: "c2",
+                workspaces: [workspace("w1", "p1", { updatedAt: 2, version: 2 })],
+            }),
+        );
+        expect(store.projects()[0]?.workspaces).toEqual([]);
+    });
+
+    it("replaces one optimistic creation with one authoritative workspace", () => {
+        const store = new GroupStore();
+        store.applyHello(hello());
+        const pending = workspace("pending:mutation-1", "p1", {
+            name: "Feature",
+            status: "initializing",
+            version: 0,
+        });
+
+        const prediction = store.applyOptimisticWorkspaceCreate(pending);
+        expect(store.projects()[0]?.workspaces.map((item) => item.id)).toEqual([pending.id]);
+
+        prediction.undo();
+        store.apply(
+            event(
+                "workspace_created",
+                {
+                    mutationId: "mutation-1",
+                    workspace: workspace("w1", "p1", { name: "Feature" }),
+                },
+                { projectId: "p1", workspaceId: "w1" },
+            ),
+        );
+        expect(store.projects()[0]?.workspaces.map((item) => item.id)).toEqual(["w1"]);
+    });
+});
 
 function event<TType extends string>(type: TType, data: unknown, scope: object = {}): GlobalEvent {
     clock += 1;

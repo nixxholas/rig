@@ -34,7 +34,9 @@ describe("ResponsesProvider", () => {
                             id: "message-1",
                             role: "assistant",
                             status: "completed",
-                            content: [{ type: "output_text", text: "protocol ok", annotations: [] }],
+                            content: [
+                                { type: "output_text", text: "protocol ok", annotations: [] },
+                            ],
                         },
                     },
                     {
@@ -88,7 +90,9 @@ describe("ResponsesProvider", () => {
 
         expect(textFromSessionEvents(events)).toBe("protocol ok");
         expect(events.at(-2)).toEqual({ type: "block_stop" });
-        expect(events.some((event) => event.type === "done" && event.state === "normal")).toBe(true);
+        expect(events.some((event) => event.type === "done" && event.state === "normal")).toBe(
+            true,
+        );
         expect(requestBody).toMatchObject({
             model: "open-model",
             stream: true,

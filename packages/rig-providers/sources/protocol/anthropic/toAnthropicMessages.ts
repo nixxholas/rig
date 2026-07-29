@@ -21,9 +21,7 @@ export type AnthropicReasoningState =
     | { type: "thinking"; thinking: string; signature: string }
     | { type: "redacted_thinking"; data: string };
 
-export function toAnthropicMessages(
-    messages: readonly SessionMessage[],
-): BetaMessageParam[] {
+export function toAnthropicMessages(messages: readonly SessionMessage[]): BetaMessageParam[] {
     const converted = messages.flatMap((message): BetaMessageParam[] => {
         if (message.role === "system") {
             // Anthropic has no system role inside a conversation, so a notice keeps the position

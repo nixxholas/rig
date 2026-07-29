@@ -168,6 +168,7 @@ export type {
     SessionStreamHello,
     SessionTranscriptTurn,
     SessionTranscriptRetry,
+    SessionTranscriptGroup,
     SessionTranscriptWindow,
     SessionResetEvent,
     SessionStatusChangedEvent,
@@ -211,6 +212,7 @@ export type {
     WriteSessionFileResponse,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
+export { RIG_PROTOCOL_VERSION } from "./ProtocolVersion.js";
 export {
     SESSION_DRAFT_MAX_CLOCK_SKEW_MS,
     SESSION_DRAFT_MAX_LENGTH,

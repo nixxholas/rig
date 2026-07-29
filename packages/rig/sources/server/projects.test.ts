@@ -180,7 +180,7 @@ describe("projects", () => {
             ready.id,
             ready.version,
         );
-        expect(archived?.status).toBe("archived");
+        expect(archived?.status).toBe("archiving");
         expect(workspaceSession.snapshot()).toMatchObject({
             archived: true,
             status: "archived",
@@ -191,9 +191,61 @@ describe("projects", () => {
         });
         expect(() => workspaceSession.submit({ text: "Do not run." })).toThrow("archived");
         expect(() => fixture.store.fork(workspaceSession.id)).toThrow("archived");
+        await waitForWorkspace(
+            fixture.store,
+            ready.projectId,
+            ready.id,
+            (value) => value.status === "archived",
+        );
         await expect(access(ready.path)).rejects.toThrow();
         await mkdir(ready.path, { recursive: true });
         expect(() => fixture.store.create({ cwd: ready.path })).toThrow("archived");
+    });
+
+    it("keeps archival committed when physical workspace cleanup fails", async () => {
+        let failRemoval = false;
+        const cleanupErrors: unknown[] = [];
+        const fixture = await createFixture({
+            onWorkspaceCleanupError: (error) => cleanupErrors.push(error),
+            projectGit: async (cwd, args) => {
+                if (failRemoval && args[0] === "worktree" && args[1] === "remove") {
+                    throw new Error("Injected worktree cleanup failure.");
+                }
+                return git(cwd, args);
+            },
+        });
+        const repository = await createRepository(fixture.root, "cleanup-source");
+        const source = fixture.store.create({ cwd: repository });
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            clientRequestId: "cleanup-failure",
+            name: "Cleanup Failure",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            created.projectId,
+            created.id,
+            (value) => value.status === "ready",
+        );
+
+        failRemoval = true;
+        const response = await fixture.store.archiveWorkspace(
+            ready.projectId,
+            ready.id,
+            ready.version,
+        );
+        expect(response?.status).toBe("archiving");
+        const archived = await waitForWorkspace(
+            fixture.store,
+            ready.projectId,
+            ready.id,
+            (value) => value.status === "archived",
+        );
+
+        expect(archived).not.toHaveProperty("error");
+        expect(cleanupErrors).toHaveLength(1);
+        await expect(access(ready.path)).resolves.toBeUndefined();
     });
 
     it("reconciles interrupted workspace creation and archival after restart", async () => {
@@ -288,7 +340,7 @@ describe("projects", () => {
                         recovered,
                         second.projectId,
                         second.id,
-                        (value) => value.status === "archived" || value.status === "archive_failed",
+                        (value) => value.status === "archived",
                     )
                 ).status,
             ).toBe("archived");
@@ -342,8 +394,15 @@ describe("projects", () => {
         );
         releaseAdd.resolve(undefined);
 
-        const archived = await archive;
-        expect(archived?.status).toBe("archived");
+        const archiving = await archive;
+        expect(archiving?.status).toBe("archiving");
+        const archived = await waitForWorkspace(
+            fixture.store,
+            workspace.projectId,
+            workspace.id,
+            (value) => value.status === "archived",
+        );
+        expect(archived.status).toBe("archived");
         await expect(access(workspace.path)).rejects.toThrow();
         const observedStates =
             fixture.store.globalEventQueue
@@ -606,6 +665,7 @@ describe("projects", () => {
 async function createFixture(
     options: {
         durableGlobalEventQueue?: boolean;
+        onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
         projectGit?: ProjectGitRunner;
     } = {},
 ): Promise<{
@@ -628,6 +688,9 @@ async function createFixture(
                 ? {}
                 : { durableGlobalEventQueue: options.durableGlobalEventQueue }),
             homeDirectory: home,
+            ...(options.onWorkspaceCleanupError === undefined
+                ? {}
+                : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
             ...(options.projectGit === undefined ? {} : { projectGit: options.projectGit }),
             stateDirectory: state,
         });

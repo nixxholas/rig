@@ -289,14 +289,12 @@ export class Executor {
         }
     }
 
-    async compact(
-        options: {
-            context: Context;
-            inputTokens?: number;
-            instructions?: string;
-            signal?: AbortSignal;
-        },
-    ): Promise<CompactionResult> {
+    async compact(options: {
+        context: Context;
+        inputTokens?: number;
+        instructions?: string;
+        signal?: AbortSignal;
+    }): Promise<CompactionResult> {
         const releaseInference = await this.acquireInference();
         try {
             if (this.active === undefined) throw new Error("Executor has no active session.");
@@ -546,9 +544,7 @@ function sessionMessageToExecutionMessage(
         return {
             role: "system",
             content:
-                typeof message.content === "string"
-                    ? message.content
-                    : message.content.join("\n"),
+                typeof message.content === "string" ? message.content : message.content.join("\n"),
             timestamp,
         };
     }

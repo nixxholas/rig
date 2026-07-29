@@ -110,13 +110,7 @@ export interface Project {
 }
 
 export type ProjectWorkspaceKind = "git_worktree";
-export type ProjectWorkspaceStatus =
-    | "initializing"
-    | "ready"
-    | "failed"
-    | "archiving"
-    | "archive_failed"
-    | "archived";
+export type ProjectWorkspaceStatus = "initializing" | "ready" | "failed" | "archiving" | "archived";
 
 export interface ProjectWorkspace {
     archivedAt?: number;
@@ -329,6 +323,7 @@ export interface GlobalStreamHello {
     cursor: string;
     catalog?: ModelCatalog;
     identity?: DaemonIdentity;
+    protocolVersion: number;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];
     workspaces: readonly ProjectWorkspace[];

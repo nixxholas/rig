@@ -68,12 +68,31 @@ message that produced it, so a consumer renders the list in order and never walk
 | `thinking`      | Model reasoning, when the provider exposes it.                                |
 | `tool_call`     | One tool invocation, from streamed arguments through to its result.           |
 | `compaction`    | A conversation compaction, reflecting its current state.                      |
-| `turn_end`      | The final element of a turn.                                                  |
+| `failure`       | An attempt that failed. `outcome` says whether the run retried or gave up.    |
+| `inference`     | An inference that has started but produced nothing yet.                       |
+| `group_end`     | The final element of an inference group.                                      |
 
-Every element carries a `turnId`, and every turn ends with a `turn_end` element stating whether it
-finished in `success`, `error`, or `stopped`. That is a guarantee the library makes rather than
-something a consumer infers from silence: a turn interrupted with a tool still running still gets
-its final element, and the open tool call is closed as `interrupted`.
+Every element carries a `groupId` and the `runId` it belongs to. A group is one stretch of work the
+person is waiting on: the question they asked, everything the agent produced answering it — text,
+thinking, and every tool call across as many turns of the tool loop as it took — and one `group_end`
+footer saying when it finished and how. Reaching the model again to work through a tool result is
+not a boundary; the group closes only when the work stops, for one of five reasons: `completed`,
+`steering`, `compaction`, `abort`, or `error`. Steering therefore splits a run into consecutive
+groups while the `runId` stays the same, and the steering message itself lands between the previous
+footer and the next group's first element. Compaction is the same kind of boundary and lands in the
+same place.
+
+A `group_end` carries two durations: `elapsedMs`, the group's own stretch since the last boundary,
+and `turnElapsedMs`, measured from where the turn really began. They differ once a run has been
+steered or compacted, and a consumer picks whichever suits where it is drawing. Failures inside a
+group appear as `failure` elements in it: every retried attempt, and, when the group ends in an
+error rather than a steering, compaction, or abort, one last `failure` carrying the message.
+
+Group identity is stable for the life of the connection, including across a reconnect, so a
+consumer can key rendering on `groupId` without waiting for anything to settle. That a group always
+closes is a guarantee the library makes rather than something a consumer infers from silence: a
+group interrupted with a tool still running still gets its final element, and the open tool call is
+closed as `interrupted`.
 
 Elements change by delta, not by replacement. Text grows as it is generated, tool-call arguments
 fill in as they stream, and a result lands on the tool-call element that was already there.
@@ -230,9 +249,10 @@ Because turns vary in length, so does the message count — a window of short re
 single long run of tool calls can fill it alone. The bound follows the conversation's own structure,
 so the cost of attaching tracks recent activity rather than the age of the session.
 
-Those reported boundaries are also what let history render like live output: each finished turn in
-the window is replayed with its real duration and outcome, so a turn read from history ends in the
-same `turn_end` element a client watching live would have seen.
+Those reported boundaries are also what let history render like live output: each turn in the window
+carries the groups it contained, so a conversation read from history is replayed group by group with
+each one's real duration and outcome, ending in the same `group_end` elements a client watching live
+would have seen.
 
 When the conversation began before the window, `session.transcriptComplete` is `false`. A UI that
 scrolls back past it loads whole earlier turns through `GET /sessions/:id/transcript?before=`.

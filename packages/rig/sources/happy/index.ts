@@ -13,7 +13,7 @@ export { HappyMachineClient } from "./HappyMachineClient.js";
 export { HAPPY_SESSION_RPC_METHODS, handleHappySessionRpc } from "./handleHappySessionRpc.js";
 export { renderHappyQrCode } from "./renderHappyQrCode.js";
 export { runHappyAuthCommand } from "./runHappyAuthCommand.js";
-export { mapSessionEventToHappyMessages } from "./mapSessionEventToHappyMessages.js";
+export { HappyMessageMapper } from "./mapSessionEventToHappyMessages.js";
 export { parseHappyCredentials } from "./parseHappyCredentials.js";
 export { readHappyRemoteInput } from "./readHappyRemoteInput.js";
 export type {

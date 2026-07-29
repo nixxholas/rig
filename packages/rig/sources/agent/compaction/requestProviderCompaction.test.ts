@@ -145,11 +145,7 @@ describe("requestProviderCompaction", () => {
     });
 
     it.each([
-        [
-            "cancelled",
-            { status: "cancelled" as const },
-            "Conversation compaction was stopped.",
-        ],
+        ["cancelled", { status: "cancelled" as const }, "Conversation compaction was stopped."],
         [
             "failed",
             {
@@ -159,31 +155,30 @@ describe("requestProviderCompaction", () => {
             },
             "native compaction failed",
         ],
-    ])("leaves the original context active when provider compaction is %s", async (
-        _label,
-        outcome,
-        expected,
-    ) => {
-        const context = compactionContext();
-        const provider = defineProvider({
-            id: "test",
-            models: [model],
-            compact: async () => ({ ...outcome, context }),
-            stream() {
-                throw new Error("Native compaction must not fall back to inference.");
-            },
-        });
+    ])(
+        "leaves the original context active when provider compaction is %s",
+        async (_label, outcome, expected) => {
+            const context = compactionContext();
+            const provider = defineProvider({
+                id: "test",
+                models: [model],
+                compact: async () => ({ ...outcome, context }),
+                stream() {
+                    throw new Error("Native compaction must not fall back to inference.");
+                },
+            });
 
-        await expect(
-            requestProviderCompaction({
-                context,
-                inputTokens: 1_000,
-                model,
-                now: () => 1,
-                provider,
-            }),
-        ).rejects.toThrow(expected);
-    });
+            await expect(
+                requestProviderCompaction({
+                    context,
+                    inputTokens: 1_000,
+                    model,
+                    now: () => 1,
+                    provider,
+                }),
+            ).rejects.toThrow(expected);
+        },
+    );
 });
 
 function compactionContext(): Context {

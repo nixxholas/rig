@@ -89,7 +89,12 @@ describe("the live event stream", () => {
         expect(hello.data.gap).toBe(false);
         expect(hello.data.resumed).toBe(false);
         // The whole point: entities travel by request-response, never in the stream.
-        expect(Object.keys(hello.data).sort()).toEqual(["cursor", "gap", "resumed"]);
+        expect(Object.keys(hello.data).sort()).toEqual([
+            "cursor",
+            "gap",
+            "protocolVersion",
+            "resumed",
+        ]);
     });
 
     it("delivers session events as light updates carrying a cursor", async () => {

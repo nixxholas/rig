@@ -118,9 +118,10 @@ describe("HappySessionClient", () => {
             },
         ]);
         expect(repository.getSession("session-1")?.lastRemoteSeq).toBe(1);
-        expect(socket.emitted.find(([event]) => event === "session-alive")?.[1]).not.toHaveProperty(
-            "mode",
-        );
+        expect(socket.emitted.find(([event]) => event === "session-alive")?.[1]).toMatchObject({
+            activity: { kind: "idle", label: "Idle" },
+            thinking: false,
+        });
         await client.close();
         repository.close();
         expect(databasePath).toBeTruthy();
@@ -249,6 +250,12 @@ describe("HappySessionClient", () => {
         await waitFor(() => socket.emitted.some(([event]) => event === "session-alive"));
 
         harness.snapshot.title = "Updated from Rig";
+        Object.assign(harness.activity, {
+            kind: "generating_tool_call",
+            label: "Generating a tool call",
+            runId: "run-1",
+            since: 20,
+        });
         harness.snapshot.backgroundProcesses = [
             { command: "pnpm test", cwd: "/workspace", sessionId: 4, status: "running" },
         ];
@@ -277,6 +284,10 @@ describe("HappySessionClient", () => {
         expect(metadata).toMatchObject({
             activity: {
                 processes: { running: 1 },
+                session: {
+                    kind: "generating_tool_call",
+                    runId: "run-1",
+                },
                 subagents: { running: 1, total: 1 },
                 workflows: { running: 1, total: 1 },
             },
@@ -516,6 +527,7 @@ class FakeSocket {
 }
 
 function fakeSession(submitted: unknown[]): {
+    activity: any;
     abortCalls: number;
     changedModels: unknown[];
     changedPermissionModes: string[];
@@ -526,6 +538,7 @@ function fakeSession(submitted: unknown[]): {
     const changedModels: unknown[] = [];
     const changedPermissionModes: string[] = [];
     let abortCalls = 0;
+    const activity: any = { kind: "idle", label: "Idle", since: 0 };
     const snapshot: any = {
         agent: { type: "primary" },
         backgroundProcesses: [],
@@ -555,9 +568,11 @@ function fakeSession(submitted: unknown[]): {
         get abortCalls() {
             return abortCalls;
         },
+        activity,
         changedModels,
         changedPermissionModes,
         session: {
+            activity: () => structuredClone(activity),
             abort: async () => {
                 abortCalls += 1;
                 return { aborted: true };

@@ -2,11 +2,7 @@ import OpenAI from "openai";
 
 import { BaseSession } from "@/core/BaseSession.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
-import type {
-    SessionContext,
-    SessionMessage,
-    SessionUserMessage,
-} from "@/core/SessionContext.js";
+import type { SessionContext, SessionMessage, SessionUserMessage } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
@@ -155,8 +151,7 @@ export class ResponsesSession extends BaseSession {
         }
     }
 
-    destroy(): void {
-    }
+    destroy(): void {}
 
     private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
         const { abort } = request;

@@ -72,7 +72,7 @@ export interface WorkspaceGroup {
     readonly path: string;
     readonly presence: "present" | "missing";
     readonly projectId: string;
-    readonly status: "initializing" | "ready" | "failed" | "archiving" | "archive_failed";
+    readonly status: "initializing" | "ready" | "failed";
     readonly title?: string;
     readonly usage: GroupUsage;
     readonly git?: GitChangeSnapshot;

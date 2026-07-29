@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 import type { Message, UserMessage } from "../agent/types.js";
+import type { SessionEvent } from "../protocol/index.js";
 import {
     sessionTranscriptWindow,
+    transcriptRunFacts,
     type TranscriptEntry,
     type TranscriptRunFacts,
 } from "./sessionTranscriptWindow.js";
+
+function sessionEvent(type: string, createdAt: number, data: unknown): SessionEvent {
+    return { createdAt, data, id: `event-${String(createdAt)}`, sessionId: "s1", type } as never;
+}
 
 function userMessage(id: string): UserMessage {
     return { blocks: [{ text: id, type: "text" }], id, role: "user" };
@@ -36,6 +42,149 @@ function newest(
 }
 
 describe("sessionTranscriptWindow", () => {
+    it("records stable inference groups and their exact boundaries", () => {
+        const facts = transcriptRunFacts([
+            sessionEvent("run_started", 10, { runId: "run-1" }),
+            sessionEvent("agent_event", 20, {
+                event: { iteration: 1, messageId: "message-1", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            // A second reach for the model inside the same answer. It is one
+            // thing the user asked for, so it does not open a second group.
+            sessionEvent("agent_event", 25, {
+                event: { iteration: 2, messageId: "message-1b", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("steering_applied", 30, {
+                messageIds: ["steer-1"],
+                runId: "run-1",
+            }),
+            sessionEvent("agent_event", 40, {
+                event: { iteration: 3, messageId: "message-2", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("run_finished", 50, {
+                modelLocked: false,
+                runId: "run-1",
+                stopReason: "stop",
+            }),
+        ]);
+
+        expect(facts.get("run-1")?.groups).toEqual([
+            {
+                endedAt: 30,
+                id: "message-1",
+                outcome: "success",
+                reason: "steering",
+                startedAt: 20,
+            },
+            {
+                endedAt: 50,
+                id: "message-2",
+                outcome: "success",
+                reason: "completed",
+                startedAt: 40,
+            },
+        ]);
+        expect(newest(turn("run-1"), facts, 20).turns[0]?.groups).toEqual(
+            facts.get("run-1")?.groups,
+        );
+    });
+
+    it("closes a group at compaction, the same as it does at steering", () => {
+        const facts = transcriptRunFacts([
+            sessionEvent("run_started", 10, { runId: "run-1" }),
+            sessionEvent("agent_event", 20, {
+                event: { iteration: 1, messageId: "message-1", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("agent_event", 30, {
+                event: {
+                    compactionId: "c1",
+                    estimatedTokensBefore: 100,
+                    type: "context_compaction_started",
+                },
+                runId: "run-1",
+            }),
+            sessionEvent("agent_event", 31, {
+                event: {
+                    compactedMessageCount: 4,
+                    compactionId: "c1",
+                    estimatedTokensAfter: 40,
+                    type: "context_compacted",
+                },
+                runId: "run-1",
+            }),
+            sessionEvent("agent_event", 32, {
+                event: {
+                    compactionId: "c1",
+                    status: "completed",
+                    type: "context_compaction_finished",
+                },
+                runId: "run-1",
+            }),
+            sessionEvent("agent_event", 40, {
+                event: { iteration: 2, messageId: "message-2", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("run_finished", 50, {
+                modelLocked: false,
+                runId: "run-1",
+                stopReason: "stop",
+            }),
+        ]);
+
+        // The compaction is durable history as a message, so only where the
+        // boundary fell is recorded here.
+        expect(facts.get("run-1")?.boundaryGroupIds).toEqual({ c1: "message-1" });
+        expect(facts.get("run-1")?.groups).toEqual([
+            {
+                endedAt: 30,
+                id: "message-1",
+                outcome: "success",
+                reason: "compaction",
+                startedAt: 20,
+            },
+            {
+                endedAt: 50,
+                id: "message-2",
+                outcome: "success",
+                reason: "completed",
+                startedAt: 40,
+            },
+        ]);
+    });
+
+    it("records which group a steering message and an attempt belong to", () => {
+        // The clock cannot say: a boundary and the group it opens routinely
+        // share a millisecond, and so do an attempt and the boundary beside it.
+        const facts = transcriptRunFacts([
+            sessionEvent("run_started", 10, { runId: "run-1" }),
+            sessionEvent("agent_event", 20, {
+                event: { iteration: 1, messageId: "message-1", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("inference_retry", 20, {
+                attempt: 1,
+                reason: "Connection lost",
+                runId: "run-1",
+            }),
+            sessionEvent("steering_applied", 20, { messageIds: ["steer-1"], runId: "run-1" }),
+            sessionEvent("agent_event", 20, {
+                event: { iteration: 2, messageId: "message-2", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("run_finished", 30, {
+                modelLocked: false,
+                runId: "run-1",
+                stopReason: "stop",
+            }),
+        ]);
+
+        expect(facts.get("run-1")?.retries?.[0]?.groupId).toBe("message-1");
+        expect(facts.get("run-1")?.boundaryGroupIds).toEqual({ "steer-1": "message-1" });
+    });
+
     it("groups contiguous messages of one run into a single turn", () => {
         const window = newest(turn("run-1", 2), new Map(), 20);
 

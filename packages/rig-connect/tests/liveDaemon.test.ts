@@ -221,26 +221,29 @@ describe("rig-connect against a live daemon", () => {
         await waitFor(() => connection?.session().connection === "live", "the stream to open");
 
         const elements = connection.elements();
-        const ends = elements.filter((element) => element.kind === "turn_end");
+        const ends = elements.filter((element) => element.kind === "group_end");
         expect(ends).toHaveLength(2);
-        expect(ends.every((element) => element.turnId.startsWith("history:"))).toBe(false);
+        expect(ends.every((element) => element.runId.startsWith("history:"))).toBe(false);
         const events = session.events.since(undefined) ?? [];
-        const firstSubmitted = events.find(
-            (event) => event.type === "message_submitted" && event.data.runId === first.runId,
+        const firstInference = events.find(
+            (event) =>
+                event.type === "agent_event" &&
+                event.data.runId === first.runId &&
+                event.data.event.type === "inference_iteration_start",
         );
         const firstFinished = events.find(
             (event) => event.type === "run_finished" && event.data.runId === first.runId,
         );
         expect(ends[0]).toMatchObject({
             endedAt: firstFinished?.createdAt,
-            startedAt: firstSubmitted?.createdAt,
+            startedAt: firstInference?.createdAt,
         });
         expect(connection.session().usage).toMatchObject({
             currentProviderId: "test",
             totalCost: 0.2,
             totalTokens: 24,
         });
-        expect(elements.at(-1)?.kind).toBe("turn_end");
+        expect(elements.at(-1)?.kind).toBe("group_end");
         expect(connection.session().transcriptComplete).toBe(true);
     });
 
@@ -267,12 +270,12 @@ describe("rig-connect against a live daemon", () => {
             (event) => event.type === "message_submitted" && event.data.runId === submitted.runId,
         );
         await waitFor(
-            () => connection?.session().activeTurn?.turnId === submitted.runId,
+            () => connection?.session().activeTurn?.runId === submitted.runId,
             "the active turn timing to arrive",
         );
         expect(connection.session().activeTurn).toEqual({
+            runId: submitted.runId,
             startedAt: submission?.createdAt,
-            turnId: submitted.runId,
         });
 
         releaseInference();
@@ -281,17 +284,26 @@ describe("rig-connect against a live daemon", () => {
             () =>
                 connection
                     ?.elements()
-                    .some((element) => element.id === `turn:${submitted.runId}`) === true,
+                    .some(
+                        (element) =>
+                            element.kind === "group_end" && element.runId === submitted.runId,
+                    ) === true,
             "the completed turn timing to arrive",
         );
         const end = connection
             .elements()
-            .find((element) => element.id === `turn:${submitted.runId}`);
+            .find((element) => element.kind === "group_end" && element.runId === submitted.runId);
+        const inferenceStarted = (session.events.since(undefined) ?? []).find(
+            (event) =>
+                event.type === "agent_event" &&
+                event.data.runId === submitted.runId &&
+                event.data.event.type === "inference_iteration_start",
+        );
         expect(connection.session().activeTurn).toBeUndefined();
         expect(end).toMatchObject({
             elapsedMs: expect.any(Number),
             endedAt: expect.any(Number),
-            startedAt: submission?.createdAt,
+            startedAt: inferenceStarted?.createdAt,
         });
         expect(connection.session().usage).toMatchObject({
             totalCost: 0.1,
@@ -318,9 +330,9 @@ describe("rig-connect against a live daemon", () => {
         // A client must be able to tell that earlier turns exist rather than
         // presenting a truncated window as the whole conversation.
         expect(connection.session().transcriptComplete).toBe(false);
-        expect(connection.elements().filter((element) => element.kind === "turn_end")).toHaveLength(
-            20,
-        );
+        expect(
+            connection.elements().filter((element) => element.kind === "group_end"),
+        ).toHaveLength(20);
     });
 });
 

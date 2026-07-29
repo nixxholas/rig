@@ -33,8 +33,7 @@ describe("incomplete tool call at the output limit", () => {
                     (message) =>
                         message.role === "assistant" &&
                         message.content.some(
-                            (content) =>
-                                content.type === "toolCall" && content.incomplete === true,
+                            (content) => content.type === "toolCall" && content.incomplete === true,
                         ),
                 );
                 const resultIndex = request.context.messages.findIndex(

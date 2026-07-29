@@ -47,6 +47,7 @@ function liveHello(): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
         gap: false,
+        protocolVersion: 1,
         resumed: false,
     })}\n\n`;
 }
@@ -181,7 +182,7 @@ describe("connectSession", () => {
 
             expect(connection.elements().map((element) => element.kind)).toEqual([
                 "agent_text",
-                "turn_end",
+                "group_end",
             ]);
             expect(connection.session()).toMatchObject({ connection: "live", modelId: "sonnet-5" });
             // One subscription, and one bootstrap. The stream carries no session
@@ -315,7 +316,7 @@ describe("connectSession", () => {
                 );
                 await settle();
 
-                expect(new Set(connection.elements().map((element) => element.turnId))).toEqual(
+                expect(new Set(connection.elements().map((element) => element.runId))).toEqual(
                     new Set(["run-4"]),
                 );
                 expect(connection.session()).toMatchObject({

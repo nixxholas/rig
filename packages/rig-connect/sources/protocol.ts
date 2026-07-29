@@ -618,7 +618,8 @@ export interface ProtocolSession {
     appendSystemPrompt?: string;
     projectId: string;
     workspaceId?: string;
-    orderKey: string;
+    /** Absent for a session with no place in an ordered list, such as a subagent. */
+    orderKey?: string;
     cwd: string;
     draft?: string;
     draftUpdatedAt?: number;
@@ -672,11 +673,22 @@ export interface SessionTranscriptTurn {
     endedAt?: number;
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
+    groups?: readonly SessionTranscriptGroup[];
     retries?: readonly SessionTranscriptRetry[];
+}
+
+export interface SessionTranscriptGroup {
+    id: string;
+    startedAt: number;
+    endedAt?: number;
+    outcome?: "success" | "error" | "stopped";
+    reason?: "completed" | "steering" | "compaction" | "abort" | "error";
+    errorMessage?: string;
 }
 
 export interface SessionTranscriptRetry {
     id: EventId;
+    groupId?: string;
     createdAt: number;
     attempt: number;
     reason: string;
@@ -688,6 +700,7 @@ export interface SessionTranscriptWindow {
     messageEventId?: Readonly<Record<string, EventId>>;
     /** When each steering message was actually applied to its run. */
     messageSteeredAt?: Readonly<Record<string, number>>;
+    messageBoundaryGroupId?: Readonly<Record<string, string>>;
     permissionReviews?: readonly PermissionReviewState[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
@@ -1004,7 +1017,7 @@ export interface ProjectWorkspace {
     path: string;
     presence: "present" | "missing";
     projectId: string;
-    status: "initializing" | "ready" | "failed" | "archiving" | "archive_failed" | "archived";
+    status: "initializing" | "ready" | "failed" | "archiving" | "archived";
     title?: string;
     updatedAt: number;
     version: number;
@@ -1020,7 +1033,8 @@ export interface SessionSummary {
     draftUpdatedAt?: number;
     providerId: string;
     modelId: string;
-    orderKey: string;
+    /** Absent for a session with no place in an ordered list, such as a subagent. */
+    orderKey?: string;
     permissionMode: string;
     effort?: string;
     serviceTier?: string;
@@ -1058,6 +1072,7 @@ export interface GlobalStreamHello {
     catalog?: ModelCatalog;
     cursor: string;
     identity?: DaemonIdentity;
+    protocolVersion: number;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];
     workspaces: readonly ProjectWorkspace[];

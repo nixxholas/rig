@@ -6,6 +6,7 @@ export { connectRig } from "./connectRig.js";
 export type {
     ConnectRigOptions,
     CreateSessionInput,
+    CreateWorkspaceInput,
     DraftUpdate,
     GoalStatus,
     GroupTarget,
@@ -33,26 +34,37 @@ export type {
     TerminalInputPresentation,
     ToolPresentation,
 } from "./ToolPresentation.js";
-export { LiveStreamRefused } from "./streamLiveEvents.js";
+export { LiveStreamRefused, LiveStreamUnsupportedProtocol } from "./streamLiveEvents.js";
 export { streamLiveEvents } from "./streamLiveEvents.js";
 export type { LiveStreamHello, LiveStreamOptions } from "./streamLiveEvents.js";
+export {
+    CHECKING_SERVER_COMPATIBILITY,
+    MAXIMUM_RIG_PROTOCOL_VERSION,
+    MINIMUM_RIG_PROTOCOL_VERSION,
+    describeServerCompatibility,
+    serverCompatibility,
+} from "./ServerCompatibility.js";
+export type { ServerCompatibility } from "./ServerCompatibility.js";
 export type {
+    ActiveGroup,
     ActiveTurn,
     AgentTextElement,
     ChatDelta,
     ChatElement,
     CompactionElement,
     ConnectionState,
+    FailureElement,
+    GroupEndElement,
+    GroupEndReason,
+    InferenceElement,
     MutationAction,
     MutationRejectedDelta,
-    RetryElement,
     SessionState,
     SessionUsage,
     SystemNoticeElement,
     ThinkingElement,
     ToolCallElement,
     ToolCallStatus,
-    TurnEndElement,
     UserMessageElement,
 } from "./ChatElement.js";
 export type {
@@ -96,6 +108,7 @@ export type {
     SessionAgentMetadata,
     SessionExecutionEnvironment,
     SessionInterruption,
+    SessionTranscriptGroup,
     SessionEvent,
     SessionStreamHello,
     SessionTask,

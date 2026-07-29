@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../agent/index.js";
-import { mapSessionEventToHappyMessages } from "../happy/mapSessionEventToHappyMessages.js";
+import { HappyMessageMapper } from "../happy/mapSessionEventToHappyMessages.js";
 import { NativeProcessManager } from "../processes/index.js";
 import { createEventIdFactory, type ModelCatalog } from "../protocol/index.js";
 import type { CodingAssistantRuntime } from "../runtime/CodingAssistantRuntime.js";
@@ -34,12 +34,19 @@ describe("InMemorySession provider failures", () => {
         const run = session.submit({ text: "Fail this turn." });
         await session.waitForRun(run.runId);
 
-        const happy = mapSessionEventToHappyMessages(runBoundary(session, run.runId)).map(
-            (message) => message.content.ev,
-        );
+        const mapper = new HappyMessageMapper();
+        const happy = (session.events.since(undefined) ?? [])
+            .flatMap((event) => mapper.map(event))
+            .map((message) => message.content.ev);
+        // The failure reads as the same line a failed attempt gets, told apart
+        // by the outcome, and the turn still ends.
         expect(happy).toEqual(
             expect.arrayContaining([
-                expect.objectContaining({ t: "service", text: PROVIDER_FAILURE }),
+                expect.objectContaining({
+                    outcome: "failed",
+                    reason: PROVIDER_FAILURE,
+                    t: "failure",
+                }),
                 expect.objectContaining({ status: "failed", t: "turn-end" }),
             ]),
         );

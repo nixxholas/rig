@@ -45,7 +45,8 @@ import type {
     SystemNoticeElement,
     ThinkingElement,
     ToolCallElement,
-    TurnEndElement,
+    GroupEndElement,
+    GroupEndReason,
     UserMessageElement,
 } from "./ChatElement.js";
 import { groupToolCalls } from "./groupToolCalls.js";
@@ -72,8 +73,17 @@ export class ChatStore {
     #hasPinnedSteering = false;
     #session: SessionState;
     #turnId: string | undefined;
+    #groupId: string | undefined;
+    #groupPlaceholderId: string | undefined;
+    #groupRunId: string | undefined;
+    #groupStartedAt: number | undefined;
+    /** Elements already shown that belong to the group that has not started yet. */
+    #pendingNextGroupElementIds: string[] = [];
     #turnStartedAt = new Map<string, number>();
-    #lastSteeredAt = new Map<string, number>();
+    /** Runs that have opened at least one group, so their ending has a footer. */
+    #runsWithGroups = new Set<string>();
+    /** When the last steering or compaction restarted a run's group, by run. */
+    #lastBoundaryAt = new Map<string, number>();
     #openTurnIds: string[] = [];
     /** Elements by id, so a delta reaches its element without scanning the list. */
     #byId = new Map<string, ChatElement>();
@@ -87,7 +97,6 @@ export class ChatStore {
     #appliedMessageIds = new Set<string>();
     #compactionElementIds = new Map<string, string>();
     #retrying = false;
-    #sequence = 0;
     /** Bumped whenever the element list actually changes. */
     #revision = 0;
     /** Position of each element, so an update never scans the list. */
@@ -283,6 +292,12 @@ export class ChatStore {
             ...(page.messageEventId ?? {}),
             ...(loaded?.messageEventId ?? {}),
         };
+        // Without this an older page's steering loses the moment it was applied
+        // on the next rebuild, and with it both of the times it is measured by.
+        const messageSteeredAt = {
+            ...page.messageSteeredAt,
+            ...loaded?.messageSteeredAt,
+        };
         const permissionReviews = [
             ...new Map(
                 [...(loaded?.permissionReviews ?? []), ...(page.permissionReviews ?? [])].map(
@@ -294,6 +309,7 @@ export class ChatStore {
             complete: page.complete,
             ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
             ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
+            ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
             ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
             messages: [...page.messages, ...(loaded?.messages ?? [])],
             turns: [...page.turns, ...(loaded?.turns ?? [])],
@@ -425,9 +441,12 @@ export class ChatStore {
                 role: "user",
             },
             createdAt,
-            this.#session.activeTurn?.turnId ?? `optimistic:${mutationId}`,
+            this.#session.activeTurn?.runId ?? `optimistic:${mutationId}`,
             this.#session.activeTurn === undefined ? "sent" : "pending_steering",
         );
+        if (this.#session.activeTurn === undefined) {
+            this.#pendingNextGroupElementIds.push(`message:${mutationId}`);
+        }
         const deltas = this.#finish([], revisionBefore, sessionBefore);
         return {
             deltas,
@@ -471,7 +490,7 @@ export class ChatStore {
             modelLocked: session.modelLocked,
             modelId: session.modelId,
             models: session.models,
-            orderKey: session.orderKey,
+            ...(session.orderKey === undefined ? {} : { orderKey: session.orderKey }),
             pendingSteeringMessages: session.pendingSteeringMessages ?? [],
             pendingExternalToolCalls: session.pendingExternalToolCalls ?? [],
             pendingUserInputs: session.pendingUserInputs,
@@ -915,17 +934,30 @@ export class ChatStore {
             }
             case "steering_applied": {
                 const data = event.data as { messageIds: readonly string[]; runId: string };
+                this.#endGroup("steering", "success", event.createdAt, deltas);
                 const applied = new Set(data.messageIds);
+                const bridgeGroupId = `steering:${event.id}`;
                 for (const messageId of data.messageIds) {
                     const elementId = `message:${messageId}`;
                     const element = this.#byId.get(elementId);
                     if (element?.kind === "user_message") {
                         this.#update(elementId, {
                             delivery: "sent",
+                            groupId: bridgeGroupId,
                             ...this.#steeringTiming(data.runId, event.createdAt),
                         });
                     }
                 }
+                this.#moveElementsToTail(
+                    data.messageIds.map((messageId) => `message:${messageId}`),
+                );
+                this.#pendingNextGroupElementIds.push(
+                    ...data.messageIds
+                        .map((messageId) => `message:${messageId}`)
+                        .filter(
+                            (elementId) => !this.#pendingNextGroupElementIds.includes(elementId),
+                        ),
+                );
                 this.#session = {
                     ...this.#session,
                     pendingSteeringMessages: this.#session.pendingSteeringMessages.filter(
@@ -942,6 +974,13 @@ export class ChatStore {
             case "run_started":
                 this.#startTurn((event.data as { runId: string }).runId, event.createdAt, deltas);
                 break;
+            case "abort_requested": {
+                const runId = (event.data as { runId?: string }).runId;
+                if (runId === undefined || runId === this.#groupRunId) {
+                    this.#endGroup("abort", "stopped", event.createdAt, deltas);
+                }
+                break;
+            }
             case "inference_retry": {
                 const data = event.data as { attempt: number; reason: string; runId: string };
                 this.#appendRetry(event.id, data.runId, event.createdAt, data.attempt, data.reason);
@@ -989,6 +1028,7 @@ export class ChatStore {
                     (event.data as { event: AgentLoopEvent }).event,
                     event.createdAt,
                     deltas,
+                    (event.data as { runId: string }).runId,
                 );
                 break;
             case "run_finished": {
@@ -1005,6 +1045,13 @@ export class ChatStore {
                         : data.stopReason === "aborted"
                           ? "stopped"
                           : "success";
+                this.#endGroup(
+                    outcome === "error" ? "error" : outcome === "stopped" ? "abort" : "completed",
+                    outcome,
+                    event.createdAt,
+                    deltas,
+                    data.errorMessage,
+                );
                 this.#endTurn(data.runId, outcome, data.errorMessage, event.createdAt, deltas);
                 break;
             }
@@ -1018,6 +1065,7 @@ export class ChatStore {
                     ...this.#session,
                     modelLocked: data.modelLocked,
                 };
+                this.#endGroup("error", "error", event.createdAt, deltas, data.errorMessage);
                 this.#endTurn(data.runId, "error", data.errorMessage, event.createdAt, deltas);
                 break;
             }
@@ -1170,7 +1218,7 @@ export class ChatStore {
             modelLocked: session.modelLocked,
             modelId: session.modelId,
             models: session.models,
-            orderKey: session.orderKey,
+            ...(session.orderKey === undefined ? {} : { orderKey: session.orderKey }),
             pendingExternalToolCalls: session.pendingExternalToolCalls ?? [],
             pendingSteeringMessages: session.pendingSteeringMessages ?? [],
             pendingUserInputs: session.pendingUserInputs,
@@ -1227,7 +1275,7 @@ export class ChatStore {
             transcript,
             session.activeTurn === undefined
                 ? undefined
-                : { startedAt: session.activeTurn.startedAt, turnId: session.activeTurn.runId },
+                : { runId: session.activeTurn.runId, startedAt: session.activeTurn.startedAt },
             true,
         );
         for (const review of session.permissionReviews ?? []) {
@@ -1282,13 +1330,19 @@ export class ChatStore {
         this.#compactionElementIds.clear();
         this.#streamingMessageId = undefined;
         this.#turnId = undefined;
+        this.#groupId = undefined;
+        this.#groupPlaceholderId = undefined;
+        this.#groupRunId = undefined;
+        this.#groupStartedAt = undefined;
+        this.#pendingNextGroupElementIds = [];
+        this.#runsWithGroups.clear();
         this.#turnStartedAt.clear();
-        this.#lastSteeredAt.clear();
+        this.#lastBoundaryAt.clear();
         this.#openTurnIds = [];
         this.#turnUsage = undefined;
         this.#retrying = false;
         this.#session = {
-            ...withoutKeys(this.#session, ["activeTurn", "loadMoreError"]),
+            ...withoutKeys(this.#session, ["activeGroup", "activeTurn", "loadMoreError"]),
             loadingMore: false,
         };
         this.#loadedTranscript = transcript;
@@ -1300,12 +1354,16 @@ export class ChatStore {
             for (const message of messages) {
                 if (message.internal === true) continue;
                 this.#turnId = `history:${message.id}`;
+                if (message.role === "user") {
+                    this.#pendingNextGroupElementIds.push(`message:${message.id}`);
+                }
                 this.#applyMessage(message, 0, deltas, this.#turnId);
             }
+            if (activeTurn === undefined) this.#endGroup("completed", "success", 0, deltas);
             this.#turnId = undefined;
             if (activeTurn !== undefined) {
-                this.#rememberTurn(activeTurn.turnId, activeTurn.startedAt);
-                this.#activateTurn(activeTurn.turnId, activeTurn.startedAt, deltas);
+                this.#rememberTurn(activeTurn.runId, activeTurn.startedAt);
+                this.#activateTurn(activeTurn.runId, activeTurn.startedAt, deltas);
             }
         } finally {
             if (!preservePriorElements) this.#priorElements = undefined;
@@ -1334,6 +1392,8 @@ export class ChatStore {
                   message: Message;
                   order: number;
                   runId: string;
+                  /** A boundary message heads its group rather than sitting in it. */
+                  steered?: boolean;
               }
             | {
                   at: number;
@@ -1351,35 +1411,128 @@ export class ChatStore {
                   order: number;
                   outcome: "success" | "error" | "stopped";
                   runId: string;
+              }
+            | {
+                  at: number;
+                  eventId?: never;
+                  group: NonNullable<SessionTranscriptWindow["turns"][number]["groups"]>[number];
+                  kind: "group_start";
+                  order: number;
+                  runId: string;
+              }
+            | {
+                  at: number;
+                  eventId?: never;
+                  group: NonNullable<SessionTranscriptWindow["turns"][number]["groups"]>[number];
+                  kind: "group_end";
+                  order: number;
+                  runId: string;
               };
+        /**
+         * Only one inference occupies the session at a time, so its groups form
+         * a single sequence even where runs overlap. Wall-clock alone loses that
+         * sequence, because a group can open, produce, and close inside the same
+         * millisecond; `groupIndex` carries the order the timestamps cannot.
+         */
+        type OrderedItem = TimelineItem & { groupIndex: number };
         const turnByMessageId = new Map<string, SessionTranscriptWindow["turns"][number]>();
+        const groupIndexByMessageId = new Map<string, number>();
+        const groupEndings: number[] = [];
+        let groupCount = 0;
         for (const turn of transcript.turns) {
             this.#rememberTurn(turn.runId, turn.startedAt);
             for (const messageId of turn.messageIds) turnByMessageId.set(messageId, turn);
+            for (const group of turn.groups ?? []) {
+                groupIndexByMessageId.set(group.id, groupCount);
+                groupCount += 1;
+                if (group.endedAt !== undefined) groupEndings.push(group.endedAt);
+            }
         }
-        const timeline: TimelineItem[] = messages.flatMap((message, order) => {
+        groupEndings.sort((left, right) => left - right);
+        // Anything not owned by a group belongs after every group that has
+        // already closed by then, and before the one still to open. A group's
+        // own closing millisecond is not "by then": the last thing a group
+        // produced and the footer that closes it routinely share one, and
+        // counting the close would put that last thing in the next group.
+        const groupsClosedBy = (at: number): number =>
+            groupEndings.filter((endedAt) => endedAt < at).length;
+        /**
+         * Where a boundary message sits: after the group it closed, heading the
+         * next one. The clock cannot say, because the boundary and the group it
+         * opens routinely share a millisecond. Steering and compaction are the
+         * same shape here.
+         */
+        const boundaryGroupIndex = (messageId: string): number | undefined => {
+            const closedGroupId = transcript.messageBoundaryGroupId?.[messageId];
+            if (closedGroupId === undefined) return undefined;
+            const closed = groupIndexByMessageId.get(closedGroupId);
+            return closed === undefined ? undefined : closed + 1;
+        };
+        const timeline: OrderedItem[] = messages.flatMap((message, order) => {
             const turn = turnByMessageId.get(message.id);
-            return turn === undefined
-                ? []
-                : [
-                      {
-                          at: transcript.messageCreatedAt?.[message.id] ?? turn.startedAt,
-                          ...(transcript.messageEventId?.[message.id] === undefined
-                              ? {}
-                              : { eventId: transcript.messageEventId[message.id] }),
-                          kind: "message" as const,
-                          message,
-                          order,
-                          runId: turn.runId,
-                      },
-                  ];
+            if (turn === undefined) return [];
+            // The agent message an inference produced belongs to that inference,
+            // whatever millisecond it was finally persisted in.
+            const groupIndex = groupIndexByMessageId.get(message.id);
+            const group = (turn.groups ?? []).find((known) => known.id === message.id);
+            const at =
+                group?.startedAt ??
+                transcript.messageSteeredAt?.[message.id] ??
+                transcript.messageCreatedAt?.[message.id] ??
+                turn.startedAt;
+            return [
+                {
+                    at,
+                    ...(transcript.messageEventId?.[message.id] === undefined
+                        ? {}
+                        : { eventId: transcript.messageEventId[message.id] }),
+                    groupIndex: groupIndex ?? boundaryGroupIndex(message.id) ?? groupsClosedBy(at),
+                    kind: "message" as const,
+                    message,
+                    order,
+                    runId: turn.runId,
+                    steered:
+                        transcript.messageSteeredAt?.[message.id] !== undefined ||
+                        message.role === "compaction",
+                },
+            ];
         });
         let order = messages.length;
         for (const turn of transcript.turns) {
+            for (const group of turn.groups ?? []) {
+                const groupIndex = groupIndexByMessageId.get(group.id) ?? 0;
+                timeline.push({
+                    at: group.startedAt,
+                    group,
+                    groupIndex,
+                    kind: "group_start",
+                    order,
+                    runId: turn.runId,
+                });
+                order += 1;
+                if (group.endedAt !== undefined) {
+                    timeline.push({
+                        at: group.endedAt,
+                        group,
+                        groupIndex,
+                        kind: "group_end",
+                        order,
+                        runId: turn.runId,
+                    });
+                    order += 1;
+                }
+            }
             for (const retry of turn.retries ?? []) {
+                // The group it happened in is recorded, because an attempt and
+                // the boundary beside it routinely share a millisecond.
+                const inGroup =
+                    retry.groupId === undefined
+                        ? undefined
+                        : groupIndexByMessageId.get(retry.groupId);
                 timeline.push({
                     at: retry.createdAt,
                     eventId: retry.id,
+                    groupIndex: inGroup ?? groupsClosedBy(retry.createdAt),
                     kind: "retry" as const,
                     order,
                     retry,
@@ -1391,6 +1544,7 @@ export class ChatStore {
                 timeline.push({
                     at: turn.endedAt,
                     ...(turn.errorMessage === undefined ? {} : { errorMessage: turn.errorMessage }),
+                    groupIndex: groupsClosedBy(turn.endedAt),
                     kind: "end",
                     order,
                     outcome: turn.outcome ?? "success",
@@ -1399,19 +1553,40 @@ export class ChatStore {
                 order += 1;
             }
         }
+        const priority = (item: OrderedItem): number =>
+            item.kind === "message" && item.steered === true
+                ? timelinePriority("compaction")
+                : timelinePriority(item.kind);
         timeline.sort(
             (left, right) =>
                 left.at - right.at ||
+                left.groupIndex - right.groupIndex ||
+                priority(left) - priority(right) ||
                 compareEventOrder(left.eventId, right.eventId) ||
                 left.order - right.order,
         );
         for (const item of timeline) {
             this.#turnId = item.runId;
-            if (item.kind === "message") {
+            if (item.kind === "group_start") {
+                this.#startGroup(item.group.id, item.runId, item.at, deltas);
+            } else if (item.kind === "group_end") {
+                this.#endGroup(
+                    item.group.reason ?? "completed",
+                    item.group.outcome ?? "success",
+                    item.at,
+                    deltas,
+                    item.group.errorMessage,
+                );
+            } else if (item.kind === "message") {
                 const steeredAt = transcript.messageSteeredAt?.[item.message.id];
+                if (steeredAt !== undefined) {
+                    this.#endGroup("steering", "success", steeredAt, deltas);
+                } else if (item.message.role === "user") {
+                    this.#pendingNextGroupElementIds.push(`message:${item.message.id}`);
+                }
                 this.#applyMessage(
                     item.message,
-                    item.at,
+                    transcript.messageCreatedAt?.[item.message.id] ?? item.at,
                     deltas,
                     item.runId,
                     "sent",
@@ -1420,6 +1595,12 @@ export class ChatStore {
                         ? undefined
                         : this.#steeringTiming(item.runId, steeredAt),
                 );
+                if (steeredAt !== undefined) {
+                    this.#update(`message:${item.message.id}`, {
+                        groupId: `steering:${item.message.id}`,
+                    });
+                    this.#pendingNextGroupElementIds.push(`message:${item.message.id}`);
+                }
             } else if (item.kind === "retry") {
                 this.#appendRetry(
                     item.retry.id,
@@ -1429,6 +1610,17 @@ export class ChatStore {
                     item.retry.reason,
                 );
             } else {
+                this.#endGroup(
+                    item.outcome === "error"
+                        ? "error"
+                        : item.outcome === "stopped"
+                          ? "abort"
+                          : "completed",
+                    item.outcome,
+                    item.at,
+                    deltas,
+                    item.errorMessage,
+                );
                 this.#endTurn(item.runId, item.outcome, item.errorMessage, item.at, deltas, false);
             }
         }
@@ -1437,14 +1629,14 @@ export class ChatStore {
             this.#openTurnIds
                 .map((turnId) => {
                     const startedAt = this.#turnStartedAt.get(turnId);
-                    return startedAt === undefined ? undefined : { startedAt, turnId };
+                    return startedAt === undefined ? undefined : { runId: turnId, startedAt };
                 })
                 .find((turn): turn is ActiveTurn => turn !== undefined);
         if (restored === undefined) {
             this.#turnId = undefined;
         } else {
-            this.#rememberTurn(restored.turnId, restored.startedAt);
-            this.#activateTurn(restored.turnId, restored.startedAt, deltas);
+            this.#rememberTurn(restored.runId, restored.startedAt);
+            this.#activateTurn(restored.runId, restored.startedAt, deltas);
         }
     }
 
@@ -1477,18 +1669,174 @@ export class ChatStore {
 
     #activateTurn(runId: string, startedAt: number, deltas: ChatDelta[]): void {
         if (
-            this.#session.activeTurn?.turnId === runId &&
+            this.#session.activeTurn?.runId === runId &&
             this.#session.activeTurn.startedAt === startedAt
         ) {
             this.#turnId = runId;
             return;
         }
         this.#turnId = runId;
-        this.#session = { ...this.#session, activeTurn: { startedAt, turnId: runId } };
+        this.#session = { ...this.#session, activeTurn: { runId, startedAt } };
         this.#streamingElementIds.clear();
         this.#streamingMessageId = undefined;
         this.#turnUsage = undefined;
-        deltas.push({ type: "turn_started", startedAt, turnId: runId });
+        deltas.push({ runId, startedAt, type: "turn_started" });
+    }
+
+    /**
+     * Opens the inference segment the user is waiting on.
+     *
+     * A run reaches the model repeatedly to work through its tool calls, and all
+     * of that is one thing the person asked for. So a group spans every
+     * iteration of the run and closes only when the work stops: the run ends,
+     * the user steers it, the user aborts it, or it fails.
+     */
+    #startGroup(messageId: string, runId: string, at: number, deltas: ChatDelta[]): void {
+        if (this.#groupId !== undefined) {
+            if (this.#groupRunId === runId) return;
+            this.#endGroup("completed", "success", at, deltas);
+        }
+        const groupId = `group:${messageId}`;
+        this.#runsWithGroups.add(runId);
+        this.#groupId = groupId;
+        this.#groupRunId = runId;
+        this.#groupStartedAt = at;
+        this.#groupPlaceholderId = `group-start:${messageId}`;
+        for (const pendingElementId of this.#pendingNextGroupElementIds) {
+            this.#update(pendingElementId, { groupId });
+        }
+        this.#pendingNextGroupElementIds = [];
+        this.#session = {
+            ...this.#session,
+            activeGroup: { groupId, runId, startedAt: at },
+        };
+        this.#turnUsage = undefined;
+        this.#append({
+            createdAt: at,
+            groupId,
+            id: this.#groupPlaceholderId,
+            kind: "inference",
+            runId,
+            state: "waiting",
+        });
+        deltas.push({ groupId, runId, startedAt: at, type: "group_started" });
+    }
+
+    /** The group currently open, if one is. */
+    #openGroupIdentity(): { groupId: string; runId: string; startedAt: number } | undefined {
+        const groupId = this.#groupId;
+        const runId = this.#groupRunId;
+        const startedAt = this.#groupStartedAt;
+        if (groupId === undefined || runId === undefined || startedAt === undefined)
+            return undefined;
+        return { groupId, runId, startedAt };
+    }
+
+    /**
+     * The group a run that never reached the model still has to close.
+     *
+     * A run can fail before inference starts at all, and the question is still
+     * asked and still has to end. Without this it would end with nothing: no
+     * failure, no footer, and the guarantee that a group always closes broken
+     * exactly where a reader most needs to be told what happened.
+     *
+     * Only the end of a run makes one. Steering and compaction close whatever
+     * is open, and when nothing is open there is nothing for them to close.
+     */
+    #emptyGroupIdentity(
+        reason: GroupEndReason,
+    ): { groupId: string; runId: string; startedAt: number } | undefined {
+        if (reason === "steering" || reason === "compaction") return undefined;
+        const runId = this.#turnId;
+        if (runId === undefined || this.#runsWithGroups.has(runId)) return undefined;
+        const startedAt = this.#turnStartedAt.get(runId);
+        if (startedAt === undefined) return undefined;
+        return { groupId: `run:${runId}`, runId, startedAt };
+    }
+
+    #endGroup(
+        reason: GroupEndReason,
+        outcome: GroupEndElement["outcome"],
+        at: number,
+        deltas: ChatDelta[],
+        errorMessage?: string,
+    ): void {
+        const synthesized = this.#openGroupIdentity() === undefined;
+        const open = this.#openGroupIdentity() ?? this.#emptyGroupIdentity(reason);
+        if (open === undefined) return;
+        const { groupId, runId, startedAt } = open;
+        if (synthesized) {
+            // The question was waiting for a group that never opened. This is
+            // that group, so it takes what belongs to this run; leaving those
+            // waiting would hand them to the next run's first group instead.
+            // Questions queued behind it keep waiting for their own run.
+            this.#pendingNextGroupElementIds = this.#pendingNextGroupElementIds.filter(
+                (pendingElementId) => {
+                    const element = this.#byId.get(pendingElementId);
+                    if (element !== undefined && element.runId !== runId) return true;
+                    this.#update(pendingElementId, { groupId });
+                    return false;
+                },
+            );
+        }
+        // Steering and compaction restart a group, so the group's own start is
+        // not where the person's question began. Both are kept.
+        // A turn whose start predates the retained log reports 0, meaning
+        // unknown. Taking it would report the epoch as the moment the person
+        // asked, so the group's own start stands in for it.
+        const knownTurnStartedAt = this.#turnStartedAt.get(runId);
+        const turnStartedAt =
+            knownTurnStartedAt === undefined || knownTurnStartedAt === 0
+                ? startedAt
+                : Math.min(startedAt, knownTurnStartedAt);
+        this.#closeOpenElements(outcome);
+        // A real failure gets its own line, the same line a failed attempt gets.
+        // Steering, compaction, and abort stop the group without failing it, so
+        // they get none.
+        if (reason === "error" && errorMessage !== undefined) {
+            this.#append({
+                createdAt: at,
+                groupId,
+                id: `failure:${groupId}`,
+                kind: "failure",
+                outcome: "failed",
+                reason: errorMessage,
+                runId,
+            });
+        }
+        this.#append({
+            createdAt: at,
+            elapsedMs: Math.max(0, at - startedAt),
+            endedAt: at,
+            groupId,
+            id: `group-end:${groupId}`,
+            kind: "group_end",
+            outcome,
+            reason,
+            runId,
+            startedAt,
+            turnElapsedMs: Math.max(0, at - turnStartedAt),
+            turnStartedAt,
+            ...(errorMessage === undefined ? {} : { errorMessage }),
+            ...(this.#turnUsage === undefined ? {} : { usage: this.#turnUsage }),
+        });
+        this.#session = withoutKeys(this.#session, ["activeGroup"]);
+        this.#groupId = undefined;
+        this.#groupPlaceholderId = undefined;
+        this.#groupRunId = undefined;
+        this.#groupStartedAt = undefined;
+        this.#streamingElementIds.clear();
+        this.#streamingMessageId = undefined;
+        this.#turnUsage = undefined;
+        deltas.push({
+            endedAt: at,
+            groupId,
+            outcome,
+            reason,
+            runId,
+            startedAt,
+            type: "group_ended",
+        });
     }
 
     /**
@@ -1499,7 +1847,7 @@ export class ChatStore {
      */
     #endTurn(
         turnId: string,
-        outcome: TurnEndElement["outcome"],
+        outcome: GroupEndElement["outcome"],
         errorMessage: string | undefined,
         at: number,
         deltas: ChatDelta[],
@@ -1507,37 +1855,18 @@ export class ChatStore {
     ): void {
         const startedAt = this.#turnStartedAt.get(turnId);
         if (startedAt === undefined) return;
-        // Text and tool calls left open by an interrupted turn are closed here so
-        // no element stays perpetually in progress.
-        if (this.#session.activeTurn?.turnId === turnId) this.#closeOpenElements(outcome);
-        this.#append({
-            createdAt: at,
-            elapsedMs: Math.max(0, at - startedAt),
-            endedAt: at,
-            // Derived from the turn rather than a counter: a turn ends exactly
-            // once, and rebuilding the list after a recovery has to produce the
-            // same identity so a reader keeps their place.
-            id: `turn:${turnId}`,
-            kind: "turn_end",
-            outcome,
-            startedAt,
-            turnId,
-            ...(errorMessage === undefined ? {} : { errorMessage }),
-            // Omitted rather than zeroed when nothing was reported, because a
-            // free turn and an unmeasured one are different statements.
-            ...(this.#turnUsage === undefined ? {} : { usage: this.#turnUsage }),
-        });
         this.#turnUsage = undefined;
         this.#turnStartedAt.delete(turnId);
-        this.#lastSteeredAt.delete(turnId);
+        this.#lastBoundaryAt.delete(turnId);
+        this.#runsWithGroups.delete(turnId);
         this.#openTurnIds = this.#openTurnIds.filter((openTurnId) => openTurnId !== turnId);
-        if (this.#session.activeTurn?.turnId === turnId) {
+        if (this.#session.activeTurn?.runId === turnId) {
             this.#session = withoutKeys(this.#session, ["activeTurn"]);
             this.#turnId = undefined;
             this.#streamingElementIds.clear();
             this.#streamingMessageId = undefined;
         }
-        deltas.push({ endedAt: at, outcome, startedAt, turnId, type: "turn_ended" });
+        deltas.push({ endedAt: at, outcome, runId: turnId, startedAt, type: "turn_ended" });
         if (!advance) return;
         const nextTurnId = this.#openTurnIds[0];
         const nextStartedAt =
@@ -1547,7 +1876,7 @@ export class ChatStore {
         }
     }
 
-    #closeOpenElements(outcome: TurnEndElement["outcome"]): void {
+    #closeOpenElements(outcome: GroupEndElement["outcome"]): void {
         for (const elementId of this.#streamingElementIds.values()) {
             const element = this.#byId.get(elementId);
             if (element === undefined) continue;
@@ -1585,6 +1914,9 @@ export class ChatStore {
             this.#rememberTurn(data.runId, event.createdAt);
             if (this.#session.activeTurn === undefined) {
                 this.#activateTurn(data.runId, event.createdAt, deltas);
+            }
+            if (!this.#pendingNextGroupElementIds.includes(`message:${data.message.id}`)) {
+                this.#pendingNextGroupElementIds.push(`message:${data.message.id}`);
             }
         }
         this.#applyMessage(
@@ -1633,14 +1965,22 @@ export class ChatStore {
         this.#session = { ...this.#session, shellCommands };
     }
 
+    /**
+     * Records an attempt that failed and was tried again.
+     *
+     * It lands in the group that was open, because a run fighting its way
+     * through provider failures is still answering the one question the group
+     * is about.
+     */
     #appendRetry(id: string, turnId: string, at: number, attempt: number, reason: string): void {
         this.#append({
             attempt,
             createdAt: at,
             id: `retry:${id}`,
-            kind: "retry",
+            kind: "failure",
+            outcome: "retried",
             reason,
-            turnId,
+            ...this.#elementIdentity(turnId),
         });
     }
 
@@ -1748,7 +2088,9 @@ export class ChatStore {
         if (message.internal === true) return;
         if (this.#appliedMessageIds.has(message.id)) {
             if (message.role === "agent") this.#reconcileAgentMessage(message, at);
-            if (message.role === "compaction") this.#applyCompactionMessage(message, at, turnId);
+            if (message.role === "compaction") {
+                this.#applyCompactionMessage(message, at, turnId, deltas);
+            }
             if (message.role === "user" && delivery === "pending_steering") {
                 this.#update(`message:${message.id}`, { delivery });
                 this.#presentPendingSteeringAtTail();
@@ -1762,7 +2104,7 @@ export class ChatStore {
                 id: `message:${message.id}`,
                 kind: "system_notice",
                 text: textOf(message.blocks),
-                turnId: turnId ?? `history:${message.id}`,
+                ...this.#elementIdentity(turnId ?? `history:${message.id}`),
             };
             this.#append(element);
             return;
@@ -1772,16 +2114,28 @@ export class ChatStore {
             return;
         }
         if (message.role === "compaction") {
-            this.#applyCompactionMessage(message, at, turnId);
+            this.#applyCompactionMessage(message, at, turnId, deltas);
             return;
         }
+        const runId = turnId ?? this.#turnId ?? `history:${message.id}`;
+        this.#startGroup(message.id, runId, at, deltas);
         this.#appendAgentBlocks(message, at, deltas, turnId);
     }
 
+    /**
+     * Renders the durable compaction message as the row it stands for.
+     *
+     * Watched live, the row already exists: the compaction's start opened it and
+     * closed the group there. This message is the same compaction, so it
+     * completes that row rather than adding a second one. Rebuilt from history
+     * there is no such row, and this message is the only record of it, so it
+     * both draws the row and makes the boundary the reader saw.
+     */
     #applyCompactionMessage(
         message: CompactionMessage,
         at: number,
-        turnId = this.#turnId,
+        turnId: string | undefined,
+        deltas: ChatDelta[],
     ): void {
         const id = `message:${message.id}`;
         const update = {
@@ -1799,13 +2153,19 @@ export class ChatStore {
             this.#update(id, update);
             return;
         }
+        const runId = turnId ?? this.#turnId ?? `history:${message.id}`;
+        const timing = this.#boundaryTiming(runId, at);
+        this.#endGroup("compaction", "success", at, deltas);
         this.#append({
             ...update,
+            ...timing,
             createdAt: at,
             id,
             kind: "compaction",
-            turnId: turnId ?? `history:${message.id}`,
+            ...this.#elementIdentity(runId),
         });
+        // It heads the group that follows, exactly as a steering message does.
+        this.#pendingNextGroupElementIds.push(id);
     }
 
     #appendUserMessage(
@@ -1830,7 +2190,7 @@ export class ChatStore {
             ...(source === undefined ? {} : { source }),
             ...(steering === undefined ? {} : steering),
             text: textOf(message.blocks),
-            turnId: turnId ?? `history:${message.id}`,
+            ...this.#elementIdentity(turnId ?? `history:${message.id}`),
             ...(attachments.length === 0 ? {} : { attachments }),
         };
         this.#append(element);
@@ -1839,15 +2199,29 @@ export class ChatStore {
     #steeringTiming(
         turnId: string,
         steeredAt: number,
-    ): Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs"> {
+    ): Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs" | "turnElapsedMs"> {
+        return { steeredAt, ...this.#boundaryTiming(turnId, steeredAt) };
+    }
+
+    /**
+     * Measures a steering or compaction from both starts a reader can mean.
+     *
+     * Either one restarts the group, so the time since the last boundary is what
+     * the block on screen took, while the time since the turn began is what the
+     * whole question has cost so far. Which one to show is the UI's choice, so
+     * both are recorded and neither is preferred here.
+     */
+    #boundaryTiming(
+        turnId: string,
+        at: number,
+    ): Pick<UserMessageElement, "steeringElapsedMs" | "turnElapsedMs"> {
         const startedAt = this.#turnStartedAt.get(turnId);
-        const previous =
-            this.#lastSteeredAt.get(turnId) ??
-            (startedAt === undefined || startedAt === 0 ? undefined : startedAt);
-        this.#lastSteeredAt.set(turnId, steeredAt);
+        const turnStartedAt = startedAt === undefined || startedAt === 0 ? undefined : startedAt;
+        const previous = this.#lastBoundaryAt.get(turnId) ?? turnStartedAt;
+        this.#lastBoundaryAt.set(turnId, at);
         return {
-            steeredAt,
-            steeringElapsedMs: previous === undefined ? 0 : Math.max(0, steeredAt - previous),
+            steeringElapsedMs: previous === undefined ? 0 : Math.max(0, at - previous),
+            turnElapsedMs: turnStartedAt === undefined ? 0 : Math.max(0, at - turnStartedAt),
         };
     }
 
@@ -1876,13 +2250,13 @@ export class ChatStore {
                     continue;
                 }
                 if (block.text.length === 0) continue;
-                this.#append({
+                this.#appendGroupContent({
                     complete: true,
                     createdAt: at,
                     id: `${message.id}:agent_text:${contentIndex}`,
                     kind: "agent_text",
                     text: block.text,
-                    turnId: elementTurnId,
+                    ...this.#elementIdentity(elementTurnId),
                 });
                 continue;
             }
@@ -1895,13 +2269,13 @@ export class ChatStore {
                     continue;
                 }
                 if (block.thinking.length === 0) continue;
-                this.#append({
+                this.#appendGroupContent({
                     complete: true,
                     createdAt: at,
                     id: `${message.id}:thinking:${contentIndex}`,
                     kind: "thinking",
                     text: block.thinking,
-                    turnId: elementTurnId,
+                    ...this.#elementIdentity(elementTurnId),
                 });
                 continue;
             }
@@ -1936,6 +2310,7 @@ export class ChatStore {
      */
     #applyPartialMessage(message: AgentMessage, runId: string, deltas: ChatDelta[]): void {
         this.#startTurn(runId, this.#session.activity.since, deltas);
+        this.#startGroup(message.id, runId, this.#session.activity.since, deltas);
         this.#streamingMessageId = message.id;
         for (const [contentIndex, block] of message.blocks.entries()) {
             if (isTextBlock(block)) {
@@ -1951,12 +2326,15 @@ export class ChatStore {
         }
     }
 
-    #applyAgentEvent(event: AgentLoopEvent, at: number, deltas: ChatDelta[]): void {
+    #applyAgentEvent(event: AgentLoopEvent, at: number, deltas: ChatDelta[], runId: string): void {
         switch (event.type) {
-            case "inference_iteration_start":
-                this.#streamingMessageId = (event as { messageId: string }).messageId;
+            case "inference_iteration_start": {
+                const messageId = (event as { messageId: string }).messageId;
+                this.#startGroup(messageId, runId, at, deltas);
+                this.#streamingMessageId = messageId;
                 this.#streamingElementIds.clear();
                 return;
+            }
             case "block_reset":
                 // The provider restarted the message mid-stream, so everything
                 // already shown for it was tentative. It is dropped rather than
@@ -2015,6 +2393,15 @@ export class ChatStore {
                     compactionId: string;
                     estimatedTokensBefore: number;
                 };
+                // A compaction the user asked for runs on its own, with no
+                // turn open. Its own run identifies it.
+                const compactionRunId = this.#turnId ?? runId;
+                // Compaction is a boundary like steering: the group the reader
+                // was watching ends here, and this element heads the next one.
+                const timing = this.#boundaryTiming(compactionRunId, at);
+                this.#endGroup("compaction", "success", at, deltas);
+                // The compaction is durable history in its own right, so the
+                // row it opens here is the one its message later completes.
                 const id = `message:${data.compactionId}`;
                 this.#compactionElementIds.set(data.compactionId, id);
                 this.#append({
@@ -2024,8 +2411,10 @@ export class ChatStore {
                     id,
                     kind: "compaction",
                     status: "running",
-                    turnId: this.#turnId ?? `compaction:${data.compactionId}`,
+                    ...timing,
+                    ...this.#elementIdentity(compactionRunId),
                 });
+                this.#pendingNextGroupElementIds.push(id);
                 deltas.push({ type: "compaction_started", compactionId: data.compactionId });
                 return;
             }
@@ -2144,15 +2533,15 @@ export class ChatStore {
         const existingId = this.#streamingElementIds.get(key);
         if (existingId === undefined) {
             const id = `${data.messageId ?? this.#streamingMessageId ?? "stream"}:${kind}:${data.contentIndex}`;
-            this.#streamingElementIds.set(key, id);
-            this.#append({
+            const actualId = this.#appendGroupContent({
                 complete: false,
                 createdAt: at,
                 id,
                 kind,
                 text: data.delta ?? data.content ?? "",
-                turnId: this.#turnId ?? "",
+                ...this.#elementIdentity(this.#turnId ?? ""),
             } as AgentTextElement | ThinkingElement);
+            this.#streamingElementIds.set(key, actualId);
             return;
         }
         const existing = this.#byId.get(existingId);
@@ -2181,8 +2570,19 @@ export class ChatStore {
         const key = streamKey("tool_call", data.contentIndex);
         const existingId = this.#streamingElementIds.get(key);
         if (data.toolCall !== undefined) {
-            // The finished call carries its real identity, so the placeholder is
-            // replaced by an element keyed on the daemon's tool-call id.
+            const existing = existingId === undefined ? undefined : this.#byId.get(existingId);
+            if (existing?.kind === "tool_call" && existing.toolCallId.length === 0) {
+                this.#streamingElementIds.delete(key);
+                this.#toolCallElementIds.set(data.toolCall.id, existing.id);
+                this.#replace(existing.id, {
+                    ...existing,
+                    arguments: data.toolCall.arguments,
+                    argumentsComplete: true,
+                    name: data.toolCall.name,
+                    toolCallId: data.toolCall.id,
+                });
+                return;
+            }
             if (existingId !== undefined) this.#remove(existingId);
             this.#streamingElementIds.delete(key);
             this.#upsertToolCall(
@@ -2199,8 +2599,7 @@ export class ChatStore {
         }
         if (existingId !== undefined) return;
         const id = `${data.messageId ?? this.#streamingMessageId ?? "stream"}:tool:${data.contentIndex}`;
-        this.#streamingElementIds.set(key, id);
-        this.#append({
+        const actualId = this.#appendGroupContent({
             arguments: undefined,
             argumentsComplete: false,
             createdAt: at,
@@ -2209,8 +2608,9 @@ export class ChatStore {
             name: "",
             status: "pending",
             toolCallId: "",
-            turnId: this.#turnId ?? "",
+            ...this.#elementIdentity(this.#turnId ?? ""),
         });
+        this.#streamingElementIds.set(key, actualId);
     }
 
     /** Adds a tool call, or fills in the one already shown for the same call. */
@@ -2229,7 +2629,6 @@ export class ChatStore {
             return existingId;
         }
         const id = `tool:${block.id}`;
-        this.#toolCallElementIds.set(block.id, id);
         if (block.presentation !== undefined) this.#callPresentations.set(id, block.presentation);
         const element: ToolCallElement = {
             argumentsComplete: true,
@@ -2240,7 +2639,7 @@ export class ChatStore {
             name: block.name,
             status: "pending",
             toolCallId: block.id,
-            turnId,
+            ...this.#elementIdentity(turnId),
             ...(this.#permissionReviewsByToolCallId.get(block.id) === undefined
                 ? {}
                 : {
@@ -2250,8 +2649,13 @@ export class ChatStore {
                   }),
             ...presentationOf(projectToolPresentation(block.presentation, undefined)),
         };
-        this.#append(element);
-        return id;
+        const actualId = this.#appendGroupContent(element);
+        this.#toolCallElementIds.set(block.id, actualId);
+        if (actualId !== id && block.presentation !== undefined) {
+            this.#callPresentations.delete(id);
+            this.#callPresentations.set(actualId, block.presentation);
+        }
+        return actualId;
     }
 
     #applyToolResult(block: ToolResultBlock): void {
@@ -2295,19 +2699,20 @@ export class ChatStore {
         messageId: string,
     ): void {
         const id = `${messageId}:${kind}:${index}`;
-        this.#streamingElementIds.set(streamKey(kind, index), id);
         if (this.#byId.has(id)) {
             this.#update(id, { text });
+            this.#streamingElementIds.set(streamKey(kind, index), id);
             return;
         }
-        this.#append({
+        const actualId = this.#appendGroupContent({
             complete: false,
             createdAt: this.#session.activity.since,
             id,
             kind,
             text,
-            turnId: this.#turnId ?? "",
+            ...this.#elementIdentity(this.#turnId ?? ""),
         } as AgentTextElement | ThinkingElement);
+        this.#streamingElementIds.set(streamKey(kind, index), actualId);
     }
 
     #append(element: ChatElement): void {
@@ -2333,6 +2738,48 @@ export class ChatStore {
     }
 
     /**
+     * Makes the first real output occupy the row inference created up front.
+     *
+     * Its shape may change from `inference` to text, thinking, or tool call, but
+     * its stable element id and list position do not.
+     */
+    #appendGroupContent(element: ChatElement): string {
+        const placeholderId = this.#groupPlaceholderId;
+        const placeholder = placeholderId === undefined ? undefined : this.#byId.get(placeholderId);
+        if (placeholder?.kind !== "inference") {
+            this.#append(element);
+            return element.id;
+        }
+        const replacement = {
+            ...element,
+            createdAt: placeholder.createdAt,
+            groupId: placeholder.groupId,
+            id: placeholder.id,
+            runId: placeholder.runId,
+        } as ChatElement;
+        this.#replace(placeholder.id, replacement);
+        this.#groupPlaceholderId = undefined;
+        return placeholder.id;
+    }
+
+    /** Replaces one row exactly, including a change of discriminated-union kind. */
+    #replace(id: string, replacement: ChatElement): void {
+        const existing = this.#byId.get(id);
+        const index = this.#indexById.get(id);
+        if (existing === undefined || index === undefined) return;
+        const kept = this.#priorElements?.get(id);
+        if (kept !== undefined && isSameElement(kept, replacement)) replacement = kept;
+        this.#byId.set(id, replacement);
+        const next = this.#elements.slice();
+        next[index] = replacement;
+        this.#elements = next;
+        this.#revision += 1;
+        if (existing.kind === "tool_call" || replacement.kind === "tool_call") {
+            this.#groupingDirty = true;
+        }
+    }
+
+    /**
      * Replaces one element with an updated copy.
      *
      * Only that element gets a new reference; every other element in the new
@@ -2343,8 +2790,10 @@ export class ChatStore {
     #update(id: string, changes: Partial<ChatElement>): void {
         const existing = this.#byId.get(id);
         if (existing === undefined) return;
-        const updated = { ...existing, ...changes } as ChatElement;
+        let updated = { ...existing, ...changes } as ChatElement;
         if (isUnchanged(existing, updated)) return;
+        const kept = this.#priorElements?.get(id);
+        if (kept !== undefined && isSameElement(kept, updated)) updated = kept;
         const index = this.#indexById.get(id);
         if (index === undefined) return;
         this.#byId.set(id, updated);
@@ -2352,7 +2801,7 @@ export class ChatStore {
         next[index] = updated;
         this.#elements = next;
         this.#revision += 1;
-        if (updated.kind === "tool_call" && updated.turnId !== existing.turnId) {
+        if (updated.kind === "tool_call" && updated.groupId !== existing.groupId) {
             this.#groupingDirty = true;
         }
     }
@@ -2403,6 +2852,23 @@ export class ChatStore {
         this.#revision += 1;
     }
 
+    /** Places newly applied steering after the group-ending row in event order. */
+    #moveElementsToTail(elementIds: readonly string[]): void {
+        const moved = elementIds.filter((id) => this.#byId.has(id));
+        if (moved.length === 0) return;
+        const movedSet = new Set(moved);
+        this.#chronologicalElementIds = [
+            ...this.#chronologicalElementIds.filter((id) => !movedSet.has(id)),
+            ...moved,
+        ];
+        this.#elements = this.#chronologicalElementIds.flatMap((id) => {
+            const element = this.#byId.get(id);
+            return element === undefined ? [] : [element];
+        });
+        this.#reindex();
+        this.#revision += 1;
+    }
+
     /** Rebuilds the position index after the list order or length changed. */
     #reindex(): void {
         this.#indexById.clear();
@@ -2411,9 +2877,8 @@ export class ChatStore {
         }
     }
 
-    #nextId(prefix: string): string {
-        this.#sequence += 1;
-        return `${prefix}:${this.#session.sessionId}:${this.#sequence}`;
+    #elementIdentity(runId: string): { groupId: string; runId: string } {
+        return { groupId: this.#groupId ?? `run:${runId}`, runId };
     }
 }
 
@@ -2427,6 +2892,17 @@ function streamKey(kind: string, index: number): number {
 function compareEventOrder(left: string | undefined, right: string | undefined): number {
     if (left === undefined || right === undefined || left === right) return 0;
     return left < right ? -1 : 1;
+}
+
+/** Orders what shares a millisecond: boundary, open, contents, close. */
+function timelinePriority(kind: string): number {
+    // A compaction closed the group before it and heads the one after, so it
+    // stands ahead of that group opening, the way a steering message does.
+    if (kind === "compaction") return 0;
+    if (kind === "group_start") return 1;
+    if (kind === "group_end") return 3;
+    if (kind === "end") return 4;
+    return 2;
 }
 
 function toolStatus(result: {

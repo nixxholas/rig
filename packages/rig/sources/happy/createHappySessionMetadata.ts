@@ -1,6 +1,11 @@
 import { hostname, homedir, platform, release } from "node:os";
 
-import type { ModelCatalog, ProtocolSession, SubagentSummary } from "../protocol/index.js";
+import type {
+    ModelCatalog,
+    ProtocolSession,
+    SessionActivity,
+    SubagentSummary,
+} from "../protocol/index.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import type { HappyConnectionConfiguration, HappySessionMetadata } from "./types.js";
 import { createHappyCatalogMetadata } from "./createHappyCatalogMetadata.js";
@@ -9,6 +14,7 @@ import { HAPPY_PERMISSION_MODES } from "./happyPermissionModes.js";
 import { HAPPY_SESSION_RPC_METHODS } from "./handleHappySessionRpc.js";
 
 export function createHappySessionMetadata(options: {
+    activity: SessionActivity;
     configuration: HappyConnectionConfiguration;
     modelCatalog?: ModelCatalog;
     project?: HappySessionMetadata["project"];
@@ -17,7 +23,7 @@ export function createHappySessionMetadata(options: {
     summaryUpdatedAt: number;
     workspace?: HappySessionMetadata["workspace"];
 }): HappySessionMetadata {
-    const { configuration, modelCatalog, session, subagents, summaryUpdatedAt } = options;
+    const { activity, configuration, modelCatalog, session, subagents, summaryUpdatedAt } = options;
     const providerModels =
         modelCatalog !== undefined && modelCatalog.providers.length > 0
             ? modelCatalog.providers.flatMap((provider) =>
@@ -53,6 +59,7 @@ export function createHappySessionMetadata(options: {
     return {
         activity: {
             processes: { running: processes.length },
+            session: activity,
             subagents: {
                 queued: queuedSubagents,
                 running: runningSubagents,

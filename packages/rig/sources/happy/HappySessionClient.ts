@@ -521,6 +521,7 @@ export class HappySessionClient {
             this.#summaryUpdatedAt = Date.now();
         }
         return createHappySessionMetadata({
+            activity: this.#session.activity(),
             configuration: this.#configuration,
             ...(this.#modelCatalog === undefined ? {} : { modelCatalog: this.#modelCatalog }),
             session: snapshot,
@@ -548,9 +549,12 @@ export class HappySessionClient {
     }
 
     #sendKeepAlive(remoteSessionId: string): void {
+        const activity = this.#session.activity();
         this.#socket?.emit("session-alive", {
+            activity,
             sid: remoteSessionId,
-            thinking: this.#session.snapshot().status === "running",
+            // Kept for older Happy clients. New clients read `activity`.
+            thinking: isWorkingActivity(activity.kind),
             time: Date.now(),
         });
     }
@@ -573,6 +577,18 @@ export class HappySessionClient {
         if (!response.ok) throw new Error(`Happy returned HTTP ${String(response.status)}.`);
         return response;
     }
+}
+
+function isWorkingActivity(kind: ReturnType<InMemorySession["activity"]>["kind"]): boolean {
+    return (
+        kind === "queued" ||
+        kind === "thinking" ||
+        kind === "generating_message" ||
+        kind === "generating_tool_call" ||
+        kind === "executing_tool_call" ||
+        kind === "compacting" ||
+        kind === "retrying"
+    );
 }
 
 function encodePayload(state: HappySessionState, value: unknown): string {

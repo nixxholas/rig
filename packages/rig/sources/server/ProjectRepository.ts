@@ -76,6 +76,8 @@ export interface ProjectRepositoryOptions {
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
     onEvent?: (event: ProjectEvent | ProjectWorkspaceEvent) => void;
+    /** Cleanup is best-effort after logical archival has already committed. */
+    onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     stateDirectory?: string;
     taskDrain?: TaskDrain;
     transaction?: <T>(body: () => T) => T;
@@ -93,6 +95,9 @@ export class ProjectRepository {
     readonly #pendingInitializations: string[] = [];
     readonly #now: () => number;
     readonly #onEvent: ((event: ProjectEvent | ProjectWorkspaceEvent) => void) | undefined;
+    readonly #onWorkspaceCleanupError:
+        | ((error: unknown, projectId: string, workspaceId: string) => void)
+        | undefined;
     readonly #stateDirectory: string;
     readonly #taskDrain: TaskDrain | undefined;
     readonly #transactionRunner: (<T>(body: () => T) => T) | undefined;
@@ -107,6 +112,7 @@ export class ProjectRepository {
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
         this.#now = options.now ?? Date.now;
         this.#onEvent = options.onEvent;
+        this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#taskDrain = options.taskDrain;
         this.#transactionRunner = options.transaction;
         this.#stateDirectory = normalizeFuturePath(
@@ -790,7 +796,7 @@ export class ProjectRepository {
                 );
             const workspace = this.getWorkspace(projectId, workspaceId);
             if (workspace === undefined) throw new Error("The workspace could not be reserved.");
-            this.#publishWorkspace("workspace_created", workspace);
+            this.#publishWorkspace("workspace_created", workspace, clientRequestId);
             return { created: true, workspace };
         });
         if (reservation.created) {
@@ -977,24 +983,11 @@ export class ProjectRepository {
                 this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
             } catch (error) {
                 if (!this.#closed) {
-                    this.#finishWorkspaceArchive(
-                        projectId,
-                        workspaceId,
-                        "archive_failed",
-                        errorToMessage(error),
-                    );
+                    this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
+                    this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
                 }
             }
         });
-        return this.getWorkspace(projectId, workspaceId);
-    }
-
-    failWorkspaceArchive(
-        projectId: string,
-        workspaceId: string,
-        error: string,
-    ): ProjectWorkspace | undefined {
-        this.#finishWorkspaceArchive(projectId, workspaceId, "archive_failed", error);
         return this.getWorkspace(projectId, workspaceId);
     }
 
@@ -1677,12 +1670,7 @@ export class ProjectRepository {
         });
     }
 
-    #finishWorkspaceArchive(
-        projectId: string,
-        workspaceId: string,
-        status: "archived" | "archive_failed",
-        error?: string,
-    ): void {
+    #finishWorkspaceArchive(projectId: string, workspaceId: string, status: "archived"): void {
         const now = this.#now();
         this.#transaction(() => {
             const result = this.#database
@@ -1694,14 +1682,7 @@ export class ProjectRepository {
                     WHERE id = ? AND project_id = ? AND status = 'archiving'
                     `,
                 )
-                .run(
-                    status,
-                    error?.slice(0, PROJECT_ERROR_LENGTH) ?? null,
-                    status === "archived" ? now : null,
-                    now,
-                    workspaceId,
-                    projectId,
-                );
+                .run(status, null, now, now, workspaceId, projectId);
             if (result.changes > 0) {
                 this.#publishedWorkspace(projectId, workspaceId);
             }

@@ -88,10 +88,7 @@ describe("automatic compaction inside one user turn", () => {
         running.add(gym);
 
         submit(gym, "Complete several tool iterations without ending this turn.");
-        const screen = await gym.terminal.waitForText(
-            "SAME_TURN_COMPACTION_CONTINUED",
-            30_000,
-        );
+        const screen = await gym.terminal.waitForText("SAME_TURN_COMPACTION_CONTINUED", 30_000);
         expect(screen.text).toContain("Context compacted");
         expect(screen.text).toContain("TOOL_BATCH_CLOSED");
         expect(screen.text).toContain("SECOND_BATCH_CLOSED");

@@ -66,17 +66,10 @@ export class CodexWebSocketConnection {
         if (!this.started) {
             const warmup =
                 request.tools === undefined
-                    ? createResponsesLiteWarmupRequest(
-                          request,
-                          toCodexToolDefinitions(tools),
-                      )
+                    ? createResponsesLiteWarmupRequest(request, toCodexToolDefinitions(tools))
                     : { ...structuredClone(request), input: [], generate: false };
             setCodexRequestKind(warmup, "prewarm");
-            for await (const event of this.send(
-                client,
-                warmup,
-                signal,
-            )) {
+            for await (const event of this.send(client, warmup, signal)) {
                 turnState.observe(event);
                 if (event.type === "response.completed")
                     this.previousResponseId = event.response.id;

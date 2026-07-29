@@ -2865,7 +2865,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
             modelId: this.#modelId,
-            orderKey: this.#orderKey,
+            ...(this.#orderKey === "" ? {} : { orderKey: this.#orderKey }),
             modelLocked: this.#modelLocked(),
             models: this.#models,
             projectSecretIds: this.#secrets.projectIds(),
@@ -2936,7 +2936,7 @@ export class InMemorySession {
             providerId: this.#providerId,
             permissionMode: this.#permissionMode,
             modelId: this.#modelId,
-            orderKey: this.#orderKey,
+            ...(this.#orderKey === "" ? {} : { orderKey: this.#orderKey }),
             ...(this.#effort !== undefined ? { effort: this.#effort } : {}),
             ...(this.#serviceTier !== undefined ? { serviceTier: this.#serviceTier } : {}),
             status: this.#status,
@@ -4152,7 +4152,51 @@ export class InMemorySession {
             this.#forgetUnreachableRunFacts();
             return;
         }
+        if (event.type === "agent_event" && event.data.event.type === "inference_iteration_start") {
+            const facts = this.#runFacts.get(event.data.runId) ?? {
+                startedAt: event.createdAt,
+            };
+            // A run reaches the model once per tool-call iteration, and all of
+            // that is one thing the user asked for. The group already open keeps
+            // going; only steering, an abort, or the end of the run closes it.
+            if ((facts.groups ?? []).some((group) => group.endedAt === undefined)) {
+                this.#runFacts.set(event.data.runId, facts);
+                return;
+            }
+            this.#runFacts.set(event.data.runId, {
+                ...facts,
+                groups: [
+                    ...(facts.groups ?? []),
+                    { id: event.data.event.messageId, startedAt: event.createdAt },
+                ],
+            });
+            return;
+        }
+        if (event.type === "steering_applied") {
+            // Which group a steering message heads cannot be read from the
+            // clock, so the group it closed is recorded against it.
+            const closedGroupId = this.#openRunGroupId(event.data.runId);
+            this.#closeRunGroup(event.data.runId, event.createdAt, "steering", "success");
+            this.#rememberBoundary(event.data.runId, closedGroupId, event.data.messageIds);
+            return;
+        }
+        if (
+            event.type === "agent_event" &&
+            event.data.event.type === "context_compaction_started"
+        ) {
+            // Compaction is a boundary like steering: what came before it is
+            // finished work, and what follows it is a new stretch. The
+            // compaction itself is durable history as a message, so only the
+            // boundary is recorded here.
+            const closedGroupId = this.#openRunGroupId(event.data.runId);
+            this.#closeRunGroup(event.data.runId, event.createdAt, "compaction", "success");
+            this.#rememberBoundary(event.data.runId, closedGroupId, [
+                event.data.event.compactionId,
+            ]);
+            return;
+        }
         if (event.type === "inference_retry") {
+            const openGroupId = this.#openRunGroupId(event.data.runId);
             const facts = this.#runFacts.get(event.data.runId) ?? {
                 startedAt: event.createdAt,
             };
@@ -4163,6 +4207,7 @@ export class InMemorySession {
                     {
                         attempt: event.data.attempt,
                         createdAt: event.createdAt,
+                        ...(openGroupId === undefined ? {} : { groupId: openGroupId }),
                         id: event.id,
                         reason: event.data.reason,
                     },
@@ -4171,6 +4216,21 @@ export class InMemorySession {
             return;
         }
         if (event.type === "run_finished") {
+            this.#closeRunGroup(
+                event.data.runId,
+                event.createdAt,
+                event.data.stopReason === "error"
+                    ? "error"
+                    : event.data.stopReason === "aborted"
+                      ? "abort"
+                      : "completed",
+                event.data.stopReason === "error"
+                    ? "error"
+                    : event.data.stopReason === "aborted"
+                      ? "stopped"
+                      : "success",
+                event.data.errorMessage,
+            );
             const started = this.#runFacts.get(event.data.runId);
             this.#runFacts.set(event.data.runId, {
                 ...(started ?? { startedAt: event.createdAt }),
@@ -4188,6 +4248,13 @@ export class InMemorySession {
             return;
         }
         if (event.type === "run_error") {
+            this.#closeRunGroup(
+                event.data.runId,
+                event.createdAt,
+                "error",
+                "error",
+                event.data.errorMessage,
+            );
             const started = this.#runFacts.get(event.data.runId);
             this.#runFacts.set(event.data.runId, {
                 ...(started ?? { startedAt: event.createdAt }),
@@ -4196,6 +4263,56 @@ export class InMemorySession {
                 outcome: "error",
             });
         }
+    }
+
+    /** The group open for a run, which is what a retry or compaction sits in. */
+    #openRunGroupId(runId: string): string | undefined {
+        return this.#runFacts.get(runId)?.groups?.findLast((group) => group.endedAt === undefined)
+            ?.id;
+    }
+
+    /** Ties the messages that made a boundary to the group they closed. */
+    #rememberBoundary(
+        runId: string,
+        closedGroupId: string | undefined,
+        messageIds: readonly string[],
+    ): void {
+        const facts = this.#runFacts.get(runId);
+        if (closedGroupId === undefined || facts === undefined) return;
+        this.#runFacts.set(runId, {
+            ...facts,
+            boundaryGroupIds: {
+                ...facts.boundaryGroupIds,
+                ...Object.fromEntries(messageIds.map((messageId) => [messageId, closedGroupId])),
+            },
+        });
+    }
+
+    #closeRunGroup(
+        runId: string,
+        endedAt: number,
+        reason: "completed" | "steering" | "compaction" | "abort" | "error",
+        outcome: "success" | "error" | "stopped",
+        errorMessage?: string,
+    ): void {
+        const facts = this.#runFacts.get(runId);
+        const openIndex =
+            facts?.groups?.findLastIndex((group) => group.endedAt === undefined) ?? -1;
+        if (facts === undefined || openIndex < 0) return;
+        this.#runFacts.set(runId, {
+            ...facts,
+            groups: (facts.groups ?? []).map((group, index) =>
+                index === openIndex
+                    ? {
+                          ...group,
+                          endedAt,
+                          outcome,
+                          reason,
+                          ...(errorMessage === undefined ? {} : { errorMessage }),
+                      }
+                    : group,
+            ),
+        });
     }
 
     #recordPermissionReview(event: SessionEvent): void {

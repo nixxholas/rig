@@ -78,7 +78,7 @@ import type {
     WriteSessionFileRequest,
     WriteSessionFileResponse,
 } from "../protocol/index.js";
-import { createEventIdFactory } from "../protocol/index.js";
+import { createEventIdFactory, RIG_PROTOCOL_VERSION } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -2163,6 +2163,7 @@ function healthResponse(
         durableGlobalEventQueue,
         healthy: true,
         identity,
+        protocolVersion: RIG_PROTOCOL_VERSION,
         ready: true,
         status: "ready",
     };
@@ -2827,12 +2828,14 @@ function buildGroupCatalog(
             (workspace) =>
                 projectIds.has(workspace.projectId) &&
                 workspace.archivedAt === undefined &&
+                workspace.status !== "archiving" &&
                 workspace.status !== "archived",
         );
     const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
     return {
         catalog: modelCatalog,
         identity,
+        protocolVersion: RIG_PROTOCOL_VERSION,
         projects,
         terminalGroups: store.remoteTerminals.groups().flatMap((group) =>
             !projectIds.has(group.scope.projectId) ||

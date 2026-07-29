@@ -127,9 +127,7 @@ export async function requestProviderCompaction(options: {
 }
 
 function requireCompactionUsage(
-    usage:
-        | Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens">
-        | undefined,
+    usage: Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens"> | undefined,
 ): Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens"> {
     if (usage === undefined) {
         throw new Error("The provider completed compaction without reporting token usage.");

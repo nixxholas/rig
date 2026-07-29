@@ -26,7 +26,7 @@ export function groupToolCalls(elements: readonly ChatElement[]): readonly ChatE
             flush();
             continue;
         }
-        if (run.length > 0 && run[0]?.turnId !== element.turnId) flush();
+        if (run.length > 0 && run[0]?.groupId !== element.groupId) flush();
         run.push(element);
     }
     flush();
@@ -35,13 +35,13 @@ export function groupToolCalls(elements: readonly ChatElement[]): readonly ChatE
     const grouped = elements.map((element) => {
         if (element.kind !== "tool_call") return element;
         const groupId = groupIds.get(element.id);
-        if (element.groupId === groupId) return element;
+        if (element.toolCallGroupId === groupId) return element;
         changed = true;
         if (groupId === undefined) {
-            const { groupId: _ungrouped, ...rest } = element;
+            const { toolCallGroupId: _ungrouped, ...rest } = element;
             return rest;
         }
-        return { ...element, groupId };
+        return { ...element, toolCallGroupId: groupId };
     });
     return changed ? grouped : elements;
 }

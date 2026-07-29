@@ -106,6 +106,7 @@ function sessionStateWithTranscript(
 
 function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
     return {
+        protocolVersion: 1,
         projects: [
             {
                 createdAt: 1,
@@ -137,6 +138,7 @@ function liveHello(
     return `event: hello\ndata: ${JSON.stringify({
         cursor,
         gap: options.gap ?? false,
+        protocolVersion: 1,
         resumed: options.resumed ?? false,
     })}\n\n`;
 }
@@ -149,6 +151,19 @@ function event(
     return `id: ${id}\nevent: update\ndata: ${JSON.stringify({
         cursor: id,
         event: { createdAt: 2, data, id, sessionId: "session-1", type },
+    })}\n\n`;
+}
+
+/** A global-scope frame: no session owns it, so it carries its own entity scope. */
+function globalEvent(
+    type: string,
+    data: Record<string, unknown>,
+    scope: Record<string, string>,
+    id = "01900000-0000-7000-8000-000000000003",
+): string {
+    return `id: ${id}\nevent: update\ndata: ${JSON.stringify({
+        cursor: id,
+        event: { createdAt: 2, data, id, type, ...scope },
     })}\n\n`;
 }
 
@@ -1116,6 +1131,110 @@ describe("connectRig mutations", () => {
             });
             await settle();
             expect(connection.projects()[0]?.name).toBe("After (2)");
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("shows one workspace for one creation, and never brings an archived one back", async () => {
+        const stream = streamResponse();
+        const created = {
+            baseRef: "main",
+            createdAt: 2,
+            id: "workspace-1",
+            kind: "git_worktree" as const,
+            name: "Feature",
+            orderKey: "a",
+            path: "/work/feature",
+            presence: "present" as const,
+            projectId: "project-1",
+            status: "ready" as const,
+            updatedAt: 2,
+            version: 1,
+        };
+        let catalogWorkspaces: unknown[] = [];
+        const createResponse = deferred<Response>();
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...groupsCatalog(),
+                                workspaces: catalogWorkspaces,
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname.endsWith("/archive")) {
+                    return Promise.resolve(new Response("{}", { status: 200 }));
+                }
+                // Held, because the stream is what usually announces the new
+                // workspace first; the answer to the request only confirms it.
+                return createResponse.promise;
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        const workspaceIds = () => connection.projects()[0]?.workspaces.map((item) => item.id);
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const mutationId = rig.createWorkspace({
+                baseRef: "main",
+                name: "Feature",
+                projectId: "project-1",
+            });
+            // One row appears at once, before the daemon has answered anything.
+            expect(workspaceIds()).toHaveLength(1);
+
+            await settle();
+            stream.write(
+                globalEvent(
+                    "workspace_created",
+                    { mutationId, workspace: created },
+                    { projectId: "project-1", workspaceId: created.id },
+                ),
+            );
+            await settle();
+            // The prediction became the real workspace rather than a second row.
+            expect(workspaceIds()).toEqual([created.id]);
+
+            createResponse.resolve(
+                new Response(JSON.stringify({ workspace: created }), { status: 200 }),
+            );
+            await settle();
+            expect(workspaceIds()).toEqual([created.id]);
+
+            rig.archiveWorkspace("project-1", created.id);
+            expect(workspaceIds()).toEqual([]);
+
+            // The daemon is still finishing the archive, so it keeps describing the
+            // workspace. The decision was the user's, and it stands.
+            await settle();
+            stream.write(
+                globalEvent(
+                    "workspace_updated",
+                    { workspace: { ...created, status: "archiving", version: 2 } },
+                    { projectId: "project-1", workspaceId: created.id },
+                    "01900000-0000-7000-8000-000000000004",
+                ),
+            );
+            await settle();
+            expect(workspaceIds()).toEqual([]);
+
+            // Even a reconnect whose snapshot still lists the workspace as present.
+            catalogWorkspaces = [{ ...created, version: 3 }];
+            stream.write(liveHello("01900000-0000-7000-8000-000000000005", { gap: true }));
+            await settle();
+            expect(workspaceIds()).toEqual([]);
         } finally {
             connection.close();
             rig.close();

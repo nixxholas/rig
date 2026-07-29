@@ -313,6 +313,18 @@ export async function runLocalProtocolServer(
                     );
                 }
             },
+            onWorkspaceCleanupError: (error, projectId, workspaceId) => {
+                daemonLog.record(
+                    "warning",
+                    "workspace_cleanup_failed",
+                    "Rig archived the workspace, but could not remove all of its local residue.",
+                    {
+                        error: errorToMessage(error),
+                        projectId,
+                        workspaceId,
+                    },
+                );
+            },
             taskDrain,
         });
         if (happyModule !== undefined && happyConfiguration !== undefined) {

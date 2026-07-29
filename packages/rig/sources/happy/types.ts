@@ -1,4 +1,5 @@
 import type { ToolCallPresentation } from "../agent/ToolCallPresentation.js";
+import type { SessionActivity } from "../protocol/index.js";
 
 export type HappyEncryptionVariant = "dataKey" | "legacy";
 
@@ -111,6 +112,8 @@ export type HappySpawnSessionResult =
 export interface HappySessionMetadata {
     activity: {
         processes: { running: number };
+        /** Exact current Rig activity; consumers must not infer it from a boolean. */
+        session: SessionActivity;
         subagents: { queued: number; running: number; total: number };
         tasks: { completed: number; inProgress: number; pending: number; total: number };
         workflows: { running: number; total: number };
@@ -217,6 +220,12 @@ export interface HappyUsage {
 
 export type HappySessionEvent =
     | { t: "file"; ref: string; name: string; size: number; mimeType?: string }
+    | {
+          t: "failure";
+          outcome: "retried" | "failed";
+          reason: string;
+          attempt?: number;
+      }
     | { t: "service"; text: string }
     | { t: "start"; title?: string }
     | { t: "stop" }
@@ -231,7 +240,13 @@ export type HappySessionEvent =
           presentation?: ToolCallPresentation;
           title: string;
       }
-    | { t: "turn-end"; status: "cancelled" | "completed" | "failed" }
+    | {
+          t: "turn-end";
+          status: "cancelled" | "completed" | "failed";
+          elapsedMs: number;
+          reason?: "completed" | "steering" | "compaction" | "abort" | "error";
+          turnElapsedMs: number;
+      }
     | { t: "turn-start" };
 
 export interface HappySessionEnvelope {

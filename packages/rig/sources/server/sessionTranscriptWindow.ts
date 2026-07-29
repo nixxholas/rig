@@ -1,6 +1,7 @@
 import type { Message } from "../agent/types.js";
 import type {
     EventId,
+    SessionTranscriptGroup,
     SessionTranscriptRetry,
     SessionTranscriptTurn,
     SessionTranscriptWindow,
@@ -13,7 +14,10 @@ export interface TranscriptRunFacts {
     endedAt?: number;
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
+    groups?: readonly SessionTranscriptGroup[];
     retries?: readonly SessionTranscriptRetry[];
+    /** The group each boundary message closed, keyed by message ID. */
+    boundaryGroupIds?: Readonly<Record<string, string>>;
 }
 
 export interface TranscriptEntry {
@@ -28,6 +32,51 @@ export function transcriptRunFacts(
     events: readonly SessionEvent[],
 ): ReadonlyMap<string, TranscriptRunFacts> {
     const facts = new Map<string, TranscriptRunFacts>();
+    const closeGroup = (
+        runId: string,
+        endedAt: number,
+        reason: NonNullable<SessionTranscriptGroup["reason"]>,
+        outcome: NonNullable<SessionTranscriptGroup["outcome"]>,
+        errorMessage?: string,
+    ) => {
+        const known = facts.get(runId);
+        if (known === undefined) return;
+        const openIndex = known.groups?.findLastIndex((group) => group.endedAt === undefined) ?? -1;
+        if (openIndex < 0) return;
+        facts.set(runId, {
+            ...known,
+            groups: (known.groups ?? []).map((group, index) =>
+                index === openIndex
+                    ? {
+                          ...group,
+                          endedAt,
+                          outcome,
+                          reason,
+                          ...(errorMessage === undefined ? {} : { errorMessage }),
+                      }
+                    : group,
+            ),
+        });
+    };
+    /** Ties the messages that made a boundary to the group they closed. */
+    const rememberBoundary = (
+        runId: string,
+        closedGroupId: string | undefined,
+        messageIds: readonly string[],
+    ) => {
+        const known = facts.get(runId);
+        if (closedGroupId === undefined || known === undefined) return;
+        facts.set(runId, {
+            ...known,
+            boundaryGroupIds: {
+                ...known.boundaryGroupIds,
+                ...Object.fromEntries(messageIds.map((messageId) => [messageId, closedGroupId])),
+            },
+        });
+    };
+    /** The group open for a run, which is what a retry or compaction sits in. */
+    const openGroupId = (runId: string): string | undefined =>
+        facts.get(runId)?.groups?.findLast((group) => group.endedAt === undefined)?.id;
     for (const event of events) {
         if (
             (event.type === "message_submitted" && event.data.delivery === "run") ||
@@ -36,7 +85,44 @@ export function transcriptRunFacts(
             if (!facts.has(event.data.runId)) {
                 facts.set(event.data.runId, { startedAt: event.createdAt });
             }
+        } else if (
+            event.type === "agent_event" &&
+            event.data.event.type === "inference_iteration_start"
+        ) {
+            const known = facts.get(event.data.runId) ?? { startedAt: event.createdAt };
+            // A run reaches the model once per tool-call iteration, and all of
+            // that is one thing the user asked for. The group already open keeps
+            // going; only steering, an abort, or the end of the run closes it.
+            if ((known.groups ?? []).some((group) => group.endedAt === undefined)) {
+                facts.set(event.data.runId, known);
+            } else {
+                facts.set(event.data.runId, {
+                    ...known,
+                    groups: [
+                        ...(known.groups ?? []),
+                        { id: event.data.event.messageId, startedAt: event.createdAt },
+                    ],
+                });
+            }
+        } else if (event.type === "steering_applied") {
+            // Which group a steering message heads cannot be read from the
+            // clock, so the group it closed is recorded against it.
+            const closedGroupId = openGroupId(event.data.runId);
+            closeGroup(event.data.runId, event.createdAt, "steering", "success");
+            rememberBoundary(event.data.runId, closedGroupId, event.data.messageIds);
+        } else if (
+            event.type === "agent_event" &&
+            event.data.event.type === "context_compaction_started"
+        ) {
+            // Compaction is a boundary like steering: what came before it is
+            // finished work, and what follows it is a new stretch. The
+            // compaction itself is durable history as a message, so only the
+            // boundary is recorded here.
+            const closedGroupId = openGroupId(event.data.runId);
+            closeGroup(event.data.runId, event.createdAt, "compaction", "success");
+            rememberBoundary(event.data.runId, closedGroupId, [event.data.event.compactionId]);
         } else if (event.type === "inference_retry") {
+            const retryGroupId = openGroupId(event.data.runId);
             const known = facts.get(event.data.runId) ?? { startedAt: event.createdAt };
             facts.set(event.data.runId, {
                 ...known,
@@ -45,6 +131,7 @@ export function transcriptRunFacts(
                     {
                         attempt: event.data.attempt,
                         createdAt: event.createdAt,
+                        ...(retryGroupId === undefined ? {} : { groupId: retryGroupId }),
                         id: event.id,
                         reason: event.data.reason,
                     },
@@ -65,6 +152,21 @@ export function transcriptRunFacts(
                     ? {}
                     : { errorMessage: event.data.errorMessage }),
             });
+            closeGroup(
+                event.data.runId,
+                event.createdAt,
+                event.data.stopReason === "error"
+                    ? "error"
+                    : event.data.stopReason === "aborted"
+                      ? "abort"
+                      : "completed",
+                event.data.stopReason === "error"
+                    ? "error"
+                    : event.data.stopReason === "aborted"
+                      ? "stopped"
+                      : "success",
+                event.data.errorMessage,
+            );
         } else if (event.type === "run_error") {
             const known = facts.get(event.data.runId);
             facts.set(event.data.runId, {
@@ -73,6 +175,13 @@ export function transcriptRunFacts(
                 errorMessage: event.data.errorMessage,
                 outcome: "error",
             });
+            closeGroup(
+                event.data.runId,
+                event.createdAt,
+                "error",
+                "error",
+                event.data.errorMessage,
+            );
         }
     }
     return facts;
@@ -148,6 +257,7 @@ export function sessionTranscriptWindow(
             ...(facts?.endedAt === undefined ? {} : { endedAt: facts.endedAt }),
             ...(facts?.outcome === undefined ? {} : { outcome: facts.outcome }),
             ...(facts?.errorMessage === undefined ? {} : { errorMessage: facts.errorMessage }),
+            ...(facts?.groups === undefined ? {} : { groups: facts.groups }),
             ...(facts?.retries === undefined ? {} : { retries: facts.retries }),
         };
     });
@@ -167,11 +277,21 @@ export function sessionTranscriptWindow(
             entry.steeredAt === undefined ? [] : [[entry.message.id, entry.steeredAt]],
         ),
     );
+    const messageBoundaryGroupId = Object.fromEntries(
+        keptEntries.flatMap((entry) => {
+            const groupId =
+                entry.runId === undefined
+                    ? undefined
+                    : runFacts.get(entry.runId)?.boundaryGroupIds?.[entry.message.id];
+            return groupId === undefined ? [] : [[entry.message.id, groupId]];
+        }),
+    );
     return {
         complete: kept.length === earlier.length,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
         ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
+        ...(Object.keys(messageBoundaryGroupId).length === 0 ? {} : { messageBoundaryGroupId }),
         messages: keptEntries.map((entry) => entry.message),
         turns,
     };

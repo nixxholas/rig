@@ -10,7 +10,7 @@ import type { InMemorySession } from "../server/InMemorySession.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
 import { HappySessionClient, type HappySessionClientOptions } from "./HappySessionClient.js";
 import { HappySyncOutboxFullError, HappySyncRepository } from "./HappySyncRepository.js";
-import { mapSessionEventToHappyMessages } from "./mapSessionEventToHappyMessages.js";
+import { HappyMessageMapper } from "./mapSessionEventToHappyMessages.js";
 import { handleHappySpawnSession } from "./handleHappySpawnSession.js";
 import type { HappyConnectionConfiguration } from "./types.js";
 
@@ -34,6 +34,7 @@ export class HappySyncService {
     readonly #attachRetryAfter = new Map<string, number>();
     readonly #backfillTimers = new Map<string, NodeJS.Timeout>();
     readonly #clients = new Map<string, HappySessionClient>();
+    readonly #messageMappers = new Map<string, HappyMessageMapper>();
     #closed = false;
     readonly #configuration: HappyConnectionConfiguration;
     readonly #credentialFingerprint: string;
@@ -124,11 +125,14 @@ export class HappySyncService {
                         : { socketFactory: this.#socketFactory }),
                 });
                 this.#clients.set(session.id, client);
-                client.enqueue(backfillMessages(session));
+                const backfill = backfillMessages(session);
+                this.#messageMappers.set(session.id, backfill.mapper);
+                client.enqueue(backfill.messages);
                 client.start();
                 this.#attachRetryAfter.delete(session.id);
             } catch (error) {
                 this.#clients.delete(session.id);
+                this.#messageMappers.delete(session.id);
                 this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
                 void client?.close().catch(() => undefined);
                 console.error(
@@ -149,6 +153,7 @@ export class HappySyncService {
             [...this.#clients.values()].map((client) => client.close()),
         );
         this.#clients.clear();
+        this.#messageMappers.clear();
         this.#repository.close();
         const failure = results.find(
             (result): result is PromiseRejectedResult => result.status === "rejected",
@@ -161,13 +166,16 @@ export class HappySyncService {
         if (session === undefined || session.snapshot().agent.type !== "primary") return;
         try {
             this.attach(session);
-            this.#clients.get(session.id)?.enqueue(mapSessionEventToHappyMessages(event));
+            const mapper = this.#messageMappers.get(session.id) ?? new HappyMessageMapper();
+            this.#messageMappers.set(session.id, mapper);
+            this.#clients.get(session.id)?.enqueue(mapper.map(event));
         } catch (error) {
             const client = this.#clients.get(session.id);
             if (error instanceof HappySyncOutboxFullError) {
                 this.#scheduleBackfill(session);
             } else if (client !== undefined && this.#clients.get(session.id) === client) {
                 this.#clients.delete(session.id);
+                this.#messageMappers.delete(session.id);
                 this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
                 void client.close().catch(() => undefined);
             }
@@ -190,7 +198,9 @@ export class HappySyncService {
                 return;
             }
             try {
-                client.enqueue(backfillMessages(session));
+                const backfill = backfillMessages(session);
+                this.#messageMappers.set(session.id, backfill.mapper);
+                client.enqueue(backfill.messages);
             } catch (error) {
                 this.#scheduleBackfill(session);
                 console.error(
@@ -203,11 +213,21 @@ export class HappySyncService {
     }
 }
 
-function backfillMessages(session: InMemorySession) {
-    return (session.events.since(undefined) ?? [])
-        .slice(-MAX_BACKFILLED_MESSAGES)
-        .flatMap(mapSessionEventToHappyMessages)
-        .slice(-MAX_BACKFILLED_MESSAGES);
+function backfillMessages(session: InMemorySession): {
+    mapper: HappyMessageMapper;
+    messages: ReturnType<HappyMessageMapper["map"]>;
+} {
+    const mapper = new HappyMessageMapper();
+    const mapped = (session.events.since(undefined) ?? []).flatMap((event) => mapper.map(event));
+    if (mapped.length <= MAX_BACKFILLED_MESSAGES) return { mapper, messages: mapped };
+    const cutoff = mapped.length - MAX_BACKFILLED_MESSAGES;
+    let start = cutoff;
+    for (let index = cutoff; index >= 0; index -= 1) {
+        if (mapped[index]?.content.ev.t !== "turn-start") continue;
+        start = index;
+        break;
+    }
+    return { mapper, messages: mapped.slice(start) };
 }
 
 function fingerprint(configuration: HappyConnectionConfiguration): string {

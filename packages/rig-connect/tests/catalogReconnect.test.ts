@@ -61,6 +61,7 @@ function session(lastEventId: string, title: string): SessionSummary {
 function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): GlobalStreamHello {
     return {
         cursor,
+        protocolVersion: 1,
         projects: [
             {
                 createdAt: 1,
@@ -85,7 +86,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
 }
 
 function liveHello(cursor: string, gap: boolean, resumed: boolean): string {
-    return `event: hello\ndata: ${JSON.stringify({ cursor, gap, resumed })}\n\n`;
+    return `event: hello\ndata: ${JSON.stringify({ cursor, gap, protocolVersion: 1, resumed })}\n\n`;
 }
 
 function titleEvent(title: string): string {

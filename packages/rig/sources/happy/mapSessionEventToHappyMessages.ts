@@ -3,78 +3,285 @@ import type { SessionEvent } from "../protocol/index.js";
 import type { Usage } from "@slopus/rig-execution";
 import type { HappySessionEnvelope, HappySessionProtocolMessage, HappyUsage } from "./types.js";
 
-export function mapSessionEventToHappyMessages(
-    event: SessionEvent,
-): readonly HappySessionProtocolMessage[] {
-    if (event.type === "message_submitted") {
-        if (event.data.message.id.startsWith("happy:")) return [];
-        return [
-            createMessage({
-                ev: { t: "text", text: event.data.displayText },
-                id: event.data.message.id,
-                role: "user",
-                time: event.createdAt,
-            }),
-        ];
-    }
-    if (event.type === "run_started") {
-        return [
-            agentMessage(event, `${event.id}:turn-start`, event.data.runId, { t: "turn-start" }),
-        ];
-    }
-    if (event.type === "run_finished") {
-        if (event.data.stopReason === "error") {
+interface ActiveHappyGroup {
+    id: string;
+    startedAt: number;
+}
+
+/** Stateful projection of one Rig session into Happy's flat message protocol. */
+export class HappyMessageMapper {
+    readonly #activeGroups = new Map<string, ActiveHappyGroup>();
+    readonly #appliedEventIds = new Set<string>();
+    readonly #pendingCompactions = new Map<
+        string,
+        Extract<SessionEvent, { type: "agent_event" }>
+    >();
+    readonly #pendingGroupStartedAt = new Map<string, number>();
+    readonly #pendingSteering = new Map<string, Map<string, SessionEvent>>();
+    readonly #pendingSteeringHeaders = new Map<string, SessionEvent[]>();
+    readonly #runStartedAt = new Map<string, number>();
+    readonly #terminalRunIds = new Set<string>();
+
+    map(event: SessionEvent): readonly HappySessionProtocolMessage[] {
+        if (this.#appliedEventIds.has(event.id)) return [];
+        this.#appliedEventIds.add(event.id);
+        if (this.#appliedEventIds.size > 16_384) {
+            const oldest = this.#appliedEventIds.values().next().value;
+            if (oldest !== undefined) this.#appliedEventIds.delete(oldest);
+        }
+
+        if (event.type === "message_submitted") {
+            this.#rememberRunStart(event.data.runId, event.createdAt);
+            if (event.data.message.id.startsWith("happy:")) return [];
+            if (event.data.delivery === "steer") {
+                const pending = this.#pendingSteering.get(event.data.runId) ?? new Map();
+                pending.set(event.data.message.id, event);
+                this.#pendingSteering.set(event.data.runId, pending);
+                return [];
+            }
+            return [userMessage(event)];
+        }
+        if (event.type === "run_started") {
+            this.#rememberRunStart(event.data.runId, event.createdAt);
+            return [];
+        }
+        if (event.type === "agent_event" && event.data.event.type === "inference_iteration_start") {
+            if (this.#activeGroups.has(event.data.runId)) return [];
+            const group = {
+                id: event.data.event.messageId,
+                startedAt: this.#pendingGroupStartedAt.get(event.data.runId) ?? event.createdAt,
+            };
+            this.#pendingGroupStartedAt.delete(event.data.runId);
+            this.#activeGroups.set(event.data.runId, group);
             return [
-                agentMessage(event, `${event.id}:error`, event.data.runId, {
-                    t: "service",
-                    text: event.data.errorMessage ?? "The model response failed.",
-                }),
-                agentMessage(event, `${event.id}:turn-end`, event.data.runId, {
-                    status: "failed",
-                    t: "turn-end",
+                ...this.#takePendingGroupHeaders(event.data.runId, group.id),
+                agentMessage(event, `group:${group.id}:start`, group.id, {
+                    t: "turn-start",
                 }),
             ];
         }
-        const status = event.data.stopReason === "aborted" ? "cancelled" : "completed";
+        if (
+            event.type === "agent_event" &&
+            event.data.event.type === "context_compaction_started"
+        ) {
+            this.#pendingCompactions.delete(event.data.runId);
+            const output = this.#close(event, event.data.runId, "compaction", "completed");
+            this.#pendingGroupStartedAt.set(event.data.runId, event.createdAt);
+            return output;
+        }
+        if (event.type === "agent_event" && event.data.event.type === "context_compacted") {
+            const group = this.#activeGroups.get(event.data.runId);
+            if (group !== undefined) return mapAgentEvent(event, group.id);
+            this.#pendingCompactions.set(event.data.runId, event);
+            return [];
+        }
+        if (event.type === "steering_applied") {
+            const output = this.#close(event, event.data.runId, "steering", "completed");
+            const pending = this.#pendingSteering.get(event.data.runId);
+            const headers = this.#pendingSteeringHeaders.get(event.data.runId) ?? [];
+            for (const messageId of event.data.messageIds) {
+                const submitted = pending?.get(messageId);
+                if (submitted?.type === "message_submitted") headers.push(submitted);
+                pending?.delete(messageId);
+            }
+            if (pending?.size === 0) this.#pendingSteering.delete(event.data.runId);
+            if (headers.length > 0) this.#pendingSteeringHeaders.set(event.data.runId, headers);
+            this.#pendingGroupStartedAt.set(event.data.runId, event.createdAt);
+            return output;
+        }
+        if (event.type === "inference_retry") {
+            const group = this.#activeGroups.get(event.data.runId);
+            return group === undefined
+                ? []
+                : [
+                      failureMessage(
+                          event,
+                          `${event.id}:failure`,
+                          group.id,
+                          "retried",
+                          event.data.reason,
+                          event.data.attempt,
+                      ),
+                  ];
+        }
+        if (event.type === "abort_requested" && event.data.runId !== undefined) {
+            const output = this.#close(event, event.data.runId, "abort", "cancelled");
+            this.#markRunTerminal(event.data.runId);
+            return output;
+        }
+        if (event.type === "run_finished") {
+            if (this.#terminalRunIds.has(event.data.runId)) return [];
+            const status =
+                event.data.stopReason === "error"
+                    ? "failed"
+                    : event.data.stopReason === "aborted"
+                      ? "cancelled"
+                      : "completed";
+            const reason =
+                event.data.stopReason === "error"
+                    ? "error"
+                    : event.data.stopReason === "aborted"
+                      ? "abort"
+                      : "completed";
+            const group =
+                event.data.stopReason === "error"
+                    ? this.#ensureFailureGroup(event, event.data.runId)
+                    : this.#activeGroups.get(event.data.runId);
+            const output =
+                event.data.stopReason === "error" && group !== undefined
+                    ? [
+                          ...this.#takePendingGroupHeaders(event.data.runId, group.id),
+                          failureMessage(
+                              event,
+                              `${event.id}:failure`,
+                              group.id,
+                              "failed",
+                              event.data.errorMessage ?? "The model response failed.",
+                          ),
+                      ]
+                    : [];
+            output.push(...this.#close(event, event.data.runId, reason, status));
+            this.#markRunTerminal(event.data.runId);
+            return output;
+        }
+        if (event.type === "run_error") {
+            if (this.#terminalRunIds.has(event.data.runId)) return [];
+            const group = this.#ensureFailureGroup(event, event.data.runId);
+            const output = [
+                ...this.#takePendingGroupHeaders(event.data.runId, group.id),
+                failureMessage(
+                    event,
+                    `${event.id}:failure`,
+                    group.id,
+                    "failed",
+                    event.data.errorMessage,
+                ),
+                ...this.#close(event, event.data.runId, "error", "failed"),
+            ];
+            this.#markRunTerminal(event.data.runId);
+            return output;
+        }
+        if (event.type === "agent_event") {
+            const group = this.#activeGroups.get(event.data.runId);
+            return group === undefined ? [] : mapAgentEvent(event, group.id);
+        }
+        if (event.type === "agent_message" && event.data.message.role === "agent") {
+            const groupId = this.#activeGroups.get(event.data.runId)?.id ?? event.data.message.id;
+            return mapAgentMessage(event, event.data.message, groupId);
+        }
+        return [];
+    }
+
+    #ensureFailureGroup(event: SessionEvent, runId: string): ActiveHappyGroup {
+        const active = this.#activeGroups.get(runId);
+        if (active !== undefined) return active;
+        const group = {
+            id: runId,
+            startedAt:
+                this.#pendingGroupStartedAt.get(runId) ??
+                this.#runStartedAt.get(runId) ??
+                event.createdAt,
+        };
+        this.#pendingGroupStartedAt.delete(runId);
+        this.#activeGroups.set(runId, group);
+        return group;
+    }
+
+    #markRunTerminal(runId: string): void {
+        this.#activeGroups.delete(runId);
+        this.#pendingCompactions.delete(runId);
+        this.#pendingGroupStartedAt.delete(runId);
+        this.#pendingSteering.delete(runId);
+        this.#pendingSteeringHeaders.delete(runId);
+        this.#runStartedAt.delete(runId);
+        this.#terminalRunIds.add(runId);
+        if (this.#terminalRunIds.size > 16_384) {
+            const oldest = this.#terminalRunIds.values().next().value;
+            if (oldest !== undefined) this.#terminalRunIds.delete(oldest);
+        }
+    }
+
+    #rememberRunStart(runId: string, startedAt: number): void {
+        if (!this.#runStartedAt.has(runId)) this.#runStartedAt.set(runId, startedAt);
+    }
+
+    #takePendingGroupHeaders(runId: string, groupId: string): HappySessionProtocolMessage[] {
+        const output = this.#takePendingCompaction(runId, groupId);
+        const steering = this.#pendingSteeringHeaders.get(runId);
+        if (steering === undefined) return output;
+        this.#pendingSteeringHeaders.delete(runId);
+        for (const event of steering) {
+            if (event.type === "message_submitted") output.push(userMessage(event, groupId));
+        }
+        return output;
+    }
+
+    #takePendingCompaction(runId: string, groupId: string): HappySessionProtocolMessage[] {
+        const pending = this.#pendingCompactions.get(runId);
+        if (pending === undefined) return [];
+        this.#pendingCompactions.delete(runId);
+        return mapAgentEvent(pending, groupId);
+    }
+
+    #close(
+        event: SessionEvent,
+        runId: string,
+        reason: "completed" | "steering" | "compaction" | "abort" | "error",
+        status: "cancelled" | "completed" | "failed",
+    ): HappySessionProtocolMessage[] {
+        const group = this.#activeGroups.get(runId);
+        if (group === undefined) return [];
+        this.#activeGroups.delete(runId);
+        const turnStartedAt = Math.min(
+            group.startedAt,
+            this.#runStartedAt.get(runId) ?? group.startedAt,
+        );
         return [
-            agentMessage(event, `${event.id}:turn-end`, event.data.runId, {
+            agentMessage(event, `group:${group.id}:end`, group.id, {
+                elapsedMs: Math.max(0, event.createdAt - group.startedAt),
+                reason,
                 status,
                 t: "turn-end",
+                turnElapsedMs: Math.max(0, event.createdAt - turnStartedAt),
             }),
         ];
     }
-    if (event.type === "run_error") {
-        return [
-            agentMessage(event, `${event.id}:error`, event.data.runId, {
-                t: "service",
-                text: event.data.errorMessage,
-            }),
-            agentMessage(event, `${event.id}:turn-end`, event.data.runId, {
-                status: "failed",
-                t: "turn-end",
-            }),
-        ];
-    }
-    if (event.type === "abort_requested" && event.data.runId !== undefined) {
-        return [
-            agentMessage(event, `${event.id}:turn-end`, event.data.runId, {
-                status: "cancelled",
-                t: "turn-end",
-            }),
-        ];
-    }
-    if (event.type === "agent_event") return mapAgentEvent(event);
-    if (event.type === "agent_message" && event.data.message.role === "agent") {
-        return mapAgentMessage(event, event.data.message);
-    }
-    return [];
 }
 
-function mapAgentEvent(event: Extract<SessionEvent, { type: "agent_event" }>) {
+function userMessage(
+    event: Extract<SessionEvent, { type: "message_submitted" }>,
+    groupId?: string,
+): HappySessionProtocolMessage {
+    return createMessage({
+        ev: { t: "text", text: event.data.displayText },
+        id: event.data.message.id,
+        role: "user",
+        time: event.createdAt,
+        ...(groupId === undefined ? {} : { turn: groupId }),
+    });
+}
+
+function failureMessage(
+    event: SessionEvent,
+    id: string,
+    groupId: string,
+    outcome: "retried" | "failed",
+    reason: string,
+    attempt?: number,
+): HappySessionProtocolMessage {
+    return agentMessage(event, id, groupId, {
+        ...(attempt === undefined ? {} : { attempt }),
+        outcome,
+        reason,
+        t: "failure",
+    });
+}
+
+function mapAgentEvent(event: Extract<SessionEvent, { type: "agent_event" }>, groupId: string) {
     const streamed = event.data.event;
     if (streamed.type === "tool_execution_end") {
         return [
-            agentMessage(event, `tool-result:${streamed.result.toolCallId}`, event.data.runId, {
+            agentMessage(event, `tool-result:${streamed.result.toolCallId}`, groupId, {
                 call: streamed.result.toolCallId,
                 t: "tool-call-end",
             }),
@@ -82,7 +289,7 @@ function mapAgentEvent(event: Extract<SessionEvent, { type: "agent_event" }>) {
     }
     if (streamed.type === "context_compacted") {
         return [
-            agentMessage(event, `${event.id}:compacted`, event.data.runId, {
+            agentMessage(event, `${event.id}:compacted`, groupId, {
                 t: "service",
                 text: "Context compacted.",
             }),
@@ -94,29 +301,30 @@ function mapAgentEvent(event: Extract<SessionEvent, { type: "agent_event" }>) {
 function mapAgentMessage(
     event: Extract<SessionEvent, { type: "agent_message" }>,
     message: AgentMessage,
+    groupId: string,
 ): HappySessionProtocolMessage[] {
     const output: HappySessionProtocolMessage[] = [];
     for (const [index, block] of message.blocks.entries()) {
         if (block.type === "text") {
             output.push(
-                agentMessage(event, `${message.id}:text:${index}`, event.data.runId, {
+                agentMessage(event, `${message.id}:text:${index}`, groupId, {
                     t: "text",
                     text: block.text,
                 }),
             );
         } else if (block.type === "thinking") {
             output.push(
-                agentMessage(event, `${message.id}:thinking:${index}`, event.data.runId, {
+                agentMessage(event, `${message.id}:thinking:${index}`, groupId, {
                     t: "text",
                     text: block.thinking,
                     thinking: true,
                 }),
             );
         } else if (block.type === "tool_call") {
-            output.push(toolCallStartMessage(event, message.id, block, event.data.runId));
+            output.push(toolCallStartMessage(event, message.id, block, groupId));
         } else if (block.type === "tool_result") {
             output.push(
-                agentMessage(event, `tool-result:${block.toolCallId}`, event.data.runId, {
+                agentMessage(event, `tool-result:${block.toolCallId}`, groupId, {
                     call: block.toolCallId,
                     t: "tool-call-end",
                 }),

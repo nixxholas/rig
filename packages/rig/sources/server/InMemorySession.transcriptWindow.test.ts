@@ -12,6 +12,7 @@ import {
     type AssistantMessage,
 } from "@slopus/rig-execution";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
+import { transcriptRunFacts } from "./sessionTranscriptWindow.js";
 
 /**
  * These drive real runs rather than appending events by hand, because the point
@@ -94,6 +95,27 @@ describe("InMemorySession transcript window", () => {
         await session.beginShutdown();
     });
 
+    it("says the same thing as the reducer that rebuilds a paged turn", async () => {
+        const session = createSession({ retry: true });
+        const submitted = session.submit({ text: "Retry once." });
+        await session.waitForRun(submitted.runId);
+
+        // The session keeps these facts as it goes; the reducer derives them
+        // from the durable log for history a reader pages back into. Where the
+        // two disagree, paged history renders differently from what was watched.
+        const derived = transcriptRunFacts(session.events.since(undefined) ?? []).get(
+            submitted.runId,
+        );
+        const turn = session
+            .transcriptWindow()
+            .turns.find((candidate) => candidate.runId === submitted.runId);
+        expect(turn?.retries).toHaveLength(1);
+        expect(turn?.retries).toEqual(derived?.retries);
+        expect(turn?.groups).toEqual(derived?.groups);
+
+        await session.beginShutdown();
+    });
+
     it("persists provider retries inside their transcript turn", async () => {
         const session = createSession({ retry: true });
         const submitted = session.submit({ text: "Retry if needed." });
@@ -113,6 +135,9 @@ describe("InMemorySession transcript window", () => {
             {
                 attempt: 1,
                 createdAt: retry?.createdAt,
+                // The attempt records the group it happened in, because time
+                // alone cannot place it against a boundary it shares one with.
+                groupId: expect.any(String),
                 id: retry?.id,
                 reason: "Connection lost",
             },

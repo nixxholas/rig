@@ -900,10 +900,7 @@ describe("InMemorySession abort", () => {
         expect(compactionMessages).toHaveLength(1);
         expect(compactionMessages?.[0]).toMatchObject({
             kind: "summary",
-            replacedMessageIds: expect.arrayContaining([
-                expect.any(String),
-                expect.any(String),
-            ]),
+            replacedMessageIds: expect.arrayContaining([expect.any(String), expect.any(String)]),
         });
         expect(session.snapshot().snapshot.messages.at(-1)).toEqual(compactionMessages?.[0]);
     });

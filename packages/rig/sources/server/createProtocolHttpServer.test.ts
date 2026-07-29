@@ -277,7 +277,9 @@ describe("createProtocolHttpServer", () => {
             const reorderedChat = await client.reorderSession(laterChat.session.id, {
                 afterId: null,
             });
-            expect(reorderedChat.session.orderKey < first.session.orderKey).toBe(true);
+            expect(reorderedChat.session.orderKey).toBeDefined();
+            expect(first.session.orderKey).toBeDefined();
+            expect(reorderedChat.session.orderKey! < first.session.orderKey!).toBe(true);
             expect(
                 (await client.listSessions({ archived: "all" })).sessions
                     .filter((session) => session.projectId === first.session.projectId)
@@ -2370,6 +2372,14 @@ describe("createProtocolHttpServer", () => {
                 parentSessionId: "session-1",
                 type: "subagent",
             });
+            // Readable, but not a chat in the sidebar, and never given a
+            // stand-in position that would collide with the chats that are.
+            expect(loaded.session.orderKey).toBeUndefined();
+            expect(
+                (await client.listSessions({ archived: "all" })).sessions.map(
+                    (session) => session.id,
+                ),
+            ).not.toContain("subagent-1");
             await expect(
                 client.submitMessage("subagent-1", { text: "Continue working." }),
             ).rejects.toThrow("read-only");
@@ -2549,7 +2559,8 @@ function readOnlySubagentState(): PersistedSessionState {
         messages: [],
         modelId: modelOpenaiGpt55.id,
         models: [],
-        orderKey: "a0",
+        // A subagent has no place in an ordered list, so it holds no position.
+        orderKey: "",
         providerId: "codex",
         permissionMode: "workspace_write",
         queuedRuns: [],

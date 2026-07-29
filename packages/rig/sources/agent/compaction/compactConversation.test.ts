@@ -45,7 +45,7 @@ describe("compactConversation", () => {
                     api: "test",
                     provider: "test",
                     model: model.id,
-                usage: zeroUsage(),
+                    usage: zeroUsage(),
                     stopReason: "stop",
                     timestamp: 2,
                 },

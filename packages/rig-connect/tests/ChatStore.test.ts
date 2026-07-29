@@ -239,7 +239,7 @@ describe("ChatStore", () => {
         expect(store.elements().map((element) => element.kind)).toEqual([
             "agent_text",
             "tool_call",
-            "turn_end",
+            "group_end",
         ]);
     });
 
@@ -248,7 +248,7 @@ describe("ChatStore", () => {
         store.applyHello(hello());
         runOneTurn(store);
 
-        expect(store.elements().every((element) => element.turnId === "run-1")).toBe(true);
+        expect(store.elements().every((element) => element.runId === "run-1")).toBe(true);
     });
 
     it("always ends a turn with a final element that states the outcome", () => {
@@ -257,7 +257,173 @@ describe("ChatStore", () => {
         runOneTurn(store);
 
         const last = store.elements().at(-1);
-        expect(last).toMatchObject({ kind: "turn_end", outcome: "success" });
+        expect(last).toMatchObject({ kind: "group_end", outcome: "success" });
+    });
+
+    it("keeps a whole tool-calling answer in one group under one footer", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Ask",
+                message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        // Working through tools reaches the model three times. The person asked
+        // one question, so they see one answer that ends once.
+        for (const [index, messageId] of ["m1", "m2", "m3"].entries()) {
+            store.apply(
+                agentEvent({ iteration: index + 1, messageId, type: "inference_iteration_start" }),
+            );
+            store.apply(agentEvent({ contentIndex: 0, messageId, type: "text_start" }));
+            store.apply(
+                agentEvent({
+                    content: `Step ${String(index)}`,
+                    contentIndex: 0,
+                    messageId,
+                    type: "text_end",
+                }),
+            );
+            if (index === 2) continue;
+            store.apply(
+                agentEvent({
+                    toolCall: {
+                        arguments: { command: "ls" },
+                        id: `call-${String(index)}`,
+                        name: "Bash",
+                        type: "tool_call",
+                    },
+                    type: "tool_execution_start",
+                }),
+            );
+            store.apply(
+                agentEvent({
+                    result: {
+                        display: "ok",
+                        isError: false,
+                        toolCallId: `call-${String(index)}`,
+                        toolName: "Bash",
+                    },
+                    type: "tool_execution_end",
+                }),
+            );
+        }
+        store.apply(event("run_finished", { runId: "run-1", stopReason: "stop" }));
+
+        const elements = store.elements();
+        expect(new Set(elements.map((element) => element.groupId)).size).toBe(1);
+        expect(elements.map((element) => element.kind)).toEqual([
+            "user_message",
+            "agent_text",
+            "tool_call",
+            "agent_text",
+            "tool_call",
+            "agent_text",
+            "group_end",
+        ]);
+        expect(elements.at(-1)).toMatchObject({ outcome: "success", reason: "completed" });
+    });
+
+    it("creates an empty group row before output and reuses its identity for the first token", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "message-1", type: "inference_iteration_start" }),
+        );
+
+        const waiting = store.elements().at(-1);
+        expect(waiting).toMatchObject({
+            groupId: "group:message-1",
+            kind: "inference",
+            state: "waiting",
+        });
+        expect(store.session().activeGroup).toEqual({
+            groupId: "group:message-1",
+            runId: "run-1",
+            startedAt: expect.any(Number),
+        });
+
+        store.apply(
+            agentEvent({
+                contentIndex: 0,
+                delta: "H",
+                messageId: "message-1",
+                type: "text_delta",
+            }),
+        );
+        expect(store.elements().find((element) => element.id === waiting?.id)).toMatchObject({
+            groupId: "group:message-1",
+            id: waiting?.id,
+            kind: "agent_text",
+            text: "H",
+        });
+    });
+
+    it("orders steering as group end, all steering messages, then the next group", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "message-1", type: "inference_iteration_start" }),
+        );
+        for (const id of ["steer-1", "steer-2"]) {
+            store.apply(
+                event("message_submitted", {
+                    delivery: "steer",
+                    displayText: id,
+                    message: { blocks: [{ text: id, type: "text" }], id, role: "user" },
+                    runId: "run-1",
+                }),
+            );
+        }
+        store.apply(
+            event("steering_applied", {
+                messageIds: ["steer-1", "steer-2"],
+                runId: "run-1",
+            }),
+        );
+        store.apply(
+            agentEvent({ iteration: 2, messageId: "message-2", type: "inference_iteration_start" }),
+        );
+
+        const relevant = store
+            .elements()
+            .filter(
+                (element) =>
+                    element.kind === "group_end" ||
+                    (element.kind === "user_message" &&
+                        ["steer-1", "steer-2"].includes(element.messageId)) ||
+                    element.id === "group-start:message-2",
+            );
+        expect(relevant.map((element) => element.kind)).toEqual([
+            "group_end",
+            "user_message",
+            "user_message",
+            "inference",
+        ]);
+        expect(relevant.slice(1).every((element) => element.groupId === "group:message-2")).toBe(
+            true,
+        );
+    });
+
+    it("closes an aborted group once before the run finishes", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "message-1", type: "inference_iteration_start" }),
+        );
+        store.apply(event("abort_requested", { runId: "run-1" }));
+        store.apply(event("run_finished", { runId: "run-1", stopReason: "aborted" }));
+
+        expect(store.elements().filter((element) => element.kind === "group_end")).toEqual([
+            expect.objectContaining({ outcome: "stopped", reason: "abort" }),
+        ]);
+        expect(store.session().activeGroup).toBeUndefined();
     });
 
     it("keeps authoritative active turn timing through steering and activity changes", () => {
@@ -276,7 +442,7 @@ describe("ChatStore", () => {
         store.apply(submitted);
 
         expect(store.session()).toMatchObject({
-            activeTurn: { startedAt: submitted.createdAt, turnId: "run-1" },
+            activeTurn: { runId: "run-1", startedAt: submitted.createdAt },
         });
 
         store.apply(
@@ -302,7 +468,7 @@ describe("ChatStore", () => {
         });
 
         expect(store.session()).toMatchObject({
-            activeTurn: { startedAt: submitted.createdAt, turnId: "run-1" },
+            activeTurn: { runId: "run-1", startedAt: submitted.createdAt },
         });
     });
 
@@ -357,7 +523,7 @@ describe("ChatStore", () => {
             id: stableId,
             messageId: "steer-1",
         });
-        expect(acceptedIndex).toBeLessThan(laterAgentIndex);
+        expect(acceptedIndex).toBeGreaterThan(laterAgentIndex);
     });
 
     it("keeps multiple steering bubbles in queue order through back-to-back acceptance", () => {
@@ -438,7 +604,7 @@ describe("ChatStore", () => {
                 steeredAt: secondApplied.createdAt,
             },
         ]);
-        expect(store.elements().at(-1)?.kind).toBe("agent_text");
+        expect(store.elements().at(-1)?.kind).toBe("user_message");
     });
 
     it("gives a batch one steering time and measures it only once", () => {
@@ -588,7 +754,12 @@ describe("ChatStore", () => {
         store.applyHello(recovered);
 
         expect(
-            store.elements().find((element) => element.id === "tool:reviewed-call"),
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" && element.toolCallId === "reviewed-call",
+                ),
         ).toMatchObject({
             permissionReview: {
                 decision: "allow",
@@ -598,11 +769,18 @@ describe("ChatStore", () => {
         });
         const reviewedBeforeRecovery = store
             .elements()
-            .find((element) => element.id === "tool:reviewed-call");
+            .find(
+                (element) => element.kind === "tool_call" && element.toolCallId === "reviewed-call",
+            );
         store.applyHello(recovered);
-        expect(store.elements().find((element) => element.id === "tool:reviewed-call")).toBe(
-            reviewedBeforeRecovery,
-        );
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" && element.toolCallId === "reviewed-call",
+                ),
+        ).toBe(reviewedBeforeRecovery);
         const pagedMessage: Message = {
             blocks: [
                 {
@@ -637,7 +815,13 @@ describe("ChatStore", () => {
             ],
         });
         expect(
-            store.elements().find((element) => element.id === "tool:paged-reviewed-call"),
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" &&
+                        element.toolCallId === "paged-reviewed-call",
+                ),
         ).toMatchObject({
             permissionReview: {
                 decision: "allow",
@@ -671,10 +855,15 @@ describe("ChatStore", () => {
         });
         store.apply(first);
         store.apply(event("run_started", { runId: "run-1" }));
+        const inferenceStarted = event("agent_event", {
+            event: { iteration: 1, messageId: "agent-1", type: "inference_iteration_start" },
+            runId: "run-1",
+        });
+        store.apply(inferenceStarted);
         store.apply(second);
 
         expect(store.session()).toMatchObject({
-            activeTurn: { startedAt: first.createdAt, turnId: "run-1" },
+            activeTurn: { runId: "run-1", startedAt: first.createdAt },
         });
 
         const finished = event("run_finished", {
@@ -685,7 +874,7 @@ describe("ChatStore", () => {
         const deltas = store.apply(finished);
 
         expect(store.session()).toMatchObject({
-            activeTurn: { startedAt: second.createdAt, turnId: "run-2" },
+            activeTurn: { runId: "run-2", startedAt: second.createdAt },
         });
         expect(deltas).not.toContainEqual(
             expect.objectContaining({
@@ -693,11 +882,18 @@ describe("ChatStore", () => {
                 type: "session_changed",
             }),
         );
-        expect(store.elements().find((element) => element.id === "turn:run-1")).toMatchObject({
-            elapsedMs: finished.createdAt - first.createdAt,
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "group_end" && element.groupId === "group:agent-1",
+                ),
+        ).toMatchObject({
+            elapsedMs: finished.createdAt - inferenceStarted.createdAt,
             endedAt: finished.createdAt,
-            kind: "turn_end",
-            startedAt: first.createdAt,
+            kind: "group_end",
+            startedAt: inferenceStarted.createdAt,
         });
     });
 
@@ -705,11 +901,14 @@ describe("ChatStore", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
         store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
         store.apply(event("run_error", { errorMessage: "The provider failed.", runId: "run-1" }));
 
         expect(store.elements().at(-1)).toMatchObject({
             errorMessage: "The provider failed.",
-            kind: "turn_end",
+            kind: "group_end",
             outcome: "error",
         });
     });
@@ -718,6 +917,9 @@ describe("ChatStore", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
         store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
         store.apply(
             agentEvent({
                 toolCall: { arguments: {}, id: "call-1", name: "Bash", type: "tool_call" },
@@ -728,7 +930,7 @@ describe("ChatStore", () => {
 
         const call = store.elements().find((element) => element.kind === "tool_call");
         expect(call).toMatchObject({ status: "interrupted" });
-        expect(store.elements().at(-1)).toMatchObject({ kind: "turn_end", outcome: "stopped" });
+        expect(store.elements().at(-1)).toMatchObject({ kind: "group_end", outcome: "stopped" });
     });
 
     it("grows text by delta instead of appending a second element", () => {
@@ -984,8 +1186,8 @@ describe("ChatStore", () => {
             .elements()
             .filter((e): e is ToolCallElement => e.kind === "tool_call");
         expect(grouped).toHaveLength(2);
-        expect(grouped[0]?.groupId).toBeDefined();
-        expect(grouped[0]?.groupId).toBe(grouped[1]?.groupId);
+        expect(grouped[0]?.toolCallGroupId).toBeDefined();
+        expect(grouped[0]?.toolCallGroupId).toBe(grouped[1]?.toolCallGroupId);
 
         const single = new ChatStore("session-2");
         single.applyHello(hello());
@@ -997,7 +1199,8 @@ describe("ChatStore", () => {
             }),
         );
         expect(
-            (single.elements().find((e) => e.kind === "tool_call") as ToolCallElement).groupId,
+            (single.elements().find((e) => e.kind === "tool_call") as ToolCallElement)
+                .toolCallGroupId,
         ).toBeUndefined();
     });
 
@@ -1087,7 +1290,7 @@ describe("ChatStore", () => {
         const deltas = runOneTurn(store);
 
         const kinds = deltas.map((delta) => delta.type);
-        expect(kinds.indexOf("turn_started")).toBeLessThan(kinds.indexOf("turn_ended"));
+        expect(kinds.indexOf("turn_started")).toBeLessThan(kinds.indexOf("group_ended"));
         expect(deltas.at(-1)?.type).toBe("elements_changed");
     });
 
@@ -1105,9 +1308,10 @@ describe("ChatStore", () => {
         expect(started.map((delta) => delta.type)).toContain("retry_started");
         expect(store.elements().at(-1)).toMatchObject({
             attempt: 2,
-            kind: "retry",
+            kind: "failure",
+            outcome: "retried",
             reason: "rate limited",
-            turnId: "run-1",
+            runId: "run-1",
         });
 
         store.apply(
@@ -1372,16 +1576,16 @@ describe("ChatStore", () => {
                     (element) =>
                         element.kind === "user_message" ||
                         element.kind === "agent_text" ||
-                        element.kind === "turn_end",
+                        element.kind === "group_end",
                 )
-                .map((element) => `${element.kind}:${element.turnId}`),
+                .map((element) => `${element.kind}:${element.runId}`),
         ).toEqual([
             "user_message:run-1",
             "user_message:run-2",
             "agent_text:run-1",
-            "turn_end:run-1",
+            "group_end:run-1",
             "agent_text:run-2",
-            "turn_end:run-2",
+            "group_end:run-2",
         ]);
     });
 
@@ -2064,18 +2268,18 @@ describe("ChatStore", () => {
             store.apply(event("run_finished", { runId: "run-1", stopReason: "stop" }));
 
             const end = store.elements().at(-1);
-            expect(end?.kind).toBe("turn_end");
+            expect(end?.kind).toBe("group_end");
             expect(end).toMatchObject({
                 usage: { input: 100, output: 20, totalTokens: 120 },
             });
         });
 
-        it("adds up every inference the turn needed, not just the last", () => {
+        it("adds up every inference the group needed, and starts over at the next one", () => {
             const store = new ChatStore("session-1");
             store.applyHello(hello());
 
-            // A turn that calls tools runs inference more than once, and the cost
-            // of the turn is all of it.
+            // A run that calls tools reaches the model more than once, and all
+            // of it answers one question, so one footer states what it cost.
             store.apply(event("run_started", { runId: "run-1" }));
             for (const [index, tokens] of [100, 250].entries()) {
                 store.apply(
@@ -2090,15 +2294,39 @@ describe("ChatStore", () => {
                     }),
                 );
             }
+            store.apply(
+                event("message_submitted", {
+                    delivery: "steer",
+                    displayText: "Actually, stop there",
+                    message: {
+                        blocks: [{ text: "Actually, stop there", type: "text" }],
+                        id: "steer-1",
+                        role: "user",
+                    },
+                    runId: "run-1",
+                }),
+            );
+            store.apply(event("steering_applied", { messageIds: ["steer-1"], runId: "run-1" }));
+            store.apply(
+                event("agent_message", {
+                    message: {
+                        blocks: [{ text: "After steering", type: "text" }],
+                        id: "m2",
+                        role: "agent",
+                        usage: usage(70, 10, 0.25),
+                    },
+                    runId: "run-1",
+                }),
+            );
             store.apply(event("run_finished", { runId: "run-1", stopReason: "stop" }));
 
-            expect(store.elements().at(-1)).toMatchObject({
-                usage: {
-                    cost: { total: 0.5 },
-                    input: 350,
-                    output: 20,
-                    totalTokens: 370,
-                },
+            const ends = store.elements().filter((element) => element.kind === "group_end");
+            expect(ends.map((element) => element.reason)).toEqual(["steering", "completed"]);
+            expect(ends[0]).toMatchObject({
+                usage: { input: 350, output: 20, totalTokens: 370 },
+            });
+            expect(ends[1]).toMatchObject({
+                usage: { input: 70, output: 10, totalTokens: 80 },
             });
         });
 
@@ -2108,7 +2336,7 @@ describe("ChatStore", () => {
             runOneTurn(store);
 
             const end = store.elements().at(-1);
-            expect(end?.kind).toBe("turn_end");
+            expect(end?.kind).toBe("group_end");
             // Reporting zero would claim the turn was free, which is a different
             // statement from not knowing.
             expect((end as { usage?: unknown }).usage).toBeUndefined();
@@ -2146,7 +2374,7 @@ describe("ChatStore", () => {
             );
             store.apply(event("run_finished", { runId: "run-2", stopReason: "stop" }));
 
-            const ends = store.elements().filter((element) => element.kind === "turn_end");
+            const ends = store.elements().filter((element) => element.kind === "group_end");
             expect(ends).toHaveLength(2);
             expect(ends[1]).toMatchObject({ usage: { input: 7, output: 3, totalTokens: 10 } });
         });
@@ -2195,14 +2423,16 @@ describe("ChatStore", () => {
             store.applyHello(withTurns());
 
             // The advertised guarantee is that a turn always ends with a final
-            // element. History that was never watched live must honour it too.
+            // element. History that was never watched live must honour it too,
+            // including the line the second turn's failure earns before it.
             expect(store.elements().map((element) => element.kind)).toEqual([
                 "user_message",
                 "agent_text",
-                "turn_end",
+                "group_end",
                 "user_message",
                 "agent_text",
-                "turn_end",
+                "failure",
+                "group_end",
             ]);
         });
 
@@ -2210,10 +2440,11 @@ describe("ChatStore", () => {
             const store = new ChatStore("session-1");
             store.applyHello(withTurns());
 
-            expect(store.elements().map((element) => element.turnId)).toEqual([
+            expect(store.elements().map((element) => element.runId)).toEqual([
                 "run-1",
                 "run-1",
                 "run-1",
+                "run-2",
                 "run-2",
                 "run-2",
                 "run-2",
@@ -2289,9 +2520,9 @@ describe("ChatStore", () => {
                 { elapsedMs: 1_100, steeredAt: 4_700 },
                 { elapsedMs: 1_100, steeredAt: 5_800 },
             ]);
-            expect(rebuiltUsers.every((element) => element.turnId === "one-run")).toBe(true);
-            expect(store.elements().filter((element) => element.kind === "turn_end")).toEqual([
-                expect.objectContaining({ endedAt: 7_000, turnId: "one-run" }),
+            expect(rebuiltUsers.every((element) => element.runId === "one-run")).toBe(true);
+            expect(store.elements().filter((element) => element.kind === "group_end")).toEqual([
+                expect.objectContaining({ endedAt: 7_000, runId: "one-run" }),
             ]);
         });
 
@@ -2325,7 +2556,7 @@ describe("ChatStore", () => {
             const store = new ChatStore("session-1");
             store.applyHello(withTurns());
 
-            const ends = store.elements().filter((element) => element.kind === "turn_end");
+            const ends = store.elements().filter((element) => element.kind === "group_end");
             expect(ends[0]).toMatchObject({
                 elapsedMs: 500,
                 endedAt: 1_500,
@@ -2370,9 +2601,9 @@ describe("ChatStore", () => {
 
             expect(
                 store.elements().map((element) => [element.kind, element.createdAt]),
-            ).toContainEqual(["retry", 1_200]);
-            expect(store.elements().findIndex((element) => element.kind === "retry")).toBe(
-                store.elements().findIndex((element) => element.id === "a1:agent_text:0") - 1,
+            ).toContainEqual(["failure", 1_200]);
+            expect(store.elements().findIndex((element) => element.kind === "failure")).toBe(
+                store.elements().findIndex((element) => element.kind === "agent_text") - 1,
             );
         });
 
@@ -2391,11 +2622,11 @@ describe("ChatStore", () => {
             });
 
             const kinds = store.elements().map((element) => element.kind);
-            expect(kinds.filter((kind) => kind === "turn_end")).toHaveLength(1);
+            expect(kinds.filter((kind) => kind === "group_end")).toHaveLength(1);
             expect(kinds.at(-1)).toBe("agent_text");
             expect(store.session().activeTurn).toEqual({
+                runId: "run-2",
                 startedAt: 2_000,
-                turnId: "run-2",
             });
 
             store.apply(
@@ -2404,8 +2635,8 @@ describe("ChatStore", () => {
                 }),
             );
             expect(store.session().activeTurn).toEqual({
+                runId: "run-2",
                 startedAt: 2_000,
-                turnId: "run-2",
             });
         });
 
@@ -2435,7 +2666,7 @@ describe("ChatStore", () => {
                 transcript: { ...base.transcript!, messages: priced },
             });
 
-            const ends = store.elements().filter((element) => element.kind === "turn_end");
+            const ends = store.elements().filter((element) => element.kind === "group_end");
             expect(ends[0]).toMatchObject({ usage: { input: 90, totalTokens: 100 } });
             // The second turn was never priced, so it must not inherit the first.
             expect((ends[1] as { usage?: unknown }).usage).toBeUndefined();
@@ -2523,7 +2754,7 @@ describe("ChatStore", () => {
                     kind: "agent_text",
                     text: "Let me check.",
                 }),
-                expect.objectContaining({ kind: "turn_end", turnId: "run-1" }),
+                expect.objectContaining({ kind: "group_end", runId: "run-1" }),
             ]),
         );
     });
@@ -2554,8 +2785,8 @@ describe("ChatStore", () => {
         );
 
         expect(store.session().activeTurn).toEqual({
+            runId: "run-reset",
             startedAt: 5_000,
-            turnId: "run-reset",
         });
         const finished = event("run_finished", {
             modelLocked: false,
@@ -2563,10 +2794,7 @@ describe("ChatStore", () => {
             stopReason: "stop",
         });
         store.apply(finished);
-        expect(store.elements().at(-1)).toMatchObject({
-            endedAt: finished.createdAt,
-            startedAt: 5_000,
-        });
+        expect(store.session().activeTurn).toBeUndefined();
     });
 });
 
@@ -2693,7 +2921,7 @@ describe("recovering a connection", () => {
 
         // Losing turns 1 through 3 here would delete rows off the top of a
         // conversation somebody is reading.
-        const turnIds = store.elements().map((element) => element.turnId);
+        const turnIds = store.elements().map((element) => element.runId);
         expect(turnIds).toContain("run-1");
         expect(turnIds).toContain("run-6");
     });
@@ -2748,14 +2976,14 @@ describe("recovering a connection", () => {
             }),
         );
 
-        const turnIds = store.elements().map((element) => element.turnId);
+        const turnIds = store.elements().map((element) => element.runId);
         // Falling back to invented per-message turns here would lose the turn
         // guarantee: a rewound transcript would have no closing element and no
         // real run identity.
         expect(new Set(turnIds)).toEqual(
             new Set(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"]),
         );
-        expect(store.elements().filter((element) => element.kind === "turn_end")).toHaveLength(6);
+        expect(store.elements().filter((element) => element.kind === "group_end")).toHaveLength(6);
     });
 
     it("keeps real turns through a reset", () => {
@@ -2769,7 +2997,7 @@ describe("recovering a connection", () => {
             }),
         );
 
-        expect(new Set(store.elements().map((element) => element.turnId))).toEqual(
+        expect(new Set(store.elements().map((element) => element.runId))).toEqual(
             new Set(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"]),
         );
     });
@@ -2785,7 +3013,7 @@ describe("recovering a connection", () => {
             messageCreatedAt: { a1: 140, u1: 110 },
         });
 
-        const turnIds = store.elements().map((element) => element.turnId);
+        const turnIds = store.elements().map((element) => element.runId);
         expect(turnIds.indexOf("run-1")).toBeLessThan(turnIds.indexOf("run-4"));
         // A reader's scroll anchor is a row they are looking at. Rebuilding it
         // while adding history above would jump the viewport.
@@ -2858,7 +3086,7 @@ describe("recovering a connection", () => {
             );
             store.prependEarlier(windowOf(1, 3, true), started.anchor);
 
-            expect(new Set(store.elements().map((element) => element.turnId))).toEqual(
+            expect(new Set(store.elements().map((element) => element.runId))).toEqual(
                 new Set(["run-4", "run-5", "run-6"]),
             );
             expect(store.session().loadingMore).toBe(false);
@@ -2941,7 +3169,848 @@ describe("recovering a connection", () => {
         // remove turns already present in the user's timeline.
         store.applyHello(helloWith(5, 6, true));
 
-        const turnIds = new Set(store.elements().map((element) => element.turnId));
+        const turnIds = new Set(store.elements().map((element) => element.runId));
         expect([...turnIds].sort()).toEqual(["run-1", "run-2", "run-3", "run-4", "run-5", "run-6"]);
+    });
+});
+
+describe("ChatStore and the two clocks a boundary has", () => {
+    it("ends a group at compaction and times it from both starts", () => {
+        clock = 0;
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Ask",
+                message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+        store.apply(agentEvent({ contentIndex: 0, messageId: "m1", type: "text_start" }));
+        store.apply(
+            agentEvent({ content: "Before", contentIndex: 0, messageId: "m1", type: "text_end" }),
+        );
+        store.apply(
+            agentEvent({
+                compactionId: "c1",
+                estimatedTokensBefore: 100,
+                type: "context_compaction_started",
+            }),
+        );
+        store.apply(
+            agentEvent({
+                compactionId: "c1",
+                status: "completed",
+                type: "context_compaction_finished",
+            }),
+        );
+        store.apply(
+            agentEvent({ iteration: 2, messageId: "m2", type: "inference_iteration_start" }),
+        );
+        store.apply(agentEvent({ contentIndex: 0, messageId: "m2", type: "text_start" }));
+        store.apply(
+            agentEvent({ content: "After", contentIndex: 0, messageId: "m2", type: "text_end" }),
+        );
+        store.apply(event("run_finished", { runId: "run-1", stopReason: "stop" }));
+
+        const elements = store.elements();
+        expect(elements.map((element) => element.kind)).toEqual([
+            "user_message",
+            "agent_text",
+            "group_end",
+            "compaction",
+            "agent_text",
+            "group_end",
+        ]);
+
+        const footers = elements.filter((element) => element.kind === "group_end");
+        expect(footers.map((footer) => footer.reason)).toEqual(["compaction", "completed"]);
+
+        // The compaction heads the block that follows it, exactly as a steering
+        // message does, so it carries the next group's identity.
+        const compaction = elements.find((element) => element.kind === "compaction");
+        expect(compaction?.groupId).toBe(footers[1]?.groupId);
+
+        // The second group starts over, but the turn it belongs to does not: it
+        // began when the question was submitted, before inference even started.
+        const [first, second] = footers;
+        expect(first?.turnStartedAt).toBeLessThan(first?.startedAt ?? 0);
+        expect(first?.turnElapsedMs).toBeGreaterThan(first?.elapsedMs ?? 0);
+        expect(second?.turnStartedAt).toBe(first?.turnStartedAt);
+        expect(second?.turnElapsedMs).toBeGreaterThan(second?.elapsedMs ?? 0);
+        expect(second?.turnElapsedMs).toBe((second?.endedAt ?? 0) - (first?.turnStartedAt ?? 0));
+
+        // The boundary itself is measured the same two ways.
+        expect(compaction?.turnElapsedMs).toBe(
+            (compaction?.createdAt ?? 0) - (first?.turnStartedAt ?? 0),
+        );
+        expect(compaction?.steeringElapsedMs).toBe(compaction?.turnElapsedMs);
+    });
+});
+
+describe("ChatStore and the failures inside a group", () => {
+    it("keeps every attempt in the group and ends a failed one with its own line", () => {
+        clock = 0;
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Ask",
+                message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+        store.apply(
+            event("inference_retry", { attempt: 1, reason: "connection lost", runId: "run-1" }),
+        );
+        store.apply(
+            event("inference_retry", { attempt: 2, reason: "rate limited", runId: "run-1" }),
+        );
+        store.apply(agentEvent({ contentIndex: 0, messageId: "m1", type: "text_start" }));
+        store.apply(
+            agentEvent({ content: "Trying", contentIndex: 0, messageId: "m1", type: "text_end" }),
+        );
+        store.apply(
+            event("run_finished", {
+                errorMessage: "It broke",
+                runId: "run-1",
+                stopReason: "error",
+            }),
+        );
+
+        const elements = store.elements();
+        // The waiting placeholder the group opens with becomes the answer's
+        // text, so it holds its slot ahead of attempts that arrived before it.
+        expect(elements.map((element) => element.kind)).toEqual([
+            "user_message",
+            "agent_text",
+            "failure",
+            "failure",
+            "failure",
+            "group_end",
+        ]);
+
+        // Every attempt, and the failure that ended the work, belong to the one
+        // question the group is about.
+        expect(new Set(elements.map((element) => element.groupId)).size).toBe(1);
+
+        const failures = elements.filter((element) => element.kind === "failure");
+        expect(failures.map((failure) => [failure.outcome, failure.attempt])).toEqual([
+            ["retried", 1],
+            ["retried", 2],
+            ["failed", undefined],
+        ]);
+        expect(failures.at(-1)?.reason).toBe("It broke");
+        expect(elements.at(-1)).toMatchObject({ outcome: "error", reason: "error" });
+    });
+
+    it("gives no failure line to a group that was merely stopped", () => {
+        clock = 0;
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+        store.apply(agentEvent({ contentIndex: 0, messageId: "m1", type: "text_start" }));
+        store.apply(
+            agentEvent({ content: "Working", contentIndex: 0, messageId: "m1", type: "text_end" }),
+        );
+        store.apply(event("abort_requested", { runId: "run-1" }));
+
+        expect(store.elements().some((element) => element.kind === "failure")).toBe(false);
+        expect(store.elements().at(-1)).toMatchObject({ outcome: "stopped", reason: "abort" });
+    });
+});
+
+/** The durable message a completed compaction leaves in history. */
+function compactionMessage(id: string, replaced: number, before: number, after: number) {
+    return {
+        blocks: [],
+        content: "",
+        id,
+        kind: "summary" as const,
+        providerId: "claude",
+        replacedMessageIds: Array.from({ length: replaced }, (_unused, index) => `gone-${index}`),
+        role: "compaction" as const,
+        statistics: {
+            after: { exact: false, tokens: after },
+            before: { exact: true as const, tokens: before },
+        },
+        summary: "Earlier work.",
+    };
+}
+
+describe("ChatStore live and rebuilt agree", () => {
+    /** An event at an exact moment, so two of them can share a millisecond. */
+    function at<TType extends string>(
+        createdAt: number,
+        type: TType,
+        data: unknown,
+        id: string,
+    ): SessionEvent {
+        return { createdAt, data, id, sessionId: "session-1", type } as SessionEvent;
+    }
+
+    it("keeps a group's last output inside it when both share the closing millisecond", () => {
+        const live = new ChatStore("session-1");
+        live.applyHello(hello());
+        live.apply(
+            at(
+                10,
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: "Ask",
+                    message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    runId: "run-1",
+                },
+                "e1",
+            ),
+        );
+        live.apply(at(10, "run_started", { runId: "run-1" }, "e2"));
+        live.apply(
+            at(
+                20,
+                "agent_event",
+                {
+                    event: { iteration: 1, messageId: "m1", type: "inference_iteration_start" },
+                    runId: "run-1",
+                },
+                "e3",
+            ),
+        );
+        live.apply(
+            at(
+                20,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    runId: "run-1",
+                },
+                "e4",
+            ),
+        );
+        // The second tool-loop iteration lands in the very millisecond the run
+        // ends, which is ordinary: a final short reply and the stop are one tick.
+        live.apply(
+            at(
+                30,
+                "agent_event",
+                {
+                    event: { iteration: 2, messageId: "m2", type: "inference_iteration_start" },
+                    runId: "run-1",
+                },
+                "e5",
+            ),
+        );
+        live.apply(
+            at(
+                30,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
+                    runId: "run-1",
+                },
+                "e6",
+            ),
+        );
+        live.apply(at(30, "run_finished", { runId: "run-1", stopReason: "stop" }, "e7"));
+
+        const rebuilt = new ChatStore("session-1");
+        rebuilt.applyHello({
+            ...hello(),
+            transcript: {
+                complete: true,
+                messageCreatedAt: { m1: 20, m2: 30, u1: 10 },
+                messageEventId: { m1: "e4", m2: "e6", u1: "e1" },
+                messages: [
+                    { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
+                ],
+                turns: [
+                    {
+                        endedAt: 30,
+                        groups: [
+                            {
+                                endedAt: 30,
+                                id: "m1",
+                                outcome: "success",
+                                reason: "completed",
+                                startedAt: 20,
+                            },
+                        ],
+                        messageIds: ["u1", "m1", "m2"],
+                        outcome: "success",
+                        runId: "run-1",
+                        startedAt: 10,
+                    },
+                ],
+            },
+        });
+
+        const shape = (store: ChatStore) =>
+            store.elements().map((element) => [element.kind, element.groupId]);
+        expect(shape(rebuilt)).toEqual(shape(live));
+        expect(shape(live)).toEqual([
+            ["user_message", "group:m1"],
+            ["agent_text", "group:m1"],
+            ["agent_text", "group:m1"],
+            ["group_end", "group:m1"],
+        ]);
+    });
+
+    it("rebuilds a compaction into the same row and the same times as live", () => {
+        const live = new ChatStore("session-1");
+        live.applyHello(hello());
+        live.apply(
+            at(
+                10,
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: "Ask",
+                    message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    runId: "run-1",
+                },
+                "e1",
+            ),
+        );
+        live.apply(at(10, "run_started", { runId: "run-1" }, "e2"));
+        live.apply(
+            at(
+                20,
+                "agent_event",
+                {
+                    event: { iteration: 1, messageId: "m1", type: "inference_iteration_start" },
+                    runId: "run-1",
+                },
+                "e3",
+            ),
+        );
+        live.apply(
+            at(
+                20,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    runId: "run-1",
+                },
+                "e4",
+            ),
+        );
+        live.apply(
+            at(
+                30,
+                "agent_event",
+                {
+                    event: {
+                        compactionId: "c1",
+                        estimatedTokensBefore: 100,
+                        type: "context_compaction_started",
+                    },
+                    runId: "run-1",
+                },
+                "e5",
+            ),
+        );
+        live.apply(
+            at(
+                31,
+                "agent_event",
+                {
+                    event: {
+                        compactedMessageCount: 4,
+                        compactionId: "c1",
+                        estimatedTokensAfter: 40,
+                        type: "context_compacted",
+                    },
+                    runId: "run-1",
+                },
+                "e6",
+            ),
+        );
+        live.apply(
+            at(
+                32,
+                "agent_event",
+                {
+                    event: {
+                        compactionId: "c1",
+                        status: "completed",
+                        type: "context_compaction_finished",
+                    },
+                    runId: "run-1",
+                },
+                "e7",
+            ),
+        );
+        live.apply(
+            at(
+                40,
+                "agent_event",
+                {
+                    event: { iteration: 2, messageId: "m2", type: "inference_iteration_start" },
+                    runId: "run-1",
+                },
+                "e8",
+            ),
+        );
+        live.apply(
+            at(
+                40,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
+                    runId: "run-1",
+                },
+                "e9",
+            ),
+        );
+        live.apply(at(50, "run_finished", { runId: "run-1", stopReason: "stop" }, "e10"));
+
+        const rebuilt = new ChatStore("session-1");
+        rebuilt.applyHello({
+            ...hello(),
+            transcript: {
+                complete: true,
+                messageBoundaryGroupId: { c1: "m1" },
+                messageCreatedAt: { c1: 30, m1: 20, m2: 40, u1: 10 },
+                messageEventId: { m1: "e4", m2: "e9", u1: "e1" },
+                messages: [
+                    { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    compactionMessage("c1", 4, 100, 40),
+                    { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
+                ],
+                turns: [
+                    {
+                        endedAt: 50,
+                        groups: [
+                            {
+                                endedAt: 30,
+                                id: "m1",
+                                outcome: "success",
+                                reason: "compaction",
+                                startedAt: 20,
+                            },
+                            {
+                                endedAt: 50,
+                                id: "m2",
+                                outcome: "success",
+                                reason: "completed",
+                                startedAt: 40,
+                            },
+                        ],
+                        messageIds: ["u1", "m1", "c1", "m2"],
+                        outcome: "success",
+                        runId: "run-1",
+                        startedAt: 10,
+                    },
+                ],
+            },
+        });
+
+        // The compaction is a row a reader saw. History that reported only the
+        // boundary would rebuild a list missing it.
+        const shape = (store: ChatStore) =>
+            store.elements().map((element) => [element.kind, element.groupId]);
+        expect(shape(live)).toEqual([
+            ["user_message", "group:m1"],
+            ["agent_text", "group:m1"],
+            ["group_end", "group:m1"],
+            ["compaction", "group:m2"],
+            ["agent_text", "group:m2"],
+            ["group_end", "group:m2"],
+        ]);
+        expect(shape(rebuilt)).toEqual(shape(live));
+
+        const compactionOf = (store: ChatStore) =>
+            store.elements().find((element) => element.kind === "compaction");
+        expect(compactionOf(rebuilt)).toMatchObject({
+            estimatedTokensAfter: 40,
+            estimatedTokensBefore: 100,
+            messagesCompacted: 4,
+            status: "completed",
+            steeringElapsedMs: compactionOf(live)?.steeringElapsedMs,
+            turnElapsedMs: compactionOf(live)?.turnElapsedMs,
+        });
+
+        const footers = (store: ChatStore) =>
+            store
+                .elements()
+                .filter((element) => element.kind === "group_end")
+                .map((footer) => [footer.reason, footer.elapsedMs, footer.turnElapsedMs]);
+        expect(footers(rebuilt)).toEqual(footers(live));
+        expect(footers(live)).toEqual([
+            ["compaction", 10, 20],
+            ["completed", 10, 40],
+        ]);
+    });
+
+    it("closes a run that failed before it ever reached the model", () => {
+        clock = 0;
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("message_submitted", {
+                delivery: "run",
+                displayText: "Ask",
+                message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                runId: "run-1",
+            }),
+        );
+        store.apply(event("run_started", { runId: "run-1" }));
+        // Startup can fail before any inference begins. The question was still
+        // asked, so it still has to be told how it ended.
+        store.apply(
+            event("run_error", { errorMessage: "Runtime failed to start.", runId: "run-1" }),
+        );
+
+        expect(store.elements().map((element) => element.kind)).toEqual([
+            "user_message",
+            "failure",
+            "group_end",
+        ]);
+        expect(store.elements().at(-2)).toMatchObject({
+            outcome: "failed",
+            reason: "Runtime failed to start.",
+        });
+        expect(store.elements().at(-1)).toMatchObject({ outcome: "error", reason: "error" });
+    });
+});
+
+describe("ChatStore when a boundary shares its millisecond", () => {
+    /** An event at an exact moment, so several can share a millisecond. */
+    function at<TType extends string>(
+        createdAt: number,
+        type: TType,
+        data: unknown,
+        id: string,
+    ): SessionEvent {
+        return { createdAt, data, id, sessionId: "session-1", type } as SessionEvent;
+    }
+
+    it("keeps two steerings in one millisecond heading their own groups", () => {
+        const live = new ChatStore("session-1");
+        live.applyHello(hello());
+        live.apply(
+            at(
+                10,
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: "Ask",
+                    message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    runId: "r",
+                },
+                "e1",
+            ),
+        );
+        live.apply(at(10, "run_started", { runId: "r" }, "e2"));
+        live.apply(
+            at(
+                20,
+                "agent_event",
+                {
+                    event: { iteration: 1, messageId: "m1", type: "inference_iteration_start" },
+                    runId: "r",
+                },
+                "e3",
+            ),
+        );
+        live.apply(
+            at(
+                20,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    runId: "r",
+                },
+                "e4",
+            ),
+        );
+        for (const [i, sid] of ["s1", "s2"].entries()) {
+            live.apply(
+                at(
+                    30,
+                    "message_submitted",
+                    {
+                        delivery: "steer",
+                        displayText: sid,
+                        message: { blocks: [{ text: sid, type: "text" }], id: sid, role: "user" },
+                        runId: "r",
+                    },
+                    `es${i}a`,
+                ),
+            );
+            live.apply(at(30, "steering_applied", { messageIds: [sid], runId: "r" }, `es${i}b`));
+            const mid = i === 0 ? "m2" : "m3";
+            live.apply(
+                at(
+                    30,
+                    "agent_event",
+                    {
+                        event: {
+                            iteration: i + 2,
+                            messageId: mid,
+                            type: "inference_iteration_start",
+                        },
+                        runId: "r",
+                    },
+                    `es${i}c`,
+                ),
+            );
+            live.apply(
+                at(
+                    30,
+                    "agent_message",
+                    {
+                        message: { blocks: [{ text: mid, type: "text" }], id: mid, role: "agent" },
+                        runId: "r",
+                    },
+                    `es${i}d`,
+                ),
+            );
+        }
+        live.apply(at(40, "run_finished", { runId: "r", stopReason: "stop" }, "e9"));
+
+        const rebuilt = new ChatStore("session-1");
+        rebuilt.applyHello({
+            ...hello(),
+            transcript: {
+                complete: true,
+                messageCreatedAt: { m1: 20, m2: 30, m3: 30, s1: 30, s2: 30, u1: 10 },
+                messageEventId: {
+                    m1: "e4",
+                    m2: "es0d",
+                    m3: "es1d",
+                    s1: "es0a",
+                    s2: "es1a",
+                    u1: "e1",
+                },
+                messageSteeredAt: { s1: 30, s2: 30 },
+                messageBoundaryGroupId: { s1: "m1", s2: "m2" },
+                messages: [
+                    { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    { blocks: [{ text: "s1", type: "text" }], id: "s1", role: "user" },
+                    { blocks: [{ text: "m2", type: "text" }], id: "m2", role: "agent" },
+                    { blocks: [{ text: "s2", type: "text" }], id: "s2", role: "user" },
+                    { blocks: [{ text: "m3", type: "text" }], id: "m3", role: "agent" },
+                ],
+                turns: [
+                    {
+                        endedAt: 40,
+                        groups: [
+                            {
+                                endedAt: 30,
+                                id: "m1",
+                                outcome: "success",
+                                reason: "steering",
+                                startedAt: 20,
+                            },
+                            {
+                                endedAt: 30,
+                                id: "m2",
+                                outcome: "success",
+                                reason: "steering",
+                                startedAt: 30,
+                            },
+                            {
+                                endedAt: 40,
+                                id: "m3",
+                                outcome: "success",
+                                reason: "completed",
+                                startedAt: 30,
+                            },
+                        ],
+                        messageIds: ["u1", "m1", "s1", "m2", "s2", "m3"],
+                        outcome: "success",
+                        runId: "r",
+                        startedAt: 10,
+                    },
+                ],
+            },
+        });
+        // Which group a steering heads cannot be read from the clock when the
+        // boundary and the group it opens fall in the same millisecond.
+        const shape = (store: ChatStore) =>
+            store.elements().map((element) => [element.kind, element.groupId]);
+        expect(shape(rebuilt)).toEqual(shape(live));
+        expect(shape(live)).toEqual([
+            ["user_message", "group:m1"],
+            ["agent_text", "group:m1"],
+            ["group_end", "group:m1"],
+            ["user_message", "group:m2"],
+            ["agent_text", "group:m2"],
+            ["group_end", "group:m2"],
+            ["user_message", "group:m3"],
+            ["agent_text", "group:m3"],
+            ["group_end", "group:m3"],
+        ]);
+    });
+
+    it("rebuilds a compaction, the group it opened, and an attempt inside it", () => {
+        const live = new ChatStore("session-1");
+        live.applyHello(hello());
+        live.apply(
+            at(
+                10,
+                "message_submitted",
+                {
+                    delivery: "run",
+                    displayText: "Ask",
+                    message: { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    runId: "r",
+                },
+                "e1",
+            ),
+        );
+        live.apply(at(10, "run_started", { runId: "r" }, "e2"));
+        live.apply(
+            at(
+                20,
+                "agent_event",
+                {
+                    event: { iteration: 1, messageId: "m1", type: "inference_iteration_start" },
+                    runId: "r",
+                },
+                "e3",
+            ),
+        );
+        live.apply(
+            at(
+                20,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    runId: "r",
+                },
+                "e4",
+            ),
+        );
+        live.apply(
+            at(
+                30,
+                "agent_event",
+                {
+                    event: {
+                        compactionId: "c1",
+                        estimatedTokensBefore: 100,
+                        type: "context_compaction_started",
+                    },
+                    runId: "r",
+                },
+                "e5",
+            ),
+        );
+        live.apply(
+            at(
+                30,
+                "agent_event",
+                {
+                    event: {
+                        compactionId: "c1",
+                        status: "completed",
+                        type: "context_compaction_finished",
+                    },
+                    runId: "r",
+                },
+                "e6",
+            ),
+        );
+        live.apply(
+            at(
+                30,
+                "agent_event",
+                {
+                    event: { iteration: 2, messageId: "m2", type: "inference_iteration_start" },
+                    runId: "r",
+                },
+                "e7",
+            ),
+        );
+        live.apply(at(30, "inference_retry", { attempt: 1, reason: "lost", runId: "r" }, "e8"));
+        live.apply(
+            at(
+                30,
+                "agent_message",
+                {
+                    message: { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
+                    runId: "r",
+                },
+                "e9",
+            ),
+        );
+        live.apply(at(40, "run_finished", { runId: "r", stopReason: "stop" }, "e10"));
+
+        const rebuilt = new ChatStore("session-1");
+        rebuilt.applyHello({
+            ...hello(),
+            transcript: {
+                complete: true,
+                messageBoundaryGroupId: { c1: "m1" },
+                messageCreatedAt: { c1: 30, m1: 20, m2: 30, u1: 10 },
+                messageEventId: { m1: "e4", m2: "e9", u1: "e1" },
+                messages: [
+                    { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
+                    { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
+                    compactionMessage("c1", 0, 100, 100),
+                    { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
+                ],
+                turns: [
+                    {
+                        endedAt: 40,
+                        groups: [
+                            {
+                                endedAt: 30,
+                                id: "m1",
+                                outcome: "success",
+                                reason: "compaction",
+                                startedAt: 20,
+                            },
+                            {
+                                endedAt: 40,
+                                id: "m2",
+                                outcome: "success",
+                                reason: "completed",
+                                startedAt: 30,
+                            },
+                        ],
+                        messageIds: ["u1", "m1", "c1", "m2"],
+                        outcome: "success",
+                        retries: [
+                            { attempt: 1, createdAt: 30, groupId: "m2", id: "e8", reason: "lost" },
+                        ],
+                        runId: "r",
+                        startedAt: 10,
+                    },
+                ],
+            },
+        });
+        const shape = (store: ChatStore) =>
+            store.elements().map((element) => [element.kind, element.groupId]);
+        expect(shape(rebuilt)).toEqual(shape(live));
+        expect(shape(live)).toEqual([
+            ["user_message", "group:m1"],
+            ["agent_text", "group:m1"],
+            ["group_end", "group:m1"],
+            ["compaction", "group:m2"],
+            ["agent_text", "group:m2"],
+            ["failure", "group:m2"],
+            ["group_end", "group:m2"],
+        ]);
     });
 });

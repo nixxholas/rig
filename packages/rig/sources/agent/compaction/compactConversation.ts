@@ -65,10 +65,7 @@ export async function compactConversation(options: {
     const providerContext = await options.createProviderContext(options.messages);
     const summary = await requestProviderCompaction({
         context: providerContext,
-        inputTokens: resolveCompactionInputTokens(
-            estimatedTokensBefore,
-            options.reportedTokens,
-        ),
+        inputTokens: resolveCompactionInputTokens(estimatedTokensBefore, options.reportedTokens),
         provider: options.provider,
         model: options.model,
         now: options.now,
@@ -262,8 +259,7 @@ function findPreservedAgentMessage(
         providerMessage.sourceMessageId !== undefined
     ) {
         return source.find(
-            (message) =>
-                !used.has(message.id) && message.id === providerMessage.sourceMessageId,
+            (message) => !used.has(message.id) && message.id === providerMessage.sourceMessageId,
         );
     }
     if (providerMessage.role === "system") {
@@ -304,8 +300,7 @@ function sameProviderContent(
         if (other === undefined || block.type !== other.type) return false;
         if (block.type === "text" && other.type === "text") {
             return (
-                block.text === other.text &&
-                Object.keys(block).length === Object.keys(other).length
+                block.text === other.text && Object.keys(block).length === Object.keys(other).length
             );
         }
         return (
@@ -319,9 +314,7 @@ function sameProviderContent(
     });
 }
 
-function agentContentToProviderContent(
-    block: UserMessage["blocks"][number],
-): ProviderUserContent {
+function agentContentToProviderContent(block: UserMessage["blocks"][number]): ProviderUserContent {
     return block.type === "text"
         ? { type: "text", text: block.text }
         : {

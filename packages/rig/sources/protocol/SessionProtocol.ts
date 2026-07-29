@@ -160,6 +160,7 @@ export interface ReadyHealthResponse {
     durableGlobalEventQueue: boolean;
     healthy: true;
     identity: DaemonIdentity;
+    protocolVersion: number;
     ready: true;
     status: "ready";
 }
@@ -167,6 +168,7 @@ export interface ReadyHealthResponse {
 export interface StartingHealthResponse {
     healthy: true;
     identity: DaemonIdentity;
+    protocolVersion: number;
     ready: false;
     status: "starting";
 }
@@ -175,6 +177,7 @@ export interface ErrorHealthResponse {
     error: string;
     healthy: false;
     identity: DaemonIdentity;
+    protocolVersion: number;
     ready: false;
     status: "error";
 }
@@ -245,7 +248,8 @@ export interface ProtocolSession {
     providerId: string;
     permissionMode: PermissionMode;
     modelId: string;
-    orderKey: string;
+    /** Absent for a session with no place in an ordered list, such as a subagent. */
+    orderKey?: string;
     effort?: string;
     serviceTier?: ServiceTier;
     secretIds: readonly string[];
@@ -314,11 +318,30 @@ export interface SessionTranscriptTurn {
     /** Absent while the turn is still running. */
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
+    /** Inference segments inside this run, in start order. */
+    groups?: readonly SessionTranscriptGroup[];
     retries?: readonly SessionTranscriptRetry[];
+}
+
+export interface SessionTranscriptGroup {
+    /** The assistant message identity allocated before the first output token. */
+    id: string;
+    startedAt: number;
+    endedAt?: number;
+    outcome?: "success" | "error" | "stopped";
+    reason?: "completed" | "steering" | "compaction" | "abort" | "error";
+    errorMessage?: string;
 }
 
 export interface SessionTranscriptRetry {
     id: EventId;
+    /**
+     * The group this attempt happened in.
+     *
+     * Wall-clock alone cannot say, because an attempt and the boundary it sits
+     * beside routinely share a millisecond. Absent when no group was open.
+     */
+    groupId?: string;
     createdAt: number;
     attempt: number;
     reason: string;
@@ -339,6 +362,14 @@ export interface SessionTranscriptWindow {
     messageEventId?: Readonly<Record<string, EventId>>;
     /** When each steering message was actually applied to its run. */
     messageSteeredAt?: Readonly<Record<string, number>>;
+    /**
+     * The group each boundary message closed, keyed by message ID.
+     *
+     * A steering message and a compaction both head the group that follows the
+     * one they closed. Which that was cannot be read from the clock, because a
+     * boundary and the group it opens routinely share a millisecond.
+     */
+    messageBoundaryGroupId?: Readonly<Record<string, string>>;
     /** Resolved permission facts for tool calls contained in this page. */
     permissionReviews?: readonly SessionPermissionReview[];
     turns: readonly SessionTranscriptTurn[];
@@ -464,7 +495,14 @@ export interface SessionSummary {
     draftUpdatedAt?: number;
     providerId: string;
     modelId: string;
-    orderKey: string;
+    /**
+     * Position in the ordered list of a project's chats.
+     *
+     * Absent for a session that has no place in that list. A subagent belongs to
+     * the session that started it, not to the sidebar, so it has no position and
+     * must never be given a stand-in one.
+     */
+    orderKey?: string;
     permissionMode: PermissionMode;
     effort?: string;
     serviceTier?: ServiceTier;

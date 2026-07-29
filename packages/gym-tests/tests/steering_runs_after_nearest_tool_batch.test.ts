@@ -39,7 +39,8 @@ describe("steering at a provider tool-batch boundary", () => {
                 const messages = request.context.messages;
                 const steeringIndex = messages.findIndex(
                     (message) =>
-                        message.role === "user" && JSON.stringify(message.content).includes(steering),
+                        message.role === "user" &&
+                        JSON.stringify(message.content).includes(steering),
                 );
                 const resultIndexes = messages.flatMap((message, index) =>
                     message.role === "toolResult" ? [index] : [],
@@ -65,10 +66,7 @@ describe("steering at a provider tool-batch boundary", () => {
         await waitForPendingSteering(gym, steering);
         releaseInference.resolve();
 
-        const screen = await gym.terminal.waitForText(
-            "STEERING_BATCH_BOUNDARY_CONFIRMED",
-            30_000,
-        );
+        const screen = await gym.terminal.waitForText("STEERING_BATCH_BOUNDARY_CONFIRMED", 30_000);
         expect(screen.text).not.toContain("Messages to be submitted after next tool call");
     }, 120_000);
 
@@ -82,9 +80,7 @@ describe("steering at a provider tool-batch boundary", () => {
                 if (request.options.intent === "compaction") {
                     sawCompaction = true;
                     expect(
-                        request.context.messages.filter(
-                            (message) => message.role === "toolResult",
-                        ),
+                        request.context.messages.filter((message) => message.role === "toolResult"),
                     ).toHaveLength(2);
                     return {
                         content: [{ text: "Provider compacted the closed batch.", type: "text" }],
@@ -128,10 +124,7 @@ describe("steering at a provider tool-batch boundary", () => {
         await waitForPendingSteering(gym, steering);
         releaseInference.resolve();
 
-        const screen = await gym.terminal.waitForText(
-            "COMPACTION_THEN_STEERING_CONFIRMED",
-            30_000,
-        );
+        const screen = await gym.terminal.waitForText("COMPACTION_THEN_STEERING_CONFIRMED", 30_000);
         expect(screen.text).toContain("Context compacted");
     }, 120_000);
 });
