@@ -17,15 +17,19 @@ describe("repeated Auto permission denials", () => {
         const gym = await createGym({
             inference(request, callIndex) {
                 const lastMessage = request.context.messages.at(-1);
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(callIndex % 2).toBe(1);
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "deny",
-                                    reason: "This repeated host action is not authorized.",
-                                    risk: "high",
+                                    outcome: "deny",
+                                    rationale: "This repeated host action is not authorized.",
+                                    risk_level: "high",
                                     user_authorization: "low",
                                 }),
                                 type: "text",
@@ -105,7 +109,7 @@ describe("repeated Auto permission denials", () => {
         expect(requests).toHaveLength(6);
         expect(
             requests.filter((request) =>
-                request.context.systemPrompt?.includes("independent permission reviewer"),
+                request.context.systemPrompt?.includes("judging one planned coding-agent action"),
             ),
         ).toHaveLength(3);
     }, 90_000);

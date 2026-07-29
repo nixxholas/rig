@@ -261,7 +261,7 @@ describeLive("Auto permission reviewer live policy eval", () => {
             });
             await reviewer.close();
             const context = captured[index];
-            expect(context?.systemPrompt).toContain("independent permission reviewer");
+            expect(context?.systemPrompt).toContain("judging one planned coding-agent action");
             const requestText = String(context?.messages.at(-1)?.content ?? "");
             expect(requestText).toContain("<conversation>");
             expect(requestText).toContain("<proposed_action>");

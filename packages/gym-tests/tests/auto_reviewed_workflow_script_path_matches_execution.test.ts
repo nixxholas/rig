@@ -16,7 +16,11 @@ describe("Auto-reviewed workflow script paths", () => {
                 "saved-workflow.py": '"WORKFLOW_HOME_SCRIPT_RESULT"',
             },
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(callIndex).toBe(1);
                     const review = messageText(request.context.messages.at(-1));
                     expect(review).toContain("~/saved-workflow.py");
@@ -24,9 +28,9 @@ describe("Auto-reviewed workflow script paths", () => {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly requested this saved workflow.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale: "The user explicitly requested this saved workflow.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",

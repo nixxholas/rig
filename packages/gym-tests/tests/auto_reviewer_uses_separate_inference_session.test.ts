@@ -14,15 +14,19 @@ describe("Auto reviewer inference session isolation", () => {
         const gym = await createGym({
             environment: { ANTHROPIC_API_KEY: "claude-test-key" },
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(callIndex).toBe(1);
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user requested this harmless workspace marker.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale: "The user requested this harmless workspace marker.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",
@@ -71,10 +75,11 @@ describe("Auto reviewer inference session isolation", () => {
             (request) => !request.options.sessionId?.endsWith(":title"),
         );
         const reviewer = requests.find((request) =>
-            request.context.systemPrompt?.includes("independent permission reviewer"),
+            request.context.systemPrompt?.includes("judging one planned coding-agent action"),
         );
         const agent = requests.filter(
-            (request) => !request.context.systemPrompt?.includes("independent permission reviewer"),
+            (request) =>
+                !request.context.systemPrompt?.includes("judging one planned coding-agent action"),
         );
         expect(reviewer?.options.sessionId).toBeTypeOf("string");
         expect(agent).toHaveLength(2);

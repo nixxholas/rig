@@ -141,7 +141,7 @@ describe("createPermissionReviewSideAgent", () => {
         });
 
         expect(JSON.stringify(requests[1]?.messages)).toContain("PROHIBITED");
-        expect(JSON.parse(result.text)).toMatchObject({ decision: "deny" });
+        expect(JSON.parse(result.text)).toMatchObject({ outcome: "deny" });
         await reviewer.close();
     });
 
@@ -283,10 +283,10 @@ function recordingProvider(
                     {
                         type: "text" as const,
                         text: JSON.stringify({
-                            decision: denied ? "deny" : "allow",
-                            risk: denied ? "high" : "low",
+                            outcome: denied ? "deny" : "allow",
+                            risk_level: denied ? "high" : "low",
                             user_authorization: denied ? "low" : "high",
-                            reason: denied ? "The user prohibited this action." : "Routine.",
+                            rationale: denied ? "The user prohibited this action." : "Routine.",
                         }),
                     },
                 ],

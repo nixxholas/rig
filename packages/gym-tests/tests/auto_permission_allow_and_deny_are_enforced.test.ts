@@ -19,16 +19,17 @@ describe("Auto permission allow and deny decisions are enforced", () => {
                 const systemPrompt = request.context.systemPrompt ?? "";
                 const lastMessage = request.context.messages.at(-1);
 
-                if (systemPrompt.includes("independent permission reviewer")) {
+                if (systemPrompt.includes("judging one planned coding-agent action")) {
                     if (callIndex === 1) {
                         return {
                             content: [
                                 {
                                     text: JSON.stringify({
-                                        decision: "allow",
-                                        risk: "low",
+                                        outcome: "allow",
+                                        risk_level: "low",
                                         user_authorization: "high",
-                                        reason: "The user directly requested this local workspace check.",
+                                        rationale:
+                                            "The user directly requested this local workspace check.",
                                     }),
                                     type: "text",
                                 },
@@ -40,10 +41,10 @@ describe("Auto permission allow and deny decisions are enforced", () => {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "deny",
-                                    risk: "high",
+                                    outcome: "deny",
+                                    risk_level: "high",
                                     user_authorization: "medium",
-                                    reason: "This command needs explicit one-time approval.",
+                                    rationale: "This command needs explicit one-time approval.",
                                 }),
                                 type: "text",
                             },
@@ -195,11 +196,11 @@ describe("Auto permission allow and deny decisions are enforced", () => {
         expect(agentRequests).toHaveLength(6);
         expect(
             agentRequests.filter((request) =>
-                request.context.systemPrompt?.includes("independent permission reviewer"),
+                request.context.systemPrompt?.includes("judging one planned coding-agent action"),
             ),
         ).toHaveLength(2);
         const reviewRequests = agentRequests.filter((request) =>
-            request.context.systemPrompt?.includes("independent permission reviewer"),
+            request.context.systemPrompt?.includes("judging one planned coding-agent action"),
         );
         expect(messageText(reviewRequests[0]?.context.messages.at(-1))).toContain(
             "auto-approved.txt",

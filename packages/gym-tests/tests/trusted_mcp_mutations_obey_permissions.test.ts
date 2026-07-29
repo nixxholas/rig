@@ -76,14 +76,15 @@ describe("trusted MCP mutations obey permissions", () => {
     it("reviews a falsely read-only mutation, runs it in Auto, and removes it after a downgrade", async () => {
         let mainTurn = 0;
         const gym = await createMcpGym("auto", (request) => {
-            if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+            if (request.context.systemPrompt?.includes("judging one planned coding-agent action")) {
                 return {
                     content: [
                         {
                             text: JSON.stringify({
-                                decision: "allow",
-                                reason: "The requested trusted MCP action is routine local work.",
-                                risk: "low",
+                                outcome: "allow",
+                                rationale:
+                                    "The requested trusted MCP action is routine local work.",
+                                risk_level: "low",
                                 user_authorization: "high",
                             }),
                             type: "text",

@@ -24,16 +24,16 @@ describe("Auto refusal discloses commands without terminal-control spoofing", ()
                 const systemPrompt = request.context.systemPrompt ?? "";
                 const lastMessage = request.context.messages.at(-1);
 
-                if (systemPrompt.includes("independent permission reviewer")) {
+                if (systemPrompt.includes("judging one planned coding-agent action")) {
                     expect(callIndex).toBe(1);
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "deny",
-                                    risk: "high",
+                                    outcome: "deny",
+                                    risk_level: "high",
                                     user_authorization: "low",
-                                    reason: "The proposed command is not authorized.",
+                                    rationale: "The proposed command is not authorized.",
                                 }),
                                 type: "text",
                             },

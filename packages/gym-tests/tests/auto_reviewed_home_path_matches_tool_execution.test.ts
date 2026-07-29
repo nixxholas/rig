@@ -14,16 +14,20 @@ describe("Auto-reviewed home-relative file paths", () => {
         const gym = await createGym({
             environment: { ANTHROPIC_API_KEY: "claude-test-key" },
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(callIndex).toBe(1);
                     expect(messageText(request.context.messages.at(-1))).toContain("~");
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The requested path is the one the user named.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale: "The requested path is the one the user named.",
+                                    risk_level: "low",
                                     user_authorization: "medium",
                                 }),
                                 type: "text",

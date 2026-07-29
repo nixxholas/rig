@@ -16,14 +16,19 @@ describe("Auto reviewer allows authorized input to a running shell", () => {
             mode: "docker",
             cols: 104,
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly requested this interactive shell action.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale:
+                                        "The user explicitly requested this interactive shell action.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",
@@ -86,7 +91,7 @@ describe("Auto reviewer allows authorized input to a running shell", () => {
         expect(completed.text).not.toContain("Allow once");
         expect(completed.text).not.toContain("Waiting for approval");
         const reviewRequests = gym.inference.requests.filter((request) =>
-            request.context.systemPrompt?.includes("independent permission reviewer"),
+            request.context.systemPrompt?.includes("judging one planned coding-agent action"),
         );
         expect(reviewRequests).toHaveLength(1);
         expect(messageText(reviewRequests[0]?.context.messages.at(-1))).toContain(

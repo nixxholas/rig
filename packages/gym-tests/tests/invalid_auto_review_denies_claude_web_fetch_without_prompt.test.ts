@@ -14,7 +14,11 @@ describe("Claude WebFetch after an invalid Auto review", () => {
         const gym = await createGym({
             environment: { ANTHROPIC_API_KEY: "claude-test-key" },
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(callIndex).toBe(1);
                     return {
                         content: [{ text: "not a permission decision", type: "text" }],

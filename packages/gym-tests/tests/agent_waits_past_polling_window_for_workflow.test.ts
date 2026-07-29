@@ -21,15 +21,19 @@ describe("waiting for a long workflow", () => {
                 const sessionId = request.options.sessionId;
                 const lastText = textOfLastMessage(request);
 
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     permissionReviews += 1;
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly requested this workflow.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale: "The user explicitly requested this workflow.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",

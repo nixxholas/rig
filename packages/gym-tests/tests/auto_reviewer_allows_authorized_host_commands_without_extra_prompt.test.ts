@@ -14,15 +14,20 @@ describe("Auto reviewer allows authorized host commands without extra prompts", 
         const gym = await createGym({
             cols: 104,
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(callIndex).toBe(1);
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly requested this harmless developer check.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale:
+                                        "The user explicitly requested this harmless developer check.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",

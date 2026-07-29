@@ -15,14 +15,19 @@ describe("successful Auto permission reviews", () => {
             mode: "docker",
             cols: 132,
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly authorized this harmless home-directory check.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale:
+                                        "The user explicitly authorized this harmless home-directory check.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",

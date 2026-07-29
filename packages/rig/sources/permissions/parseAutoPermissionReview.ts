@@ -1,4 +1,3 @@
-import { parseJsonFromModelOutput } from "../utils/parseJsonFromModelOutput.js";
 import type { PermissionReviewTranscript } from "./PermissionReviewAgent.js";
 
 export type AutoPermissionRisk = "low" | "medium" | "high" | "critical";
@@ -32,26 +31,48 @@ const AUTHORIZATIONS: readonly AutoPermissionUserAuthorization[] = [
 ];
 
 export function parseAutoPermissionReview(text: string): AutoPermissionReview | undefined {
-    const value = parseJsonFromModelOutput(text);
+    const value = parseGuardianJson(text);
     if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;
     const record = value as Record<string, unknown>;
-    {
-        if (record.decision !== "allow" && record.decision !== "deny") return undefined;
-        const risk = RISKS.find((candidate) => candidate === record.risk);
-        const userAuthorization = AUTHORIZATIONS.find(
-            (candidate) => candidate === record.user_authorization,
-        );
-        if (risk === undefined || userAuthorization === undefined) return undefined;
-        if (typeof record.reason !== "string" || record.reason.trim().length === 0) {
+    if (record.outcome !== "allow" && record.outcome !== "deny") return undefined;
+    const risk = RISKS.find((candidate) => candidate === record.risk_level);
+    if (record.risk_level != null && risk === undefined) return undefined;
+    const userAuthorization = AUTHORIZATIONS.find(
+        (candidate) => candidate === record.user_authorization,
+    );
+    if (record.user_authorization != null && userAuthorization === undefined) return undefined;
+    if (record.rationale != null && typeof record.rationale !== "string") return undefined;
+    const rationale =
+        typeof record.rationale === "string" && record.rationale.trim().length > 0
+            ? record.rationale
+            : record.outcome === "allow"
+              ? "Auto-review returned a low-risk allow decision."
+              : "Auto-review returned a deny decision without a rationale.";
+    return {
+        decision: record.outcome,
+        ...(record.outcome === "deny" ? { denialKind: "rejected" as const } : {}),
+        reason: normalizeReason(rationale),
+        risk: risk ?? (record.outcome === "allow" ? "low" : "high"),
+        userAuthorization: userAuthorization ?? "unknown",
+    };
+}
+
+/**
+ * Matches Codex Guardian's thin recovery path: prefer strict JSON, then accept the text between
+ * the first opening and last closing brace when the model wrapped its assessment in prose.
+ */
+function parseGuardianJson(text: string): unknown {
+    try {
+        return JSON.parse(text);
+    } catch {
+        const start = text.indexOf("{");
+        const end = text.lastIndexOf("}");
+        if (start < 0 || end <= start) return undefined;
+        try {
+            return JSON.parse(text.slice(start, end + 1));
+        } catch {
             return undefined;
         }
-        return {
-            decision: record.decision,
-            ...(record.decision === "deny" ? { denialKind: "rejected" as const } : {}),
-            reason: normalizeReason(record.reason),
-            risk,
-            userAuthorization,
-        };
     }
 }
 

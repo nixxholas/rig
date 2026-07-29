@@ -212,9 +212,9 @@ function stubReviewer(
         actions.push(request.action);
         return {
             text: JSON.stringify({
-                decision: result.decision,
-                reason: result.reason,
-                risk: result.risk,
+                outcome: result.decision,
+                rationale: result.reason,
+                risk_level: result.risk,
                 user_authorization: result.userAuthorization,
             }),
             userEvidenceOmitted,

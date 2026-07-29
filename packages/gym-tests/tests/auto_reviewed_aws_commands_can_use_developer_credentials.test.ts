@@ -28,14 +28,19 @@ describe("Auto-reviewed AWS commands can use developer credentials", () => {
                 },
             },
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The requested AWS identity check is routine developer work.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale:
+                                        "The requested AWS identity check is routine developer work.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",

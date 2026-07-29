@@ -19,16 +19,17 @@ describe("Auto refusal discloses the complete execution boundary", () => {
                 const systemPrompt = request.context.systemPrompt ?? "";
                 const lastMessage = request.context.messages.at(-1);
 
-                if (systemPrompt.includes("independent permission reviewer")) {
+                if (systemPrompt.includes("judging one planned coding-agent action")) {
                     expect(callIndex).toBe(1);
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "deny",
-                                    risk: "high",
+                                    outcome: "deny",
+                                    risk_level: "high",
                                     user_authorization: "low",
-                                    reason: "This action requests unrestricted execution outside the workspace.",
+                                    rationale:
+                                        "This action requests unrestricted execution outside the workspace.",
                                 }),
                                 type: "text",
                             },

@@ -14,14 +14,19 @@ describe("Auto reviewer allows bounded medium-risk actions", () => {
         const gym = await createGym({
             cols: 104,
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "This is a bounded and reversible local developer action.",
-                                    risk: "medium",
+                                    outcome: "allow",
+                                    rationale:
+                                        "This is a bounded and reversible local developer action.",
+                                    risk_level: "medium",
                                     user_authorization: "low",
                                 }),
                                 type: "text",

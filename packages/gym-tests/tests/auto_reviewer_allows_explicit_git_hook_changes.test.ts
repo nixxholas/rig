@@ -19,7 +19,11 @@ describe("Auto reviewer allows explicit Git hook changes", () => {
                 ".git/hooks/.keep": "fixture\n",
             },
             inference(request, callIndex) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     expect(messageText(request.context.messages.at(-1))).toContain(
                         ".git/hooks/pre-commit",
                     );
@@ -27,9 +31,10 @@ describe("Auto reviewer allows explicit Git hook changes", () => {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly requested this local pre-commit hook.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale:
+                                        "The user explicitly requested this local pre-commit hook.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",

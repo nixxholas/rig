@@ -17,14 +17,19 @@ describe("Auto reviewer authorization after large tool output", () => {
         const gym = await createGym({
             cols: 100,
             inference(request) {
-                if (request.context.systemPrompt?.includes("independent permission reviewer")) {
+                if (
+                    request.context.systemPrompt?.includes(
+                        "judging one planned coding-agent action",
+                    )
+                ) {
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "allow",
-                                    reason: "The user explicitly authorized this exact host write.",
-                                    risk: "low",
+                                    outcome: "allow",
+                                    rationale:
+                                        "The user explicitly authorized this exact host write.",
+                                    risk_level: "low",
                                     user_authorization: "high",
                                 }),
                                 type: "text",
@@ -97,7 +102,7 @@ describe("Auto reviewer authorization after large tool output", () => {
             "authorized after large output\n",
         );
         const reviewRequests = gym.inference.requests.filter((request) =>
-            request.context.systemPrompt?.includes("independent permission reviewer"),
+            request.context.systemPrompt?.includes("judging one planned coding-agent action"),
         );
         expect(messageText(reviewRequests.at(-1)?.context.messages.at(-1))).toContain(
             AUTHORIZATION,

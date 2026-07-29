@@ -17,15 +17,15 @@ describe("apply_patch Auto refusal disclosure", () => {
             cols: 112,
             inference(request, callIndex) {
                 const systemPrompt = request.context.systemPrompt ?? "";
-                if (systemPrompt.includes("independent permission reviewer")) {
+                if (systemPrompt.includes("judging one planned coding-agent action")) {
                     expect(callIndex).toBe(1);
                     return {
                         content: [
                             {
                                 text: JSON.stringify({
-                                    decision: "deny",
-                                    reason: "This patch writes outside the workspace.",
-                                    risk: "high",
+                                    outcome: "deny",
+                                    rationale: "This patch writes outside the workspace.",
+                                    risk_level: "high",
                                     user_authorization: "low",
                                 }),
                                 type: "text",
