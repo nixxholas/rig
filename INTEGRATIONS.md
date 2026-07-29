@@ -199,6 +199,59 @@ same local-or-Docker filesystem, current permission mode, shell sandbox,
 network boundary, process accounting, output limits, and abort lifecycle as the
 TUI agent. File writes retain Happy's SHA-256 optimistic-concurrency contract.
 
+## HTTP proxy
+
+The authenticated daemon connection exposes a session-scoped proxy tunnel for
+native host sessions:
+
+```http
+CONNECT /sessions/{sessionId}/proxy
+Authorization: Bearer <daemon token>
+```
+
+After Rig answers `200 Connection Established`, the connection speaks the
+ordinary HTTP proxy protocol: absolute-form HTTP requests and nested
+`CONNECT host:port` requests both work, and request and response bodies stream
+without buffering. Rig removes proxy and hop-by-hop headers while preserving
+upstream `Authorization`.
+
+Putting the session ID in this URL lets an Electron main process bind one
+ephemeral loopback proxy per browser session, pass its ordinary
+`http://127.0.0.1:<port>` URL to `session.setProxy()`, and pipe each accepted
+browser connection through the authenticated Rig tunnel. Chromium does not
+preserve path, query, or arbitrary headers in its proxy server setting, so the
+loopback bridge owns that final URL-to-tunnel mapping.
+
+Docker sessions receive HTTP 403 before Rig opens any network connection instead
+of silently sending traffic through the daemon host; container-network proxying
+is not currently supported.
+
+## Direct session files
+
+`GET /sessions/{sessionId}/file?path={path}` reads arbitrary binary file bytes
+through that session's `AgentContext` and returns:
+
+```json
+{ "content": "<base64>", "hash": "<sha256>" }
+```
+
+`PUT /sessions/{sessionId}/file` replaces or creates a file:
+
+```json
+{
+    "path": "path/to/file",
+    "content": "<base64>",
+    "expectedHash": "<sha256 or null>"
+}
+```
+
+Use the hash returned by `GET` to replace the exact version that was read. Use
+`null` only when creating a file expected not to exist. A concurrent change
+returns HTTP 409. Reads and writes use the session's host or Docker filesystem
+and its current permission mode; read-only mode rejects writes, workspace mode
+rejects outside-workspace and protected Git writes, and full access permits
+arbitrary paths. File payloads are limited to 32 MB.
+
 ## Submit a configured message
 
 `POST /sessions/{sessionId}/messages` accepts the normal message fields plus:

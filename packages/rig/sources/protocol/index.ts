@@ -119,6 +119,7 @@ export type {
     ProviderQuotaObservedEvent,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
+    ReadSessionFileResponse,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
     RewindSessionRequest,
@@ -206,6 +207,8 @@ export type {
     UpdateSessionRequest,
     UserInputRequestedEvent,
     UserInputResolvedEvent,
+    WriteSessionFileRequest,
+    WriteSessionFileResponse,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
 export {

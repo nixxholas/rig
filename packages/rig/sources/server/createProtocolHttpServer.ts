@@ -42,6 +42,7 @@ import type {
     RewindSessionResponse,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
+    ReadSessionFileResponse,
     RunShellCommandRequest,
     RunShellCommandResponse,
     ResolveExternalToolCallRequest,
@@ -74,6 +75,8 @@ import type {
     UpdateDaemonConfigResponse,
     SetSessionDraftRequest,
     UpdateSessionRequest,
+    WriteSessionFileRequest,
+    WriteSessionFileResponse,
 } from "../protocol/index.js";
 import { createEventIdFactory } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
@@ -119,6 +122,13 @@ import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "./SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminalPresence.js";
+import { attachHttpConnectProxy } from "./attachHttpConnectProxy.js";
+import {
+    readSessionFile,
+    SessionFileConflictError,
+    SessionFileTooLargeError,
+    writeSessionFile,
+} from "./sessionFileApi.js";
 
 const createTerminalSnapshotEventId = createEventIdFactory();
 const createSessionSnapshotEventId = createEventIdFactory();
@@ -168,6 +178,7 @@ export function createProtocolHttpServer(
     const sessionTerminals = new SessionTerminalTracker();
 
     attachRemoteTerminalWebSocketServer({ server, store, token: options.token });
+    attachHttpConnectProxy(server, options.token, store);
     server.once("close", () => {
         void store.remoteTerminals.close();
     });
@@ -1496,6 +1507,64 @@ async function handleRequest(
         return;
     }
 
+    if (route.name === "file" && (request.method === "GET" || request.method === "PUT")) {
+        try {
+            if (request.method === "GET") {
+                const path = url.searchParams.get("path");
+                if (path === null || path.length === 0) {
+                    sendJson(response, 400, { error: "A file path is required." });
+                    return;
+                }
+                sendJson<ReadSessionFileResponse>(
+                    response,
+                    200,
+                    await readSessionFile(session.externalControlContext(), path),
+                );
+                return;
+            }
+
+            if (session.isSubagent()) {
+                sendJson(response, 409, {
+                    error: "Subagent histories are read-only and cannot update files.",
+                });
+                return;
+            }
+            const body = await readJson<unknown>(request, 44 * 1024 * 1024);
+            if (
+                !hasOnlyObjectKeys(body, ["content", "expectedHash", "path"]) ||
+                typeof body.content !== "string" ||
+                (typeof body.expectedHash !== "string" && body.expectedHash !== null) ||
+                typeof body.path !== "string" ||
+                body.path.length === 0
+            ) {
+                sendJson(response, 400, { error: "File update settings are invalid." });
+                return;
+            }
+            sendJson<WriteSessionFileResponse>(
+                response,
+                200,
+                await writeSessionFile(
+                    session.externalControlContext(),
+                    body as unknown as WriteSessionFileRequest,
+                ),
+            );
+        } catch (error) {
+            const status =
+                error instanceof SessionFileConflictError
+                    ? 409
+                    : error instanceof SessionFileTooLargeError
+                      ? 413
+                      : error instanceof Error &&
+                          (error.message.includes("disabled in read-only mode") ||
+                              error.message.includes("cannot modify files outside") ||
+                              error.message.includes("cannot modify Git control files"))
+                        ? 403
+                        : 400;
+            sendJson(response, status, { error: errorToMessage(error) });
+        }
+        return;
+    }
+
     if (request.method === "GET" && route.name === "files") {
         const query = (url.searchParams.get("query") ?? "").slice(0, 512);
         const files = await fileSearchService.search(
@@ -2202,6 +2271,7 @@ function matchRoute(pathname: string):
               | "effort"
               | "events"
               | "external-tool-calls"
+              | "file"
               | "files"
               | "fork"
               | "goal"
@@ -2411,6 +2481,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "external-tool-calls") {
         return { name: "external-tool-calls", sessionId };
     }
+    if (parts[2] === "file") return { name: "file", sessionId };
     if (parts[2] === "files") return { name: "files", sessionId };
     if (parts[2] === "fork") return { name: "fork", sessionId };
     if (parts[2] === "goal") return { name: "goal", sessionId };
@@ -2454,6 +2525,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "unarchive",
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
+        (method === "PUT" && routeName === "file") ||
         (["DELETE", "PUT"].includes(method ?? "") && routeName === "terminal-connection") ||
         (method === "DELETE" && routeName === "background-process") ||
         (["DELETE", "PATCH", "POST"].includes(method ?? "") && routeName === "goal") ||

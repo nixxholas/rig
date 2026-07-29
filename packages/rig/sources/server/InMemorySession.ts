@@ -2604,6 +2604,10 @@ export class InMemorySession {
         return this.#ensureRuntime().context;
     }
 
+    runsInDocker(): boolean {
+        return this.#request.docker !== undefined;
+    }
+
     /** What the session is doing at this moment. */
     activity(): SessionActivity {
         return structuredClone(this.#activity);

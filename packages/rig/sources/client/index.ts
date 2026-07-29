@@ -11,6 +11,8 @@ export {
     ProtocolHttpClient,
     type AttachRemoteTerminalOptions,
     type ProtocolHttpClientOptions,
+    type ProxyHttpRequestOptions,
+    type ProxyHttpResponse,
     type WatchGlobalEventsOptions,
     type WatchSessionEventsOptions,
 } from "./ProtocolHttpClient.js";

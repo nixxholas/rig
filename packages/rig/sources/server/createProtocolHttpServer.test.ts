@@ -1194,6 +1194,49 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("reads and hash-guards direct session file updates through the permission context", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-session-file-"));
+        const { client, close } = await startServer();
+        try {
+            const created = await client.createSession({
+                cwd: directory,
+                permissionMode: "workspace_write",
+            });
+            const first = await client.writeFile(created.session.id, {
+                content: Buffer.from("first").toString("base64"),
+                expectedHash: null,
+                path: "note.txt",
+            });
+            await expect(client.readFile(created.session.id, "note.txt")).resolves.toEqual({
+                content: Buffer.from("first").toString("base64"),
+                hash: first.hash,
+            });
+            await writeFile(join(directory, "note.txt"), "changed elsewhere");
+            await expect(
+                client.writeFile(created.session.id, {
+                    content: Buffer.from("second").toString("base64"),
+                    expectedHash: first.hash,
+                    path: "note.txt",
+                }),
+            ).rejects.toThrow("changed before");
+
+            await client.changePermissionMode(created.session.id, {
+                permissionMode: "read_only",
+            });
+            const current = await client.readFile(created.session.id, "note.txt");
+            await expect(
+                client.writeFile(created.session.id, {
+                    content: Buffer.from("blocked").toString("base64"),
+                    expectedHash: current.hash,
+                    path: "note.txt",
+                }),
+            ).rejects.toThrow("read-only");
+        } finally {
+            await close();
+            await rm(directory, { force: true, recursive: true });
+        }
+    });
+
     it("serves daemon readiness and model catalog", async () => {
         const { client, close } = await startServer();
         try {

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { request as httpRequest } from "node:http";
+import { Agent, request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import type { Duplex } from "node:stream";
 
 import {
@@ -49,6 +49,7 @@ import type {
     ReorderRequest,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
+    ReadSessionFileResponse,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
     RewindSessionResponse,
@@ -78,6 +79,8 @@ import type {
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
     UpdateSessionRequest,
+    WriteSessionFileRequest,
+    WriteSessionFileResponse,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import { parseGlobalSseEvent } from "./parseGlobalSseEvent.js";
@@ -124,6 +127,19 @@ export interface AttachRemoteTerminalOptions {
     creditBytes?: number;
     reconnectState?: RemoteTerminalReconnectState;
     replica?: RemoteTerminalClientReplica;
+}
+
+export interface ProxyHttpRequestOptions {
+    body?: Uint8Array;
+    headers?: Readonly<Record<string, string>>;
+    method?: string;
+    url: string;
+}
+
+export interface ProxyHttpResponse {
+    body: import("node:http").IncomingMessage;
+    headers: IncomingHttpHeaders;
+    statusCode: number;
 }
 
 export class ProtocolHttpClient {
@@ -645,6 +661,132 @@ export class ProtocolHttpClient {
         );
     }
 
+    readFile(sessionId: string, path: string): Promise<ReadSessionFileResponse> {
+        return this.#requestJson(
+            "GET",
+            `/sessions/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`,
+        );
+    }
+
+    writeFile(
+        sessionId: string,
+        request: WriteSessionFileRequest,
+    ): Promise<WriteSessionFileResponse> {
+        return this.#requestJson("PUT", `/sessions/${encodeURIComponent(sessionId)}/file`, request);
+    }
+
+    async proxyHttpRequest(
+        sessionId: string,
+        options: ProxyHttpRequestOptions,
+    ): Promise<ProxyHttpResponse> {
+        const body = options.body === undefined ? undefined : Buffer.from(options.body);
+        const tunnel = await this.openHttpProxy(sessionId);
+        const agent = singleSocketAgent(tunnel);
+        return new Promise((resolve, reject) => {
+            const request = httpRequest(
+                {
+                    agent,
+                    headers: {
+                        ...options.headers,
+                        ...(body === undefined ? {} : { "content-length": body.byteLength }),
+                    },
+                    method: options.method ?? "GET",
+                    path: options.url,
+                },
+                (response) => {
+                    response.once("end", () => tunnel.destroy());
+                    resolve({
+                        body: response,
+                        headers: response.headers,
+                        statusCode: response.statusCode ?? 500,
+                    });
+                },
+            );
+            request.once("error", (error) => {
+                tunnel.destroy();
+                reject(error);
+            });
+            request.end(body);
+        });
+    }
+
+    async connectHttpProxy(sessionId: string, authority: string): Promise<Duplex> {
+        const tunnel = await this.openHttpProxy(sessionId);
+        const agent = singleSocketAgent(tunnel);
+        return new Promise((resolve, reject) => {
+            const request = httpRequest({
+                agent,
+                method: "CONNECT",
+                path: authority,
+            });
+            request.once("connect", (response, socket, head) => {
+                if (response.statusCode !== 200) {
+                    socket.destroy();
+                    reject(
+                        new ProtocolHttpError(
+                            response.statusCode ?? 500,
+                            `HTTP proxy CONNECT returned ${String(response.statusCode ?? 500)}.`,
+                        ),
+                    );
+                    return;
+                }
+                if (head.length > 0) socket.unshift(head);
+                resolve(socket);
+            });
+            request.once("response", (response) => {
+                response.resume();
+                tunnel.destroy();
+                reject(
+                    new ProtocolHttpError(
+                        response.statusCode ?? 500,
+                        `HTTP proxy CONNECT returned ${String(response.statusCode ?? 500)}.`,
+                    ),
+                );
+            });
+            request.once("error", (error) => {
+                tunnel.destroy();
+                reject(error);
+            });
+            request.end();
+        });
+    }
+
+    openHttpProxy(sessionId: string): Promise<Duplex> {
+        return new Promise((resolve, reject) => {
+            const request = httpRequest({
+                headers: { authorization: `Bearer ${this.token}` },
+                method: "CONNECT",
+                path: `/sessions/${encodeURIComponent(sessionId)}/proxy`,
+                socketPath: this.socketPath,
+            });
+            request.once("connect", (response, socket, head) => {
+                if (response.statusCode !== 200) {
+                    socket.destroy();
+                    reject(
+                        new ProtocolHttpError(
+                            response.statusCode ?? 500,
+                            `HTTP proxy tunnel returned ${String(response.statusCode ?? 500)}.`,
+                        ),
+                    );
+                    return;
+                }
+                if (head.length > 0) socket.unshift(head);
+                resolve(socket);
+            });
+            request.once("response", (response) => {
+                response.resume();
+                reject(
+                    new ProtocolHttpError(
+                        response.statusCode ?? 500,
+                        `HTTP proxy tunnel returned ${String(response.statusCode ?? 500)}.`,
+                    ),
+                );
+            });
+            request.once("error", reject);
+            request.end();
+        });
+    }
+
     getSession(
         sessionId: string,
         options: { messageLimit?: number } = {},
@@ -1120,6 +1262,12 @@ export class ProtocolHttpClient {
             request.end();
         });
     }
+}
+
+function singleSocketAgent(socket: Duplex): Agent {
+    const agent = new Agent({ keepAlive: false });
+    agent.createConnection = () => socket as import("node:net").Socket;
+    return agent;
 }
 
 /** One parsed SSE frame, keeping the event name so callers can tell frames apart. */

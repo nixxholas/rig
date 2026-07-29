@@ -682,6 +682,25 @@ export interface SearchFilesResponse {
     files: readonly FileSearchResult[];
 }
 
+export interface ReadSessionFileResponse {
+    /** Base64-encoded file bytes. */
+    content: string;
+    /** SHA-256 of the returned bytes, used to guard a later write. */
+    hash: string;
+}
+
+export interface WriteSessionFileRequest {
+    /** Base64-encoded replacement bytes. */
+    content: string;
+    /** `null` creates a new file; a hash replaces exactly the version that was read. */
+    expectedHash: string | null;
+    path: string;
+}
+
+export interface WriteSessionFileResponse {
+    hash: string;
+}
+
 export interface ShutdownServerResponse {
     pid?: number;
     shuttingDown: boolean;
