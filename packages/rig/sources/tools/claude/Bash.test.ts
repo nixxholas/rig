@@ -6,6 +6,13 @@ import { claudeTaskOutputTool } from "../../agent/tools/claude/TaskOutput.js";
 import { claudeTaskStopTool } from "../../agent/tools/claude/TaskStop.js";
 
 describe("Claude Code Bash tool", () => {
+    it("tells Claude not to redundantly change to the current working directory", () => {
+        expect(claudeBashTool.description).toContain("avoiding usage of `cd`");
+        expect(claudeBashTool.description).toContain(
+            "never prepend `cd <current-directory>` to a `git` command",
+        );
+    });
+
     it("allows steering to interrupt passive task-output waits", () => {
         expect(claudeTaskOutputTool.steerable).toBe(true);
     });

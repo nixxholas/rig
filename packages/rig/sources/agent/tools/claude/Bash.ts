@@ -19,6 +19,7 @@ export const claudeBashTool = defineTool({
     description: `Executes a bash command and returns its output.
 
 - Commands start in the session working directory. Shell state (such as \`cd\`, environment variables, and functions) does not persist between calls.
+- Try to maintain the current working directory by using absolute paths and avoiding usage of \`cd\`. In particular, never prepend \`cd <current-directory>\` to a \`git\` command: Git already operates on the current working tree, and making it a compound command can trigger an unnecessary permission review.
 - Prefer the dedicated file and search tools over shell equivalents when one fits.
 - \`timeout\` is in milliseconds: default 120000, max 600000.
 - \`run_in_background\` runs the command detached: it keeps running across turns and re-invokes you when it exits. No \`&\` needed.

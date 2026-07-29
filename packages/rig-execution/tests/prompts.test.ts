@@ -27,4 +27,9 @@ describe("Claude system prompts", () => {
     it("matches the Opus 5 capture, which omits the knowledge cutoff line", () => {
         expect(claude_opus_5_system_prompt).not.toContain("Knowledge cutoff:");
     });
+
+    it("preserves Claude Code's neutral-pronoun guidance for Sonnet", () => {
+        expect(claude_sonnet_5_system_prompt).toContain("When you use a pronoun for someone");
+        expect(claude_sonnet_5_system_prompt).toContain("use they/them");
+    });
 });
