@@ -54,6 +54,22 @@ the copied folders on archive.
 You make a root template folder and then just clone it everywhere — that would
 be genuinely useful to many people.
 
+## Archiving
+
+Archiving a workspace is an immediate, irreversible logical action. The moment
+the user chooses it, stop the workspace and everything running inside it, mark
+it for archival, and remove it from the active workspace list. It must not
+reappear during a refresh, reconnect, or background state update.
+
+Deleting the folder is background cleanup, not the archival decision. Archival
+never fails and is never rolled back because cleanup failed. If Rig cannot
+remove something, keep the workspace logically archived and write the cleanup
+failure to the log.
+
+Workspace creation has the same one-entity rule: the local result, request
+response, live event, refresh, and reconnect all reconcile to one workspace.
+Creating one workspace must never produce two sidebar entries.
+
 ## Tracking changes
 
 With Git we must track file changes line by line. We must detect file types —

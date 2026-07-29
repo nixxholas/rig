@@ -36,25 +36,43 @@ not compatibility with what we shipped first.
 
 ## The chat state
 
-The chat state is a flat, time-ordered list of elements.
+The chat state is a flat, time-ordered list of exactly the elements an
+application such as Happy Place or Aqua should render. A consumer must not
+reconstruct turns or infer presentation boundaries from the provider context.
 
 - One element per message, per block, and per tool call. A tool call is not
   nested inside the message that produced it; it is its own element.
-- Every element carries a turn ID.
-- A turn always ends with a final element, and that element states whether the
-  turn ended in success or in an error. This is a guarantee the library makes,
-  not something the consumer infers from silence.
-- Everything between the turn's start and its final element is ordered by time.
+- Every element carries a group ID. A group is one inference segment: it starts
+  whenever inference starts and ends at steering, abort, or completion.
+- Group IDs need not be durable protocol identities. They may exist only in
+  memory, but they stay stable for the life of the `rig-connect` instance and
+  the same messages keep the same group ID when a reconnect rebuilds the list.
+- Starting inference immediately creates the group's first, initially empty
+  element. This lets the UI show that work has begun before the first token or
+  tool call. Streaming the first token is not the boundary problem: the empty
+  element must already be present in history, and the first text, thinking, or
+  tool-call update turns that same object into the first real content while
+  preserving its identity instead of adding a second beginning.
+- A group always ends with a final element. It states the outcome, elapsed time,
+  and why the group ended, including steering, abort, success, and error. This
+  is a guarantee the library makes, not something the consumer infers from
+  silence.
+- Everything between the group's start and final element is ordered by time.
 - State that is not model output is in the list too, in its time position —
   compaction, for instance, appears as an element and reflects its current
   state.
+
+Steering is an explicit boundary. First the current group ends with its elapsed
+time and steering as the reason. Then all user messages that caused the
+steering appear. Only after them does the next inference group start. Abort
+also closes the current group before anything later can begin.
 
 Elements change by delta, not by replacement. Text arrives as it is generated,
 tool-call arguments fill in as they stream, a tool result lands on the element
 that was already there. The library applies those deltas; the consumer sees an
 element that is simply more complete than it was.
 
-History loads by turns, and it can load backwards. It must also load from the
+History loads by groups, and it can load backwards. It must also load from the
 middle, so that on restart a client opens a chat exactly where the user left
 off, however large the chat is. Chats are assumed to be colossally huge — a
 chat may run for months or years — and all of them must be supported.
@@ -66,6 +84,18 @@ Separate from the list, and just as important, is one small value that answers
 generating a tool call, executing a tool call, compacting, retrying, stopped.
 It is a current-moment summary, not history, and a UI should be able to render a
 status line from it without walking the list.
+
+That value must report reality rather than a stale lifecycle label. A session
+is shown as working only while Rig has corresponding live or queued work. Every
+completion, abort, steering boundary, disconnect, reconnect, restart, and error
+must settle it to the state the session is actually in; a dead run must never
+leave the UI saying that the session is still working.
+
+Every client and integration receives the full activity phase. Happy and other
+adapters must not collapse it into a `running` or `thinking` boolean: thinking,
+generating text, generating a tool call, executing one or more tools,
+compacting, retrying, awaiting input, queued, stopped, error, and idle remain
+distinct live states.
 
 The session also carries live facts that a UI shows next to the conversation,
 and each of them is tracked continuously rather than fetched on demand:
@@ -120,6 +150,18 @@ the daemon, in the background, retried with backoff until it lands. Nobody waits
 on a round trip to see a decision they already made, and no control sits inert
 after being used.
 
+Workspace creation and archival follow the same single-state path through
+`rig-connect`. A workspace created locally and the daemon's echo are one entity,
+including across refresh and reconnect; the sidebar must never show both.
+
+Workspace archival is stronger than an ordinary prediction. The click is the
+logical commit: the workspace and everything running inside it stop
+immediately, the workspace is marked for archival, and it disappears from the
+active interface without waiting for cleanup. Logical archival cannot fail or
+be reverted. Physical deletion continues in the background. If a folder or
+other residue cannot be removed, Rig records the cleanup failure in its log and
+still keeps the workspace logically archived and absent from the interface.
+
 The daemon stays authoritative. An optimistic change is a prediction of what it
 will say, superseded the moment the real state arrives, through the same
 ordered-identity merge that reconciles any two views of an entity. A prediction
@@ -132,7 +174,7 @@ survives a reconnect, retries with backoff, and holds its order against other
 mutations of the same entity — sending them out of order would let a stale
 intent win.
 
-Loading is the one exception. Fetching earlier turns, or the rest of a long
+Loading is the one exception. Fetching earlier groups, or the rest of a long
 session list, has genuinely nothing to show until it arrives. That may present a
 loading state. Nothing else may.
 
@@ -265,8 +307,8 @@ result should be the lightest, tidiest synchronization we can build.
 4. **Reliable.** Reconnects resume rather than restart. No gaps, no duplicates,
    no reordering visible to the subscriber. Interruption is a state the
    subscriber can see, not a silent stall.
-5. **Correct under React.** Stable references, stable identities, no tearing
-   between the list and the deltas.
+5. **Correct under React.** Stable references, stable element and group
+   identities, no tearing between the list and the deltas.
 6. **Instant.** Every mutation applies locally at the moment it is made, and the
    round trip happens behind it. Delivery, retry, ordering, and reconciliation
    are the library's job. Loading more is the only thing allowed to make anyone
@@ -288,10 +330,11 @@ and keep everything it holds current from the stream.
 follows the stream, maintains the element list and the session state, applies
 presentation and grouping, applies mutations optimistically and delivers them in
 the background, and exposes the subscription, the actions, and the deltas. Done
-when the turn guarantee, the ordering, and the reference stability hold under
-test, including across reconnects and interruptions, and when a mutation
-survives a reconnect, a rejection, and a competing update without leaving the
-interface showing something untrue.
+when the group guarantee, empty inference start, steering and abort boundaries,
+ordering, activity truth, and reference stability hold under test, including
+across reconnects and interruptions; when workspace creation cannot duplicate
+an entity; and when workspace archival remains logically complete even if
+physical cleanup fails.
 
 **C. Move the clients onto it.** The terminal and the web UI read their session
 state through `rig-connect` and delete their own reconstruction logic. Done when
