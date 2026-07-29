@@ -215,6 +215,7 @@ async function* streamExecutorInference(options: {
                 if (contentIndex === undefined || content?.type !== "toolCall") continue;
                 const toolCall: ToolCall = {
                     ...content,
+                    ...(event.incomplete === true ? { incomplete: true } : {}),
                     arguments:
                         content.kind === "custom"
                             ? { input: event.arguments }

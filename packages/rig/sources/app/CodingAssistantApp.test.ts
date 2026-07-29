@@ -3656,7 +3656,11 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("Context compacted");
         expect(rendered).toContain("Summarized 2 older messages;");
         expect(rendered).toMatch(/The full\s+transcript remains visible\./u);
-        expect(agent.snapshot().messages).toHaveLength(2);
+        expect(agent.snapshot().messages).toHaveLength(3);
+        expect(agent.snapshot().messages.at(-1)).toMatchObject({
+            role: "compaction",
+            replacedMessageIds: expect.any(Array),
+        });
         expect(agent.snapshot().contextMessages).toHaveLength(1);
     });
 

@@ -45,6 +45,8 @@ export interface ToolCallBlock {
     name: string;
     namespace?: string;
     arguments: unknown;
+    /** The provider stopped before this call became executable. */
+    incomplete?: boolean;
     kind?: "custom" | "function" | "tool_search";
     /** Opaque provider metadata required to replay this call faithfully. */
     vendor?: unknown;
@@ -116,19 +118,6 @@ export interface UserMessage {
     };
     /** Whether this agent-authored message starts a new inference turn. */
     agentMessageTriggerTurn?: boolean;
-    /**
-     * Opaque provider-native context checkpoint this summary message stands for.
-     *
-     * A vendor that compacts into an encrypted checkpoint returns no readable text, so the blocks
-     * carry a plain notice and the checkpoint is replayed verbatim to the provider that issued it.
-     */
-    compactionCheckpoint?: {
-        content: string;
-        /** Opaque provider metadata required to replay the checkpoint natively. */
-        vendor?: unknown;
-        /** Provider that issued the checkpoint; no other provider can read it. */
-        providerId: string;
-    };
     /** Durable model context that must never be presented as user-authored content. */
     internal?: true;
     /** Marks a durable record of the project instructions the model has been given. */
@@ -136,6 +125,29 @@ export interface UserMessage {
         /** Fingerprint of the instructions, or null once they were deleted from disk. */
         fingerprint: string | null;
     };
+}
+
+export interface CompactionMessage {
+    role: "compaction";
+    id: string;
+    blocks: readonly ContentBlock[];
+    /** Whether the provider supplied an opaque native checkpoint or a readable summary. */
+    kind: "native" | "summary";
+    /** Messages removed from the model context by this compaction. */
+    replacedMessageIds: readonly string[];
+    statistics: {
+        before: { exact: true; tokens: number };
+        after: { exact: boolean; tokens: number };
+    };
+    /** Provider that issued this opaque checkpoint. */
+    providerId: string;
+    content: string;
+    /** Opaque provider metadata required for native replay. */
+    vendor?: unknown;
+    /** Human-readable fallback when a different provider cannot read the checkpoint. */
+    summary: string;
+    /** Compaction is durable visible history and can never be hidden as internal context. */
+    internal?: never;
 }
 
 export interface AgentMessage {
@@ -154,7 +166,7 @@ export interface AgentMessage {
     internal?: true;
 }
 
-export type Message = SystemMessage | UserMessage | AgentMessage;
+export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage;
 
 /** A fixed lock key shared across all invocations. */
 export type LockConstant = string;

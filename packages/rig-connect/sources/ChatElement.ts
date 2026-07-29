@@ -122,6 +122,11 @@ export interface CompactionElement extends BaseChatElement {
     estimatedTokensBefore: number;
     estimatedTokensAfter?: number;
     messagesCompacted?: number;
+    /** Exact provider-reported context size before compaction. */
+    tokensBefore?: number;
+    /** Estimated until the first following inference reports its input/cache usage. */
+    tokensAfter?: number;
+    tokensAfterExact?: boolean;
 }
 
 /** One provider retry retained in the transcript at the moment it occurred. */

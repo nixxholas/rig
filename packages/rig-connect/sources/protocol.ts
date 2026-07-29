@@ -81,6 +81,7 @@ export interface ToolCallBlock {
     name: string;
     namespace?: string;
     arguments: unknown;
+    incomplete?: boolean;
     kind?: "custom" | "function" | "tool_search";
     vendor?: unknown;
     presentation?: ToolCallPresentation;
@@ -217,7 +218,24 @@ export interface AgentMessage {
     internal?: true;
 }
 
-export type Message = SystemMessage | UserMessage | AgentMessage;
+export interface CompactionMessage {
+    role: "compaction";
+    id: string;
+    blocks: readonly ContentBlock[];
+    kind: "native" | "summary";
+    replacedMessageIds: readonly string[];
+    statistics: {
+        before: { exact: true; tokens: number };
+        after: { exact: boolean; tokens: number };
+    };
+    providerId: string;
+    content: string;
+    vendor?: unknown;
+    summary: string;
+    internal?: never;
+}
+
+export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage;
 
 export interface Usage {
     input: number;

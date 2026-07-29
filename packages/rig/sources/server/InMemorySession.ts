@@ -2512,8 +2512,10 @@ export class InMemorySession {
         this.#restartMetadataSettlement();
         this.#saveSession();
         try {
-            const result = await this.#ensureRuntime().agent.compact(compactSignal, (event) =>
-                this.#appendCompactionAgentEvent(compactionRunId, event),
+            const result = await this.#ensureRuntime().agent.compact(
+                compactSignal,
+                (event) => this.#appendCompactionAgentEvent(compactionRunId, event),
+                (message) => this.#appendAgentMessage(compactionRunId, message),
             );
             this.#syncContextMessages();
             return result;
@@ -4324,7 +4326,10 @@ export class InMemorySession {
     }
 
     #appendAgentMessage(runId: string, message: Message): void {
-        if (this.#activeRun?.runId !== runId) {
+        if (
+            this.#activeRun?.runId !== runId &&
+            !(this.#compactionActive && message.role === "compaction")
+        ) {
             return;
         }
 
@@ -4344,6 +4349,12 @@ export class InMemorySession {
             false,
             runId,
         );
+        if (message.role === "compaction") {
+            this.#contextMessages = this.#contextMessages?.map((contextMessage) =>
+                contextMessage.id === message.id ? message : contextMessage,
+            );
+            this.#totalTokens = message.statistics.after.tokens;
+        }
         if (message.role === "agent") {
             const resultIds = new Set(
                 message.blocks.flatMap((block) =>

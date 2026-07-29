@@ -853,6 +853,61 @@ describe("InMemorySession abort", () => {
         });
     });
 
+    it("persists a standalone compaction as one durable transcript message", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/manual-compaction",
+            name: "Manual compaction",
+            thinkingLevels: ["off"],
+        });
+        let streamCount = 0;
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream: (_model, _context, options) => {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
+                streamCount += 1;
+                return responseStream(streamCount === 1 ? "Earlier answer" : "Earlier summary");
+            },
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => createRuntime(options, provider),
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ models: [model], providerId: provider.id }],
+            },
+            request: {
+                cwd: "/tmp/rig-manual-compaction-test",
+                modelId: model.id,
+                providerId: provider.id,
+            },
+        });
+
+        const submitted = session.submit({ text: "Earlier request" });
+        await session.waitForRun(submitted.runId);
+        await session.compact();
+
+        const compactionMessages = session.events
+            .since(undefined)
+            ?.flatMap((event) =>
+                event.type === "agent_message" && event.data.message.role === "compaction"
+                    ? [event.data.message]
+                    : [],
+            );
+        expect(compactionMessages).toHaveLength(1);
+        expect(compactionMessages?.[0]).toMatchObject({
+            kind: "summary",
+            replacedMessageIds: expect.arrayContaining([
+                expect.any(String),
+                expect.any(String),
+            ]),
+        });
+        expect(session.snapshot().snapshot.messages.at(-1)).toEqual(compactionMessages?.[0]);
+    });
+
     it("aborts compaction without overwriting the repaired shutdown state", async () => {
         const model = defineModel({
             defaultThinkingLevel: "off",

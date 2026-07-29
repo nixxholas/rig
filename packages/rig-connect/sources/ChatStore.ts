@@ -5,6 +5,7 @@ import type {
     AgentMessage,
     BackgroundProcess,
     ContentBlock,
+    CompactionMessage,
     ExternalToolCall,
     GitChangeSnapshot,
     McpServerSummary,
@@ -1747,6 +1748,7 @@ export class ChatStore {
         if (message.internal === true) return;
         if (this.#appliedMessageIds.has(message.id)) {
             if (message.role === "agent") this.#reconcileAgentMessage(message, at);
+            if (message.role === "compaction") this.#applyCompactionMessage(message, at, turnId);
             if (message.role === "user" && delivery === "pending_steering") {
                 this.#update(`message:${message.id}`, { delivery });
                 this.#presentPendingSteeringAtTail();
@@ -1769,7 +1771,41 @@ export class ChatStore {
             this.#appendUserMessage(message, at, turnId, delivery, source, steering);
             return;
         }
+        if (message.role === "compaction") {
+            this.#applyCompactionMessage(message, at, turnId);
+            return;
+        }
         this.#appendAgentBlocks(message, at, deltas, turnId);
+    }
+
+    #applyCompactionMessage(
+        message: CompactionMessage,
+        at: number,
+        turnId = this.#turnId,
+    ): void {
+        const id = `message:${message.id}`;
+        const update = {
+            compactionId: message.id,
+            estimatedTokensAfter: message.statistics.after.tokens,
+            estimatedTokensBefore: message.statistics.before.tokens,
+            messagesCompacted: message.replacedMessageIds.length,
+            status: "completed" as const,
+            tokensAfter: message.statistics.after.tokens,
+            tokensAfterExact: message.statistics.after.exact,
+            tokensBefore: message.statistics.before.tokens,
+        };
+        const existing = this.#byId.get(id);
+        if (existing?.kind === "compaction") {
+            this.#update(id, update);
+            return;
+        }
+        this.#append({
+            ...update,
+            createdAt: at,
+            id,
+            kind: "compaction",
+            turnId: turnId ?? `history:${message.id}`,
+        });
     }
 
     #appendUserMessage(
@@ -1979,7 +2015,7 @@ export class ChatStore {
                     compactionId: string;
                     estimatedTokensBefore: number;
                 };
-                const id = this.#nextId("compaction");
+                const id = `message:${data.compactionId}`;
                 this.#compactionElementIds.set(data.compactionId, id);
                 this.#append({
                     compactionId: data.compactionId,

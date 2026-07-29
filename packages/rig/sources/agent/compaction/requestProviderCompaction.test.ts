@@ -10,7 +10,7 @@ import {
     type InferenceStream,
     type StreamOptions,
 } from "@slopus/rig-execution";
-import { requestCompactionSummary } from "./requestCompactionSummary.js";
+import { requestProviderCompaction } from "./requestProviderCompaction.js";
 
 const model = defineModel({
     id: "openai/test",
@@ -19,7 +19,7 @@ const model = defineModel({
     defaultThinkingLevel: "off",
 });
 
-describe("requestCompactionSummary", () => {
+describe("requestProviderCompaction", () => {
     it("preserves the cached wire prefix and appends one summary request", async () => {
         const observedContexts: Context[] = [];
         const observedOptions: (StreamOptions | undefined)[] = [];
@@ -35,7 +35,7 @@ describe("requestCompactionSummary", () => {
         });
 
         await expect(
-            requestCompactionSummary({
+            requestProviderCompaction({
                 context,
                 inputTokens: 1_000,
                 model,
@@ -43,7 +43,14 @@ describe("requestCompactionSummary", () => {
                 provider,
                 startDate: "2024-01-02",
             }),
-        ).resolves.toEqual({ summary: "Cached summary." });
+        ).resolves.toEqual({
+            summary: "Cached summary.",
+            usage: zeroUsage(),
+            context: {
+                ...context,
+                messages: [{ role: "user", content: "Cached summary.", timestamp: 4 }],
+            },
+        });
 
         expect(observedContexts).toEqual([
             {
@@ -75,7 +82,7 @@ describe("requestCompactionSummary", () => {
         });
 
         await expect(
-            requestCompactionSummary({
+            requestProviderCompaction({
                 context: compactionContext(),
                 inputTokens: 1_000,
                 model,
@@ -98,7 +105,7 @@ describe("requestCompactionSummary", () => {
         });
 
         await expect(
-            requestCompactionSummary({
+            requestProviderCompaction({
                 context: compactionContext(),
                 inputTokens: 1_000,
                 model,
@@ -125,7 +132,7 @@ describe("requestCompactionSummary", () => {
             });
 
             await expect(
-                requestCompactionSummary({
+                requestProviderCompaction({
                     context: compactionContext(),
                     inputTokens: 1_000,
                     model,
@@ -135,6 +142,47 @@ describe("requestCompactionSummary", () => {
             ).rejects.toThrow(errorMessage);
             expect(requests).toBe(1);
         }
+    });
+
+    it.each([
+        [
+            "cancelled",
+            { status: "cancelled" as const },
+            "Conversation compaction was stopped.",
+        ],
+        [
+            "failed",
+            {
+                status: "failed" as const,
+                kind: "inference_error" as const,
+                message: "native compaction failed",
+            },
+            "native compaction failed",
+        ],
+    ])("leaves the original context active when provider compaction is %s", async (
+        _label,
+        outcome,
+        expected,
+    ) => {
+        const context = compactionContext();
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            compact: async () => ({ ...outcome, context }),
+            stream() {
+                throw new Error("Native compaction must not fall back to inference.");
+            },
+        });
+
+        await expect(
+            requestProviderCompaction({
+                context,
+                inputTokens: 1_000,
+                model,
+                now: () => 1,
+                provider,
+            }),
+        ).rejects.toThrow(expected);
     });
 });
 

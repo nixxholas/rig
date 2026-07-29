@@ -220,6 +220,119 @@ describe("Grok continuation goldens", () => {
         ]);
     });
 
+    it("closes a custom tool item that is still active at max-output truncation", async () => {
+        const events = await collect(
+            mapOpenAIResponseStream(
+                stream([
+                    {
+                        type: "response.output_item.added",
+                        output_index: 0,
+                        item: {
+                            type: "custom_tool_call",
+                            id: "custom-1",
+                            call_id: "call-partial",
+                            name: "apply_patch",
+                            input: "",
+                            status: "in_progress",
+                        },
+                    },
+                    {
+                        type: "response.custom_tool_call_input.delta",
+                        output_index: 0,
+                        delta: "*** Begin Patch",
+                    },
+                    {
+                        type: "response.incomplete",
+                        response: {
+                            incomplete_details: { reason: "max_output_tokens" },
+                            output: [
+                                {
+                                    type: "custom_tool_call",
+                                    id: "custom-1",
+                                    call_id: "call-partial",
+                                    name: "apply_patch",
+                                    input: "*** Begin Patch",
+                                    status: "incomplete",
+                                },
+                            ],
+                            usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+                        },
+                    },
+                ]),
+                { failureMessage: "Grok failed." },
+            ),
+        );
+
+        expect(events).toEqual([
+            {
+                type: "tool_call_start",
+                callId: "call-partial",
+                name: "apply_patch",
+                vendor: { provider: "grok", type: "custom_tool_call" },
+            },
+            {
+                type: "tool_call_delta",
+                callId: "call-partial",
+                delta: "*** Begin Patch",
+            },
+            {
+                type: "tool_call_end",
+                callId: "call-partial",
+                arguments: "*** Begin Patch",
+                incomplete: true,
+            },
+            {
+                type: "token_usage",
+                usage: { input: 20, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 25 },
+            },
+            { type: "done", state: "length" },
+        ]);
+    });
+
+    it("marks an incomplete function item as non-executable before max-output termination", async () => {
+        const item = {
+            type: "function_call" as const,
+            id: "function-1",
+            call_id: "call-function-partial",
+            name: "exec_command",
+            arguments: '{"cmd":"printf',
+            status: "incomplete" as const,
+        };
+        const events = await collect(
+            mapOpenAIResponseStream(
+                stream([
+                    {
+                        type: "response.output_item.added",
+                        output_index: 0,
+                        item,
+                    },
+                    {
+                        type: "response.output_item.done",
+                        output_index: 0,
+                        item,
+                    },
+                    {
+                        type: "response.incomplete",
+                        response: {
+                            incomplete_details: { reason: "max_output_tokens" },
+                            output: [item],
+                            usage: { input_tokens: 20, output_tokens: 5, total_tokens: 25 },
+                        },
+                    },
+                ]),
+                { failureMessage: "Grok failed." },
+            ),
+        );
+
+        expect(events).toContainEqual({
+            type: "tool_call_end",
+            callId: "call-function-partial",
+            arguments: '{"cmd":"printf',
+            incomplete: true,
+        });
+        expect(events.at(-1)).toEqual({ type: "done", state: "length" });
+    });
+
     it("surfaces typed stream failures", async () => {
         await expect(
             collect(

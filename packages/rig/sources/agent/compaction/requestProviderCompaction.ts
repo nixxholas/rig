@@ -6,8 +6,8 @@ import type {
     Provider,
     ServiceTier,
     StreamOptions,
+    Usage,
 } from "@slopus/rig-execution";
-import { Executor } from "@slopus/rig-execution";
 import { toLocalDate } from "../../executor/toLocalDate.js";
 
 /**
@@ -16,15 +16,17 @@ import { toLocalDate } from "../../executor/toLocalDate.js";
  * Most vendors return readable text. Codex returns an opaque checkpoint only it can read, so the
  * summary is a plain notice and the checkpoint is kept verbatim to be replayed exactly as it came.
  */
-export interface CompactionSummary {
+export interface ProviderCompaction {
+    context: Context;
     summary: string;
     encrypted?: { content: string; vendor?: unknown };
+    usage: Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens">;
 }
 
 const CHECKPOINT_SUMMARY =
     "The earlier conversation was compacted into a provider context checkpoint.";
 
-export async function requestCompactionSummary(options: {
+export async function requestProviderCompaction(options: {
     provider: Provider;
     model: Model;
     context: Context;
@@ -34,7 +36,7 @@ export async function requestCompactionSummary(options: {
     startDate?: string;
     thinking?: string;
     now: () => number;
-}): Promise<CompactionSummary> {
+}): Promise<ProviderCompaction> {
     const startDate =
         options.startDate ??
         toLocalDate(options.context.messages.at(0)?.timestamp ?? options.now());
@@ -47,7 +49,7 @@ export async function requestCompactionSummary(options: {
     if (options.signal !== undefined) streamOptions.signal = options.signal;
 
     const prompt = selectCompactionSystemPromptForModel(options.model);
-    if (options.provider instanceof Executor && options.provider.hasActiveSession) {
+    if (options.provider.compact !== undefined) {
         const result = await options.provider.compact({
             context: options.context,
             inputTokens: options.inputTokens,
@@ -59,17 +61,25 @@ export async function requestCompactionSummary(options: {
         }
         if (result.status === "failed") throw new Error(result.message);
         const summary = result.summary?.trim();
-        if (summary !== undefined && summary.length > 0) return { summary };
+        if (summary !== undefined && summary.length > 0) {
+            return {
+                summary,
+                context: result.context,
+                usage: requireCompactionUsage(result.usage),
+            };
+        }
         // Codex answers with an encrypted checkpoint and no text. It is not a summary and must
         // never be shown as one; it goes back to the provider exactly as it arrived.
         const checkpoint = result.compaction;
         if (checkpoint !== undefined && checkpoint.content.length > 0) {
             return {
                 summary: CHECKPOINT_SUMMARY,
+                context: result.context,
                 encrypted: {
                     content: checkpoint.content,
                     ...(checkpoint.vendor === undefined ? {} : { vendor: checkpoint.vendor }),
                 },
+                usage: requireCompactionUsage(result.usage),
             };
         }
         throw new Error("The model returned an empty conversation summary.");
@@ -103,5 +113,26 @@ export async function requestCompactionSummary(options: {
     if (summary.length === 0) {
         throw new Error("The model returned an empty conversation summary.");
     }
-    return { summary };
+    return {
+        summary,
+        usage: response.usage,
+        context: {
+            ...options.context,
+            messages: [
+                ...options.context.messages.filter((message) => message.role === "system"),
+                { role: "user", content: summary, timestamp },
+            ],
+        },
+    };
+}
+
+function requireCompactionUsage(
+    usage:
+        | Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens">
+        | undefined,
+): Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens"> {
+    if (usage === undefined) {
+        throw new Error("The provider completed compaction without reporting token usage.");
+    }
+    return usage;
 }

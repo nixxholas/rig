@@ -78,6 +78,110 @@ describe("agent loop tool presentations", () => {
             type: "exec_command",
         });
     });
+
+    it.each([
+        ["function", {}, "provider-function-call"],
+        ["custom", { input: "*** Begin Patch" }, "provider-custom-call"],
+    ] as const)(
+        "closes an incomplete %s tool call before a later inference",
+        async (kind, argumentsValue, providerToolCallId) => {
+            const model = defineModel({
+                id: "mock/model",
+                name: "Mock Model",
+                thinkingLevels: ["off"],
+                defaultThinkingLevel: "off",
+            });
+            const contexts: Parameters<ReturnType<typeof defineProvider>["stream"]>[1][] = [];
+            const provider = defineProvider({
+                id: "mock",
+                models: [model],
+                stream(_model, context) {
+                    contexts.push(context);
+                    const message =
+                        contexts.length === 1
+                            ? assistantMessage(
+                                  [
+                                      {
+                                          type: "toolCall",
+                                          id: `rig-${kind}-call`,
+                                          providerToolCallId,
+                                          kind,
+                                          name: "partial_tool",
+                                          arguments: argumentsValue,
+                                          incomplete: true,
+                                      },
+                                  ],
+                                  "length",
+                              )
+                            : assistantMessage([{ type: "text", text: "continued" }], "stop");
+                    return createInferenceStream(async function* () {
+                        yield { partial: message, type: "start" };
+                        yield { message, reason: message.stopReason, type: "done" };
+                        return message;
+                    });
+                },
+            });
+            const harness = createJustBashToolHarness();
+            const first = await runAgentLoop({
+                provider,
+                modelId: model.id,
+                tools: [],
+                messages: [
+                    {
+                        role: "user",
+                        id: "user-1",
+                        blocks: [{ type: "text", text: "Start a partial call." }],
+                    },
+                ],
+                context: harness.context,
+            });
+
+            expect(first.stopReason).toBe("length");
+            expect(first.contextMessages.at(-1)).toMatchObject({
+                role: "agent",
+                blocks: [
+                    {
+                        type: "tool_result",
+                        toolCallId: expect.any(String),
+                        providerToolCallId,
+                        isError: true,
+                        failure: { kind: "interrupted" },
+                    },
+                ],
+            });
+
+            await runAgentLoop({
+                provider,
+                modelId: model.id,
+                tools: [],
+                messages: [
+                    ...first.messages,
+                    {
+                        role: "user",
+                        id: "user-2",
+                        blocks: [{ type: "text", text: "Continue." }],
+                    },
+                ],
+                contextMessages: [
+                    ...first.contextMessages,
+                    {
+                        role: "user",
+                        id: "user-2",
+                        blocks: [{ type: "text", text: "Continue." }],
+                    },
+                ],
+                context: harness.context,
+            });
+
+            expect(contexts[1]?.messages).toContainEqual(
+                expect.objectContaining({
+                    role: "toolResult",
+                    providerToolCallId,
+                    isError: true,
+                }),
+            );
+        },
+    );
 });
 
 function assistantMessage(

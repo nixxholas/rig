@@ -63,4 +63,67 @@ describe("createDebugProvider", () => {
         expect(record).toHaveBeenCalledTimes(3);
         expect(debugProvider.extendProfilePromptContext).toBe(extendProfilePromptContext);
     });
+
+    it("preserves provider-owned compaction", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test-model",
+            name: "Test model",
+            thinkingLevels: ["off"],
+        });
+        const compact = vi.fn(async (options) => ({
+            status: "completed" as const,
+            summary: "summary",
+            context: {
+                ...options.context,
+                messages: [{ role: "user" as const, content: "summary", timestamp: 2 }],
+            },
+        }));
+        const provider = defineProvider({
+            id: "test-provider",
+            models: [model],
+            compact,
+            stream() {
+                return createInferenceStream(async function* () {
+                    return {
+                        api: "test",
+                        content: [],
+                        model: model.id,
+                        provider: "test-provider",
+                        role: "assistant",
+                        stopReason: "stop",
+                        timestamp: 1,
+                        usage: {
+                            cacheRead: 0,
+                            cacheWrite: 0,
+                            cost: {
+                                cacheRead: 0,
+                                cacheWrite: 0,
+                                input: 0,
+                                output: 0,
+                                total: 0,
+                            },
+                            input: 0,
+                            output: 0,
+                            totalTokens: 0,
+                        },
+                    };
+                });
+            },
+        });
+        const debugProvider = createDebugProvider(provider, {
+            log: { record: vi.fn() } as unknown as DebugLog,
+            runId: "run-1",
+            source: "agent",
+        });
+        const context = {
+            messages: [{ role: "user" as const, content: "original", timestamp: 1 }],
+        };
+
+        await expect(debugProvider.compact?.({ context })).resolves.toMatchObject({
+            status: "completed",
+            context: { messages: [{ role: "user", content: "summary" }] },
+        });
+        expect(compact).toHaveBeenCalledWith({ context });
+    });
 });

@@ -7,7 +7,9 @@ import {
     type ClaudeAuxiliaryQueryResponse,
     type BaseProvider,
     type BaseSession,
+    type SessionCompaction,
     type SessionContext,
+    type SessionMessage,
     type SessionModelConfiguration,
 } from "@slopus/rig-providers";
 
@@ -26,6 +28,7 @@ import { toSessionMessages } from "@/toSessionMessages.js";
 import type { ExecutorEnvironment } from "@/prompts/ExecutorEnvironment.js";
 import { assembleSystemPrompt } from "@/prompts/assembleSystemPrompt.js";
 import type {
+    CompactionResult,
     Context,
     InferenceStream,
     Model,
@@ -288,25 +291,25 @@ export class Executor {
 
     async compact(
         options: {
-            context?: Context;
+            context: Context;
             inputTokens?: number;
             instructions?: string;
             signal?: AbortSignal;
-        } = {},
-    ) {
+        },
+    ): Promise<CompactionResult> {
         const releaseInference = await this.acquireInference();
         try {
             if (this.active === undefined) throw new Error("Executor has no active session.");
-            return this.active.session.compact({
-                ...(options.context === undefined
-                    ? {}
-                    : { context: { messages: toSessionMessages(options.context.messages) } }),
+            const sourceContext = options.context;
+            const result = await this.active.session.compact({
+                context: { messages: toSessionMessages(options.context.messages) },
                 ...(options.inputTokens === undefined ? {} : { inputTokens: options.inputTokens }),
                 ...(options.instructions === undefined
                     ? {}
                     : { instructions: options.instructions }),
                 ...(options.signal === undefined ? {} : { signal: options.signal }),
             });
+            return toExecutionCompactionResult(result, sourceContext);
         } finally {
             releaseInference();
         }
@@ -482,4 +485,121 @@ function toCompatibilitySelection(profile: ExecutorModelProfile) {
         providerId: profile.providerId,
         providerType: profile.providerType,
     };
+}
+
+function toExecutionCompactionResult(
+    result: SessionCompaction,
+    sourceContext: Context,
+): CompactionResult {
+    const context = {
+        ...sourceContext,
+        messages: restoreExecutionMessages(result.context.messages, sourceContext.messages),
+    };
+    if (result.status !== "completed") return { ...result, context };
+    return {
+        status: "completed",
+        context,
+        ...(result.summary === undefined ? {} : { summary: result.summary }),
+        ...(result.compaction === undefined
+            ? {}
+            : {
+                  compaction: {
+                      role: "compaction",
+                      content: result.compaction.content,
+                      ...(result.compaction.vendor === undefined
+                          ? {}
+                          : { vendor: result.compaction.vendor }),
+                      timestamp: latestTimestamp(sourceContext.messages),
+                  },
+              }),
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
+    };
+}
+
+function restoreExecutionMessages(
+    replacement: readonly SessionMessage[],
+    source: readonly Context["messages"][number][],
+): Context["messages"] {
+    const sessionSource = toSessionMessages(source);
+    const restored: Context["messages"][number][] = [];
+    let sourceIndex = 0;
+    for (const message of replacement) {
+        const match = sessionSource.findIndex(
+            (candidate, index) =>
+                index >= sourceIndex && JSON.stringify(candidate) === JSON.stringify(message),
+        );
+        if (match >= 0) {
+            restored.push(structuredClone(source[match]!));
+            sourceIndex = match + 1;
+            continue;
+        }
+        restored.push(sessionMessageToExecutionMessage(message, latestTimestamp(source)));
+    }
+    return restored;
+}
+
+function sessionMessageToExecutionMessage(
+    message: SessionMessage,
+    timestamp: number,
+): Context["messages"][number] {
+    if (message.role === "system") {
+        return {
+            role: "system",
+            content:
+                typeof message.content === "string"
+                    ? message.content
+                    : message.content.join("\n"),
+            timestamp,
+        };
+    }
+    if (message.role === "compaction") {
+        return {
+            role: "compaction",
+            content: message.content,
+            ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
+            timestamp,
+        };
+    }
+    if (message.role === "agent") {
+        return {
+            role: "user",
+            content: "",
+            encryptedAgentMessage: {
+                author: message.author,
+                recipient: message.recipient,
+                header: message.header,
+                encryptedContent: message.encryptedContent,
+            },
+            ...(message.agentMessageTriggerTurn === undefined
+                ? {}
+                : { agentMessageTriggerTurn: message.agentMessageTriggerTurn }),
+            timestamp,
+        };
+    }
+    if (message.role === "user") {
+        return {
+            role: "user",
+            content:
+                message.input === undefined
+                    ? message.content
+                    : message.input.map((part) =>
+                          part.type === "text"
+                              ? { type: "text" as const, text: part.text }
+                              : {
+                                    type: "image" as const,
+                                    data: part.data,
+                                    mimeType: part.mimeType,
+                                },
+                      ),
+            timestamp,
+        };
+    }
+    throw new Error(
+        `Provider compaction returned an unmatched ${message.role} message in replacement context.`,
+    );
+}
+
+function latestTimestamp(messages: readonly Context["messages"][number][]): number {
+    if (messages.length === 0) return Date.now();
+    return messages.reduce((latest, message) => Math.max(latest, message.timestamp), 0);
 }

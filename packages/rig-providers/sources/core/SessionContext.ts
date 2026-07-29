@@ -70,6 +70,8 @@ export interface SessionToolCall {
     readonly name: string;
     readonly namespace?: string;
     readonly arguments: string;
+    /** The provider stopped before this call became executable. */
+    readonly incomplete?: boolean;
     /** Opaque provider metadata persisted with this tool call. */
     readonly vendor?: any;
 }

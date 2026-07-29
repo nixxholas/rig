@@ -114,6 +114,12 @@ describe("Executor", () => {
         ).resolves.toMatchObject({
             status: "completed",
             summary: "summary",
+            context: {
+                messages: [
+                    { role: "user", content: "Selected prefix.", timestamp: 1 },
+                    { role: "user", content: "summary" },
+                ],
+            },
         });
         expect(native.sessions[0]?.compactions).toEqual([
             {
@@ -516,11 +522,15 @@ class RecordingSession extends BaseSession {
 
     override async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
         this.compactions.push(options);
+        const preservedMessages = options.context?.messages ?? [];
         return {
             status: "completed",
             summary: "summary",
-            preservedMessages: [],
-            context: { instructions: "", messages: [] },
+            preservedMessages,
+            context: {
+                instructions: "",
+                messages: [...preservedMessages, { role: "user", content: "summary" }],
+            },
         };
     }
 

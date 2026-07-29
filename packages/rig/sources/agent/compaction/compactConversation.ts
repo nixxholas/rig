@@ -1,16 +1,21 @@
 import { estimateMessagesTokens } from "./estimateMessagesTokens.js";
-import { requestCompactionSummary } from "./requestCompactionSummary.js";
+import { requestProviderCompaction } from "./requestProviderCompaction.js";
 import { resolveCompactionInputTokens } from "./resolveCompactionInputTokens.js";
 import { resolveAutoCompactThreshold } from "./resolveAutoCompactThreshold.js";
-import { resolveAutoCompactWindow } from "./resolveAutoCompactWindow.js";
-import type { Message, UserMessage } from "../types.js";
-import type { Context, Model, Provider, ServiceTier } from "@slopus/rig-execution";
-
-const RETAINED_CONTEXT_FRACTION = 0.1;
+import type { CompactionMessage, Message, UserMessage } from "../types.js";
+import type {
+    Context,
+    Message as ProviderMessage,
+    Model,
+    Provider,
+    ServiceTier,
+    UserContent as ProviderUserContent,
+} from "@slopus/rig-execution";
 
 export interface CompactConversationResult {
     compacted: boolean;
     compactedMessageCount: number;
+    compactionMessage?: CompactionMessage;
     contextMessages: readonly Message[];
     estimatedTokensAfter: number;
     estimatedTokensBefore: number;
@@ -26,31 +31,24 @@ export async function compactConversation(options: {
     now: () => number;
     reportedTokens?: number;
     force: boolean;
-    preserveLatestUserMessage: boolean;
-    onCompactionStart?: (event: { estimatedTokensBefore: number }) => void | Promise<void>;
+    onCompactionStart?: (event: {
+        compactionId: string;
+        estimatedTokensBefore: number;
+    }) => void | Promise<void>;
     signal?: AbortSignal;
     serviceTier?: ServiceTier;
     startDate?: string;
     thinking?: string;
 }): Promise<CompactConversationResult> {
     const estimatedTokensBefore = estimateMessagesTokens(options.messages);
-    const autoCompactWindow = resolveAutoCompactWindow(options.model);
     const tokensBefore = Math.max(estimatedTokensBefore, options.reportedTokens ?? 0);
     if (!options.force && tokensBefore < resolveAutoCompactThreshold(options.model)) {
         return unchanged(options.messages, estimatedTokensBefore);
     }
 
-    const systemMessages = options.messages.filter((message) => message.role === "system");
-    const conversation = options.messages.filter((message) => message.role !== "system");
-    const keepStart = options.preserveLatestUserMessage
-        ? findRetainedStart(conversation, autoCompactWindow)
-        : conversation.length;
-    const messagesToCompact = conversation.slice(0, keepStart);
-    const retainedMessages = conversation.slice(keepStart);
-
     if (
-        messagesToCompact.length < 2 ||
-        !messagesToCompact.some((message) => message.role === "agent")
+        options.messages.length < 2 ||
+        !options.messages.some((message) => message.role === "agent")
     ) {
         return unchanged(options.messages, estimatedTokensBefore);
     }
@@ -62,11 +60,13 @@ export async function compactConversation(options: {
     // is just as broken as one inside the summary.
     assertToolCallsAnswered(options.messages);
 
-    await options.onCompactionStart?.({ estimatedTokensBefore });
-    const summary = await requestCompactionSummary({
-        context: await options.createProviderContext([...systemMessages, ...messagesToCompact]),
+    const compactionId = options.idFactory();
+    await options.onCompactionStart?.({ compactionId, estimatedTokensBefore });
+    const providerContext = await options.createProviderContext(options.messages);
+    const summary = await requestProviderCompaction({
+        context: providerContext,
         inputTokens: resolveCompactionInputTokens(
-            estimateMessagesTokens(messagesToCompact),
+            estimatedTokensBefore,
             options.reportedTokens,
         ),
         provider: options.provider,
@@ -77,36 +77,28 @@ export async function compactConversation(options: {
         ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
-    const summaryMessage: UserMessage = {
-        role: "user",
-        id: options.idFactory(),
-        blocks: [
-            {
-                type: "text",
-                text: `<conversation_summary>\n${summary.summary}\n</conversation_summary>`,
-            },
-        ],
-        ...(summary.encrypted === undefined
-            ? {}
-            : {
-                  compactionCheckpoint: {
-                      content: summary.encrypted.content,
-                      ...(summary.encrypted.vendor === undefined
-                          ? {}
-                          : { vendor: summary.encrypted.vendor }),
-                      providerId: options.provider.id,
-                  },
-              }),
-    };
-    const contextMessages = [...systemMessages, summaryMessage, ...retainedMessages];
+    const replacement = toAgentReplacementContext({
+        compactionId,
+        idFactory: options.idFactory,
+        providerId: options.provider.id,
+        replacement: summary.context.messages,
+        source: options.messages,
+        summary,
+    });
+    const contextMessages = replacement.contextMessages;
+    const sourceIds = new Set(options.messages.map((message) => message.id));
+    const retainedMessageCount = contextMessages.filter((message) =>
+        sourceIds.has(message.id),
+    ).length;
 
     return {
         compacted: true,
-        compactedMessageCount: messagesToCompact.length,
+        compactedMessageCount: options.messages.length - retainedMessageCount,
+        compactionMessage: replacement.compactionMessage,
         contextMessages,
         estimatedTokensAfter: estimateMessagesTokens(contextMessages),
         estimatedTokensBefore,
-        retainedMessageCount: retainedMessages.length,
+        retainedMessageCount,
     };
 }
 
@@ -130,27 +122,6 @@ function assertToolCallsAnswered(messages: readonly Message[]): void {
     }
 }
 
-function findRetainedStart(messages: readonly Message[], contextWindow: number): number {
-    const userIndexes = messages.flatMap((message, index) =>
-        message.role === "user" ? [index] : [],
-    );
-    const latestUserIndex = userIndexes.at(-1);
-    if (latestUserIndex === undefined) return messages.length;
-
-    const retainedTokenTarget = Math.max(32, Math.floor(contextWindow * RETAINED_CONTEXT_FRACTION));
-    let keepStart = latestUserIndex;
-    for (let index = userIndexes.length - 2; index >= 0; index -= 1) {
-        const candidate = userIndexes[index];
-        if (candidate === undefined) continue;
-        if (estimateMessagesTokens(messages.slice(candidate)) > retainedTokenTarget) break;
-        keepStart = candidate;
-    }
-    // Provider usage can include tokens that our local estimator cannot see. Once the
-    // provider says the context is over the policy threshold (or rejects it outright),
-    // always compact an older prefix when one exists instead of trusting a low estimate.
-    return keepStart === 0 && latestUserIndex > 0 ? latestUserIndex : keepStart;
-}
-
 function unchanged(
     messages: readonly Message[],
     estimatedTokens: number,
@@ -163,4 +134,200 @@ function unchanged(
         estimatedTokensBefore: estimatedTokens,
         retainedMessageCount: messages.length,
     };
+}
+
+function toAgentReplacementContext(options: {
+    compactionId: string;
+    idFactory: () => string;
+    providerId: string;
+    replacement: readonly ProviderMessage[];
+    source: readonly Message[];
+    summary: {
+        summary: string;
+        encrypted?: { content: string; vendor?: unknown };
+        usage: {
+            input: number;
+            cacheRead: number;
+            cacheWrite: number;
+        };
+    };
+}): { compactionMessage: CompactionMessage; contextMessages: Message[] } {
+    const used = new Set<string>();
+    let kind: CompactionMessage["kind"] | undefined;
+    let content: string | undefined;
+    let vendor: unknown;
+    let insertion = -1;
+    const contextMessages: Message[] = [];
+    for (const message of options.replacement) {
+        const preserved = findPreservedAgentMessage(message, options.source, used);
+        if (preserved !== undefined) {
+            used.add(preserved.id);
+            contextMessages.push(preserved);
+            continue;
+        }
+        if (message.role === "system") {
+            contextMessages.push({
+                role: "system",
+                id: options.idFactory(),
+                blocks: [{ type: "text", text: message.content }],
+                internal: true,
+            });
+            continue;
+        }
+        if (message.role === "compaction") {
+            if (kind !== undefined) {
+                throw new Error("Provider compaction returned more than one replacement message.");
+            }
+            kind = "native";
+            content = message.content;
+            vendor = message.vendor;
+            insertion = contextMessages.length;
+            continue;
+        }
+        if (message.role === "user") {
+            if (kind !== undefined) {
+                throw new Error("Provider compaction returned more than one replacement message.");
+            }
+            const replacementText =
+                typeof message.content === "string"
+                    ? message.content
+                    : message.content
+                          .filter((block) => block.type === "text")
+                          .map((block) => block.text)
+                          .join("\n");
+            if (
+                message.sourceMessageId !== undefined ||
+                replacementText !== options.summary.summary
+            ) {
+                throw new Error(
+                    "Provider compaction returned an unmatched user message without source identity.",
+                );
+            }
+            kind = "summary";
+            content = replacementText;
+            insertion = contextMessages.length;
+            continue;
+        }
+        throw new Error(
+            `Provider compaction returned an unmatched ${message.role} message in replacement context.`,
+        );
+    }
+    if (kind === undefined || content === undefined || insertion < 0) {
+        throw new Error("Provider compaction did not return a replacement message.");
+    }
+    const replacedMessageIds = options.source
+        .filter((message) => !used.has(message.id))
+        .map((message) => message.id);
+    const beforeTokens =
+        options.summary.usage.input +
+        options.summary.usage.cacheRead +
+        options.summary.usage.cacheWrite;
+    const initial: CompactionMessage = {
+        role: "compaction",
+        id: options.compactionId,
+        blocks: [{ type: "text", text: options.summary.summary }],
+        kind,
+        replacedMessageIds,
+        statistics: {
+            before: { exact: true, tokens: beforeTokens },
+            after: { exact: false, tokens: 0 },
+        },
+        providerId: options.providerId,
+        content,
+        ...(vendor === undefined ? {} : { vendor }),
+        summary: options.summary.summary,
+    };
+    contextMessages.splice(insertion, 0, initial);
+    const compactionMessage: CompactionMessage = {
+        ...initial,
+        statistics: {
+            ...initial.statistics,
+            after: {
+                exact: false,
+                tokens: estimateMessagesTokens(contextMessages),
+            },
+        },
+    };
+    contextMessages[insertion] = compactionMessage;
+    return { compactionMessage, contextMessages };
+}
+
+function findPreservedAgentMessage(
+    providerMessage: ProviderMessage,
+    source: readonly Message[],
+    used: ReadonlySet<string>,
+): Message | undefined {
+    if (
+        (providerMessage.role === "system" || providerMessage.role === "user") &&
+        providerMessage.sourceMessageId !== undefined
+    ) {
+        return source.find(
+            (message) =>
+                !used.has(message.id) && message.id === providerMessage.sourceMessageId,
+        );
+    }
+    if (providerMessage.role === "system") {
+        return source.find(
+            (message) =>
+                !used.has(message.id) &&
+                message.role === "system" &&
+                message.blocks
+                    .filter((block) => block.type === "text")
+                    .map((block) => block.text)
+                    .join("\n") === providerMessage.content,
+        );
+    }
+    if (providerMessage.role === "user") {
+        return source.find(
+            (message) =>
+                !used.has(message.id) &&
+                message.role === "user" &&
+                message.encryptedAgentMessage === undefined &&
+                sameProviderContent(
+                    message.blocks.map(agentContentToProviderContent),
+                    typeof providerMessage.content === "string"
+                        ? [{ type: "text", text: providerMessage.content }]
+                        : providerMessage.content,
+                ),
+        );
+    }
+    return undefined;
+}
+
+function sameProviderContent(
+    left: readonly ProviderUserContent[],
+    right: readonly ProviderUserContent[],
+): boolean {
+    if (left.length !== right.length) return false;
+    return left.every((block, index) => {
+        const other = right[index];
+        if (other === undefined || block.type !== other.type) return false;
+        if (block.type === "text" && other.type === "text") {
+            return (
+                block.text === other.text &&
+                Object.keys(block).length === Object.keys(other).length
+            );
+        }
+        return (
+            block.type === "image" &&
+            other.type === "image" &&
+            block.data === other.data &&
+            block.mimeType === other.mimeType &&
+            block.detail === other.detail &&
+            Object.keys(block).length === Object.keys(other).length
+        );
+    });
+}
+
+function agentContentToProviderContent(
+    block: UserMessage["blocks"][number],
+): ProviderUserContent {
+    return block.type === "text"
+        ? { type: "text", text: block.text }
+        : {
+              type: "image",
+              data: block.data,
+              mimeType: block.mediaType,
+              ...(block.detail === undefined ? {} : { detail: block.detail }),
+          };
 }

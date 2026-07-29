@@ -31,7 +31,7 @@ export type SessionEvent =
           vendor?: any;
       }
     | { type: "tool_call_delta"; callId: string; delta: string }
-    | { type: "tool_call_end"; callId: string; arguments: string }
+    | { type: "tool_call_end"; callId: string; arguments: string; incomplete?: boolean }
     | { type: "server_tool_call_delta"; callId: string; delta: string }
     | { type: "retrying"; attempt: number; reason: string }
     | { type: "token_usage"; usage: SessionCacheUsage }

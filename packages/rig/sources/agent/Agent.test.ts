@@ -697,18 +697,22 @@ describe("Agent", () => {
                     },
                 ],
             },
-            {
-                role: "user",
-                content: [{ type: "text", text: "Continue from there." }],
-            },
         ]);
         expect(agent.snapshot().messages).toMatchObject([
             { id: "user-old" },
             { id: "agent-old" },
             { role: "user" },
+            {
+                role: "compaction",
+                statistics: { after: { exact: true, tokens: 0 } },
+            },
             { role: "agent", blocks: [{ type: "text", text: "continued" }] },
         ]);
-        expect(agent.snapshot().contextMessages).toHaveLength(3);
+        expect(agent.snapshot().contextMessages).toHaveLength(2);
+        expect(agent.snapshot().contextMessages?.[0]).toMatchObject({
+            role: "compaction",
+            statistics: { after: { exact: true, tokens: 0 } },
+        });
     });
 
     it.each([
@@ -808,17 +812,17 @@ describe("Agent", () => {
             expect(contexts).toHaveLength(3);
             expect(contexts[1]?.systemPrompt).toBe(contexts[0]?.systemPrompt);
             expect(contexts[1]?.tools).toEqual(contexts[0]?.tools);
-            expect(contexts[1]?.messages.slice(0, -1)).toEqual(contexts[0]?.messages.slice(0, 2));
-            const replayedToolCall = contexts[2]?.messages[2];
-            if (replayedToolCall?.role !== "assistant") {
-                throw new Error("Expected the compacted tool call.");
-            }
-            const replayedToolCallId = replayedToolCall.content.find(
-                (content) => content.type === "toolCall",
-            )?.id;
-            if (replayedToolCallId === undefined) {
-                throw new Error("Expected the compacted tool call identifier.");
-            }
+            expect(
+                contexts[1]?.messages
+                    .slice(0, -3)
+                    .map(({ timestamp: _timestamp, ...message }) => message),
+            ).toEqual(
+                contexts[0]?.messages.map(({ timestamp: _timestamp, ...message }) => message),
+            );
+            expect(contexts[1]?.messages.slice(-3, -1).map((message) => message.role)).toEqual([
+                "assistant",
+                "toolResult",
+            ]);
             expect(contexts[2]?.messages).toMatchObject([
                 {
                     role: "user",
@@ -829,30 +833,9 @@ describe("Agent", () => {
                         },
                     ],
                 },
-                {
-                    role: "user",
-                    content: [{ type: "text", text: "Continue with the tool." }],
-                },
-                {
-                    role: "assistant",
-                    content: [
-                        {
-                            type: "toolCall",
-                            id: replayedToolCallId,
-                            providerToolCallId: "call-echo",
-                            name: "echo",
-                        },
-                    ],
-                },
-                {
-                    role: "toolResult",
-                    toolCallId: replayedToolCallId,
-                    providerToolCallId: "call-echo",
-                    content: [{ type: "text", text: toolResult }],
-                },
             ]);
             expect(agent.snapshot().messages.slice(0, 2)).toEqual(messages);
-            expect(agent.snapshot().contextMessages).toHaveLength(5);
+            expect(agent.snapshot().contextMessages).toHaveLength(2);
         },
     );
 
@@ -942,10 +925,6 @@ describe("Agent", () => {
                         text: expect.stringContaining("Earlier work was summarized."),
                     },
                 ],
-            },
-            {
-                role: "user",
-                content: [{ type: "text", text: "Continue after compacting." }],
             },
         ]);
         expect(observedEventTypes).not.toContain("error");
@@ -1095,7 +1074,7 @@ describe("Agent", () => {
         });
     });
 
-    it("manually compacts with the active reasoning and service tier without changing history", async () => {
+    it("manually compacts into one durable transcript and provider-context message", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -1150,13 +1129,25 @@ describe("Agent", () => {
             compactedMessageCount: 2,
             retainedMessageCount: 0,
         });
-        expect(agent.snapshot().messages).toEqual(visibleMessages);
+        expect(agent.snapshot().messages).toEqual([
+            ...visibleMessages,
+            expect.objectContaining({
+                role: "compaction",
+                kind: "summary",
+                replacedMessageIds: visibleMessages.map((message) => message.id),
+                statistics: {
+                    after: { exact: false, tokens: expect.any(Number) },
+                    before: { exact: true, tokens: 0 },
+                },
+            }),
+        ]);
         expect(agent.snapshot().contextMessages).toMatchObject([
             {
-                role: "user",
+                role: "compaction",
                 blocks: [{ type: "text", text: expect.stringContaining("Brief.") }],
             },
         ]);
+        expect(agent.snapshot().contextMessages?.[0]).toBe(agent.snapshot().messages.at(-1));
         expect(compactionThinking).toEqual(["high"]);
         expect(compactionServiceTiers).toEqual(["fast"]);
         expect(compactionEvents.map((event) => event.type)).toEqual([
@@ -2094,6 +2085,44 @@ describe("Agent", () => {
         expect(agent.messages).toEqual([]);
         expect(agent.queue).toEqual([]);
     });
+
+    it("does not restore a compaction that finishes after reset", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const started = deferred<void>();
+        const release = deferred<void>();
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamAfterRelease(started.resolve, release.promise, "summary");
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: harness.context,
+            messages: [
+                { role: "user", id: "user-1", blocks: [{ type: "text", text: "work" }] },
+                { role: "agent", id: "agent-1", blocks: [{ type: "text", text: "done" }] },
+            ],
+            printToConsole: false,
+        });
+
+        const compaction = agent.compact();
+        await started.promise;
+        await agent.reset();
+        release.resolve();
+        await compaction;
+
+        expect(agent.snapshot().messages).toEqual([]);
+        expect(agent.snapshot().contextMessages).toBeUndefined();
+    });
 });
 
 function createDeterministicIds(): () => string {
@@ -2161,10 +2190,14 @@ function deferred<T>(): {
     return { promise, resolve };
 }
 
-function streamAfterRelease(started: () => void, release: Promise<void>): InferenceStream {
+function streamAfterRelease(
+    started: () => void,
+    release: Promise<void>,
+    text = "done",
+): InferenceStream {
     const message: AssistantMessage = {
         role: "assistant",
-        content: [{ type: "text", text: "done" }],
+        content: [{ type: "text", text }],
         api: "test",
         provider: "codex",
         model: "openai/gpt-test",

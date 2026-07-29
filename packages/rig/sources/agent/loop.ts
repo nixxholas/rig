@@ -13,6 +13,7 @@ import { normalizeToolCallArguments } from "./normalizeToolCallArguments.js";
 import { prepareProviderMessageImages } from "./prepareProviderMessageImages.js";
 import { presentToolCall, type PresentedToolCall } from "./presentToolCall.js";
 import { replaceLastTurnToolResultImages } from "./replaceLastTurnToolResultImages.js";
+import { finalizeCompactionMessage } from "./compaction/finalizeCompactionMessage.js";
 import { systemMessageToText } from "./systemMessageToText.js";
 import { ABORTED_BY_SIGNAL, raceWithAbort } from "../utils/raceWithAbort.js";
 import { createProviderPrompt, type ProviderPrompt } from "./prompt/createSystemPrompt.js";
@@ -23,6 +24,7 @@ import type {
     AgentBlock,
     AgentMessage,
     AnyDefinedTool,
+    CompactionMessage,
     ContentBlock,
     Message,
     ToolResultBlock,
@@ -92,6 +94,7 @@ export interface RunAgentLoopOptions {
     ) => Promise<
         | {
               compacted: boolean;
+              compactionMessage?: CompactionMessage;
               contextMessages: readonly Message[];
           }
         | undefined
@@ -259,6 +262,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             providerMessages,
             providerTools,
             providerPrompt,
+            transcript,
         });
 
     const permissionDenials = new AutoPermissionDenialCircuitBreaker();
@@ -443,9 +447,32 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             },
             (toolCall) => presentedToolCalls.get(toolCall.id)?.presentation,
         );
+        const finalizedCompaction = finalizeCompactionMessage(
+            contextTranscript,
+            transcript,
+            assistantMessage.usage,
+        );
+        if (finalizedCompaction !== undefined) {
+            await options.onMessage?.(finalizedCompaction);
+        }
         transcript.push(agentMessage);
         contextTranscript.push(agentMessage);
         await options.onMessage?.(agentMessage);
+
+        const incompleteToolCalls = toolCalls.filter((toolCall) => toolCall.incomplete === true);
+        if (assistantMessage.stopReason === "length" && incompleteToolCalls.length > 0) {
+            await appendNonExecutedToolResults({
+                toolCalls: incompleteToolCalls,
+                transcript,
+                contextTranscript,
+                providerMessages,
+                idFactory,
+                now,
+                onEvent: options.onEvent,
+                onMessage: options.onMessage,
+                message: "The tool call was interrupted because the model reached its output limit.",
+            });
+        }
 
         if (assistantMessage.stopReason === "aborted") {
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
@@ -470,7 +497,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             if (assistantMessage.endTurn === false) {
                 await compactCurrentContext({
                     force: false,
-                    reportedTokens: assistantMessage.usage.totalTokens,
+                    reportedTokens: contextTokens(assistantMessage.usage),
                 });
                 await appendSteering(options, transcript, contextTranscript, providerMessages, now);
                 continue;
@@ -798,7 +825,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         }
         await compactCurrentContext({
             force: false,
-            reportedTokens: assistantMessage.usage.totalTokens,
+            reportedTokens: contextTokens(assistantMessage.usage),
         });
         await appendSteering(options, transcript, contextTranscript, providerMessages, now);
     }
@@ -821,17 +848,17 @@ async function compactLoopContext(options: {
     providerMessages: ProviderMessage[];
     providerTools: readonly ProviderTool[];
     providerPrompt: ProviderPrompt;
+    transcript: Message[];
 }): Promise<boolean> {
     const result = await options.options.compactContext?.(options.contextTranscript, {
         ...options.compaction,
         createProviderContext: async (messages) => {
-            const providerMessageCount = toProviderMessages(messages, {
-                model: options.model,
-                now: () => 0,
-                providerId: options.options.provider.id,
-            }).length;
             const preparedMessages = await prepareProviderMessageImages(
-                options.providerMessages.slice(0, providerMessageCount),
+                toProviderMessages(messages, {
+                    model: options.model,
+                    now: options.now,
+                    providerId: options.options.provider.id,
+                }),
                 resolveModelImageProfile(options.model),
             );
             return toProviderContext(
@@ -842,7 +869,12 @@ async function compactLoopContext(options: {
         },
     });
     if (result?.compacted !== true) return false;
+    if (result.compactionMessage === undefined) {
+        throw new Error("Compaction completed without a durable compaction message.");
+    }
 
+    options.transcript.push(result.compactionMessage);
+    await options.options.onMessage?.(result.compactionMessage);
     options.contextTranscript.splice(
         0,
         options.contextTranscript.length,
@@ -858,6 +890,10 @@ async function compactLoopContext(options: {
         }),
     );
     return true;
+}
+
+function contextTokens(usage: Usage): number {
+    return usage.input + usage.cacheRead + usage.cacheWrite;
 }
 
 async function appendSteering(
@@ -924,6 +960,39 @@ async function appendInterruptedToolResults(options: {
     };
 }
 
+async function appendNonExecutedToolResults(options: {
+    toolCalls: readonly ProviderToolCall[];
+    transcript: Message[];
+    contextTranscript: Message[];
+    providerMessages: ProviderMessage[];
+    idFactory: () => string;
+    now: () => number;
+    onEvent: ((event: AgentLoopEvent) => void | Promise<void>) | undefined;
+    onMessage: ((message: Message) => void | Promise<void>) | undefined;
+    message: string;
+}): Promise<void> {
+    const toolResultBlocks = options.toolCalls.map((toolCall) =>
+        createErrorToolResultBlock(toolCall, options.message, { kind: "interrupted" }),
+    );
+    for (const resultBlock of toolResultBlocks) {
+        await ignoreOptionalFailure(() =>
+            options.onEvent?.({
+                type: "tool_execution_end",
+                result: toToolExecutionEndResult(resultBlock),
+            }),
+        );
+        options.providerMessages.push(toProviderToolResultMessage(resultBlock, options.now));
+    }
+    const toolResultMessage: AgentMessage = {
+        role: "agent",
+        id: options.idFactory(),
+        blocks: toolResultBlocks,
+    };
+    options.transcript.push(toolResultMessage);
+    options.contextTranscript.push(toolResultMessage);
+    await options.onMessage?.(toolResultMessage);
+}
+
 function findModel(provider: Provider, modelId: string, allowReviewerModel: boolean): Model {
     const model =
         provider.models.find((candidate) => candidate.id === modelId) ??
@@ -976,13 +1045,32 @@ export function toProviderMessages(
             providerMessages.push({
                 role: "system",
                 content: systemMessageToText(message),
+                sourceMessageId: message.id,
                 timestamp: options.now(),
             });
             continue;
         }
 
         if (message.role === "user") {
-            providerMessages.push(toProviderUserMessage(message, options.now, options.providerId));
+            providerMessages.push(toProviderUserMessage(message, options.now));
+            continue;
+        }
+
+        if (message.role === "compaction") {
+            providerMessages.push(
+                message.kind === "native" && message.providerId === options.providerId
+                    ? {
+                          role: "compaction",
+                          content: message.content,
+                          ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
+                          timestamp: options.now(),
+                      }
+                    : {
+                          role: "user",
+                          content: [{ type: "text", text: message.summary }],
+                          timestamp: options.now(),
+                      },
+            );
             continue;
         }
 
@@ -995,22 +1083,11 @@ export function toProviderMessages(
 function toProviderUserMessage(
     message: UserMessage,
     now: () => number,
-    providerId?: string,
 ): ProviderMessage {
-    // Only the provider that issued a checkpoint can read it, and it goes back exactly as it came.
-    // Anywhere else this message travels as the summary text it also carries.
-    const checkpoint = message.compactionCheckpoint;
-    if (checkpoint !== undefined && checkpoint.providerId === providerId) {
-        return {
-            role: "compaction",
-            content: checkpoint.content,
-            ...(checkpoint.vendor === undefined ? {} : { vendor: checkpoint.vendor }),
-            timestamp: now(),
-        };
-    }
     return {
         role: "user",
         content: message.blocks.map(toProviderUserContent),
+        sourceMessageId: message.id,
         ...(message.encryptedAgentMessage === undefined
             ? {}
             : { encryptedAgentMessage: message.encryptedAgentMessage }),
@@ -1116,6 +1193,7 @@ function toProviderAssistantContent(
             name: block.name,
             ...(block.namespace === undefined ? {} : { namespace: block.namespace }),
             arguments: block.arguments as Record<string, unknown>,
+            ...(block.incomplete === true ? { incomplete: true } : {}),
             ...(block.kind === undefined ? {} : { kind: block.kind }),
             ...(block.vendor === undefined ? {} : { vendor: block.vendor }),
         };

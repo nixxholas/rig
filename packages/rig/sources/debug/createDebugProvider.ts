@@ -13,6 +13,7 @@ export function createDebugProvider(
     options: CreateDebugProviderOptions,
 ): Provider {
     let inference = 0;
+    const compact = provider.compact;
 
     return defineProvider({
         id: provider.id,
@@ -23,6 +24,9 @@ export function createDebugProvider(
         models: provider.models,
         ...(provider.reviewerModel === undefined ? {} : { reviewerModel: provider.reviewerModel }),
         ...(provider.serviceTiers === undefined ? {} : { serviceTiers: provider.serviceTiers }),
+        ...(compact === undefined
+            ? {}
+            : { compact: (compactionOptions) => compact(compactionOptions) }),
         stream(model, context, streamOptions = {}) {
             const inferenceId = `${options.source}-${String(++inference).padStart(4, "0")}`;
             return createInferenceStream(async function* () {

@@ -359,6 +359,7 @@ export class Agent {
     async compact(
         signal?: AbortSignal,
         onEvent?: AgentRunOptions["onEvent"],
+        onMessage?: AgentRunOptions["onMessage"],
     ): Promise<AgentCompactionResult> {
         if (this.#activeRunId !== undefined) {
             throw new Error("Wait for the active response to finish before compacting.");
@@ -369,9 +370,11 @@ export class Agent {
         this.#status = "running";
         try {
             const result = await this.#compactContext({
-                eventOptions: onEvent === undefined ? {} : { onEvent },
+                eventOptions: {
+                    ...(onEvent === undefined ? {} : { onEvent }),
+                    ...(onMessage === undefined ? {} : { onMessage }),
+                },
                 force: true,
-                preserveLatestUserMessage: false,
                 reason: "manual",
                 ...(signal !== undefined ? { signal } : {}),
             });
@@ -411,7 +414,6 @@ export class Agent {
                 await this.#compactContext({
                     eventOptions: options,
                     force: false,
-                    preserveLatestUserMessage: true,
                     provider,
                     reason: "threshold",
                     ...(options.signal !== undefined ? { signal: options.signal } : {}),
@@ -476,7 +478,6 @@ export class Agent {
                             messages,
                             createProviderContext: compaction.createProviderContext,
                             force: compaction.force,
-                            preserveLatestUserMessage: true,
                             provider,
                             reason: compaction.force ? "context_window" : "threshold",
                             ...(compaction.reportedTokens === undefined
@@ -484,6 +485,7 @@ export class Agent {
                                 : { reportedTokens: compaction.reportedTokens }),
                             ...(options.signal === undefined ? {} : { signal: options.signal }),
                         });
+                        if (this.#resetVersion !== resetVersion) return undefined;
                         contextCompactedDuringRun ||= result.compacted;
                         return result;
                     } catch (error) {
@@ -605,22 +607,26 @@ export class Agent {
     async #compactContext(options: {
         eventOptions: AgentRunOptions;
         force: boolean;
-        preserveLatestUserMessage: boolean;
         provider?: Provider;
         reason: "context_window" | "manual" | "threshold";
         signal?: AbortSignal;
     }): Promise<AgentCompactionResult> {
+        const resetVersion = this.#resetVersion;
         const result = await this.#compactMessages({
             messages: this.#contextMessages ?? this.#messages,
             eventOptions: options.eventOptions,
             force: options.force,
-            preserveLatestUserMessage: options.preserveLatestUserMessage,
             reason: options.reason,
             ...(options.provider === undefined ? {} : { provider: options.provider }),
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
         });
-        if (result.compacted) {
+        if (result.compacted && this.#resetVersion === resetVersion) {
+            if (result.compactionMessage === undefined) {
+                throw new Error("Compaction completed without a durable compaction message.");
+            }
             this.#contextMessages = [...result.contextMessages];
+            this.#messages.push(result.compactionMessage);
+            await this.#handleMessage(result.compactionMessage, options.eventOptions);
         }
         return {
             compacted: result.compacted,
@@ -636,7 +642,6 @@ export class Agent {
         createProviderContext?: (messages: readonly Message[]) => Promise<Context>;
         eventOptions: AgentRunOptions;
         force: boolean;
-        preserveLatestUserMessage: boolean;
         provider?: Provider;
         reason: "context_window" | "manual" | "threshold";
         reportedTokens?: number;
@@ -688,7 +693,6 @@ export class Agent {
                     idFactory: this.#idFactory,
                     now: this.#now,
                     force: options.force,
-                    preserveLatestUserMessage: options.preserveLatestUserMessage,
                     startDate: this.#startDate,
                     onCompactionStart,
                     ...(options.reportedTokens === undefined

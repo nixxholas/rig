@@ -259,12 +259,14 @@ export async function* mapOpenAIResponseStream(
                         ? {}
                         : { namespace: event.item.namespace }),
                     arguments: event.item.arguments,
+                    ...(isIncompleteOutputItem(event.item) ? { incomplete: true } : {}),
                     vendor: responseToolVendor(options.vendor, "function_call"),
                 });
                 yield {
                     type: "tool_call_end",
                     callId: event.item.call_id,
                     arguments: event.item.arguments,
+                    ...(isIncompleteOutputItem(event.item) ? { incomplete: true } : {}),
                 };
             }
             if (
@@ -297,12 +299,14 @@ export async function* mapOpenAIResponseStream(
                         ? {}
                         : { namespace: event.item.namespace }),
                     arguments: event.item.input,
+                    ...(isIncompleteOutputItem(event.item) ? { incomplete: true } : {}),
                     vendor: responseToolVendor(options.vendor, "custom_tool_call"),
                 });
                 yield {
                     type: "tool_call_end",
                     callId: event.item.call_id,
                     arguments: event.item.input,
+                    ...(isIncompleteOutputItem(event.item) ? { incomplete: true } : {}),
                 };
             }
             if (
@@ -344,6 +348,45 @@ export async function* mapOpenAIResponseStream(
 
         if (event.type === "response.incomplete") {
             const reason = event.response.incomplete_details?.reason ?? "unknown";
+            for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
+                responseItems.set(outputIndex, JSON.stringify(item));
+            }
+            for (const [outputIndex, activeItem] of activeItems) {
+                if (
+                    (activeItem.type !== "function_call" &&
+                        activeItem.type !== "custom_tool_call" &&
+                        activeItem.type !== "tool_search_call") ||
+                    activeItem.callId === undefined ||
+                    activeItem.name === undefined ||
+                    toolCalls.some((toolCall) => toolCall.callId === activeItem.callId)
+                ) {
+                    continue;
+                }
+                const argumentsJson = activeItem.argumentsJson ?? "";
+                const vendorType =
+                    activeItem.type === "custom_tool_call"
+                        ? "custom_tool_call"
+                        : activeItem.type === "tool_search_call"
+                          ? "tool_search_call"
+                          : "function_call";
+                toolCalls.push({
+                    callId: activeItem.callId,
+                    name: activeItem.name,
+                    ...(activeItem.namespace === undefined
+                        ? {}
+                        : { namespace: activeItem.namespace }),
+                    arguments: argumentsJson,
+                    incomplete: true,
+                    vendor: responseToolVendor(options.vendor, vendorType),
+                });
+                yield {
+                    type: "tool_call_end",
+                    callId: activeItem.callId,
+                    arguments: argumentsJson,
+                    incomplete: true,
+                };
+                activeItems.delete(outputIndex);
+            }
             usage = toSessionCacheUsage(event.response.usage);
             if (usage.totalTokens > 0) {
                 yield { type: "token_usage", usage };
@@ -474,4 +517,13 @@ function responseToolVendor(
     return type === "tool_search_call"
         ? { provider, type, execution: "client" }
         : { provider, type };
+}
+
+function isIncompleteOutputItem(item: unknown): boolean {
+    return (
+        typeof item === "object" &&
+        item !== null &&
+        "status" in item &&
+        item.status === "incomplete"
+    );
 }

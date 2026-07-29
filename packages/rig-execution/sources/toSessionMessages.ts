@@ -82,6 +82,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
                     content.kind === "custom" && typeof content.arguments.input === "string"
                         ? content.arguments.input
                         : JSON.stringify(content.arguments),
+                ...(content.incomplete === true ? { incomplete: true } : {}),
                 ...(content.vendor === undefined ? {} : { vendor: content.vendor }),
             }));
         const encryptedReasoning = thinking.at(-1)?.encrypted;

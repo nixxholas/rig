@@ -75,6 +75,8 @@ export interface ToolCall {
     name: string;
     namespace?: string;
     arguments: Record<string, unknown>;
+    /** The provider stopped before this call became executable. */
+    incomplete?: boolean;
     kind?: "custom" | "function" | "tool_search";
     /** Opaque provider metadata required to replay this call faithfully. */
     vendor?: unknown;
@@ -94,12 +96,16 @@ export type ToolResultContent = TextContent | ImageContent;
 export interface SystemMessage {
     role: "system";
     content: string;
+    /** Caller-owned identity used only while restoring provider-selected replacement context. */
+    sourceMessageId?: string;
     timestamp: number;
 }
 
 export interface UserMessage {
     role: "user";
     content: string | readonly UserContent[];
+    /** Caller-owned identity used only while restoring provider-selected replacement context. */
+    sourceMessageId?: string;
     encryptedAgentMessage?: {
         author: string;
         recipient: string;
@@ -163,6 +169,28 @@ export type Message =
     | CompactionMessage
     | AssistantMessage
     | ToolResultMessage;
+
+export type CompactionResult =
+    | {
+          status: "completed";
+          context: Context;
+          summary?: string;
+          compaction?: CompactionMessage;
+          usage?: {
+              input: number;
+              output: number;
+              cacheRead: number;
+              cacheWrite: number;
+              totalTokens: number;
+          };
+      }
+    | { status: "cancelled"; context: Context }
+    | {
+          status: "failed";
+          kind: "inference_error" | "invalid_summary" | "tool_call";
+          message: string;
+          context: Context;
+      };
 
 export interface FunctionTool<TParameters extends TSchema = TSchema> {
     kind?: "function";
@@ -316,6 +344,12 @@ export interface Provider {
         | ((context: ProfilePromptContext) => ProfilePromptContext | Promise<ProfilePromptContext>)
         | undefined;
     reset?(): Promise<void> | void;
+    compact?(options: {
+        context: Context;
+        inputTokens?: number;
+        instructions?: string;
+        signal?: AbortSignal;
+    }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
     quota: ((options?: { fresh?: boolean }) => Promise<ProviderQuota>) | undefined;
     runClaudeAuxiliaryQuery?(
@@ -358,6 +392,12 @@ export function defineProvider(provider: {
         context: ProfilePromptContext,
     ) => ProfilePromptContext | Promise<ProfilePromptContext>;
     reset?(): Promise<void> | void;
+    compact?(options: {
+        context: Context;
+        inputTokens?: number;
+        instructions?: string;
+        signal?: AbortSignal;
+    }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
     quota?: (options?: { fresh?: boolean }) => Promise<ProviderQuota>;
     runClaudeAuxiliaryQuery?(

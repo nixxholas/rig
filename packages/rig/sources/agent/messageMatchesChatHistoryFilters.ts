@@ -5,7 +5,12 @@ export function messageMatchesChatHistoryFilters(
     message: Message,
     options: { query?: string; roles?: readonly ChatHistoryRole[] },
 ): boolean {
-    const role: ChatHistoryRole = message.role === "agent" ? "assistant" : message.role;
+    const role: ChatHistoryRole =
+        message.role === "agent"
+            ? "assistant"
+            : message.role === "compaction"
+              ? "system"
+              : message.role;
     if (options.roles !== undefined && !options.roles.includes(role)) return false;
 
     const query = options.query?.trim().toLocaleLowerCase();

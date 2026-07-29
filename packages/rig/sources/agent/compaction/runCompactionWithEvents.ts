@@ -3,7 +3,10 @@ import type { CompactConversationResult } from "./compactConversation.js";
 
 export async function runCompactionWithEvents(options: {
     compact: (
-        onCompactionStart: (event: { estimatedTokensBefore: number }) => void | Promise<void>,
+        onCompactionStart: (event: {
+            compactionId: string;
+            estimatedTokensBefore: number;
+        }) => void | Promise<void>,
     ) => Promise<CompactConversationResult>;
     idFactory: () => string;
     now: () => number;
@@ -18,11 +21,10 @@ export async function runCompactionWithEvents(options: {
           }
         | undefined;
     let status: "cancelled" | "completed" | "failed" = "failed";
-
     try {
-        const result = await options.compact(async ({ estimatedTokensBefore }) => {
+        const result = await options.compact(async ({ compactionId, estimatedTokensBefore }) => {
             lifecycle = {
-                compactionId: options.idFactory(),
+                compactionId,
                 startedAt: options.now(),
             };
             await options.onEvent({

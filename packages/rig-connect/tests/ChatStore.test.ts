@@ -1036,11 +1036,48 @@ describe("ChatStore", () => {
                 type: "context_compaction_finished",
             }),
         );
+        const compaction: Message = {
+            role: "compaction",
+            id: "c1",
+            blocks: [{ type: "text", text: "Earlier context." }],
+            content: "Earlier context.",
+            kind: "summary",
+            providerId: "claude",
+            replacedMessageIds: ["m1", "m2"],
+            statistics: {
+                after: { exact: false, tokens: 40_000 },
+                before: { exact: true, tokens: 121_000 },
+            },
+            summary: "Earlier context.",
+        };
+        store.apply(event("agent_message", { message: compaction, runId: "run-1" }));
 
+        expect(store.elements().filter((element) => element.kind === "compaction")).toHaveLength(1);
         expect(store.elements().find((element) => element.kind === "compaction")).toMatchObject({
             estimatedTokensAfter: 40_000,
-            messagesCompacted: 12,
+            messagesCompacted: 2,
             status: "completed",
+            tokensAfter: 40_000,
+            tokensAfterExact: false,
+            tokensBefore: 121_000,
+        });
+
+        store.apply(
+            event("agent_message", {
+                message: {
+                    ...compaction,
+                    statistics: {
+                        ...compaction.statistics,
+                        after: { exact: true, tokens: 41_000 },
+                    },
+                },
+                runId: "run-1",
+            }),
+        );
+        expect(store.elements().filter((element) => element.kind === "compaction")).toHaveLength(1);
+        expect(store.elements().find((element) => element.kind === "compaction")).toMatchObject({
+            tokensAfter: 41_000,
+            tokensAfterExact: true,
         });
     });
 

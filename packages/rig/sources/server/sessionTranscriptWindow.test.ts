@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { Message } from "../agent/types.js";
+import type { Message, UserMessage } from "../agent/types.js";
 import {
     sessionTranscriptWindow,
     type TranscriptEntry,
     type TranscriptRunFacts,
 } from "./sessionTranscriptWindow.js";
 
-function userMessage(id: string): Message {
+function userMessage(id: string): UserMessage {
     return { blocks: [{ text: id, type: "text" }], id, role: "user" };
 }
 

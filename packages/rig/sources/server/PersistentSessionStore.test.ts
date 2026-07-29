@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
-import type { AgentMessage, UserMessage } from "../agent/types.js";
+import type { AgentMessage, CompactionMessage, UserMessage } from "../agent/types.js";
 import { createEventIdFactory, type ModelCatalog, type SessionEvent } from "../protocol/index.js";
 import type { GymInferenceRequest } from "../executor/gym-types.js";
 import { defineModel } from "@slopus/rig-execution";
@@ -1830,10 +1830,20 @@ describe("PersistentSessionStore", () => {
 
     it("resumes from compacted model context instead of the visible transcript", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
-        const summaryMessage = textUserMessage(
-            "summary-1",
-            "<conversation_summary>Earlier work.</conversation_summary>",
-        );
+        const summaryMessage: CompactionMessage = {
+            blocks: [{ text: "Earlier work.", type: "text" }],
+            content: "Earlier work.",
+            id: "summary-1",
+            kind: "summary",
+            providerId: "claude",
+            replacedMessageIds: ["visible-1"],
+            role: "compaction",
+            statistics: {
+                after: { exact: false, tokens: 20 },
+                before: { exact: true, tokens: 100 },
+            },
+            summary: "Earlier work.",
+        };
         const visibleMessage = textUserMessage("visible-1", "The original full transcript.");
         try {
             const store = new PersistentSessionStore({ databasePath });
@@ -1843,6 +1853,12 @@ describe("PersistentSessionStore", () => {
                 isPartial: false,
                 message: visibleMessage,
                 position: 0,
+                runId: "run-1",
+            });
+            store.upsertMessage(state.id, {
+                isPartial: false,
+                message: summaryMessage,
+                position: 1,
                 runId: "run-1",
             });
             store.close();
@@ -1860,7 +1876,10 @@ describe("PersistentSessionStore", () => {
             try {
                 const restored = restoredStore.get(state.id);
 
-                expect(restored?.snapshot().snapshot.messages).toEqual([visibleMessage]);
+                expect(restored?.snapshot().snapshot.messages).toEqual([
+                    visibleMessage,
+                    summaryMessage,
+                ]);
                 expect(restored?.snapshot().snapshot.contextMessages).toEqual([summaryMessage]);
                 expect(() => restored?.externalControlContext()).toThrow(
                     "Captured resumed runtime options.",
