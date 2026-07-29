@@ -9,7 +9,6 @@ import type { SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import type { GrokCredential } from "@/vendors/VendorCredential.js";
 import { GROK_INFERENCE_MAX_RETRIES } from "@/vendors/grok/impl/grokConstants.js";
 import { GrokConnection } from "@/vendors/grok/impl/GrokConnection.js";
@@ -59,16 +58,14 @@ export class GrokSession extends BaseSession {
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
         | undefined;
-    private initialMessages: SessionContext["messages"];
     private turnIndex: number;
     private readonly userAgent: string | undefined;
 
     constructor(id: string, options: GrokSessionOptions) {
         super(id);
         this.credential = options.credential;
-        this.context = { ...options.context, messages: [...options.context.messages] };
-        this.initialMessages = [...options.context.messages];
-        this.turnIndex = countGrokUserQueries(options.context.messages);
+        this.context = { instructions: options.instructions, messages: [] };
+        this.turnIndex = 0;
         this.endpoint = options.endpoint;
         this.model = options.model;
         this.activeModel = options.model;
@@ -91,10 +88,16 @@ export class GrokSession extends BaseSession {
 
     async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
         const { signal } = options;
-        const context = {
-            ...this.context,
-            messages: [...this.context.messages],
-        };
+        const context: SessionContext =
+            options.context === undefined
+                ? {
+                      ...this.context,
+                      messages: [...this.context.messages],
+                  }
+                : {
+                      instructions: this.context.instructions,
+                      messages: [...options.context.messages],
+                  };
         if (signal?.aborted) {
             return { status: "cancelled", context };
         }
@@ -203,7 +206,6 @@ export class GrokSession extends BaseSession {
                 ...stateReminders,
             ],
         };
-        this.initialMessages = [...this.context.messages];
         return {
             status: "completed",
             summary,
@@ -221,7 +223,7 @@ export class GrokSession extends BaseSession {
     private async *streamRun(request: SessionRunRequest): AsyncGenerator<SessionEvent> {
         const { abort } = request;
         const previousUserQueries = countGrokUserQueries(this.context.messages);
-        const messages = withInitialSessionMessages(this.initialMessages, request.context.messages);
+        const messages = [...request.context.messages];
         const nextUserQueries = countGrokUserQueries(messages);
         if (nextUserQueries > previousUserQueries) {
             this.turnIndex += nextUserQueries - previousUserQueries;

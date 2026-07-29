@@ -82,10 +82,7 @@ describe.skipIf(!live)("Claude live session", () => {
             const credential = await ClaudeAuthTokenCredential.tryLoad({ env: process.env });
             if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
             const session = new ClaudeSession("wire-golden", {
-                context: {
-                    instructions: "Wire-specific instructions.",
-                    messages: [],
-                },
+                instructions: "Wire-specific instructions.",
                 credential,
                 env: {
                     ...process.env,
@@ -145,11 +142,7 @@ describe.skipIf(!live)("Claude live session", () => {
             });
             if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
             const session = new ClaudeSession("rig-providers-claude-live", {
-                context: {
-                    instructions:
-                        "You are testing Rig's Claude provider. Follow exact reply instructions.",
-                    messages: [],
-                },
+                instructions: "You are testing Rig's Claude provider. Follow exact reply instructions.",
                 credential,
                 model: "opus[1m]",
             });
@@ -229,20 +222,21 @@ describe.skipIf(!live)("Claude live session", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ env: process.env });
         if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
         const session = new ClaudeSession("rig-providers-claude-plain-compact-live", {
-            context: {
-                instructions: "Preserve conversation facts accurately.",
-                messages: [
-                    { role: "user", content: "Remember the exact marker PLAIN_COMPACT_MARKER." },
-                    { role: "assistant", content: "I will remember PLAIN_COMPACT_MARKER." },
-                    { role: "user", content: "The current task is native compaction testing." },
-                    { role: "assistant", content: "Understood." },
-                ],
-            },
+            instructions: "Preserve conversation facts accurately.",
             credential,
             model: "sonnet[1m]",
         });
         try {
-            const compacted = await session.compact();
+            const compacted = await session.compact({
+                context: {
+                    messages: [
+                        { role: "user", content: "Remember the exact marker PLAIN_COMPACT_MARKER." },
+                        { role: "assistant", content: "I will remember PLAIN_COMPACT_MARKER." },
+                        { role: "user", content: "The current task is native compaction testing." },
+                        { role: "assistant", content: "Understood." },
+                    ],
+                },
+            });
             expect(compacted.status).toBe("completed");
             if (compacted.status === "completed") {
                 expect(compacted.summary).toContain("PLAIN_COMPACT_MARKER");

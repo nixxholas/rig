@@ -10,13 +10,8 @@ export function resolveGrokModelConfiguration(options: {
     const configuration = options.modelConfiguration;
     return {
         context: {
-            instructions: configuration?.context.instructions ?? options.context.instructions,
-            messages: [
-                ...(configuration?.context.messages.filter(
-                    (message) => message.role === "system",
-                ) ?? []),
-                ...options.context.messages,
-            ],
+            instructions: configuration?.instructions ?? options.context.instructions,
+            messages: options.context.messages,
         },
         tools: configuration?.tools ?? options.defaultTools,
     };

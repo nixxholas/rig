@@ -166,7 +166,7 @@ async function withServer(
             session: () => {
                 // Every session shares one id, because a rebuild is the same conversation resumed.
                 const session = new ClaudeSession("<SESSION_ID>", {
-                    context: { instructions: "You are a careful engineer.", messages: [] },
+                    instructions: "You are a careful engineer.",
                     credential,
                     env,
                     model: "anthropic/opus-4-8",

@@ -11,6 +11,7 @@ import type { SessionEvent } from "../protocol/index.js";
 /** When a run began, ended, and how, gathered from the durable event log. */
 export interface TranscriptRunFacts {
     startedAt: number;
+    kind?: "compaction";
     endedAt?: number;
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
@@ -78,13 +79,16 @@ export function transcriptRunFacts(
     const openGroupId = (runId: string): string | undefined =>
         facts.get(runId)?.groups?.findLast((group) => group.endedAt === undefined)?.id;
     for (const event of events) {
-        if (
-            (event.type === "message_submitted" && event.data.delivery === "run") ||
-            event.type === "run_started"
-        ) {
+        if (event.type === "message_submitted" && event.data.delivery === "run") {
             if (!facts.has(event.data.runId)) {
                 facts.set(event.data.runId, { startedAt: event.createdAt });
             }
+        } else if (event.type === "run_started") {
+            const known = facts.get(event.data.runId);
+            facts.set(event.data.runId, {
+                ...(known ?? { startedAt: event.createdAt }),
+                ...(event.data.kind === undefined ? {} : { kind: event.data.kind }),
+            });
         } else if (
             event.type === "agent_event" &&
             event.data.event.type === "inference_iteration_start"
@@ -250,6 +254,7 @@ export function sessionTranscriptWindow(
         return {
             messageIds: group.entries.map((entry) => entry.message.id),
             runId: group.runId,
+            ...(facts?.kind === undefined ? {} : { kind: facts.kind }),
             // Messages carry no time of their own, so a turn whose run predates
             // the retained event log reports 0 rather than inventing one. A
             // client renders that as an unknown duration, not as the epoch.

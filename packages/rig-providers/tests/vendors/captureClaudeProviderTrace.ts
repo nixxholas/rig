@@ -77,31 +77,22 @@ const providerEnv = {
     TZ: "UTC",
 };
 const session = new ClaudeSession(sessionId, {
-    context: {
-        instructions: createClaudeTestInstructions(initialModel, { cwd, env: providerEnv }),
-        messages: [],
-    },
+    instructions: createClaudeTestInstructions(initialModel, { cwd, env: providerEnv }),
     credential,
     env: providerEnv,
     modelConfigurations: {
         [resolveClaudeModelId(initialModel)]: {
-            context: {
-                instructions: createClaudeTestInstructions(initialModel, {
-                    cwd,
-                    env: providerEnv,
-                }),
-                messages: [],
-            },
+            instructions: createClaudeTestInstructions(initialModel, {
+                cwd,
+                env: providerEnv,
+            }),
             tools: resolveClaudeTools(initialModel),
         },
         [resolveClaudeModelId(switchedModel)]: {
-            context: {
-                instructions: createClaudeTestInstructions(switchedModel, {
-                    cwd,
-                    env: providerEnv,
-                }),
-                messages: [],
-            },
+            instructions: createClaudeTestInstructions(switchedModel, {
+                cwd,
+                env: providerEnv,
+            }),
             tools: resolveClaudeTools(switchedModel),
         },
     },

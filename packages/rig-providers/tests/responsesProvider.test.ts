@@ -71,7 +71,7 @@ describe("ResponsesProvider", () => {
             },
         });
         const session = await provider.session("responses-session", {
-            context: { instructions: "Be concise.", messages: [] },
+            instructions: "Be concise.",
             tools: [
                 {
                     name: "lookup",
@@ -172,17 +172,20 @@ describe("ResponsesProvider", () => {
             },
         });
         const session = await provider.session("responses-compaction", {
-            context: {
-                instructions: "Preserve state.",
-                messages: [
-                    { role: "user", content: "Provider dropped this." },
-                    { role: "user", content: "Provider kept this." },
-                ],
-            },
+            instructions: "Preserve state.",
             tools: [],
         });
 
-        await expect(session.compact()).resolves.toMatchObject({
+        await expect(
+            session.compact({
+                context: {
+                    messages: [
+                        { role: "user", content: "Provider dropped this." },
+                        { role: "user", content: "Provider kept this." },
+                    ],
+                },
+            }),
+        ).resolves.toMatchObject({
             status: "completed",
             compaction: {
                 role: "compaction",
@@ -209,7 +212,7 @@ describe("ResponsesProvider", () => {
             },
         });
         const session = await provider.session("responses-aborted", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             tools: [],
         });
         const controller = new AbortController();

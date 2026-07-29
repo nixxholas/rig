@@ -902,6 +902,42 @@ describe("InMemorySession abort", () => {
             kind: "summary",
             replacedMessageIds: expect.arrayContaining([expect.any(String), expect.any(String)]),
         });
+        const events = session.events.since(undefined);
+        const compactionStarted = events?.findLast(
+            (event) => event.type === "run_started" && event.data.kind === "compaction",
+        );
+        const compactionRunId =
+            compactionStarted?.type === "run_started" ? compactionStarted.data.runId : undefined;
+        const compactionLifecycle = events?.filter(
+            (event) =>
+                (event.type === "run_started" ||
+                    event.type === "run_finished" ||
+                    event.type === "run_error") &&
+                event.data.runId === compactionRunId,
+        );
+        expect(compactionLifecycle).toHaveLength(2);
+        expect(compactionStarted).toMatchObject({
+            data: {
+                kind: "compaction",
+                runId: expect.any(String),
+            },
+            type: "run_started",
+        });
+        expect(compactionLifecycle?.[1]).toMatchObject({
+            data: {
+                runId: compactionRunId,
+                stopReason: "stop",
+            },
+            type: "run_finished",
+        });
+        expect(
+            session
+                .transcriptWindow()
+                .turns.find((turn) => turn.runId === compactionRunId),
+        ).toMatchObject({
+            kind: "compaction",
+            outcome: "success",
+        });
         expect(session.snapshot().snapshot.messages.at(-1)).toEqual(compactionMessages?.[0]);
     });
 
@@ -948,6 +984,10 @@ describe("InMemorySession abort", () => {
         await session.waitForRun(submitted.runId);
         const compacting = session.compact();
         await compactStarted;
+        expect(session.snapshot().activeTurn).toMatchObject({
+            kind: "compaction",
+            runId: expect.any(String),
+        });
         const shutdown = session.beginShutdown();
         session.markInterrupted({
             interruptedAt: 1,
@@ -956,6 +996,7 @@ describe("InMemorySession abort", () => {
         });
 
         await expect(compacting).rejects.toThrow("compaction was stopped");
+        expect(session.snapshot().activeTurn).toBeUndefined();
         await expect(shutdown).resolves.toBeUndefined();
         const compactionEvents = session.events
             .since(undefined)

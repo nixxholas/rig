@@ -540,24 +540,28 @@ describe("Codex CLI mode WebSocket goldens", () => {
                 model,
                 transport: "websocket",
             });
+            const initialMessages = prompt.systemMessages.map((content) => ({
+                role: "system" as const,
+                content,
+            }));
             const session = await provider.session("<SESSION_ID>", {
-                context: withCodexSkills(
-                    {
-                        instructions: prompt.instructions,
-                        messages: prompt.systemMessages.map((content) => ({
-                            role: "system" as const,
-                            content,
-                        })),
-                    },
-                    codexSkillsWithGithub,
-                    model,
-                ),
+                instructions: prompt.instructions,
                 tools: codexCliTools(model),
             });
 
             for await (const event of session.run({
                 context: {
-                    messages: [{ role: "user", content: "Reply with OK." }],
+                    messages: withCodexSkills(
+                        {
+                            instructions: prompt.instructions,
+                            messages: [
+                                ...initialMessages,
+                                { role: "user", content: "Reply with OK." },
+                            ],
+                        },
+                        codexSkillsWithGithub,
+                        model,
+                    ).messages,
                 },
                 effort: "low",
             })) {
@@ -646,11 +650,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
@@ -688,11 +688,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("replays full context when the remote previous response is missing", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 0, true).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const first = { role: "user" as const, content: "first" };
@@ -734,11 +730,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("retries on a fresh WebSocket when the initial connection closes before warmup", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         websocket.closeBeforeSendOnce = true;
@@ -768,11 +760,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("retries a nested Codex internal server error with a human-readable notification", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         websocket.internalErrorFailures = 1;
@@ -807,11 +795,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("retries on a fresh WebSocket when the cached connection closes between turns", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const first = { role: "user" as const, content: "first" };
@@ -856,11 +840,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("absorbs an idle Responses WebSocket connection-limit error without crashing", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const first = { role: "user" as const, content: "first" };
@@ -910,11 +890,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const startedAt = 1_700_000_000_000;
         const now = vi.spyOn(Date, "now").mockReturnValue(startedAt);
         const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const first = { role: "user" as const, content: "first" };
@@ -956,11 +932,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
@@ -998,11 +970,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
@@ -1055,11 +1023,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
@@ -1152,11 +1116,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
@@ -1197,11 +1157,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
@@ -1242,11 +1198,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
@@ -1290,11 +1242,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "auto",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
@@ -1317,11 +1265,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.emitCustomToolResponse = true;
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const user = { role: "user" as const, content: "use exec" };
@@ -1395,11 +1339,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.beforeOutputFailures = 1;
         websocket.turnState = "sticky-turn";
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
@@ -1434,11 +1374,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.usageTotalTokens = 250_000;
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
@@ -1482,11 +1418,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("leaves oversized restored context for the caller to compact", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const restored = `restored-${"x".repeat(980_000)}`;
@@ -1519,11 +1451,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.emitCustomToolResponse = true;
         websocket.usageTotalTokens = 250_000;
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const user = { role: "user" as const, content: "use exec" };
@@ -1576,11 +1504,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.emitCustomToolResponse = true;
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
@@ -1609,16 +1533,8 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("returns cancelled when compaction is aborted during retry backoff", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.beforeOutputFailures = 1;
-        const initialContext = withCodexSkills(
-            {
-                instructions: prompt.instructions,
-                messages: [{ role: "user", content: "compact" }],
-            },
-            codexSkills,
-            "gpt-5.6-sol",
-        );
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: initialContext,
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
@@ -1630,7 +1546,10 @@ describe("Codex CLI mode WebSocket goldens", () => {
 
         await expect(compacting).resolves.toEqual({
             status: "cancelled",
-            context: initialContext,
+            context: {
+                instructions: prompt.instructions,
+                messages: [],
+            },
         });
         session.destroy();
     });
@@ -1649,44 +1568,14 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                {
-                    instructions: sol.instructions,
-                    messages: sol.systemMessages.map((content) => ({
-                        role: "system" as const,
-                        content,
-                    })),
-                },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: sol.instructions,
             modelConfigurations: {
                 "gpt-5.6-sol": {
-                    context: withCodexSkills(
-                        {
-                            instructions: sol.instructions,
-                            messages: sol.systemMessages.map((content) => ({
-                                role: "system" as const,
-                                content,
-                            })),
-                        },
-                        codexSkills,
-                        "gpt-5.6-sol",
-                    ),
+                    instructions: sol.instructions,
                     tools: codexCliTools("gpt-5.6-sol"),
                 },
                 "gpt-5.5": {
-                    context: withCodexSkills(
-                        {
-                            instructions: legacy.instructions,
-                            messages: legacy.systemMessages.map((content) => ({
-                                role: "system" as const,
-                                content,
-                            })),
-                        },
-                        codexSkills,
-                        "gpt-5.5",
-                    ),
+                    instructions: legacy.instructions,
                     tools: codexCliTools("gpt-5.5"),
                 },
             },
@@ -1694,7 +1583,12 @@ describe("Codex CLI mode WebSocket goldens", () => {
         });
         await drain(
             session.run({
-                context: { messages: [{ role: "user", content: "first" }] },
+                context: {
+                    messages: [
+                        ...sol.systemMessages.map((content) => ({ role: "system" as const, content })),
+                        { role: "user", content: "first" },
+                    ],
+                },
                 effort: "low",
             }),
         );
@@ -1702,6 +1596,10 @@ describe("Codex CLI mode WebSocket goldens", () => {
             session.run({
                 context: {
                     messages: [
+                        ...legacy.systemMessages.map((content) => ({
+                            role: "system" as const,
+                            content,
+                        })),
                         { role: "user", content: "first" },
                         { role: "user", content: "switch" },
                     ],
@@ -1743,18 +1641,13 @@ describe("Codex CLI mode WebSocket goldens", () => {
             transport: "websocket",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: withCodexSkills(
-                {
-                    instructions: prompt.instructions,
-                    messages: [{ role: "user", content: "compact this" }],
-                },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
-        const compacted = await session.compact();
+        const compacted = await session.compact({
+            context: { messages: [{ role: "user", content: "compact this" }] },
+        });
 
         expect(compacted.status).toBe("completed");
         expect(compacted.context.messages).toEqual([
@@ -1771,11 +1664,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("compacts the caller's history including the tool results of the finished turn", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         for await (const _event of session.run({
@@ -1807,25 +1696,62 @@ describe("Codex CLI mode WebSocket goldens", () => {
         session.destroy();
     });
 
+    it("does not restore the session's original history after compaction replaces it", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const oldHistory = `OLD_HISTORY_MUST_STAY_COMPACTED_${"x".repeat(40_000)}`;
+        const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
+            instructions: prompt.instructions,
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        const originalHistory = [
+            { role: "assistant" as const, content: oldHistory },
+            { role: "assistant" as const, content: "Old response." },
+        ];
+        await drain(
+            session.run({
+                context: { messages: originalHistory },
+                effort: "low",
+            }),
+        );
+        const compacted = await session.compact({
+            context: {
+                messages: originalHistory,
+            },
+        });
+        expect(compacted.status).toBe("completed");
+
+        await drain(
+            session.run({
+                context: {
+                    messages: [
+                        ...compacted.context.messages,
+                        { role: "user", content: "Continue after compaction." },
+                    ],
+                },
+                effort: "low",
+                model: "gpt-5.6-terra",
+            }),
+        );
+
+        const continuation = websocket.sent.at(-1)!;
+        expect(continuation.previous_response_id).toBeUndefined();
+        expect(continuation.input).toContainEqual({
+            type: "compaction",
+            encrypted_content: "opaque-native-compaction",
+        });
+        expect(JSON.stringify(continuation.input)).toContain("Continue after compaction.");
+        expect(JSON.stringify(continuation.input)).not.toContain("OLD_HISTORY_MUST_STAY_COMPACTED");
+        session.destroy();
+    });
+
     it("compacts a reordered caller history without repeating the session's own messages", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
-        // The session was built once the conversation was already under way, so its configuration
-        // holds those first messages too.
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                {
-                    instructions: prompt.instructions,
-                    messages: [{ role: "user", content: "first" }],
-                },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
 
-        // Compaction hoists system messages to the front, and a model switch writes one long after
-        // the session was built. The caller's history is then no longer a continuation of what the
-        // session started from, and prepending that start wholesale would say "first" twice.
+        // The caller's history is authoritative even when compaction reorders it.
         await session.compact({
             context: {
                 messages: [
@@ -1845,29 +1771,24 @@ describe("Codex CLI mode WebSocket goldens", () => {
     it("keeps provider-added system content without repeating caller-owned system content", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
+            instructions: prompt.instructions,
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+
+        await session.compact({
             context: withCodexSkills(
                 {
                     instructions: prompt.instructions,
                     messages: [
                         { role: "system", content: "Original instructions." },
+                        { role: "system", content: "Later instructions." },
                         { role: "user", content: "first" },
+                        { role: "assistant", content: "answered" },
                     ],
                 },
                 codexSkills,
                 "gpt-5.6-sol",
             ),
-            tools: codexCliTools("gpt-5.6-sol"),
-        });
-
-        await session.compact({
-            context: {
-                messages: [
-                    { role: "system", content: "Original instructions." },
-                    { role: "system", content: "Later instructions." },
-                    { role: "user", content: "first" },
-                    { role: "assistant", content: "answered" },
-                ],
-            },
         });
 
         const input = JSON.stringify(websocket.sent.at(-1)!.input);
@@ -1880,11 +1801,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.endMidstreamOnce = true;
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
@@ -1912,11 +1829,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.failTerminalOnce = true;
         const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         await drain(
@@ -1947,11 +1860,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.failMidstreamOnce = true;
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
@@ -1987,11 +1896,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.failMidstreamOnce = true;
         const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
@@ -2021,11 +1926,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.holdWarmupOpenOnce = true;
         const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const controller = new AbortController();
@@ -2060,11 +1961,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         websocket.unavailableOnce = true;
         const session = await codexProvider("auto", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];
@@ -2086,11 +1983,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
         websocket.unavailableOnce = true;
         const controller = new AbortController();
         const session = await codexProvider("auto", 0).session("<SESSION_ID>", {
-            context: withCodexSkills(
-                { instructions: prompt.instructions, messages: [] },
-                codexSkills,
-                "gpt-5.6-sol",
-            ),
+            instructions: prompt.instructions,
             tools: codexCliTools("gpt-5.6-sol"),
         });
         const events = [];

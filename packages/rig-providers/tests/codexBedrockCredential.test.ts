@@ -152,18 +152,12 @@ describe("CodexProvider credential behavior", () => {
                     model,
                     userAgent: golden.http.headers["user-agent"]!,
                 });
+                const initialMessages = [
+                    { role: "system" as const, content: read_only_permissions },
+                    { role: "user" as const, content: environmentMessage! },
+                ];
                 const session = await provider.session("bedrock-session", {
-                    context: withCodexSkills(
-                        {
-                            instructions: codex_coding_agent_instructions,
-                            messages: [
-                                { role: "system", content: read_only_permissions },
-                                { role: "user", content: environmentMessage! },
-                            ],
-                        },
-                        codexSkills,
-                        model,
-                    ),
+                    instructions: codex_coding_agent_instructions,
                     tools: [
                         exec_command,
                         write_stdin,
@@ -175,7 +169,19 @@ describe("CodexProvider credential behavior", () => {
                     ],
                 });
                 for await (const event of session.run({
-                    context: { messages: [{ role: "user", content: "Reply with OK." }] },
+                    context: {
+                        messages: withCodexSkills(
+                            {
+                                instructions: codex_coding_agent_instructions,
+                                messages: [
+                                    ...initialMessages,
+                                    { role: "user", content: "Reply with OK." },
+                                ],
+                            },
+                            codexSkills,
+                            model,
+                        ).messages,
+                    },
                     effort: "low",
                 })) {
                     if (event.type === "done") expect(event.state).toBe("normal");
@@ -243,7 +249,7 @@ describe("CodexProvider credential behavior", () => {
                 endpoint: `http://127.0.0.1:${address.port}/openai/v1`,
                 model: "openai.gpt-5.6-sol",
             }).session("bedrock-compaction", {
-                context: { instructions: "instructions", messages: [] },
+                instructions: "instructions",
             });
             await drain(
                 session.run({

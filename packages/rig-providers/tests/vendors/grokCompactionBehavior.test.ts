@@ -37,13 +37,10 @@ describe("Grok compaction behavior", () => {
         if (credential === null) throw new Error("Missing test credential.");
         const provider = new GrokProvider({ credential, endpoint });
         const session = await provider.session("session", {
-            context: { instructions: "Base prompt.", messages: [] },
+            instructions: "Base prompt.",
             modelConfigurations: {
                 "grok-switched": {
-                    context: {
-                        instructions: "Switched prompt.",
-                        messages: [{ role: "system", content: "Switched system message." }],
-                    },
+                    instructions: "Switched prompt.",
                     tools: [
                         {
                             name: "switched_tool",
@@ -58,11 +55,24 @@ describe("Grok compaction behavior", () => {
 
         for await (const _event of session.run({
             model: "grok-switched",
-            context: { messages: [{ role: "user", content: "Switch." }] },
+            context: {
+                messages: [
+                    { role: "system", content: "Switched system message." },
+                    { role: "user", content: "Switch." },
+                ],
+            },
         })) {
             // Drain the response.
         }
-        const compacted = await session.compact();
+        const compacted = await session.compact({
+            context: {
+                messages: [
+                    { role: "system", content: "Switched system message." },
+                    { role: "user", content: "Switch." },
+                    { role: "assistant", content: "switched response" },
+                ],
+            },
+        });
 
         expect(compacted.status).toBe("completed");
         expect(requests.map((request) => request.model)).toEqual([
@@ -88,7 +98,7 @@ describe("Grok compaction behavior", () => {
                 completeText(response, `<summary>${"valid summary ".repeat(50)}</summary>`);
             }
         });
-        const session = await createSession(endpoint, []);
+        const session = await createSession(endpoint);
 
         const runEvents = [];
         for await (const event of session.run({
@@ -96,7 +106,14 @@ describe("Grok compaction behavior", () => {
         })) {
             runEvents.push(event);
         }
-        const result = await session.compact();
+        const result = await session.compact({
+            context: {
+                messages: [
+                    { role: "user", content: "Original query." },
+                    { role: "assistant", content: "assistant-only-marker" },
+                ],
+            },
+        });
 
         expect(result.status).toBe("completed");
         expect(requests[1]).not.toHaveProperty("tool_choice");
@@ -118,7 +135,7 @@ describe("Grok compaction behavior", () => {
                 delta: "partial",
             });
         });
-        const session = await createSession(endpoint, []);
+        const session = await createSession(endpoint);
         const controller = new AbortController();
         const events = [];
         for await (const event of session.run({
@@ -147,11 +164,11 @@ describe("Grok compaction behavior", () => {
             }
             completeText(response, `<summary>${"valid summary ".repeat(50)}</summary>`);
         });
-        const session = await createSession(endpoint, [
-            { role: "user", content: "Original query." },
-        ]);
+        const session = await createSession(endpoint);
 
-        const result = await session.compact();
+        const result = await session.compact({
+            context: { messages: [{ role: "user", content: "Original query." }] },
+        });
 
         expect(result.status).toBe("completed");
     });
@@ -167,9 +184,9 @@ describe("Grok compaction behavior", () => {
             }
         });
         const original = { role: "user" as const, content: "Keep this original request." };
-        const session = await createSession(endpoint, [original]);
+        const session = await createSession(endpoint);
 
-        await expect(session.compact()).resolves.toEqual({
+        await expect(session.compact({ context: { messages: [original] } })).resolves.toEqual({
             status: "failed",
             kind: "invalid_summary",
             message: "Grok returned three compaction summaries shorter than 500 characters.",
@@ -187,7 +204,7 @@ describe("Grok compaction behavior", () => {
         }
 
         const secondInput = requests[3]?.input as Array<{ content?: string }>;
-        expect(secondInput.some((item) => item.content === original.content)).toBe(true);
+        expect(secondInput.some((item) => item.content === original.content)).toBe(false);
         expect(secondInput.some((item) => item.content === grok_compaction_prompt)).toBe(false);
     });
 
@@ -223,11 +240,11 @@ describe("Grok compaction behavior", () => {
             });
             response.end("data: [DONE]\n\n");
         });
-        const session = await createSession(endpoint, [
-            { role: "user", content: "Original query." },
-        ]);
+        const session = await createSession(endpoint);
 
-        const result = await session.compact();
+        const result = await session.compact({
+            context: { messages: [{ role: "user", content: "Original query." }] },
+        });
 
         expect(result).toMatchObject({
             status: "failed",
@@ -250,11 +267,11 @@ describe("Grok compaction behavior", () => {
                     : `<summary>${"valid summary ".repeat(50)}</summary>`,
             );
         });
-        const session = await createSession(endpoint, [
-            { role: "user", content: "Original query." },
-        ]);
+        const session = await createSession(endpoint);
 
-        const result = await session.compact();
+        const result = await session.compact({
+            context: { messages: [{ role: "user", content: "Original query." }] },
+        });
 
         expect(requests).toBe(2);
         expect(result.status).toBe("completed");
@@ -275,11 +292,11 @@ describe("Grok compaction behavior", () => {
             }
             completeText(response, `<summary>${"winning summary ".repeat(50)}</summary>`);
         });
-        const session = await createSession(endpoint, [
-            { role: "user", content: "Original query." },
-        ]);
+        const session = await createSession(endpoint);
 
-        const result = await session.compact();
+        const result = await session.compact({
+            context: { messages: [{ role: "user", content: "Original query." }] },
+        });
 
         expect(result.status).toBe("completed");
         if (result.status !== "completed") return;
@@ -293,15 +310,18 @@ describe("Grok compaction behavior", () => {
             requestBody = JSON.parse(request);
             completeText(response, `<summary>${"valid summary ".repeat(50)}</summary>`);
         });
-        const session = await createSession(endpoint, [
-            { role: "user", content: "Original query." },
-            {
-                role: "user",
-                content: "<system-reminder>Stale state.</system-reminder>",
-            },
-        ]);
+        const session = await createSession(endpoint);
         const result = await session.compact({
             instructions: "Preserve the database migration decision.",
+            context: {
+                messages: [
+                    { role: "user", content: "Original query." },
+                    {
+                        role: "user",
+                        content: "<system-reminder>Stale state.</system-reminder>",
+                    },
+                ],
+            },
         });
 
         expect(result.status).toBe("completed");
@@ -335,11 +355,11 @@ describe("Grok compaction behavior", () => {
             });
             response.end("data: [DONE]\n\n");
         });
-        const session = await createSession(endpoint, [
-            { role: "user", content: "Original query." },
-        ]);
+        const session = await createSession(endpoint);
 
-        const result = await session.compact();
+        const result = await session.compact({
+            context: { messages: [{ role: "user", content: "Original query." }] },
+        });
 
         expect(result.status).toBe("completed");
     });
@@ -365,10 +385,13 @@ describe("Grok compaction behavior", () => {
             }
         });
         const original = { role: "user" as const, content: "Original query." };
-        const session = await createSession(endpoint, [original]);
+        const session = await createSession(endpoint);
         const controller = new AbortController();
 
-        const compaction = session.compact({ signal: controller.signal });
+        const compaction = session.compact({
+            context: { messages: [original] },
+            signal: controller.signal,
+        });
         await started;
         controller.abort();
 
@@ -385,7 +408,7 @@ describe("Grok compaction behavior", () => {
             // Drain the response.
         }
         const secondInput = requests[1]?.input as Array<{ content?: string }>;
-        expect(secondInput.some((item) => item.content === original.content)).toBe(true);
+        expect(secondInput.some((item) => item.content === original.content)).toBe(false);
         expect(secondInput.some((item) => item.content === grok_compaction_prompt)).toBe(false);
     });
 
@@ -440,7 +463,7 @@ describe("Grok compaction behavior", () => {
                 completeText(response, "done");
             }
         });
-        const session = await createSession(endpoint, []);
+        const session = await createSession(endpoint);
         const firstUser = { role: "user" as const, content: "Inspect README." };
         const toolAssistant = {
             role: "assistant" as const,
@@ -487,12 +510,12 @@ describe("Grok compaction behavior", () => {
     });
 });
 
-async function createSession(endpoint: string, messages: Array<{ role: "user"; content: string }>) {
+async function createSession(endpoint: string) {
     const credential = await GrokApiKeyCredential.tryLoad({ apiKey: "test" });
     if (credential === null) throw new Error("Missing test credential.");
     const provider = new GrokProvider({ credential, endpoint, model: "grok-4.5" });
     return provider.session("session", {
-        context: { instructions: "System prompt.", messages },
+        instructions: "System prompt.",
         tools: [],
     });
 }

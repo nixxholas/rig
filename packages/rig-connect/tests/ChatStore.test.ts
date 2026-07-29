@@ -1284,6 +1284,83 @@ describe("ChatStore", () => {
         });
     });
 
+    it("marks a standalone manual compaction as its own completed turn", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const started = store.apply(
+            event("run_started", { kind: "compaction", runId: "run-1" }),
+        );
+
+        expect(store.session().activeTurn).toEqual({
+            kind: "compaction",
+            runId: "run-1",
+            startedAt: clock,
+        });
+        expect(started).toContainEqual({
+            kind: "compaction",
+            runId: "run-1",
+            startedAt: clock,
+            type: "turn_started",
+        });
+
+        store.apply(
+            event("run_finished", {
+                modelLocked: false,
+                runId: "run-1",
+                stopReason: "stop",
+            }),
+        );
+
+        expect(store.session().activeTurn).toBeUndefined();
+        expect(store.elements().find((element) => element.kind === "group_end")).toMatchObject({
+            outcome: "success",
+            runId: "run-1",
+            turnKind: "compaction",
+        });
+
+        const compaction: Message = {
+            blocks: [{ text: "Earlier context.", type: "text" }],
+            content: "Earlier context.",
+            id: "manual-compaction-message",
+            kind: "summary",
+            providerId: "claude",
+            replacedMessageIds: ["older-message"],
+            role: "compaction",
+            statistics: {
+                after: { exact: false, tokens: 40 },
+                before: { exact: true, tokens: 120 },
+            },
+            summary: "Earlier context.",
+        };
+        const opening = hello();
+        const restored = new ChatStore("session-1");
+        restored.applyHello({
+            ...opening,
+            session: {
+                ...opening.session!,
+                snapshot: { messages: [compaction] },
+            },
+            transcript: {
+                complete: true,
+                messages: [compaction],
+                turns: [
+                    {
+                        endedAt: 20,
+                        kind: "compaction",
+                        messageIds: [compaction.id],
+                        outcome: "success",
+                        runId: "run-2",
+                        startedAt: 10,
+                    },
+                ],
+            },
+        });
+        expect(restored.elements().find((element) => element.kind === "group_end")).toMatchObject({
+            runId: "run-2",
+            turnKind: "compaction",
+        });
+    });
+
     it("emits ordered deltas for the turn, compaction, and retry lifecycle", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());

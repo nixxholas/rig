@@ -46,24 +46,28 @@ describe("Codex SSE goldens", () => {
                 transport: "sse",
                 userAgent: golden.http.headers["user-agent"]!,
             });
+            const initialMessages = prompt.systemMessages.map((content) => ({
+                role: "system" as const,
+                content,
+            }));
             const session = await provider.session("<SESSION_ID>", {
-                context: withCodexSkills(
-                    {
-                        instructions: prompt.instructions,
-                        messages: prompt.systemMessages.map((content) => ({
-                            role: "system" as const,
-                            content,
-                        })),
-                    },
-                    codexSkills,
-                    model,
-                ),
+                instructions: prompt.instructions,
                 tools: codexCliTools(model),
             });
             const events = [];
             for await (const event of session.run({
                 context: {
-                    messages: [{ role: "user", content: "Reply with OK." }],
+                    messages: withCodexSkills(
+                        {
+                            instructions: prompt.instructions,
+                            messages: [
+                                ...initialMessages,
+                                { role: "user", content: "Reply with OK." },
+                            ],
+                        },
+                        codexSkills,
+                        model,
+                    ).messages,
                 },
                 effort: "low",
             })) {
@@ -162,11 +166,7 @@ describe("Codex SSE goldens", () => {
                 transport: "sse",
             });
             const session = await provider.session("<SESSION_ID>", {
-                context: withCodexSkills(
-                    { instructions: prompt.instructions, messages: [] },
-                    codexSkills,
-                    "gpt-5.6-sol",
-                ),
+                instructions: prompt.instructions,
                 tools: codexCliTools("gpt-5.6-sol"),
             });
             await drain(
@@ -262,11 +262,11 @@ describe("Codex SSE goldens", () => {
                 model: "gpt-5.6-sol",
                 transport: "sse",
             }).session("<SESSION_ID>", {
-                context: {
-                    instructions: "instructions",
-                    messages: [
-                        {
-                            role: "assistant",
+                instructions: "instructions",
+            });
+            const initialMessages = [
+                {
+                            role: "assistant" as const,
                             content: "",
                             toolCalls: [
                                 {
@@ -281,7 +281,7 @@ describe("Codex SSE goldens", () => {
                             ],
                         },
                         {
-                            role: "tool",
+                            role: "tool" as const,
                             callId: "huge-call",
                             content: "x".repeat(1_200_000),
                             vendor: {
@@ -289,11 +289,9 @@ describe("Codex SSE goldens", () => {
                                 type: "function_call",
                             },
                         },
-                        { role: "user", content: "retain this request" },
-                    ],
-                },
-            });
-            const compacted = await session.compact();
+                        { role: "user" as const, content: "retain this request" },
+            ];
+            const compacted = await session.compact({ context: { messages: initialMessages } });
 
             expect(compacted.status).toBe("completed");
             expect(captured).toHaveLength(2);
@@ -334,27 +332,26 @@ describe("Codex SSE goldens", () => {
                 transport: "sse",
             });
             const session = await provider.session("<SESSION_ID>", {
-                context: { instructions: "legacy instructions", messages: [] },
+                instructions: "legacy instructions",
                 modelConfigurations: {
                     "gpt-5.5": {
-                        context: {
-                            instructions: "legacy instructions",
-                            messages: [{ role: "system", content: "legacy system" }],
-                        },
+                        instructions: "legacy instructions",
                         tools: codexCliTools("gpt-5.5"),
                     },
                     "gpt-5.6-sol": {
-                        context: {
-                            instructions: "target instructions",
-                            messages: [{ role: "system", content: "target system" }],
-                        },
+                        instructions: "target instructions",
                         tools: codexCliTools("gpt-5.6-sol"),
                     },
                 },
             });
             await drain(
                 session.run({
-                    context: { messages: [{ role: "user", content: "first" }] },
+                    context: {
+                        messages: [
+                            { role: "system", content: "legacy system" },
+                            { role: "user", content: "first" },
+                        ],
+                    },
                     model: "gpt-5.5",
                 }),
             );
@@ -362,6 +359,7 @@ describe("Codex SSE goldens", () => {
                 session.run({
                     context: {
                         messages: [
+                            { role: "system", content: "target system" },
                             { role: "user", content: "first" },
                             { role: "user", content: "switch" },
                         ],
@@ -411,11 +409,7 @@ describe("Codex SSE goldens", () => {
                 model: "gpt-5.6-sol",
                 transport: "sse",
             }).session("<SESSION_ID>", {
-                context: withCodexSkills(
-                    { instructions: prompt.instructions, messages: [] },
-                    codexSkills,
-                    "gpt-5.6-sol",
-                ),
+                instructions: prompt.instructions,
                 tools: codexCliTools("gpt-5.6-sol"),
             });
             const user = { role: "user" as const, content: "first" };

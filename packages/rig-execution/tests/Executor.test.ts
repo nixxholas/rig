@@ -61,7 +61,7 @@ describe("Executor", () => {
             "openai/terra",
         ]);
         expect(native.options[0]?.tools?.map((candidate) => candidate.name)).toEqual(["extra"]);
-        expect(native.options[0]?.context.instructions).toBe(
+        expect(native.options[0]?.instructions).toBe(
             [
                 "You are Rig, built by Happy",
                 "Sol",
@@ -84,7 +84,7 @@ describe("Executor", () => {
                 (candidate) => candidate.name,
             ),
         ).toEqual(["extra"]);
-        expect(native.options[0]?.modelConfigurations?.["openai/terra"]?.context.instructions).toBe(
+        expect(native.options[0]?.modelConfigurations?.["openai/terra"]?.instructions).toBe(
             [
                 "You are Rig, built by Happy",
                 "Terra",
@@ -161,9 +161,9 @@ describe("Executor", () => {
         );
 
         expect(native.sessions).toHaveLength(2);
-        expect(native.options[0]?.context.instructions).toContain("First context");
-        expect(native.options[1]?.context.instructions).toContain("Second context");
-        expect(native.options[1]?.context.instructions).not.toContain("First context");
+        expect(native.options[0]?.instructions).toContain("First context");
+        expect(native.options[1]?.instructions).toContain("Second context");
+        expect(native.options[1]?.instructions).not.toContain("First context");
     });
 
     it("starts a fresh native session when the caller changes the tool catalog", async () => {
@@ -221,7 +221,7 @@ describe("Executor", () => {
             }),
         );
 
-        const instructions = native.options[0]?.context.instructions ?? "";
+        const instructions = native.options[0]?.instructions ?? "";
         expect(instructions).toContain("Custom base for Rig");
         expect(instructions).not.toContain("You are Rig, built by Happy");
         expect(instructions).not.toContain("\nSol\n");
@@ -358,11 +358,11 @@ describe("Executor", () => {
             }),
         );
 
-        expect(native.options[0]?.context.instructions).toContain(
+        expect(native.options[0]?.instructions).toContain(
             "Follow Acme's coding standards.\nAgent name: Acme\nSol",
         );
-        expect(native.options[0]?.context.instructions).not.toContain("You are Acme");
-        expect(native.options[0]?.context.instructions).not.toContain("You are Rig");
+        expect(native.options[0]?.instructions).not.toContain("You are Acme");
+        expect(native.options[0]?.instructions).not.toContain("You are Rig");
     });
 
     it("requires reset before an incompatible selection and does not infer", async () => {

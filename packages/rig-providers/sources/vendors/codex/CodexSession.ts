@@ -47,7 +47,6 @@ import {
     waitForCodexRetry,
 } from "@/vendors/codex/impl/codexRetry.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
-import { stripCodexInitialMessages } from "@/vendors/codex/impl/stripCodexInitialMessages.js";
 import {
     context_checkpoint_compaction_instructions,
     context_checkpoint_summary_prefix,
@@ -57,7 +56,7 @@ import type { CodexTransport } from "@/vendors/codex/impl/codexConstants.js";
 const CODEX_COMPACTION_MAX_RETRIES = 2;
 
 export interface CodexSessionOptions {
-    context: SessionContext;
+    instructions: string;
     credential: CodexProviderCredential;
     endpoint: string;
     installationId: string;
@@ -113,7 +112,7 @@ export class CodexSession extends BaseSession {
         this.userAgent = options.userAgent;
 
         const baseConfiguration = cloneConfiguration({
-            context: options.context,
+            instructions: options.instructions,
             tools: this.tools,
         });
         for (const [model, configuration] of Object.entries(options.modelConfigurations ?? {})) {
@@ -126,7 +125,7 @@ export class CodexSession extends BaseSession {
             (options.model === undefined
                 ? undefined
                 : this.modelConfigurations.get(options.model)) ?? baseConfiguration;
-        this.context = cloneContext(this.activeConfiguration.context);
+        this.context = { instructions: this.activeConfiguration.instructions, messages: [] };
 
         this.sseConnection = new CodexSseConnection({
             bedrock: () => this.credential.name === "bedrock-bearer-token",
@@ -176,56 +175,6 @@ export class CodexSession extends BaseSession {
         this.client = undefined;
     }
 
-    /**
-     * Builds what compaction summarizes: the session's own preamble, then the caller's history.
-     *
-     * The caller compacts a slice of the conversation, and that slice need not begin the way this
-     * session began. It is often shorter, and it carries the system messages the conversation has
-     * collected since, so it is not always a continuation of the messages the session was built
-     * with. Prepending those messages regardless would say the opening of the conversation twice.
-     * When the caller does start from them, they are prepended whole and dropped from the caller's
-     * copy; otherwise only provider-added parts of the leading system messages come along. The
-     * caller's reordered copy remains authoritative, and system content it already carries must
-     * not be repeated.
-     */
-    private composeCompactionMessages(
-        configuration: SessionModelConfiguration,
-        requested: readonly SessionMessage[],
-    ): SessionMessage[] {
-        const stripped = stripCodexInitialMessages(requested, this.knownInitialMessageSets());
-        if (stripped.length !== requested.length) {
-            return [
-                ...configuration.context.messages.map((message) => structuredClone(message)),
-                ...stripped,
-            ];
-        }
-        const requestedSystemParts = requested.flatMap((message) =>
-            message.role === "system"
-                ? typeof message.content === "string"
-                    ? [message.content]
-                    : [...message.content]
-                : [],
-        );
-        const preamble: SessionMessage[] = [];
-        for (const message of configuration.context.messages) {
-            if (message.role !== "system") break;
-            const parts =
-                typeof message.content === "string" ? [message.content] : [...message.content];
-            const missing = parts.filter((part) => {
-                const index = requestedSystemParts.indexOf(part);
-                if (index < 0) return true;
-                requestedSystemParts.splice(index, 1);
-                return false;
-            });
-            if (missing.length === 0) continue;
-            preamble.push({
-                role: "system",
-                content: typeof message.content === "string" ? missing[0]! : missing,
-            });
-        }
-        return [...preamble, ...structuredClone([...requested])];
-    }
-
     private async compactContext(
         configuration: SessionModelConfiguration,
         requested: SessionCompactionOptions["context"],
@@ -241,8 +190,8 @@ export class CodexSession extends BaseSession {
             requested === undefined
                 ? this.context
                 : {
-                      instructions: configuration.context.instructions,
-                      messages: this.composeCompactionMessages(configuration, requested.messages),
+                      instructions: configuration.instructions,
+                      messages: structuredClone([...requested.messages]),
                   };
         if (signal?.aborted) return { status: "cancelled", context: this.context };
         if (this.credential.name === "bedrock-bearer-token") {
@@ -391,7 +340,7 @@ export class CodexSession extends BaseSession {
             ],
         };
         const compactionConfiguration: SessionModelConfiguration = {
-            context: configuration.context,
+            instructions: configuration.instructions,
             tools: [],
         };
         const basePayload = this.createRequest(
@@ -492,31 +441,25 @@ export class CodexSession extends BaseSession {
         const configuration = this.resolveConfiguration(model);
         const effort = resolveCodexReasoningEffort(model, request.effort);
         const modelChanged = this.activeModel !== undefined && this.activeModel !== model;
-        const knownInitialMessages = this.knownInitialMessageSets();
-        const currentDynamic = stripCodexInitialMessages(
-            this.context.messages,
-            knownInitialMessages,
-        );
-        const rebuiltDynamic = stripCodexInitialMessages(
-            request.context.messages,
-            knownInitialMessages,
-        );
-        const appended = getCodexContextSuffix(currentDynamic, rebuiltDynamic);
+        // The caller's rebuilt context is authoritative. The session's own copy is preferred only
+        // when the rebuilt context extends it, because that copy retains provider state such as
+        // encrypted reasoning that the caller's transcript does not carry.
+        const rebuilt = structuredClone([...request.context.messages]);
+        const appended = getCodexContextSuffix(this.context.messages, rebuilt);
         const nextTurnKey = getCodexTurnKey(request.context.messages);
         if (this.turnKey !== nextTurnKey) this.beginTurn(nextTurnKey);
 
-        const history = appended === undefined ? [] : currentDynamic;
-        const newMessages = appended ?? rebuiltDynamic;
+        const history = appended === undefined ? [] : this.context.messages;
+        const newMessages = appended ?? rebuilt;
         const messages: SessionMessage[] = [
-            ...configuration.context.messages.map((message) => structuredClone(message)),
             ...history,
             ...(modelChanged
-                ? [createCodexModelSwitchMessage(configuration.context.instructions)]
+                ? [createCodexModelSwitchMessage(configuration.instructions)]
                 : []),
             ...newMessages,
         ];
         this.context = {
-            instructions: configuration.context.instructions,
+            instructions: configuration.instructions,
             messages,
         };
         this.activeConfiguration = configuration;
@@ -740,15 +683,6 @@ export class CodexSession extends BaseSession {
         });
     }
 
-    private knownInitialMessageSets(): readonly (readonly SessionMessage[])[] {
-        return [
-            this.activeConfiguration.context.messages,
-            ...[...this.modelConfigurations.values()].map(
-                (configuration) => configuration.context.messages,
-            ),
-        ];
-    }
-
     private resolveClient(): OpenAI {
         return (this.client ??= createCodexClient({
             credential: this.credential,
@@ -810,15 +744,8 @@ export class CodexSession extends BaseSession {
 
 function cloneConfiguration(configuration: SessionModelConfiguration): SessionModelConfiguration {
     return {
-        context: cloneContext(configuration.context),
+        instructions: configuration.instructions,
         tools: [...(configuration.tools ?? [])],
-    };
-}
-
-function cloneContext(context: SessionContext): SessionContext {
-    return {
-        instructions: context.instructions,
-        messages: structuredClone(context.messages),
     };
 }
 

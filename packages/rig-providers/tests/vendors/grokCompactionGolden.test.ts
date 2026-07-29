@@ -166,10 +166,10 @@ describe("Grok CLI compaction golden trace", () => {
                 model: "grok-4.5",
             });
             const session = await provider.session("<SESSION_ID>", {
-                context,
+                instructions: context.instructions,
                 tools: grok_4_5_tools,
             });
-            const result = await session.compact();
+            const result = await session.compact({ context: { messages: context.messages } });
 
             expect(result.status).toBe("completed");
             expect(capturedHeaders[0]?.["x-grok-turn-idx"]).toBeUndefined();
@@ -198,6 +198,7 @@ describe("Grok CLI compaction golden trace", () => {
             for await (const _event of session.run({
                 context: {
                     messages: [
+                        ...result.context.messages,
                         {
                             role: "user",
                             content: `<user_query>\n${trace.scenario.followUpPrompt}\n</user_query>`,

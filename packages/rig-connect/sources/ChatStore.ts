@@ -84,6 +84,7 @@ export class ChatStore {
     #runsWithGroups = new Set<string>();
     /** When the last steering or compaction restarted a run's group, by run. */
     #lastBoundaryAt = new Map<string, number>();
+    #turnKinds = new Map<string, "compaction">();
     #openTurnIds: string[] = [];
     /** Elements by id, so a delta reaches its element without scanning the list. */
     #byId = new Map<string, ChatElement>();
@@ -972,7 +973,10 @@ export class ChatStore {
                 this.#applySubmittedMessage(event, deltas);
                 break;
             case "run_started":
-                this.#startTurn((event.data as { runId: string }).runId, event.createdAt, deltas);
+                {
+                    const data = event.data as { kind?: "compaction"; runId: string };
+                    this.#startTurn(data.runId, event.createdAt, deltas, data.kind);
+                }
                 break;
             case "abort_requested": {
                 const runId = (event.data as { runId?: string }).runId;
@@ -1275,7 +1279,13 @@ export class ChatStore {
             transcript,
             session.activeTurn === undefined
                 ? undefined
-                : { runId: session.activeTurn.runId, startedAt: session.activeTurn.startedAt },
+                : {
+                      runId: session.activeTurn.runId,
+                      startedAt: session.activeTurn.startedAt,
+                      ...(session.activeTurn.kind === undefined
+                          ? {}
+                          : { kind: session.activeTurn.kind }),
+                  },
             true,
         );
         for (const review of session.permissionReviews ?? []) {
@@ -1300,10 +1310,10 @@ export class ChatStore {
      * Rebuilds the list from a committed transcript.
      *
      * When the daemon reported turn boundaries the history is rebuilt as real
-     * turns, each closed by its own `turn_end`, so scrolled-back history renders
-     * the same way live output does. Without them each message becomes its own
-     * turn, which is all that can honestly be said about messages whose run the
-     * daemon no longer knows.
+     * turns, each closed by its final group, so scrolled-back history renders the
+     * same way live output does. Without them each message becomes its own turn,
+     * which is all that can honestly be said about messages whose run the daemon
+     * no longer knows.
      */
     #resetTranscript(
         messages: readonly Message[],
@@ -1338,6 +1348,7 @@ export class ChatStore {
         this.#runsWithGroups.clear();
         this.#turnStartedAt.clear();
         this.#lastBoundaryAt.clear();
+        this.#turnKinds.clear();
         this.#openTurnIds = [];
         this.#turnUsage = undefined;
         this.#retrying = false;
@@ -1362,8 +1373,8 @@ export class ChatStore {
             if (activeTurn === undefined) this.#endGroup("completed", "success", 0, deltas);
             this.#turnId = undefined;
             if (activeTurn !== undefined) {
-                this.#rememberTurn(activeTurn.runId, activeTurn.startedAt);
-                this.#activateTurn(activeTurn.runId, activeTurn.startedAt, deltas);
+                this.#rememberTurn(activeTurn.runId, activeTurn.startedAt, activeTurn.kind);
+                this.#activateTurn(activeTurn.runId, activeTurn.startedAt, deltas, activeTurn.kind);
             }
         } finally {
             if (!preservePriorElements) this.#priorElements = undefined;
@@ -1373,10 +1384,10 @@ export class ChatStore {
     /**
      * Replays committed history as the turns the daemon recorded.
      *
-     * A turn that the daemon reported as finished is closed with a `turn_end`
-     * carrying its real outcome and duration, so a footer rendered from history
-     * matches what a client watching live would have seen. A turn still running
-     * is left open for the live events to finish.
+     * A turn that the daemon reported as finished closes its final group with the
+     * real outcome and duration, so a footer rendered from history matches what a
+     * client watching live would have seen. A turn still running is left open for
+     * the live events to finish.
      */
     #rebuildTurns(
         messages: readonly Message[],
@@ -1440,7 +1451,7 @@ export class ChatStore {
         const groupEndings: number[] = [];
         let groupCount = 0;
         for (const turn of transcript.turns) {
-            this.#rememberTurn(turn.runId, turn.startedAt);
+            this.#rememberTurn(turn.runId, turn.startedAt, turn.kind);
             for (const messageId of turn.messageIds) turnByMessageId.set(messageId, turn);
             for (const group of turn.groups ?? []) {
                 groupIndexByMessageId.set(group.id, groupCount);
@@ -1629,14 +1640,17 @@ export class ChatStore {
             this.#openTurnIds
                 .map((turnId) => {
                     const startedAt = this.#turnStartedAt.get(turnId);
-                    return startedAt === undefined ? undefined : { runId: turnId, startedAt };
+                    const kind = this.#turnKinds.get(turnId);
+                    return startedAt === undefined
+                        ? undefined
+                        : { runId: turnId, startedAt, ...(kind === undefined ? {} : { kind }) };
                 })
                 .find((turn): turn is ActiveTurn => turn !== undefined);
         if (restored === undefined) {
             this.#turnId = undefined;
         } else {
-            this.#rememberTurn(restored.runId, restored.startedAt);
-            this.#activateTurn(restored.runId, restored.startedAt, deltas);
+            this.#rememberTurn(restored.runId, restored.startedAt, restored.kind);
+            this.#activateTurn(restored.runId, restored.startedAt, deltas, restored.kind);
         }
     }
 
@@ -1656,18 +1670,29 @@ export class ChatStore {
         }
     }
 
-    #startTurn(runId: string, at: number, deltas: ChatDelta[]): void {
+    #startTurn(
+        runId: string,
+        at: number,
+        deltas: ChatDelta[],
+        kind?: "compaction",
+    ): void {
         const startedAt = this.#turnStartedAt.get(runId) ?? at;
-        this.#rememberTurn(runId, startedAt);
-        this.#activateTurn(runId, startedAt, deltas);
+        this.#rememberTurn(runId, startedAt, kind);
+        this.#activateTurn(runId, startedAt, deltas, kind);
     }
 
-    #rememberTurn(runId: string, startedAt: number): void {
+    #rememberTurn(runId: string, startedAt: number, kind?: "compaction"): void {
         if (!this.#turnStartedAt.has(runId)) this.#turnStartedAt.set(runId, startedAt);
+        if (kind !== undefined) this.#turnKinds.set(runId, kind);
         if (!this.#openTurnIds.includes(runId)) this.#openTurnIds.push(runId);
     }
 
-    #activateTurn(runId: string, startedAt: number, deltas: ChatDelta[]): void {
+    #activateTurn(
+        runId: string,
+        startedAt: number,
+        deltas: ChatDelta[],
+        kind = this.#turnKinds.get(runId),
+    ): void {
         if (
             this.#session.activeTurn?.runId === runId &&
             this.#session.activeTurn.startedAt === startedAt
@@ -1676,11 +1701,19 @@ export class ChatStore {
             return;
         }
         this.#turnId = runId;
-        this.#session = { ...this.#session, activeTurn: { runId, startedAt } };
+        this.#session = {
+            ...this.#session,
+            activeTurn: { runId, startedAt, ...(kind === undefined ? {} : { kind }) },
+        };
         this.#streamingElementIds.clear();
         this.#streamingMessageId = undefined;
         this.#turnUsage = undefined;
-        deltas.push({ runId, startedAt, type: "turn_started" });
+        deltas.push({
+            runId,
+            startedAt,
+            type: "turn_started",
+            ...(kind === undefined ? {} : { kind }),
+        });
     }
 
     /**
@@ -1765,6 +1798,7 @@ export class ChatStore {
         const open = this.#openGroupIdentity() ?? this.#emptyGroupIdentity(reason);
         if (open === undefined) return;
         const { groupId, runId, startedAt } = open;
+        const turnKind = this.#turnKinds.get(runId);
         if (synthesized) {
             // The question was waiting for a group that never opened. This is
             // that group, so it takes what belongs to this run; leaving those
@@ -1815,6 +1849,7 @@ export class ChatStore {
             reason,
             runId,
             startedAt,
+            ...(turnKind === undefined ? {} : { turnKind }),
             turnElapsedMs: Math.max(0, at - turnStartedAt),
             turnStartedAt,
             ...(errorMessage === undefined ? {} : { errorMessage }),
@@ -1836,14 +1871,12 @@ export class ChatStore {
             runId,
             startedAt,
             type: "group_ended",
+            ...(turnKind === undefined ? {} : { kind: turnKind }),
         });
     }
 
     /**
-     * Closes the current turn with its final element.
-     *
-     * The guarantee that a turn always ends is kept here: whatever state the turn
-     * was in, it gains exactly one `turn_end` element and no more.
+     * Closes the current turn after its final group has ended.
      */
     #endTurn(
         turnId: string,
@@ -1855,10 +1888,12 @@ export class ChatStore {
     ): void {
         const startedAt = this.#turnStartedAt.get(turnId);
         if (startedAt === undefined) return;
+        const turnKind = this.#turnKinds.get(turnId);
         this.#turnUsage = undefined;
         this.#turnStartedAt.delete(turnId);
         this.#lastBoundaryAt.delete(turnId);
         this.#runsWithGroups.delete(turnId);
+        this.#turnKinds.delete(turnId);
         this.#openTurnIds = this.#openTurnIds.filter((openTurnId) => openTurnId !== turnId);
         if (this.#session.activeTurn?.runId === turnId) {
             this.#session = withoutKeys(this.#session, ["activeTurn"]);
@@ -1866,7 +1901,14 @@ export class ChatStore {
             this.#streamingElementIds.clear();
             this.#streamingMessageId = undefined;
         }
-        deltas.push({ endedAt: at, outcome, runId: turnId, startedAt, type: "turn_ended" });
+        deltas.push({
+            endedAt: at,
+            outcome,
+            runId: turnId,
+            startedAt,
+            type: "turn_ended",
+            ...(turnKind === undefined ? {} : { kind: turnKind }),
+        });
         if (!advance) return;
         const nextTurnId = this.#openTurnIds[0];
         const nextStartedAt =

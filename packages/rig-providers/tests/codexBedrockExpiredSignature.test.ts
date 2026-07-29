@@ -66,7 +66,7 @@ async function runOnce(status: number, body: string): Promise<string | undefined
         streamMaxRetries: 0,
     });
     const session = await provider.session("expired-signature-session", {
-        context: { instructions: "Test", messages: [] },
+        instructions: "Test",
         tools: [],
     });
 

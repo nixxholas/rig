@@ -428,6 +428,7 @@ export class InMemorySession {
     #createdAt: number;
     #createRuntime: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
     #compactionController: AbortController | undefined;
+    #compactionRunId: string | undefined;
     #contextMessages: Message[] | undefined;
     #closing = false;
     #compactionActive = false;
@@ -2504,9 +2505,11 @@ export class InMemorySession {
         const compactSignal =
             signal === undefined ? controller.signal : AbortSignal.any([signal, controller.signal]);
         const previousStatus = this.#status;
-        const compactionRunId = `compaction:${createId()}`;
+        const compactionRunId = createId();
+        this.#compactionRunId = compactionRunId;
         this.#compactionActive = true;
         this.#status = "running";
+        this.#append("run_started", { kind: "compaction", runId: compactionRunId });
         this.#restartMetadataSettlement();
         this.#saveSession();
         try {
@@ -2516,9 +2519,30 @@ export class InMemorySession {
                 (message) => this.#appendAgentMessage(compactionRunId, message),
             );
             this.#syncContextMessages();
+            this.#append("run_finished", {
+                modelLocked: this.#modelLocked(),
+                runId: compactionRunId,
+                stopReason: "stop",
+            });
             return result;
+        } catch (error) {
+            if (compactSignal.aborted) {
+                this.#append("run_finished", {
+                    modelLocked: this.#modelLocked(),
+                    runId: compactionRunId,
+                    stopReason: "aborted",
+                });
+            } else {
+                this.#append("run_error", {
+                    errorMessage: errorToMessage(error),
+                    modelLocked: this.#modelLocked(),
+                    runId: compactionRunId,
+                });
+            }
+            throw error;
         } finally {
             this.#compactionActive = false;
+            if (this.#compactionRunId === compactionRunId) this.#compactionRunId = undefined;
             if (this.#compactionController === controller) this.#compactionController = undefined;
             if (!this.#closing) {
                 this.#status = previousStatus;
@@ -2831,10 +2855,19 @@ export class InMemorySession {
 
     #activeTurn(): SessionActiveTurn | undefined {
         const runId =
-            this.#activeRun?.runId ?? this.#restoredActiveRunId ?? this.#queue.at(0)?.runId;
+            this.#activeRun?.runId ??
+            this.#restoredActiveRunId ??
+            this.#compactionRunId ??
+            this.#queue.at(0)?.runId;
         if (runId === undefined) return undefined;
-        const startedAt = this.#runFacts.get(runId)?.startedAt;
-        return startedAt === undefined ? undefined : { runId, startedAt };
+        const facts = this.#runFacts.get(runId);
+        return facts === undefined
+            ? undefined
+            : {
+                  runId,
+                  startedAt: facts.startedAt,
+                  ...(facts.kind === undefined ? {} : { kind: facts.kind }),
+              };
     }
 
     snapshot(): ProtocolSession {
@@ -4141,9 +4174,11 @@ export class InMemorySession {
             return;
         }
         if (event.type === "run_started") {
-            if (!this.#runFacts.has(event.data.runId)) {
-                this.#runFacts.set(event.data.runId, { startedAt: event.createdAt });
-            }
+            const known = this.#runFacts.get(event.data.runId);
+            this.#runFacts.set(event.data.runId, {
+                ...(known ?? { startedAt: event.createdAt }),
+                ...(event.data.kind === undefined ? {} : { kind: event.data.kind }),
+            });
             this.#forgetUnreachableRunFacts();
             return;
         }

@@ -173,6 +173,8 @@ export type GroupEndReason = "completed" | "steering" | "compaction" | "abort" |
  */
 export interface GroupEndElement extends BaseChatElement {
     kind: "group_end";
+    /** Present when this group is the complete standalone manual compaction turn. */
+    turnKind?: "compaction";
     outcome: "success" | "error" | "stopped";
     reason: GroupEndReason;
     /** Present when the group ended in an error. */
@@ -207,6 +209,8 @@ export interface ActiveGroup {
 /** The turn currently occupying the session. */
 export interface ActiveTurn {
     runId: string;
+    /** Present when this turn exists solely for a manual context compaction. */
+    kind?: "compaction";
     /** Stable across every activity transition, reconnect, retry, and steering segment. */
     startedAt: number;
 }
@@ -350,13 +354,14 @@ export interface MutationRejectedDelta {
 export type ChatDelta =
     | { type: "elements_changed"; elements: readonly ChatElement[] }
     | { type: "session_changed"; session: SessionState }
-    | { type: "turn_started"; runId: string; startedAt: number }
+    | { type: "turn_started"; runId: string; startedAt: number; kind?: "compaction" }
     | {
           type: "turn_ended";
           runId: string;
           outcome: GroupEndElement["outcome"];
           startedAt: number;
           endedAt: number;
+          kind?: "compaction";
       }
     | { type: "group_started"; groupId: string; runId: string; startedAt: number }
     | {
@@ -367,6 +372,7 @@ export type ChatDelta =
           reason: GroupEndReason;
           startedAt: number;
           endedAt: number;
+          kind?: "compaction";
       }
     | { type: "compaction_started"; compactionId: string }
     | { type: "compaction_finished"; compactionId: string }

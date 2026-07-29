@@ -27,11 +27,7 @@ describeLive("CodexProvider live", () => {
                 transport,
             });
             const session = await provider.session(`codex-parallel-${transport}-${Date.now()}`, {
-                context: {
-                    instructions:
-                        "Call every explicitly requested independent tool in the same response.",
-                    messages: [],
-                },
+                instructions: "Call every explicitly requested independent tool in the same response.",
                 tools: [
                     {
                         type: "local",
@@ -90,10 +86,7 @@ describeLive("CodexProvider live", () => {
 
             const provider = new CodexProvider({ credential, transport });
             const session = await provider.session(`codex-${transport}-live-${Date.now()}`, {
-                context: {
-                    instructions: "You are a concise coding assistant.",
-                    messages: [],
-                },
+                instructions: "You are a concise coding assistant.",
                 tools: [],
             });
             try {
@@ -134,10 +127,7 @@ describeLive("CodexProvider live", () => {
             }
             const provider = new CodexProvider({ credential, transport });
             const session = await provider.session(`codex-compact-${transport}-${Date.now()}`, {
-                context: {
-                    instructions: "You are a concise coding assistant.",
-                    messages: [],
-                },
+                instructions: "You are a concise coding assistant.",
                 tools: [],
             });
             try {

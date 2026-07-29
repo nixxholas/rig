@@ -88,34 +88,25 @@ describe("Claude provider golden", () => {
             TZ: "UTC",
         };
         const session = new ClaudeSession("<SESSION_ID>", {
-            context: {
-                instructions: createClaudeTestInstructions(golden.scenario.initialModel, {
-                    cwd,
-                    env: providerEnv,
-                }),
-                messages: [],
-            },
+            instructions: createClaudeTestInstructions(golden.scenario.initialModel, {
+                cwd,
+                env: providerEnv,
+            }),
             credential,
             env: providerEnv,
             modelConfigurations: {
                 [resolveClaudeModelId(golden.scenario.initialModel)]: {
-                    context: {
-                        instructions: createClaudeTestInstructions(golden.scenario.initialModel, {
-                            cwd,
-                            env: providerEnv,
-                        }),
-                        messages: [],
-                    },
+                    instructions: createClaudeTestInstructions(golden.scenario.initialModel, {
+                        cwd,
+                        env: providerEnv,
+                    }),
                     tools: resolveClaudeTools(golden.scenario.initialModel),
                 },
                 [resolveClaudeModelId(golden.scenario.switchedModel)]: {
-                    context: {
-                        instructions: createClaudeTestInstructions(golden.scenario.switchedModel, {
-                            cwd,
-                            env: providerEnv,
-                        }),
-                        messages: [],
-                    },
+                    instructions: createClaudeTestInstructions(golden.scenario.switchedModel, {
+                        cwd,
+                        env: providerEnv,
+                    }),
                     tools: resolveClaudeTools(golden.scenario.switchedModel),
                 },
             },

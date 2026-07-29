@@ -8,13 +8,12 @@ describe("SessionCompaction", () => {
             apiKey: "test-key",
             endpoint: "http://127.0.0.1:1/v1",
             nativeCompaction: false,
-            context: {
-                instructions: "System prompt.",
-                messages: [{ role: "system", content: "Preserved metadata." }],
-            },
+            instructions: "System prompt.",
         });
 
-        const result = await session.compact();
+        const result = await session.compact({
+            context: { messages: [{ role: "system", content: "Preserved metadata." }] },
+        });
 
         expect(result).toEqual({
             status: "failed",
@@ -22,7 +21,7 @@ describe("SessionCompaction", () => {
             message: "This Responses API endpoint does not provide native compaction.",
             context: {
                 instructions: "System prompt.",
-                messages: [{ role: "system", content: "Preserved metadata." }],
+                messages: [],
             },
         });
     });
@@ -35,14 +34,16 @@ describe("SessionCompaction", () => {
         const session = new ResponsesSession("session", {
             apiKey: "test-key",
             endpoint: "http://127.0.0.1:1/v1",
-            context,
+            instructions: context.instructions,
         });
         const controller = new AbortController();
         controller.abort();
 
-        await expect(session.compact({ signal: controller.signal })).resolves.toEqual({
+        await expect(
+            session.compact({ signal: controller.signal, context: { messages: context.messages } }),
+        ).resolves.toEqual({
             status: "cancelled",
-            context,
+            context: { instructions: context.instructions, messages: [] },
         });
     });
 });

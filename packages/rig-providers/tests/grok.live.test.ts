@@ -24,7 +24,7 @@ describeLive("GrokProvider live", () => {
 
         const provider = new GrokProvider({ credential });
         const session = await provider.session(`grok-live-${Date.now()}`, {
-            context: { instructions: "You are a concise assistant.", messages: [] },
+            instructions: "You are a concise assistant.",
             tools: [],
         });
         const events = await collectSessionEvents(
@@ -56,7 +56,7 @@ describeLive("GrokProvider live", () => {
 
         const provider = new GrokProvider({ credential });
         const session = await provider.session(`composer-live-${Date.now()}`, {
-            context: { instructions: "You are a concise assistant.", messages: [] },
+            instructions: "You are a concise assistant.",
             tools: [],
         });
         const events = await collectSessionEvents(
@@ -88,7 +88,7 @@ describeLive("GrokProvider live", () => {
         } as const satisfies SessionTool;
         const provider = new GrokProvider({ credential, model: "grok-4.5" });
         const session = await provider.session(`grok-tool-live-${Date.now()}`, {
-            context: { instructions: "Follow the user's tool instructions exactly.", messages: [] },
+            instructions: "Follow the user's tool instructions exactly.",
             tools: [probe],
         });
         const user = {
@@ -155,23 +155,22 @@ describeLive("GrokProvider live", () => {
         }
         const provider = new GrokProvider({ credential, model: "grok-4.5" });
         const session = await provider.session(`grok-compact-live-${Date.now()}`, {
-            context: { instructions: "You are a concise coding assistant.", messages: [] },
+            instructions: "You are a concise coding assistant.",
             tools: [],
         });
+        const messages = [
+            {
+                role: "user" as const,
+                content: "Remember that the verification command is pnpm test.",
+            },
+        ];
         await collectSessionEvents(
             session.run({
-                context: {
-                    messages: [
-                        {
-                            role: "user",
-                            content: "Remember that the verification command is pnpm test.",
-                        },
-                    ],
-                },
+                context: { messages },
                 effort: "low",
             }),
         );
-        const compacted = await session.compact();
+        const compacted = await session.compact({ context: { messages } });
         if (compacted.status !== "completed") {
             expect.fail(`Live compaction failed: ${JSON.stringify(compacted)}`);
         }

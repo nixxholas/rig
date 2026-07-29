@@ -74,7 +74,7 @@ describe("Codex ChatGPT unauthorized recovery", () => {
                 model: "gpt-5.6-sol",
                 transport: "sse",
             }).session("auth-recovery", {
-                context: { instructions: "instructions", messages: [] },
+                instructions: "instructions",
             });
             const events = [];
             for await (const event of session.run({

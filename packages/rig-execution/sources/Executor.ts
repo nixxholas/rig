@@ -384,13 +384,9 @@ export class Executor {
                 profiles: this.profiles,
                 ...(systemPrompt === undefined ? {} : { systemPrompt }),
             });
-            modelConfigurations[candidate.id] = {
-                context: {
-                    ...context,
-                    instructions,
-                },
-                tools,
-            };
+            // Sessions receive configuration only. The conversation history is owned by the
+            // caller and arrives complete with every run, never at session creation.
+            modelConfigurations[candidate.id] = { instructions, tools };
         }
         const sequence = ++this.sessionSequence;
         const sessionId =
@@ -401,7 +397,7 @@ export class Executor {
                   : `${provider.sessionId}-reset-${String(sequence)}`;
         const native = await this.resolveNative(provider, profile);
         const session = await native.session(sessionId, {
-            context,
+            instructions: context.instructions,
             modelConfigurations,
             tools,
         });

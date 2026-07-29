@@ -41,7 +41,7 @@ export type ClaudeSdkQuery = typeof defaultClaudeSdkQuery;
 const CLAUDE_QUERY_ABORTED = Symbol("claude_query_aborted");
 
 export interface ClaudeSessionOptions {
-    context: SessionContext;
+    instructions: string;
     credential: ClaudeCredential;
     env?: NodeJS.ProcessEnv;
     model?: string;
@@ -86,10 +86,7 @@ export class ClaudeSession extends BaseSession {
         this.tools = options.tools;
         this.modelConfigurations = options.modelConfigurations;
         this.query = options.query ?? defaultClaudeSdkQuery;
-        this.context = {
-            instructions: options.context.instructions,
-            messages: [...options.context.messages],
-        };
+        this.context = { instructions: options.instructions, messages: [] };
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -248,13 +245,8 @@ export class ClaudeSession extends BaseSession {
             modelConfiguration === undefined
                 ? options.context
                 : {
-                      instructions: modelConfiguration.context.instructions,
-                      messages: [
-                          ...modelConfiguration.context.messages.filter(
-                              (message) => message.role === "system",
-                          ),
-                          ...options.context.messages,
-                      ],
+                      instructions: modelConfiguration.instructions,
+                      messages: options.context.messages,
                   };
         const queryKey = JSON.stringify({
             compaction: options.compaction === true,

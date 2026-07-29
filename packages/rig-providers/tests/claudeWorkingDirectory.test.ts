@@ -28,7 +28,7 @@ describe("Claude working directory", () => {
             }) as unknown as ClaudeSdkQuery,
         });
         const session = await provider.session("working-directory-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             tools: [],
         });
 

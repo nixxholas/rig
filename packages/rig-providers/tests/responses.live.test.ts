@@ -22,7 +22,7 @@ describeLive("ResponsesProvider through OpenRouter", () => {
             },
         });
         const session = await provider.session(`openrouter-responses-${Date.now()}`, {
-            context: { instructions: "You are a concise assistant.", messages: [] },
+            instructions: "You are a concise assistant.",
             tools: [],
         });
         const events = await collectSessionEvents(

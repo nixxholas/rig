@@ -52,7 +52,7 @@ async function runOnce(options: {
         ...(options.userAgent === undefined ? {} : { userAgent: options.userAgent }),
     });
     const session = await provider.session("user-agent-session", {
-        context: { instructions: "", messages: [] },
+        instructions: "",
         tools: [],
     });
     try {

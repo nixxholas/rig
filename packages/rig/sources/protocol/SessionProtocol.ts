@@ -216,6 +216,8 @@ export interface PendingSteeringMessage {
 export interface SessionActiveTurn {
     runId: string;
     startedAt: number;
+    /** Present for a standalone manual context compaction turn. */
+    kind?: "compaction";
 }
 
 export interface SessionPermissionReview {
@@ -309,6 +311,8 @@ export interface SessionPartialMessage {
 export interface SessionTranscriptTurn {
     /** Identifies the run, and is the turn identity a client renders against. */
     runId: string;
+    /** Present for a standalone manual context compaction turn. */
+    kind?: "compaction";
     /** Messages belonging to this turn, in order, by id. */
     messageIds: readonly string[];
     startedAt: number;
@@ -985,7 +989,10 @@ export type SteeringAppliedEvent = BaseSessionEvent<
     }
 >;
 
-export type RunStartedEvent = BaseSessionEvent<"run_started", { runId: string }>;
+export type RunStartedEvent = BaseSessionEvent<
+    "run_started",
+    { runId: string; kind?: "compaction" }
+>;
 
 export type InferenceRetryEvent = BaseSessionEvent<
     "inference_retry",

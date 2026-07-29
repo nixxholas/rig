@@ -79,7 +79,7 @@ async function captureChildEnvironment(
         return Object.assign(messages(), { close: () => {} });
     }) as ClaudeSdkQuery;
     const session = new ClaudeSession("native-credential-session", {
-        context: { instructions: "", messages: [] },
+        instructions: "",
         credential,
         env,
         model: "sonnet[1m]",

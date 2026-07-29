@@ -7,7 +7,6 @@ import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import {
     MINIMAL_RESPONSES_CAPABILITIES,
     type ResponsesCapabilities,
@@ -31,7 +30,6 @@ export interface ResponsesSessionOptions extends SessionOptions {
 export class ResponsesSession extends BaseSession {
     private readonly client: OpenAI;
     private context: SessionContext;
-    private readonly initialMessages: SessionContext["messages"];
     private readonly model: string | undefined;
     private activeModel: string | undefined;
     private readonly nativeCompaction: boolean;
@@ -47,8 +45,7 @@ export class ResponsesSession extends BaseSession {
             fetch: options.fetch,
             maxRetries: 0,
         });
-        this.context = { ...options.context, messages: [...options.context.messages] };
-        this.initialMessages = [...options.context.messages];
+        this.context = { instructions: options.instructions, messages: [] };
         this.model = options.model;
         this.activeModel = options.model;
         this.nativeCompaction = options.nativeCompaction ?? true;
@@ -95,10 +92,7 @@ export class ResponsesSession extends BaseSession {
                 ? context
                 : {
                       instructions: context.instructions,
-                      messages: withInitialSessionMessages(
-                          this.initialMessages,
-                          options.context.messages,
-                      ),
+                      messages: [...options.context.messages],
                   };
         try {
             const response = await this.client.responses.compact(
@@ -157,7 +151,7 @@ export class ResponsesSession extends BaseSession {
         const { abort } = request;
         this.context = {
             instructions: this.context.instructions,
-            messages: withInitialSessionMessages(this.initialMessages, request.context.messages),
+            messages: [...request.context.messages],
         };
         const context = this.context;
 

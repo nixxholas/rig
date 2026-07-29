@@ -172,10 +172,7 @@ describe("AnthropicBedrockProvider", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: {
-                instructions: "system",
-                messages: [{ role: "user", content: "long conversation" }],
-            },
+            instructions: "system",
             tools: [],
         });
 
@@ -389,10 +386,7 @@ describe("AnthropicBedrockProvider", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: {
-                instructions: "system",
-                messages: [{ role: "user", content: "short conversation" }],
-            },
+            instructions: "system",
             tools: [],
         });
 
@@ -485,14 +479,14 @@ describe("AnthropicBedrockProvider", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: {
-                instructions: "system",
-                messages: [{ role: "user", content: "long conversation" }],
-            },
+            instructions: "system",
             tools: [],
         });
 
-        const result = await session.compact({ inputTokens: 50_000 });
+        const result = await session.compact({
+            context: { messages: [{ role: "user", content: "long conversation" }] },
+            inputTokens: 50_000,
+        });
 
         expect(capturedRequests).toHaveLength(2);
         expect(capturedRequests[0]).toHaveProperty("context_management");
@@ -571,16 +565,10 @@ describe("AnthropicBedrockProvider", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: {
-                instructions: "unconfigured instructions",
-                messages: [{ role: "system", content: "configured system message" }],
-            },
+            instructions: "unconfigured instructions",
             modelConfigurations: {
                 "anthropic/opus-4-8": {
-                    context: {
-                        instructions: "assembled executor prompt",
-                        messages: [{ role: "system", content: "configured system message" }],
-                    },
+                    instructions: "assembled executor prompt",
                     tools: [],
                 },
             },
@@ -781,7 +769,7 @@ describe("AnthropicBedrockProvider", () => {
             region: "us-east-1",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             tools: [],
         });
 
@@ -822,7 +810,7 @@ describe("AnthropicBedrockProvider", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             tools: [],
         });
 
@@ -951,7 +939,7 @@ describe("AnthropicBedrockProvider", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session("<SESSION_ID>", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             tools: [],
         });
 
@@ -1156,10 +1144,10 @@ describe("AnthropicBedrockProvider", () => {
             skills,
         ].join("\n\n");
         const session = await provider.session("<SESSION_ID>", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             modelConfigurations: {
                 [model]: {
-                    context: { instructions: configuredInstructions, messages: [] },
+                    instructions: configuredInstructions,
                     tools: claude_tools,
                 },
             },

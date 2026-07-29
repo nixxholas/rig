@@ -7,7 +7,6 @@ import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
-import { withInitialSessionMessages } from "@/core/withInitialSessionMessages.js";
 import type { BedrockCredential } from "@/vendors/VendorCredential.js";
 import type { AnthropicBedrockCompactionVendor } from "@/vendors/bedrock/AnthropicBedrockCompactionVendor.js";
 import type { AnthropicBedrockTransport } from "@/vendors/bedrock/AnthropicBedrockTransport.js";
@@ -35,7 +34,7 @@ export type AnthropicBedrockClient = CreatedAnthropicBedrockClient;
 
 export interface AnthropicBedrockSessionOptions {
     client?: AnthropicBedrockClient;
-    context: SessionContext;
+    instructions: string;
     credential: BedrockCredential;
     endpoint?: string;
     model?: string;
@@ -59,7 +58,6 @@ export class AnthropicBedrockSession extends BaseSession {
     private activeModel: string | undefined;
     private readonly connection: AnthropicBedrockConnection;
     private context: SessionContext;
-    private readonly fixedMessages: SessionContext["messages"];
     private readonly modelConfigurations:
         | Readonly<Record<string, SessionModelConfiguration>>
         | undefined;
@@ -83,13 +81,7 @@ export class AnthropicBedrockSession extends BaseSession {
             transport: this.transport,
             ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
         });
-        this.context = {
-            instructions: options.context.instructions,
-            messages: [...options.context.messages],
-        };
-        this.fixedMessages = options.context.messages.filter(
-            (message) => message.role === "system",
-        );
+        this.context = { instructions: options.instructions, messages: [] };
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -105,7 +97,7 @@ export class AnthropicBedrockSession extends BaseSession {
                       instructions: this.context.instructions,
                       messages: restoreAnthropicBedrockCompaction(
                           this.context.messages,
-                          withInitialSessionMessages(this.fixedMessages, options.context.messages),
+                          [...options.context.messages],
                       ),
                   };
         if (options.signal?.aborted) return { status: "cancelled", context: original };
@@ -145,7 +137,9 @@ export class AnthropicBedrockSession extends BaseSession {
                         content,
                         vendor,
                     };
-                    const preservedMessages = [...this.fixedMessages];
+                    const preservedMessages = original.messages.filter(
+                        (message) => message.role === "system",
+                    );
                     this.context = {
                         instructions: original.instructions,
                         messages: [...preservedMessages, compaction],
@@ -211,7 +205,9 @@ export class AnthropicBedrockSession extends BaseSession {
             };
         }
         usage = addSessionCacheUsage(nativeUsage, usage);
-        const preservedMessages = [...this.fixedMessages];
+        const preservedMessages = original.messages.filter(
+            (message) => message.role === "system",
+        );
         this.context = {
             instructions: original.instructions,
             messages: [
@@ -243,10 +239,7 @@ export class AnthropicBedrockSession extends BaseSession {
         this.activeModel = model;
         const effort = request.effort ?? this.activeEffort;
         this.activeEffort = effort;
-        const rebuiltMessages = withInitialSessionMessages(
-            this.fixedMessages,
-            request.context.messages,
-        );
+        const rebuiltMessages = [...request.context.messages];
         this.context = {
             instructions: this.context.instructions,
             messages: restoreAnthropicBedrockCompaction(this.context.messages, rebuiltMessages),
@@ -380,13 +373,8 @@ export class AnthropicBedrockSession extends BaseSession {
             modelConfiguration === undefined
                 ? options.context
                 : {
-                      instructions: modelConfiguration.context.instructions,
-                      messages: withInitialSessionMessages(
-                          modelConfiguration.context.messages.filter(
-                              (message) => message.role === "system",
-                          ),
-                          options.context.messages,
-                      ),
+                      instructions: modelConfiguration.instructions,
+                      messages: options.context.messages,
                   };
         return createAnthropicRequest({
             context,

@@ -71,15 +71,15 @@ describe("Grok SSE goldens", () => {
                     model: "grok-4.5",
                 });
                 const session = await provider.session("<SESSION_ID>", {
-                    context: {
-                        instructions: grok_4_5_system_prompt,
-                        messages: input.slice(1, -1) as SessionMessage[],
-                    },
+                    instructions: grok_4_5_system_prompt,
                     tools: capturedTools,
                 });
                 for await (const event of session.run({
                     context: {
-                        messages: [{ role: "user", content: input.at(-1)!.content }],
+                        messages: [
+                            ...(input.slice(1, -1) as SessionMessage[]),
+                            { role: "user", content: input.at(-1)!.content },
+                        ],
                     },
                     effort,
                 })) {

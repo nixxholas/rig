@@ -12,7 +12,7 @@ export async function runProviderAuxiliaryText(options: {
     request: ClaudeAuxiliaryQueryRequest;
 }): Promise<ClaudeAuxiliaryQueryResponse> {
     const session = await options.native.session(`executor-auxiliary-${randomUUID()}`, {
-        context: { instructions: options.request.systemPrompt, messages: [] },
+        instructions: options.request.systemPrompt,
         tools: [],
     });
     let text = "";

@@ -20,10 +20,7 @@ describe.skipIf(!LIVE)("Anthropic Bedrock live session", () => {
             model: "anthropic/opus-4-8",
         });
         const session = await provider.session(`anthropic-bedrock-live-${Date.now()}`, {
-            context: {
-                instructions: "Follow exact response instructions. Do not add punctuation.",
-                messages: [],
-            },
+            instructions: "Follow exact response instructions. Do not add punctuation.",
             tools: [],
         });
 

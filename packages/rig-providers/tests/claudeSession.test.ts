@@ -11,7 +11,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("quota-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: (() => {
@@ -97,7 +97,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("empty-error-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: (() => {
@@ -148,7 +148,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("retry-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: (() => {
@@ -189,7 +189,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("tool-result-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: ((parameters) => {
@@ -264,7 +264,7 @@ describe("ClaudeSession", () => {
             return fakeQuery("RECOVERED");
         });
         const session = new ClaudeSession("interrupted-tool-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query,
@@ -323,7 +323,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("parallel-tool-replay-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: ((parameters) => {
@@ -435,7 +435,7 @@ describe("ClaudeSession", () => {
         const addAbortListener = vi.spyOn(abortController.signal, "addEventListener");
         const removeAbortListener = vi.spyOn(abortController.signal, "removeEventListener");
         const session = new ClaudeSession("throwing-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: (() => {
@@ -464,7 +464,7 @@ describe("ClaudeSession", () => {
         const close = vi.fn();
         const interrupt = vi.fn(() => never);
         const session = new ClaudeSession("stuck-abort-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: (() => ({
@@ -520,7 +520,7 @@ describe("ClaudeSession", () => {
             } as unknown as ReturnType<ClaudeSdkQuery>;
         });
         const session = new ClaudeSession("rotate-after-abort-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query,
@@ -559,7 +559,7 @@ describe("ClaudeSession", () => {
         const controller = new AbortController();
         const close = vi.fn();
         const session = new ClaudeSession("construction-abort-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: (() => {
@@ -596,7 +596,7 @@ describe("ClaudeSession", () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
         const session = new ClaudeSession("image-session", {
-            context: { instructions: "", messages: [] },
+            instructions: "",
             credential,
             model: "sonnet[1m]",
             query: ((parameters) => {
@@ -712,10 +712,7 @@ describe("ClaudeSession", () => {
             { role: "system" as const, content: "Golden skill description." },
         ];
         const session = new ClaudeSession("session-id", {
-            context: {
-                instructions: "Rig system instructions.",
-                messages: systemMessages,
-            },
+            instructions: "Rig system instructions.",
             credential,
             env: {
                 PATH: process.env.PATH,
@@ -895,10 +892,7 @@ describe("ClaudeSession", () => {
             content: "RETAIN THIS LATEST TURN",
         };
         const session = new ClaudeSession("restored-session", {
-            context: {
-                instructions: "Rig system instructions.",
-                messages: [...compactedPrefix, retainedMessage],
-            },
+            instructions: "Rig system instructions.",
             credential,
             model: "opus[1m]",
             query,

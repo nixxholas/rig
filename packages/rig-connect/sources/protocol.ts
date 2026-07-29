@@ -436,6 +436,7 @@ export interface PendingSteeringMessage {
 export interface SessionActiveTurn {
     runId: string;
     startedAt: number;
+    kind?: "compaction";
 }
 
 export interface PermissionReviewState {
@@ -668,6 +669,7 @@ export interface SessionPartialMessage {
 
 export interface SessionTranscriptTurn {
     runId: string;
+    kind?: "compaction";
     messageIds: readonly string[];
     startedAt: number;
     endedAt?: number;
@@ -846,7 +848,7 @@ export type InterpretedSessionEvent =
               source?: "notification";
           }
       >
-    | BaseSessionEvent<"run_started", { runId: string }>
+    | BaseSessionEvent<"run_started", { runId: string; kind?: "compaction" }>
     | BaseSessionEvent<"abort_requested", { mutationId?: MutationId; runId?: string }>
     | BaseSessionEvent<"inference_retry", { attempt: number; reason: string; runId: string }>
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
