@@ -63,9 +63,11 @@ describe("settled session metadata", () => {
         gym.terminal.type("Implement delayed session metadata.");
         gym.terminal.press("enter");
         await gym.terminal.waitForText("FIRST_TURN_COMPLETE", 30_000);
+        // The first turn produces two metadata requests: an immediate title from the
+        // first user message, then one refinement after the first agent response.
         await expect
             .poll(() => metadataRequestCount(gym), { interval: 250, timeout: 75_000 })
-            .toBe(1);
+            .toBe(2);
         expect(standaloneBellCount(rawOutput)).toBe(1);
         expect((await gym.terminal.snapshot()).title).toBe("Rig - Gym session");
 
@@ -86,6 +88,7 @@ describe("settled session metadata", () => {
         gym.terminal.type("Keep the current title unless it is clearly misleading.");
         gym.terminal.press("enter");
         await gym.terminal.waitForText("SECOND_TURN_COMPLETE", 30_000);
+        // The single refinement already ran, so the second turn adds no metadata request.
         await expect
             .poll(() => metadataRequestCount(gym), { interval: 250, timeout: 75_000 })
             .toBe(2);

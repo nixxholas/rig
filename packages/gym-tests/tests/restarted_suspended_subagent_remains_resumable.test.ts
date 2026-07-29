@@ -122,10 +122,10 @@ describe("restarted suspended subagent", () => {
         gym.terminal.press("escape");
         await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes("1 subagent was suspended: Restart audit") &&
+                snapshot.text.includes('"Restart audit" was stopped in') &&
                 snapshot.text.includes("Ask Rig to do anything") &&
                 !snapshot.text.includes("esc to interrupt"),
-            "the delegated audit to suspend",
+            "the delegated audit to stop with the parent",
             30_000,
         );
         gym.terminal.press("ctrlD");
@@ -162,6 +162,8 @@ describe("restarted suspended subagent", () => {
         await gym.terminal.waitForText("Suspended · Restart audit", 30_000);
         expect(childRunCount).toBe(1);
 
+        gym.terminal.press("escape");
+        await gym.terminal.waitForText("Ask Rig to do anything", 30_000);
         submit(gym, "Resume the stopped delegated audit now.");
         const recovered = await gym.terminal.waitUntil(
             (snapshot) =>
@@ -196,16 +198,19 @@ function messageText(content: unknown): string {
         .join("\n");
 }
 
+// Escape stops delegated work, so a goal-paused suspension interrupted by a server
+// restart is reproduced directly in the database: the subagent is marked suspended
+// with a stale active run that never reached a terminal event.
 const markSuspendedActiveRunScript = `
 import { DatabaseSync } from "node:sqlite";
 
 const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite");
 const result = database
-    .prepare("UPDATE sessions SET active_run_id = 'stale-suspended-run' WHERE status = 'suspended' AND parent_session_id IS NOT NULL")
+    .prepare("UPDATE sessions SET status = 'suspended', active_run_id = 'stale-suspended-run' WHERE parent_session_id IS NOT NULL")
     .run();
 database.close();
 if (result.changes !== 1) {
-    throw new Error("Expected exactly one suspended subagent, updated " + result.changes);
+    throw new Error("Expected exactly one subagent, updated " + result.changes);
 }
 `;
 
