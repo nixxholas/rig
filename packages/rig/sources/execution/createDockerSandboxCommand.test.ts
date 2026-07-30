@@ -7,6 +7,29 @@ const runtime = {
 };
 
 describe("createDockerSandboxCommand", () => {
+    it("bridges managed proxy sockets without sharing the container network", () => {
+        const command = createDockerSandboxCommand({
+            command: "curl https://example.com",
+            commandCwd: "/workspace",
+            mode: "workspace_write",
+            networkUnixProxySockets: {
+                http: "/workspace/.rig-network/http.sock",
+                loopback: [{ path: "/workspace/.rig-network/loopback-443.sock", port: 443 }],
+                socks: "/workspace/.rig-network/socks.sock",
+            },
+            runtime,
+            shell: "/bin/sh",
+            workspaceCwd: "/workspace",
+        });
+
+        expect(command).toContain("--unshare-net");
+        const script = command.at(-1);
+        expect(script).toContain("TCP-LISTEN:3128,bind=127.0.0.1");
+        expect(script).toContain("TCP-LISTEN:1080,bind=127.0.0.1");
+        expect(script).toContain("TCP-LISTEN:443,bind=127.0.0.1");
+        expect(script).toContain("curl https://example.com");
+    });
+
     it("makes the workspace read-only and isolates networking in Read only mode", () => {
         const command = createDockerSandboxCommand({
             command: "touch changed.txt",

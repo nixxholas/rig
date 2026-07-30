@@ -15,6 +15,34 @@ afterEach(async () => {
 });
 
 describe("createLinuxBubblewrapCommand", () => {
+    it("bridges only managed proxy and loopback ports into the isolated network", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-network-"));
+        temporaryDirectories.push(root);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "curl https://example.com",
+            commandCwd: root,
+            cwd: root,
+            mode: "workspace_write",
+            networkUnixProxySockets: {
+                http: "/tmp/rig-network/http.sock",
+                loopback: [{ path: "/tmp/rig-network/loopback-443.sock", port: 443 }],
+                socks: "/tmp/rig-network/socks.sock",
+            },
+            shell: "/bin/sh",
+            temporaryDirectory: join(root, "tmp"),
+        });
+
+        expect(result.args).toContain("--unshare-net");
+        const script = result.args.at(-1);
+        expect(script).toContain("TCP-LISTEN:3128,bind=127.0.0.1");
+        expect(script).toContain("UNIX-CONNECT:'/tmp/rig-network/http.sock'");
+        expect(script).toContain("TCP-LISTEN:1080,bind=127.0.0.1");
+        expect(script).toContain("TCP-LISTEN:443,bind=127.0.0.1");
+        expect(script).toContain("curl https://example.com");
+    });
+
     it("uses a read-only host view with isolated networking in Read only mode", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-bwrap-read-only-"));
         temporaryDirectories.push(root);

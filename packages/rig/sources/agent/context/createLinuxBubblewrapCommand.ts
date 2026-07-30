@@ -7,7 +7,7 @@ import { findGitWritablePaths } from "./findGitWritablePaths.js";
 import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
-const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex"] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", "rig.toml"] as const;
 
 export async function createLinuxBubblewrapCommand(options: {
     /**
@@ -22,6 +22,11 @@ export async function createLinuxBubblewrapCommand(options: {
     environment?: NodeJS.ProcessEnv;
     mode: Exclude<PermissionMode, "full_access">;
     mountProc?: boolean;
+    networkUnixProxySockets?: {
+        http: string;
+        loopback?: readonly { path: string; port: number }[];
+        socks: string;
+    };
     path?: string;
     shell: string;
     temporaryDirectory?: string;
@@ -71,10 +76,28 @@ export async function createLinuxBubblewrapCommand(options: {
             }),
     );
     const commandCwd = await resolvePotentialPath(options.commandCwd);
-    const userCommand =
+    const requestedCommand =
         options.path === undefined
             ? options.command
             : `export PATH=${quoteShellArgument(options.path)}\n${options.command}`;
+    const userCommand =
+        options.networkUnixProxySockets === undefined
+            ? requestedCommand
+            : [
+                  `socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${quoteShellArgument(options.networkUnixProxySockets.http)} >/dev/null 2>&1 &`,
+                  `socat TCP-LISTEN:1080,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${quoteShellArgument(options.networkUnixProxySockets.socks)} >/dev/null 2>&1 &`,
+                  ...(options.networkUnixProxySockets.loopback ?? []).map(
+                      ({ path, port }) =>
+                          `socat TCP-LISTEN:${String(port)},bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${quoteShellArgument(path)} >/dev/null 2>&1 &`,
+                  ),
+                  `trap 'kill $(jobs -p) 2>/dev/null || true' EXIT`,
+                  readinessCheck([
+                      3128,
+                      1080,
+                      ...(options.networkUnixProxySockets.loopback ?? []).map(({ port }) => port),
+                  ]),
+                  requestedCommand,
+              ].join("\n");
     const args = ["--new-session", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev"];
 
     for (const writableRoot of writableRoots) args.push("--bind", writableRoot, writableRoot);
@@ -96,4 +119,13 @@ export async function createLinuxBubblewrapCommand(options: {
         command: options.bwrapPath ?? "bwrap",
         ...(protectedCreatePaths.length === 0 ? {} : { protectedCreatePaths }),
     };
+}
+
+function readinessCheck(ports: readonly number[]): string {
+    return ports
+        .map(
+            (port) =>
+                `attempt=0; until socat -u /dev/null TCP4:127.0.0.1:${String(port)} >/dev/null 2>&1; do attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || { echo "Managed network bridge did not become ready." >&2; exit 1; }; sleep 0.01; done`,
+        )
+        .join("\n");
 }

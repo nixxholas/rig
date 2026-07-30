@@ -111,11 +111,19 @@ export interface ConfigTheme {
 
 export type PartialConfigTheme = Partial<ConfigTheme>;
 
+export interface ConfigNetwork {
+    allowedDomains?: readonly string[];
+    allowedLoopbackPorts?: readonly number[];
+    allowedPorts?: readonly number[];
+    deniedDomains?: readonly string[];
+}
+
 export interface RigConfig {
     docker?: DockerExecutionConfig;
     defaults: ConfigDefaults;
     features: ConfigFeatures;
     mcpServers: Readonly<Record<string, McpServerConfig>>;
+    network?: ConfigNetwork;
     providerDefaultEnable: boolean;
     providers: ConfigProviders;
     settings: ConfigSettings;
@@ -127,6 +135,7 @@ export interface PartialRigConfig {
     defaults?: PartialConfigDefaults;
     features?: PartialConfigFeatures;
     mcpServers?: Readonly<Record<string, McpServerConfig>>;
+    network?: ConfigNetwork;
     providerDefaultEnable?: boolean;
     providers?: PartialConfigProviders;
     settings?: PartialConfigSettings;

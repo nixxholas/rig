@@ -8,7 +8,7 @@ import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
 const MACOS_SEATBELT_EXECUTABLE = "/usr/bin/sandbox-exec";
-const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex"] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", "rig.toml"] as const;
 
 export async function createMacOsSeatbeltCommand(options: {
     /**
@@ -20,6 +20,7 @@ export async function createMacOsSeatbeltCommand(options: {
     cwd: string;
     environment?: NodeJS.ProcessEnv;
     mode: PermissionMode;
+    networkAllowedLoopbackPorts?: readonly number[];
     path?: string;
     shell: string;
 }): Promise<{ args: readonly string[]; command: string }> {
@@ -72,6 +73,9 @@ export async function createMacOsSeatbeltCommand(options: {
         MACOS_SEATBELT_BASE_POLICY,
         "; allow read-only file operations across the host, matching Codex workspace-write",
         "(allow file-read*)",
+        ...(options.networkAllowedLoopbackPorts ?? []).map(
+            (port) => `(allow network-outbound (remote ip "localhost:${String(port)}"))`,
+        ),
         fileWritePolicy,
         ...protectedRules,
     ]

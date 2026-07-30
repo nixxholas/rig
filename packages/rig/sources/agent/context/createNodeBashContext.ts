@@ -10,6 +10,16 @@ import type { PermissionContext } from "../../permissions/index.js";
 import type { BashContext, BashSessionSnapshot } from "./BashContext.js";
 import { assertCanUseCustomShell } from "./assertCanUseCustomShell.js";
 import { createSandboxedCommand } from "./createSandboxedCommand.js";
+import type { ManagedNetworkProxyHandle } from "./ManagedNetworkPolicy.js";
+import { startManagedNetworkProxy } from "./startManagedNetworkProxy.js";
+import {
+    startLinuxManagedNetworkBridge,
+    type LinuxManagedNetworkBridge,
+} from "./startLinuxManagedNetworkBridge.js";
+import {
+    loadProjectManagedNetworkPolicy,
+    mergeManagedNetworkPolicies,
+} from "./loadProjectManagedNetworkPolicy.js";
 import { createProtectedPathMonitor } from "./createProtectedPathMonitor.js";
 import { createToolEnvironment } from "./createToolEnvironment.js";
 import { waitForBashSessionCompletion } from "./waitForBashSessionCompletion.js";
@@ -28,6 +38,7 @@ interface NodeBashSession {
     completionWaiters: Set<() => void>;
     cwd: string;
     process: ManagedProcess;
+    managedNetwork?: CommandManagedNetwork;
     result?: ProcessRunResult;
     sessionId: number;
     stderrOffset: number;
@@ -141,18 +152,34 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 globalThis.process.env,
                 { cwd: options.cwd },
             );
-            const sandboxedCommand = await createSandboxedCommand({
-                command: runOptions.command,
-                commandCwd: cwd,
-                cwd: options.cwd,
-                mode: options.permissions.mode,
-                ...(toolEnvironment.PATH === undefined ? {} : { path: toolEnvironment.PATH }),
-                shell,
-            });
+            const networkPolicy = mergeManagedNetworkPolicies(
+                await loadProjectManagedNetworkPolicy(options.cwd),
+                runOptions.network,
+            );
+            const managedNetwork = await startCommandManagedNetwork(networkPolicy);
+            let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
+            try {
+                sandboxedCommand = await createSandboxedCommand({
+                    command: runOptions.command,
+                    commandCwd: cwd,
+                    cwd: options.cwd,
+                    mode: options.permissions.mode,
+                    ...networkSandboxOptions(networkPolicy, managedNetwork),
+                    ...(toolEnvironment.PATH === undefined ? {} : { path: toolEnvironment.PATH }),
+                    shell,
+                });
+            } catch (error) {
+                await managedNetwork?.close();
+                throw error;
+            }
             const processRunOptions: Parameters<NativeProcessManager["run"]>[0] = {
                 command: sandboxedCommand.command,
                 cwd,
-                env: createCommandEnvironment(toolEnvironment, options.secrets, runOptions.secrets),
+                env: withManagedNetworkProxy(
+                    createCommandEnvironment(toolEnvironment, options.secrets, runOptions.secrets),
+                    managedNetwork,
+                    networkPolicy,
+                ),
                 timeoutMs: runOptions.timeoutMs ?? 120_000,
                 maxOutputBytes: runOptions.maxOutputBytes ?? 512_000,
             };
@@ -172,6 +199,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 result = await options.processManager.run(processRunOptions);
             } finally {
                 protectedPathViolation = await protectedPathMonitor.stop();
+                await managedNetwork?.close();
             }
             return {
                 stdout: result.stdout,
@@ -194,22 +222,40 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     globalThis.process.env,
                     { cwd: options.cwd },
                 );
-                const sandboxedCommand = await createSandboxedCommand({
-                    command: runOptions.command,
-                    commandCwd: cwd,
-                    cwd: options.cwd,
-                    mode: options.permissions.mode,
-                    ...(toolEnvironment.PATH === undefined ? {} : { path: toolEnvironment.PATH }),
-                    shell,
-                });
+                const networkPolicy = mergeManagedNetworkPolicies(
+                    await loadProjectManagedNetworkPolicy(options.cwd),
+                    runOptions.network,
+                );
+                const managedNetwork = await startCommandManagedNetwork(networkPolicy);
+                let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
+                try {
+                    sandboxedCommand = await createSandboxedCommand({
+                        command: runOptions.command,
+                        commandCwd: cwd,
+                        cwd: options.cwd,
+                        mode: options.permissions.mode,
+                        ...networkSandboxOptions(networkPolicy, managedNetwork),
+                        ...(toolEnvironment.PATH === undefined
+                            ? {}
+                            : { path: toolEnvironment.PATH }),
+                        shell,
+                    });
+                } catch (error) {
+                    await managedNetwork?.close();
+                    throw error;
+                }
                 const processStartOptions: Parameters<NativeProcessManager["start"]>[0] = {
                     cleanupProcessGroupOnExit: true,
                     command: sandboxedCommand.command,
                     cwd,
-                    env: createCommandEnvironment(
-                        toolEnvironment,
-                        options.secrets,
-                        runOptions.secrets,
+                    env: withManagedNetworkProxy(
+                        createCommandEnvironment(
+                            toolEnvironment,
+                            options.secrets,
+                            runOptions.secrets,
+                        ),
+                        managedNetwork,
+                        networkPolicy,
                     ),
                     maxOutputBytes: runOptions.maxOutputBytes ?? 512_000,
                 };
@@ -226,6 +272,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     process = options.processManager.start(processStartOptions);
                 } catch (error) {
                     await protectedPathMonitor.stop();
+                    await managedNetwork?.close();
                     throw error;
                 }
                 const completion = process.wait();
@@ -236,6 +283,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     completionWaiters: new Set(),
                     cwd,
                     process,
+                    ...(managedNetwork === undefined ? {} : { managedNetwork }),
                     sessionId,
                     stderrOffset: 0,
                     stdoutOffset: 0,
@@ -252,6 +300,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 }
                 void completion.then(async (result) => {
                     const protectedPathViolation = await protectedPathMonitor.stop();
+                    await managedNetwork?.close();
                     session.result =
                         protectedPathViolation && result.exitCode === 0
                             ? {
@@ -284,5 +333,120 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             const session = sessions.get(sessionId);
             return session?.process.writeStdin(data) ?? false;
         },
+    };
+}
+
+interface CommandManagedNetwork {
+    bridge?: LinuxManagedNetworkBridge;
+    close(): Promise<void>;
+    proxy?: ManagedNetworkProxyHandle;
+}
+
+async function startCommandManagedNetwork(
+    policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
+): Promise<CommandManagedNetwork | undefined> {
+    if (policy === undefined) return undefined;
+    if (process.platform !== "darwin" && process.platform !== "linux")
+        throw new Error("Managed network access is currently supported only on macOS and Linux.");
+    if (
+        (policy.allowedDomains?.length ?? 0) === 0 &&
+        (policy.allowedLoopbackPorts?.length ?? 0) === 0
+    ) {
+        throw new Error(
+            "Managed network access requires an allowed domain or an allowed loopback port.",
+        );
+    }
+    validateLoopbackPorts(policy.allowedLoopbackPorts ?? []);
+    if ((policy.allowedDomains?.length ?? 0) === 0 && process.platform !== "linux")
+        return { close: async () => {} };
+    const proxy = await startManagedNetworkProxy(policy);
+    try {
+        const bridge =
+            process.platform === "linux"
+                ? await startLinuxManagedNetworkBridge(proxy, {
+                      ...(policy.allowedLoopbackPorts === undefined
+                          ? {}
+                          : { loopbackPorts: policy.allowedLoopbackPorts }),
+                  })
+                : undefined;
+        return {
+            ...(bridge === undefined ? {} : { bridge }),
+            proxy,
+            async close() {
+                await bridge?.close();
+                await proxy.close();
+            },
+        };
+    } catch (error) {
+        await proxy.close();
+        throw error;
+    }
+}
+
+function networkSandboxOptions(
+    policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
+    managedNetwork: CommandManagedNetwork | undefined,
+): {
+    networkAllowedLoopbackPorts?: readonly number[];
+    networkUnixProxySockets?: {
+        http: string;
+        loopback?: readonly { path: string; port: number }[];
+        socks: string;
+    };
+} {
+    const proxy = managedNetwork?.proxy;
+    const ports = [
+        ...(policy?.allowedLoopbackPorts ?? []),
+        ...(proxy === undefined ? [] : [proxy.port, proxy.socksPort]),
+    ];
+    return {
+        ...(ports.length === 0 ? {} : { networkAllowedLoopbackPorts: [...new Set(ports)] }),
+        ...(managedNetwork?.bridge === undefined
+            ? {}
+            : {
+                  networkUnixProxySockets: {
+                      http: managedNetwork.bridge.httpSocketPath,
+                      loopback: managedNetwork.bridge.loopbackSockets,
+                      socks: managedNetwork.bridge.socksSocketPath,
+                  },
+              }),
+    };
+}
+
+function validateLoopbackPorts(ports: readonly number[]): void {
+    for (const port of ports) {
+        if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+            throw new Error(`Invalid managed network loopback port: ${String(port)}`);
+        }
+    }
+}
+
+function withManagedNetworkProxy(
+    environment: NodeJS.ProcessEnv,
+    managedNetwork: CommandManagedNetwork | undefined,
+    policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
+): NodeJS.ProcessEnv {
+    const proxy = managedNetwork?.proxy;
+    if (proxy === undefined) return environment;
+    const bridge = managedNetwork?.bridge;
+    const url =
+        bridge === undefined ? `http://127.0.0.1:${String(proxy.port)}` : "http://127.0.0.1:3128";
+    const socksUrl =
+        bridge === undefined
+            ? `socks5h://127.0.0.1:${String(proxy.socksPort)}`
+            : "socks5h://127.0.0.1:1080";
+    const noProxy =
+        (policy?.allowedLoopbackPorts?.length ?? 0) > 0 ? "localhost,127.0.0.1,::1" : "";
+    return {
+        ...environment,
+        ALL_PROXY: socksUrl,
+        HTTP_PROXY: url,
+        HTTPS_PROXY: url,
+        NODE_USE_ENV_PROXY: "1",
+        NO_PROXY: noProxy,
+        all_proxy: socksUrl,
+        http_proxy: url,
+        https_proxy: url,
+        no_proxy: noProxy,
     };
 }

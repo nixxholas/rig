@@ -14,7 +14,7 @@ export async function prepareDockerSandbox(
     const metadata = await runDockerExec(container, [
         "/bin/sh",
         "-c",
-        'bwrap=$(command -v bwrap) || exit 20; readlink -f "$bwrap" || exit 21',
+        'bwrap=$(command -v bwrap) || exit 20; command -v socat >/dev/null || exit 22; readlink -f "$bwrap" || exit 21',
     ]);
     if (metadata.exitCode !== 0) throw dockerSandboxRequirementsError(metadata.stderr);
 
@@ -51,7 +51,7 @@ export async function prepareDockerSandbox(
 function dockerSandboxRequirementsError(stderr: Buffer): Error {
     const detail = stderr.toString("utf8").trim();
     return new Error(
-        "Restricted Docker commands require Bubblewrap and nested user namespaces. Install bubblewrap in the image; when connecting to an existing container, start it with '--security-opt seccomp=unconfined'." +
+        "Restricted Docker commands require Bubblewrap, socat, and nested user namespaces. Install bubblewrap and socat in the image; when connecting to an existing container, start it with '--security-opt seccomp=unconfined'." +
             (detail === "" ? "" : ` Docker reported: ${detail}`),
     );
 }

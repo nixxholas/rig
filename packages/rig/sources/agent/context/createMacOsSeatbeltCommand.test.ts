@@ -55,6 +55,19 @@ describe("createMacOsSeatbeltCommand", () => {
         expect(definedPaths(result.args, "PROTECTED_WRITE")).not.toContain(join(cwd, ".git"));
     });
 
+    it("allows outbound network only to the managed proxy port", async () => {
+        const result = await createMacOsSeatbeltCommand({
+            command: "true",
+            cwd: process.cwd(),
+            mode: "workspace_write",
+            networkAllowedLoopbackPorts: [43_123],
+            shell: "/bin/sh",
+        });
+
+        expect(result.args[1]).toContain('(allow network-outbound (remote ip "localhost:43123"))');
+        expect(result.args[1]).not.toContain("\n(allow network-outbound)\n");
+    });
+
     it.runIf(process.platform === "darwin")(
         "allows a normal commit from a linked worktree in Workspace write mode",
         async () => {
@@ -63,12 +76,26 @@ describe("createMacOsSeatbeltCommand", () => {
             const repository = join(root, "repository");
             const worktree = join(root, "worktree");
             await execFileAsync("git", ["init", repository]);
-            await execFileAsync("git", ["-C", repository, "config", "user.email", "rig@example.com"]);
+            await execFileAsync("git", [
+                "-C",
+                repository,
+                "config",
+                "user.email",
+                "rig@example.com",
+            ]);
             await execFileAsync("git", ["-C", repository, "config", "user.name", "Rig"]);
             await writeFile(join(repository, "tracked.txt"), "initial\n");
             await execFileAsync("git", ["-C", repository, "add", "tracked.txt"]);
             await execFileAsync("git", ["-C", repository, "commit", "-m", "initial"]);
-            await execFileAsync("git", ["-C", repository, "worktree", "add", "-b", "feature", worktree]);
+            await execFileAsync("git", [
+                "-C",
+                repository,
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                worktree,
+            ]);
             await writeFile(join(worktree, "tracked.txt"), "changed\n");
 
             const result = await createMacOsSeatbeltCommand({

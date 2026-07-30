@@ -28,6 +28,7 @@ export type {
     ConfigSettings,
     ConfigSource,
     ConfigTheme,
+    ConfigNetwork,
     LoadedConfig,
     LoadConfigOptions,
     RigConfig,

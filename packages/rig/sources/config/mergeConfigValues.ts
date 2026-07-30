@@ -8,6 +8,7 @@ export function mergeConfigValues(
     const defaults = { ...baseDefaults.defaults };
     const features = { ...baseDefaults.features };
     const mcpServers = { ...baseDefaults.mcpServers };
+    let network = baseDefaults.network;
     let providerDefaultEnable = baseDefaults.providerDefaultEnable;
     const providers: Record<string, PartialConfigProvider> = Object.fromEntries(
         Object.entries(baseDefaults.providers).map(([id, provider]) => {
@@ -81,12 +82,14 @@ export function mergeConfigValues(
         if (config.mcpServers !== undefined) {
             Object.assign(mcpServers, config.mcpServers);
         }
+        if (config.network !== undefined) network = config.network;
     }
 
     return {
         defaults,
         features,
         mcpServers,
+        ...(network === undefined ? {} : { network }),
         providerDefaultEnable,
         providers: Object.fromEntries(
             Object.entries(providers).map(([id, provider]) => [

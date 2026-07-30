@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { posix } from "node:path";
 import { PassThrough, type Duplex } from "node:stream";
 
@@ -10,6 +12,13 @@ import type {
     BashSessionSnapshot,
 } from "../agent/context/BashContext.js";
 import { assertCanUseCustomShell } from "../agent/context/assertCanUseCustomShell.js";
+import type { ManagedNetworkProxyHandle } from "../agent/context/ManagedNetworkPolicy.js";
+import { mergeManagedNetworkPolicies } from "../agent/context/loadProjectManagedNetworkPolicy.js";
+import {
+    startLinuxManagedNetworkBridge,
+    type LinuxManagedNetworkBridge,
+} from "../agent/context/startLinuxManagedNetworkBridge.js";
+import { startManagedNetworkProxy } from "../agent/context/startManagedNetworkProxy.js";
 import type { PermissionContext } from "../permissions/index.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
 import { runDockerExec } from "./runDockerExec.js";
@@ -19,6 +28,8 @@ import { createDockerSandboxCommand } from "./createDockerSandboxCommand.js";
 import { prepareDockerSandbox, type PreparedDockerSandbox } from "./prepareDockerSandbox.js";
 import { resolveDockerPath } from "./resolveDockerPath.js";
 import { DOCKER_PROTECTED_PATH_MONITOR_SCRIPT } from "./dockerProtectedPathMonitorScript.js";
+import { loadDockerProjectManagedNetworkPolicy } from "./loadDockerProjectManagedNetworkPolicy.js";
+import { resolveDockerBindMountPath } from "./resolveDockerBindMountPath.js";
 
 interface DockerBashSession {
     command: string;
@@ -28,6 +39,7 @@ interface DockerBashSession {
     exitCode: number | null;
     finished: boolean;
     killed: boolean;
+    managedNetwork?: DockerManagedNetwork;
     pidFile: string;
     sessionId: number;
     stderr: Buffer;
@@ -37,6 +49,15 @@ interface DockerBashSession {
     stream: Duplex;
     timedOut: boolean;
     timeout?: NodeJS.Timeout;
+}
+
+interface DockerManagedNetwork {
+    bridge: LinuxManagedNetworkBridge;
+    close(): Promise<void>;
+    containerHttpSocketPath: string;
+    containerLoopbackSockets: readonly { path: string; port: number }[];
+    containerSocksSocketPath: string;
+    proxy: ManagedNetworkProxyHandle;
 }
 
 const MAX_RETAINED_SESSIONS = 64;
@@ -79,6 +100,19 @@ export function createDockerBashContext(
         );
         const workspaceCwd =
             permissionMode === "full_access" ? undefined : await loadCanonicalWorkspace();
+        const runtime =
+            permissionMode === "full_access" ? undefined : await loadSandboxRuntime(container);
+        const networkPolicy =
+            permissionMode === "full_access"
+                ? undefined
+                : mergeManagedNetworkPolicies(
+                      await loadDockerProjectManagedNetworkPolicy(container, cwd),
+                      options.network,
+                  );
+        const managedNetwork =
+            networkPolicy === undefined
+                ? undefined
+                : await startDockerManagedNetwork(container, workspaceCwd ?? cwd, networkPolicy);
         const invokedCommand =
             permissionMode === "full_access"
                 ? [shell, "-lc", options.command]
@@ -86,50 +120,76 @@ export function createDockerBashContext(
                       command: options.command,
                       commandCwd: runCwd,
                       mode: permissionMode,
+                      ...(managedNetwork === undefined
+                          ? {}
+                          : {
+                                networkUnixProxySockets: {
+                                    http: managedNetwork.containerHttpSocketPath,
+                                    loopback: managedNetwork.containerLoopbackSockets,
+                                    socks: managedNetwork.containerSocksSocketPath,
+                                },
+                            }),
                       protectedPaths: [pidFile],
-                      runtime: await loadSandboxRuntime(container),
+                      runtime: runtime!,
                       shell,
                       workspaceCwd: workspaceCwd ?? cwd,
                   });
         const protectedCreatePaths =
             workspaceCwd === undefined || permissionMode === "read_only"
                 ? []
-                : [".agents", ".codex"].map((name) => posix.join(workspaceCwd, name));
-        const exec = await container.exec({
-            AttachStdin: true,
-            AttachStderr: true,
-            AttachStdout: true,
-            Cmd:
-                protectedCreatePaths.length === 0
-                    ? [
-                          "/bin/sh",
-                          "-c",
-                          'echo $$ > "$1"; shift; exec "$@"',
-                          "rig",
-                          pidFile,
-                          ...invokedCommand,
-                      ]
-                    : [
-                          "/bin/sh",
-                          "-c",
-                          DOCKER_PROTECTED_PATH_MONITOR_SCRIPT,
-                          "rig",
-                          pidFile,
-                          ...protectedCreatePaths,
-                          "--",
-                          ...invokedCommand,
-                      ],
-            ...(Object.keys(secretEnvironment).length === 0
-                ? {}
-                : {
-                      Env: Object.entries(secretEnvironment).map(
-                          ([name, value]) => `${name}=${value ?? ""}`,
-                      ),
-                  }),
-            Tty: false,
-            WorkingDir: runCwd,
-        });
-        const stream = await exec.start({ hijack: true, stdin: true, Tty: false });
+                : [".agents", ".codex", "rig.toml"].map((name) => posix.join(workspaceCwd, name));
+        let exec: Dockerode.Exec;
+        try {
+            exec = await container.exec({
+                AttachStdin: true,
+                AttachStderr: true,
+                AttachStdout: true,
+                Cmd:
+                    protectedCreatePaths.length === 0
+                        ? [
+                              "/bin/sh",
+                              "-c",
+                              'echo $$ > "$1"; shift; exec "$@"',
+                              "rig",
+                              pidFile,
+                              ...invokedCommand,
+                          ]
+                        : [
+                              "/bin/sh",
+                              "-c",
+                              DOCKER_PROTECTED_PATH_MONITOR_SCRIPT,
+                              "rig",
+                              pidFile,
+                              ...protectedCreatePaths,
+                              "--",
+                              ...invokedCommand,
+                          ],
+                ...(Object.keys(
+                    withDockerManagedNetworkEnvironment(secretEnvironment, managedNetwork),
+                ).length === 0
+                    ? {}
+                    : {
+                          Env: Object.entries(
+                              withDockerManagedNetworkEnvironment(
+                                  secretEnvironment,
+                                  managedNetwork,
+                              ),
+                          ).map(([name, value]) => `${name}=${value ?? ""}`),
+                      }),
+                Tty: false,
+                WorkingDir: runCwd,
+            });
+        } catch (error) {
+            await managedNetwork?.close();
+            throw error;
+        }
+        let stream: Duplex;
+        try {
+            stream = await exec.start({ hijack: true, stdin: true, Tty: false });
+        } catch (error) {
+            await managedNetwork?.close();
+            throw error;
+        }
         const stdoutStream = new PassThrough();
         const stderrStream = new PassThrough();
         const maximum = options.maxOutputBytes ?? 512_000;
@@ -141,6 +201,7 @@ export function createDockerBashContext(
             exitCode: null,
             finished: false,
             killed: false,
+            ...(managedNetwork === undefined ? {} : { managedNetwork }),
             pidFile,
             sessionId,
             stderr: Buffer.alloc(0),
@@ -180,6 +241,7 @@ export function createDockerBashContext(
                     .then((details) => details.ExitCode)
                     .catch(() => null);
                 session.finished = true;
+                await session.managedNetwork?.close();
                 if (session.timeout !== undefined) clearTimeout(session.timeout);
                 onActiveSessionCountChange?.(activeSessionCount());
                 resolve();
@@ -390,6 +452,76 @@ export function createDockerBashContext(
             if (session === undefined || session.finished || session.stream.destroyed) return false;
             return session.stream.write(data);
         },
+    };
+}
+
+async function startDockerManagedNetwork(
+    container: Dockerode.Container,
+    workspaceCwd: string,
+    policy: import("../agent/context/ManagedNetworkPolicy.js").ManagedNetworkPolicy,
+): Promise<DockerManagedNetwork> {
+    if (
+        (policy.allowedDomains?.length ?? 0) === 0 &&
+        (policy.allowedLoopbackPorts?.length ?? 0) === 0
+    ) {
+        throw new Error(
+            "Managed network access requires an allowed domain or an allowed loopback port.",
+        );
+    }
+    const mapping = await resolveDockerBindMountPath(container, workspaceCwd);
+    const directory = await mkdtemp(join(mapping.hostPath, ".rig-network-"));
+    const containerDirectory = posix.join(mapping.containerPath, basename(directory));
+    const proxy = await startManagedNetworkProxy(policy);
+    try {
+        const bridge = await startLinuxManagedNetworkBridge(proxy, {
+            directory,
+            ...(policy.allowedLoopbackPorts === undefined
+                ? {}
+                : { loopbackPorts: policy.allowedLoopbackPorts }),
+        });
+        let closed = false;
+        return {
+            bridge,
+            containerHttpSocketPath: posix.join(containerDirectory, "http.sock"),
+            containerLoopbackSockets: bridge.loopbackSockets.map(({ port }) => ({
+                path: posix.join(containerDirectory, `loopback-${String(port)}.sock`),
+                port,
+            })),
+            containerSocksSocketPath: posix.join(containerDirectory, "socks.sock"),
+            proxy,
+            async close() {
+                if (closed) return;
+                closed = true;
+                await bridge.close();
+                await proxy.close();
+                await rm(directory, { force: true, recursive: true });
+            },
+        };
+    } catch (error) {
+        await proxy.close();
+        await rm(directory, { force: true, recursive: true });
+        throw error;
+    }
+}
+
+function withDockerManagedNetworkEnvironment(
+    environment: NodeJS.ProcessEnv,
+    managedNetwork: DockerManagedNetwork | undefined,
+): NodeJS.ProcessEnv {
+    if (managedNetwork === undefined) return environment;
+    const noProxy =
+        managedNetwork.containerLoopbackSockets.length === 0 ? "" : "localhost,127.0.0.1,::1";
+    return {
+        ...environment,
+        ALL_PROXY: "socks5h://127.0.0.1:1080",
+        HTTP_PROXY: "http://127.0.0.1:3128",
+        HTTPS_PROXY: "http://127.0.0.1:3128",
+        NODE_USE_ENV_PROXY: "1",
+        NO_PROXY: noProxy,
+        all_proxy: "socks5h://127.0.0.1:1080",
+        http_proxy: "http://127.0.0.1:3128",
+        https_proxy: "http://127.0.0.1:3128",
+        no_proxy: noProxy,
     };
 }
 

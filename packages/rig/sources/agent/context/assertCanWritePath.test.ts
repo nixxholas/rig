@@ -15,6 +15,44 @@ afterEach(async () => {
     );
 });
 
+describe("direct filesystem project configuration protection", () => {
+    it("blocks changes to the root rig.toml in restricted write modes", async () => {
+        const workspace = await mkdtemp(join(tmpdir(), "rig-project-config-security-"));
+        temporaryDirectories.push(workspace);
+        await writeFile(join(workspace, "rig.toml"), "[network]\nallowed_ports = [443]\n");
+        let mode: PermissionMode = "workspace_write";
+        const context = createNodeFileSystemContext(workspace, {
+            permissionMode: () => mode,
+        });
+
+        for (const restrictedMode of ["workspace_write", "auto"] as const) {
+            mode = restrictedMode;
+            await expect(context.writeFile("rig.toml", "compromised\n")).rejects.toThrow(
+                "cannot modify the project rig.toml",
+            );
+            await expect(context.rm("rig.toml")).rejects.toThrow(
+                "cannot modify the project rig.toml",
+            );
+        }
+
+        await expect(readFile(join(workspace, "rig.toml"), "utf8")).resolves.toBe(
+            "[network]\nallowed_ports = [443]\n",
+        );
+    });
+
+    it("allows explicit Full access to change the root rig.toml", async () => {
+        const workspace = await mkdtemp(join(tmpdir(), "rig-project-config-full-access-"));
+        temporaryDirectories.push(workspace);
+        const context = createNodeFileSystemContext(workspace, {
+            permissionMode: () => "full_access",
+        });
+
+        await context.writeFile("rig.toml", "[network]\nallowed_ports = [8443]\n");
+
+        await expect(readFile(join(workspace, "rig.toml"), "utf8")).resolves.toContain("8443");
+    });
+});
+
 describe("direct filesystem Git control protection", () => {
     it("blocks writes, directory creation, and removal throughout Git metadata", async () => {
         const workspace = await createRepositoryFixture();

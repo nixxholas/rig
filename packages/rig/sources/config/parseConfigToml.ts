@@ -27,11 +27,13 @@ export function parseConfigToml(source: string): PartialRigConfig {
         "docker",
         "features",
         "mcp_servers",
+        "network",
         "providers",
         "settings",
         "theme",
     ]);
     const docker = readDockerConfig(table.docker);
+    const network = readNetworkConfig(table.network);
     const defaultsTable = readTable(table.defaults, "defaults");
 
     if (defaultsTable !== undefined) {
@@ -173,6 +175,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(defaults).length > 0 ? { defaults } : {}),
         ...(Object.keys(features).length > 0 ? { features } : {}),
         ...(mcpServers !== undefined ? { mcpServers } : {}),
+        ...(network !== undefined ? { network } : {}),
         ...(providerSettings?.defaultEnable === undefined
             ? {}
             : { providerDefaultEnable: providerSettings.defaultEnable }),
@@ -182,6 +185,41 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(Object.keys(theme).length > 0 ? { theme } : {}),
     };
+}
+
+function readNetworkConfig(
+    value: TomlValue | undefined,
+): import("./types.js").ConfigNetwork | undefined {
+    if (value === undefined) return undefined;
+    if (!isTomlTable(value)) throw new Error("network must be a TOML table.");
+    assertKnownKeys(value, "network", [
+        "allowed_domains",
+        "allowed_loopback_ports",
+        "allowed_ports",
+        "denied_domains",
+    ]);
+    const network = {
+        ...readOptionalStringArray(
+            value,
+            "allowed_domains",
+            "allowedDomains",
+            "network.allowed_domains",
+        ),
+        ...readOptionalPortArray(
+            value,
+            "allowed_loopback_ports",
+            "allowedLoopbackPorts",
+            "network.allowed_loopback_ports",
+        ),
+        ...readOptionalPortArray(value, "allowed_ports", "allowedPorts", "network.allowed_ports"),
+        ...readOptionalStringArray(
+            value,
+            "denied_domains",
+            "deniedDomains",
+            "network.denied_domains",
+        ),
+    };
+    return Object.keys(network).length === 0 ? undefined : network;
 }
 
 function readProviders(
@@ -631,6 +669,25 @@ function readOptionalStringArray<TKey extends string>(
         throw new Error(`${path} must be an array of strings.`);
     }
     return { [outputKey]: value } as unknown as Partial<Record<TKey, readonly string[]>>;
+}
+
+function readOptionalPortArray<TKey extends string>(
+    table: TomlTable,
+    key: string,
+    outputKey: TKey,
+    path = key,
+): Partial<Record<TKey, readonly number[]>> {
+    const value = table[key];
+    if (value === undefined) return {};
+    if (
+        !Array.isArray(value) ||
+        value.some(
+            (entry) => !Number.isSafeInteger(entry) || Number(entry) < 1 || Number(entry) > 65_535,
+        )
+    ) {
+        throw new Error(`${path} must be an array of ports between 1 and 65535.`);
+    }
+    return { [outputKey]: value } as unknown as Partial<Record<TKey, readonly number[]>>;
 }
 
 function readOptionalStringRecord<TKey extends string>(

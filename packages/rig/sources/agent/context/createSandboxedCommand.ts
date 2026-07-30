@@ -33,6 +33,12 @@ export async function createSandboxedCommand(options: {
     commandCwd?: string;
     cwd: string;
     mode: PermissionMode;
+    networkAllowedLoopbackPorts?: readonly number[];
+    networkUnixProxySockets?: {
+        http: string;
+        loopback?: readonly { path: string; port: number }[];
+        socks: string;
+    };
     path?: string;
     shell: string;
 }): Promise<SandboxedCommand> {

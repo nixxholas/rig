@@ -9,6 +9,11 @@ import {
     toTextBlocks,
 } from "../utils/index.js";
 import { shellExplorationPresentation } from "../utils/shellExplorationPresentation.js";
+import {
+    describeManagedNetworkAccess,
+    managedNetworkToolSchema,
+    toManagedNetworkPolicy,
+} from "../../agent/context/managedNetworkToolSchema.js";
 
 export const grokRunTerminalCommandTool = defineTool({
     name: "run_terminal_command",
@@ -49,6 +54,7 @@ Usage notes:
                     "Request reviewed execution outside the workspace sandbox in Auto mode. Defaults to use_default.",
             }),
         ),
+        network: Type.Optional(managedNetworkToolSchema),
     }),
     returnType: Type.Object({
         text: Type.String(),
@@ -56,20 +62,24 @@ Usage notes:
     }),
     autoPermissionInstructions:
         'For run_terminal_command, request full-access execution with sandbox_permissions: "require_escalated". Explain why in the description. Keep sandbox_permissions at "use_default" or omit it for ordinary commands.',
-    describeAutoPermissionAction: ({ command }, context) =>
-        summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
+    describeAutoPermissionAction: ({ command, network }, context) =>
+        network === undefined
+            ? summarizeEscalatedShellAction({ command, cwd: context.fs.cwd })
+            : describeManagedNetworkAccess(network),
     availableToPermissionReviewer: true,
-    shouldReviewInAutoMode: ({ sandbox_permissions }) =>
-        sandbox_permissions === "require_escalated",
+    shouldReviewInAutoMode: ({ network, sandbox_permissions }) =>
+        sandbox_permissions === "require_escalated" || network !== undefined,
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
-    execute: async ({ background, command, secrets, timeout }, context, execution) => {
+    execute: async ({ background, command, network, secrets, timeout }, context, execution) => {
+        const networkPolicy = toManagedNetworkPolicy(network);
         if (background) {
             const taskId = await context.bash.startSession({
                 command,
                 maxOutputBytes: 512_000,
                 ...(secrets === undefined ? {} : { secrets }),
                 ...(timeout === undefined || timeout === 0 ? {} : { timeoutMs: timeout }),
+                ...(networkPolicy === undefined ? {} : { network: networkPolicy }),
             });
             return {
                 task_id: String(taskId),
@@ -83,6 +93,7 @@ Usage notes:
             ...(secrets === undefined ? {} : { secrets }),
             timeoutMs: timeout === undefined || timeout === 0 ? 120_000 : timeout,
             ...(execution.signal === undefined ? {} : { signal: execution.signal }),
+            ...(networkPolicy === undefined ? {} : { network: networkPolicy }),
         });
         const text = [result.stdout, result.stderr].filter(Boolean).join("\n") || "(no output)";
         if (result.timedOut) throw new Error(`${text}\n\nCommand timed out.`);

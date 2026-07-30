@@ -10,6 +10,11 @@ import {
 } from "./impl/unifiedExecOutput.js";
 import { readSessionWithProgress } from "../../../tools/utils/readSessionWithProgress.js";
 import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
+import {
+    describeManagedNetworkAccess,
+    managedNetworkToolSchema,
+    toManagedNetworkPolicy,
+} from "../../context/managedNetworkToolSchema.js";
 
 export const codexExecCommandTool = defineTool({
     name: "exec_command",
@@ -34,6 +39,7 @@ export const codexExecCommandTool = defineTool({
                             "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
                     }),
                 ),
+                network: Type.Optional(managedNetworkToolSchema),
                 sandbox_permissions: Type.Optional(
                     Type.Union([Type.Literal("use_default"), Type.Literal("require_escalated")], {
                         description:
@@ -80,6 +86,7 @@ export const codexExecCommandTool = defineTool({
                     "Output token budget. Defaults to 10000 tokens; larger requests may be capped by policy.",
             }),
         ),
+        network: Type.Optional(managedNetworkToolSchema),
         secrets: Type.Optional(
             Type.Array(Type.String(), {
                 description:
@@ -107,19 +114,21 @@ export const codexExecCommandTool = defineTool({
     returnType: unifiedExecOutputSchema,
     autoPermissionInstructions:
         'For exec_command, request full-access execution with sandbox_permissions: "require_escalated" and include a concise justification. Keep sandbox_permissions at "use_default" or omit it for ordinary commands.',
-    describeAutoPermissionAction: ({ cmd, shell, workdir }, context) =>
-        summarizeEscalatedShellAction({
-            command: cmd,
-            cwd: workdir ?? context.fs.cwd,
-            ...(shell === undefined ? {} : { shell }),
-        }),
+    describeAutoPermissionAction: ({ cmd, network, shell, workdir }, context) =>
+        network === undefined
+            ? summarizeEscalatedShellAction({
+                  command: cmd,
+                  cwd: workdir ?? context.fs.cwd,
+                  ...(shell === undefined ? {} : { shell }),
+              })
+            : describeManagedNetworkAccess(network),
     availableToPermissionReviewer: true,
-    shouldReviewInAutoMode: ({ sandbox_permissions }) =>
-        sandbox_permissions === "require_escalated",
+    shouldReviewInAutoMode: ({ network, sandbox_permissions }) =>
+        sandbox_permissions === "require_escalated" || network !== undefined,
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
     execute: async (
-        { cmd, max_output_tokens, secrets, shell, workdir, yield_time_ms },
+        { cmd, max_output_tokens, network, secrets, shell, workdir, yield_time_ms },
         context,
         execution,
     ) => {
@@ -131,6 +140,8 @@ export const codexExecCommandTool = defineTool({
         if (workdir !== undefined) startOptions.cwd = workdir;
         if (secrets !== undefined) startOptions.secrets = secrets;
         if (shell !== undefined) startOptions.shell = shell;
+        const networkPolicy = toManagedNetworkPolicy(network);
+        if (networkPolicy !== undefined) startOptions.network = networkPolicy;
         const sessionId = await context.bash.startSession(startOptions);
         const snapshot = await readSessionWithProgress({
             bash: context.bash,

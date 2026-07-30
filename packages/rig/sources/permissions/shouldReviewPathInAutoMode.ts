@@ -4,6 +4,7 @@ import type { AgentContext } from "../agent/context/AgentContext.js";
 import { createUserSkillRootPaths } from "../agent/context/createUserSkillRootPaths.js";
 import { isPathInsideWorkspace } from "../agent/context/isPathInsideWorkspace.js";
 import { isProtectedGitControlPath } from "../agent/context/isProtectedGitControlPath.js";
+import { isProtectedProjectConfigPath } from "../agent/context/isProtectedProjectConfigPath.js";
 import { resolvePotentialPath } from "../agent/context/resolvePotentialPath.js";
 import { resolveFileSystemPath } from "../agent/context/resolveFileSystemPath.js";
 
@@ -35,8 +36,12 @@ export async function shouldReviewPathInAutoMode(
         return true;
     }
     if (!options.write) return false;
+    const canonicalCwd = await resolvePotentialPath(context.fs.cwd);
+    const canonicalTarget = await resolvePotentialPath(resolvedPath);
     return (
+        isProtectedProjectConfigPath(context.fs.cwd, resolvedPath) ||
+        isProtectedProjectConfigPath(canonicalCwd, canonicalTarget) ||
         isProtectedGitControlPath(resolvedPath) ||
-        isProtectedGitControlPath(await resolvePotentialPath(resolvedPath))
+        isProtectedGitControlPath(canonicalTarget)
     );
 }
