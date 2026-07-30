@@ -162,6 +162,20 @@ describe("rig-connect groups against a live daemon", () => {
                 },
             ],
         });
+
+        await git(repository, ["add", "--all"]);
+        await git(repository, ["commit", "--quiet", "--message", "commit changed file"]);
+
+        await waitFor(
+            () => {
+                const snapshot = connection
+                    ?.projects()
+                    .find((project) => project.id === session.snapshot().projectId)?.git;
+                return snapshot?.changedFiles === 0 && snapshot.files?.length === 0;
+            },
+            "the committed file to leave the changed-file list",
+            15_000,
+        );
     }, 30_000);
 
     it("keeps open terminal tabs in the live group stream", async () => {

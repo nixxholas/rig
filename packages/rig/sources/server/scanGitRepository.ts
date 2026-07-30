@@ -25,19 +25,16 @@ const UNTRACKED_BYTE_LIMIT = 1024 * 1024;
 const CONSISTENCY_ATTEMPTS = 3;
 
 export interface ScanGitRepositoryOptions {
-    /** Immutable commit a managed workspace was created from; absent for a plain project. */
-    baseCommit?: string;
     now?: () => number;
     path: string;
     signal?: AbortSignal;
 }
 
 /**
- * Produces one change snapshot: what differs from the comparison base, in files and in lines.
+ * Produces one Git-status snapshot: what differs from HEAD, in files and in lines.
  *
- * Committed, staged, unstaged, and untracked work all count toward the same totals, because the
- * question a client asks is "how much work is here", not "which staging area is it in". Per-file
- * staged and unstaged flags are still reported for clients that care.
+ * Staged, unstaged, and untracked work all count toward the same totals. Committed work is reflected
+ * by branch divergence instead of remaining in the changed-file list after `git status` is clean.
  */
 export async function scanGitRepository(
     options: ScanGitRepositoryOptions,
@@ -96,7 +93,6 @@ async function scanOnce(
     const facts = factsFromStatus(status);
     const conflicted = status.entries.some((entry) => entry.unmerged);
     const comparison = await resolveGitComparisonBase({
-        ...(options.baseCommit === undefined ? {} : { baseCommit: options.baseCommit }),
         ...(status.head === undefined ? {} : { head: status.head }),
         run: async (args) => await run(args),
     });

@@ -30,8 +30,6 @@ const BACKOFF_START_MS = 1_000;
 const BACKOFF_LIMIT_MS = 30_000;
 
 export interface GitTrackedEntity {
-    /** Immutable commit a managed workspace was created from. */
-    baseCommit?: string;
     path: string;
     projectId: string;
     workspaceId?: string;
@@ -522,7 +520,6 @@ export class GitStateTracker {
 
     async #runScan(entity: GitTrackedEntity, signal?: AbortSignal): Promise<GitChangeState> {
         return await this.#scan({
-            ...(entity.baseCommit === undefined ? {} : { baseCommit: entity.baseCommit }),
             now: this.#now,
             path: entity.path,
             ...(signal === undefined ? {} : { signal }),

@@ -18,11 +18,10 @@ afterEach(async () => {
 });
 
 describe("scanGitRepository", () => {
-    it("counts committed, staged, unstaged, and untracked work in one total", async () => {
+    it("counts staged, unstaged, and untracked work in one total", async () => {
         const repository = await createRepository();
         await write(repository, "base.txt", "1\n");
         await commitAll(repository);
-        const baseCommit = await git(repository, ["rev-parse", "HEAD"]);
         await write(repository, "committed.txt", "c1\nc2\n");
         await commitAll(repository);
         await write(repository, "staged.txt", "s1\n");
@@ -31,14 +30,13 @@ describe("scanGitRepository", () => {
         await git(repository, ["add", "unstaged.txt"]);
         await write(repository, "untracked.txt", "n1\nn2\n");
 
-        const snapshot = await scanGitRepository({ baseCommit, path: repository });
+        const snapshot = await scanGitRepository({ path: repository });
 
         expect(snapshot.comparison).toBe("ready");
         expect(snapshot.countsExact).toBe(true);
-        expect(snapshot.changedFiles).toBe(4);
-        expect(snapshot.insertions).toBe(2 + 1 + 3 + 2);
+        expect(snapshot.changedFiles).toBe(3);
+        expect(snapshot.insertions).toBe(1 + 3 + 2);
         expect(snapshot.deletions).toBe(0);
-        expect(file(snapshot, "committed.txt")).toMatchObject({ staged: false, unstaged: false });
         expect(file(snapshot, "staged.txt")).toMatchObject({ staged: true });
         expect(file(snapshot, "untracked.txt")).toMatchObject({
             insertions: 2,
@@ -46,22 +44,20 @@ describe("scanGitRepository", () => {
         });
     });
 
-    it("keeps committed work in the totals after the workspace commits", async () => {
+    it("removes committed work from Git status even in a managed workspace", async () => {
         const repository = await createRepository();
         await write(repository, "a.txt", "1\n");
         await commitAll(repository);
-        const baseCommit = await git(repository, ["rev-parse", "HEAD"]);
         await write(repository, "a.txt", "1\n2\n3\n");
 
-        const dirty = await scanGitRepository({ baseCommit, path: repository });
+        const dirty = await scanGitRepository({ path: repository });
         await commitAll(repository);
-        const committed = await scanGitRepository({ baseCommit, path: repository });
+        const committed = await scanGitRepository({ path: repository });
 
         expect(dirty.insertions).toBe(2);
-        // Committing must not reset the workspace total to zero; that is the whole point of
-        // measuring against the base rather than HEAD.
-        expect(committed.insertions).toBe(2);
-        expect(committed.changedFiles).toBe(1);
+        expect(committed.insertions).toBe(0);
+        expect(committed.changedFiles).toBe(0);
+        expect(committed.files).toEqual([]);
     });
 
     it("measures a plain project against HEAD so committing clears the total", async () => {
@@ -77,39 +73,6 @@ describe("scanGitRepository", () => {
         expect(dirty.insertions).toBe(1);
         expect(clean.changedFiles).toBe(0);
         expect(clean.insertions).toBe(0);
-    });
-
-    it("reports an unavailable comparison instead of zero when the base commit is gone", async () => {
-        const repository = await createRepository();
-        await write(repository, "a.txt", "1\n");
-        await commitAll(repository);
-        await write(repository, "a.txt", "1\n2\n");
-
-        const snapshot = await scanGitRepository({
-            baseCommit: "0".repeat(40),
-            path: repository,
-        });
-
-        expect(snapshot.comparison).toBe("unavailable");
-        expect(snapshot.error).toContain("no longer in the repository");
-        expect(snapshot.countsExact).toBe(false);
-        expect(snapshot.changedFiles).toBe(0);
-    });
-
-    it("reports an unavailable comparison when history no longer connects", async () => {
-        const repository = await createRepository();
-        await write(repository, "a.txt", "1\n");
-        await commitAll(repository);
-        const unrelated = await createRepository();
-        await write(unrelated, "b.txt", "2\n");
-        await commitAll(unrelated);
-        const foreign = await git(unrelated, ["rev-parse", "HEAD"]);
-        await git(repository, ["fetch", "--quiet", unrelated, "main"]);
-
-        const snapshot = await scanGitRepository({ baseCommit: foreign, path: repository });
-
-        expect(snapshot.comparison).toBe("unavailable");
-        expect(snapshot.error).toContain("no longer shares history");
     });
 
     it("treats every file as added in a repository without commits", async () => {
