@@ -74,6 +74,13 @@ describe("createDebugProvider", () => {
         const compact = vi.fn(async (options) => ({
             status: "completed" as const,
             summary: "summary",
+            usage: {
+                input: 0,
+                output: 0,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 0,
+            },
             context: {
                 ...options.context,
                 messages: [{ role: "user" as const, content: "summary", timestamp: 2 }],

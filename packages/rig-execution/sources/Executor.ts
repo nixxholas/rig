@@ -555,7 +555,7 @@ function toExecutionCompactionResult(
                       timestamp: latestTimestamp(sourceContext.messages),
                   },
               }),
-        ...(result.usage === undefined ? {} : { usage: result.usage }),
+        usage: result.usage,
     };
 }
 

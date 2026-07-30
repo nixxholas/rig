@@ -185,7 +185,7 @@ export type CompactionResult =
           context: Context;
           summary?: string;
           compaction?: CompactionMessage;
-          usage?: {
+          usage: {
               input: number;
               output: number;
               cacheRead: number;

@@ -158,6 +158,14 @@ export class ClaudeSession extends BaseSession {
                 context: original,
             };
         }
+        if (usage === undefined) {
+            return {
+                status: "failed",
+                kind: "inference_error",
+                message: "Claude completed compaction without reporting token usage.",
+                context: original,
+            };
+        }
         const preservedMessages = original.messages.filter((message) => message.role === "system");
         this.context = {
             instructions: original.instructions,
@@ -167,7 +175,7 @@ export class ClaudeSession extends BaseSession {
             status: "completed",
             summary,
             preservedMessages,
-            ...(usage === undefined ? {} : { usage }),
+            usage,
             context: this.context,
         };
     }
@@ -484,6 +492,14 @@ export class ClaudeSession extends BaseSession {
                 throw new Error(nativeCompactionError);
             }
             if (options.compaction && nativeCompactionCompleted) {
+                const compactResultUsage =
+                    result === undefined
+                        ? undefined
+                        : toModelUsage(result.modelUsage, options.model);
+                if (!sawInferenceUsage && compactResultUsage !== undefined) {
+                    usage = compactResultUsage;
+                    sawInferenceUsage = true;
+                }
                 const summary = this.activeReplay?.compactionSummary();
                 if (summary === undefined) {
                     throw new Error(
@@ -635,6 +651,25 @@ function mergeUsage(
     const output = update.output_tokens ?? current.output;
     const cacheRead = update.cache_read_input_tokens ?? current.cacheRead;
     const cacheWrite = update.cache_creation_input_tokens ?? current.cacheWrite;
+    return {
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        totalTokens: input + output + cacheRead + cacheWrite,
+    };
+}
+
+function toModelUsage(
+    modelUsage: SDKResultMessage["modelUsage"],
+    model: string,
+): SessionCacheUsage | undefined {
+    const usage = modelUsage[model];
+    if (usage === undefined) return undefined;
+    const input = usage.inputTokens;
+    const output = usage.outputTokens;
+    const cacheRead = usage.cacheReadInputTokens;
+    const cacheWrite = usage.cacheCreationInputTokens;
     return {
         input,
         output,

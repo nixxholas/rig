@@ -907,6 +907,13 @@ describe("ClaudeSession", () => {
         expect(compacted).toMatchObject({
             status: "completed",
             summary: "SUMMARY",
+            usage: {
+                input: 7,
+                output: 11,
+                cacheRead: 101,
+                cacheWrite: 13,
+                totalTokens: 132,
+            },
             context: {
                 instructions: "Rig system instructions.",
                 messages: [
@@ -1129,6 +1136,39 @@ function fakeNativeCompactQuery(
             compact_result: "success",
             uuid: "compact-status",
             session_id: "session-id",
+        };
+        const model = parameters.options?.model ?? "claude-sonnet-5[1m]";
+        yield {
+            type: "result",
+            subtype: "success",
+            duration_ms: 1,
+            duration_api_ms: 1,
+            is_error: false,
+            num_turns: 0,
+            result: "",
+            stop_reason: null,
+            session_id: "session-id",
+            total_cost_usd: 0,
+            usage: {
+                input_tokens: 0,
+                output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+            },
+            modelUsage: {
+                [model]: {
+                    inputTokens: 7,
+                    outputTokens: 11,
+                    cacheReadInputTokens: 101,
+                    cacheCreationInputTokens: 13,
+                    webSearchRequests: 0,
+                    costUSD: 0,
+                    contextWindow: 1_000_000,
+                    maxOutputTokens: 64_000,
+                },
+            },
+            permission_denials: [],
+            uuid: "compact-result",
         };
     }
     const generator = messages();

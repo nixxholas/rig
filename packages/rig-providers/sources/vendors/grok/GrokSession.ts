@@ -179,6 +179,14 @@ export class GrokSession extends BaseSession {
         }
 
         const { rawSummary, encryptedReasoning, usage } = completedAttempt;
+        if (usage === undefined) {
+            return {
+                status: "failed",
+                kind: "inference_error",
+                message: "Grok completed compaction without reporting token usage.",
+                context,
+            };
+        }
         const summary = formatGrokCompactionSummary(rawSummary);
 
         const userInfo = context.messages.filter(isGrokUserInfoMessage).slice(0, 1);
@@ -211,7 +219,7 @@ export class GrokSession extends BaseSession {
             summary,
             ...(encryptedReasoning === undefined ? {} : { encryptedReasoning }),
             preservedMessages,
-            ...(usage === undefined ? {} : { usage }),
+            usage,
             context: this.context,
         };
     }

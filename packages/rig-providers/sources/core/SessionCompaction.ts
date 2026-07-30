@@ -27,7 +27,7 @@ export interface CompletedSessionCompaction {
     readonly encryptedReasoning?: string;
     /** Original messages intentionally retained alongside the summary. */
     readonly preservedMessages: readonly SessionMessage[];
-    readonly usage?: SessionCacheUsage;
+    readonly usage: SessionCacheUsage;
     /** Complete replacement context applied to the session. */
     readonly context: SessionContext;
 }
