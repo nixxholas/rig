@@ -1,7 +1,7 @@
 import { asc, eq, sql } from "drizzle-orm";
 
 import { projects } from "../database/schema.js";
-import { projectNameKey, projectStorageKey } from "../../server/projectIdentity.js";
+import { projectNameKey, projectStorageKey } from "../../project/projectIdentity.js";
 import { generateKeyBetween } from "../../utils/fractionalIndexing.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";

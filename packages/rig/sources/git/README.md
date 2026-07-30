@@ -5,12 +5,12 @@ how it parses that output, how it watches a repository for change, and how it
 creates and removes the managed worktrees a workspace lives in.
 
 Nothing in here decides what a project or a workspace _is_. That belongs to
-`server/ProjectRepository`, which orchestrates lifecycle and persists the result;
+`project/ProjectRepository`, which orchestrates lifecycle and persists the result;
 this module answers Git questions and performs Git actions, and returns typed
 values. It holds no database code and no HTTP code.
 
 ```
-   server (ProjectRepository, HTTP routes, daemon)
+   project (ProjectRepository) + server (HTTP routes, daemon)
                      |
                      v
    +---------------------------------------------------------------+

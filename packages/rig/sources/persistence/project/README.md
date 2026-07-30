@@ -5,7 +5,7 @@ avatar metadata. Every operation accepts the shared `TX` facade first. Public re
 `query` prefix; mutations retain any reads needed inside their complete consistency boundary.
 
 ```text
-ProjectRepository
+project/ProjectRepository
       |
       v
 query / mutation operation

@@ -16,9 +16,9 @@ import type {
 import type { InMemorySession } from "./InMemorySession.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
-import type { GlobalEventQueue } from "../server/GlobalEventQueue.js";
-import type { LiveGlobalEventQueue } from "../server/LiveGlobalEventQueue.js";
-import type { ProjectAvatarAsset } from "../server/ProjectRepository.js";
+import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
+import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
+import type { ProjectAvatarAsset } from "../project/ProjectRepository.js";
 import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 
 export interface SessionStore {

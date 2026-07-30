@@ -1,6 +1,6 @@
 import { and, eq, ne, sql } from "drizzle-orm";
 import { projects } from "../database/schema.js";
-import { projectNameKey } from "../../server/projectIdentity.js";
+import { projectNameKey } from "../../project/projectIdentity.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 

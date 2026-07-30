@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitChangeState } from "../../protocol/index.js";
-import { InMemoryGlobalEventQueue } from "../../server/InMemoryGlobalEventQueue.js";
+import { InMemoryGlobalEventQueue } from "../../global-event/InMemoryGlobalEventQueue.js";
 import {
     GitStateTracker,
     type GitChangeSnapshot,

@@ -8,12 +8,6 @@ export type {
     SecretReference,
     SecretRegistration,
 } from "../secrets/index.js";
-export { PersistentGlobalEventQueue } from "./PersistentGlobalEventQueue.js";
-export type {
-    GlobalEventQueue,
-    GlobalEventQueueListener,
-    ListGlobalEventQueueOptions,
-} from "./GlobalEventQueue.js";
 export { TrackedTaskDrain, type TaskDrain } from "./TrackedTaskDrain.js";
 export { getDefaultSessionDatabasePath } from "./getDefaultSessionDatabasePath.js";
 export { createModelCatalog, type CreateModelCatalogOptions } from "./createModelCatalog.js";

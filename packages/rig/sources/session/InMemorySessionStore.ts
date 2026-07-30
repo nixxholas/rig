@@ -29,11 +29,11 @@ import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
-import { InMemoryGlobalEventQueue } from "../server/InMemoryGlobalEventQueue.js";
-import { LiveGlobalEventQueue } from "../server/LiveGlobalEventQueue.js";
-import { ProjectRepository, type ProjectAvatarAsset } from "../server/ProjectRepository.js";
-import type { GlobalEventQueue } from "../server/GlobalEventQueue.js";
-import { shouldPublishGlobalEvent } from "../server/shouldPublishGlobalEvent.js";
+import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
+import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
+import { ProjectRepository, type ProjectAvatarAsset } from "../project/ProjectRepository.js";
+import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
+import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import {

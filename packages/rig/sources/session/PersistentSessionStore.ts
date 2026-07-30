@@ -36,8 +36,8 @@ import {
 } from "./InMemorySession.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { createModelCatalog } from "../server/createModelCatalog.js";
-import type { GlobalEventQueue } from "../server/GlobalEventQueue.js";
-import { PersistentGlobalEventQueue } from "../server/PersistentGlobalEventQueue.js";
+import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
+import { PersistentGlobalEventQueue } from "../global-event/PersistentGlobalEventQueue.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import type { TaskDrain } from "../server/TrackedTaskDrain.js";
@@ -47,10 +47,10 @@ import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
 import type { GitCommandRunner } from "../git/types.js";
-import { InMemoryGlobalEventQueue } from "../server/InMemoryGlobalEventQueue.js";
-import { LiveGlobalEventQueue } from "../server/LiveGlobalEventQueue.js";
-import { ProjectRepository, type ProjectAvatarAsset } from "../server/ProjectRepository.js";
-import { shouldPublishGlobalEvent } from "../server/shouldPublishGlobalEvent.js";
+import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
+import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
+import { ProjectRepository, type ProjectAvatarAsset } from "../project/ProjectRepository.js";
+import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import {

@@ -178,4 +178,4 @@ The TypeScript definitions remain authoritative:
 - Agent loop events: `packages/rig/sources/agent/loop.ts`
 - Inference message stream events: `packages/rig/sources/providers/types.ts`
 - Durable global queue filter:
-  `packages/rig/sources/server/shouldPersistGlobalEventType.ts`
+  `packages/rig/sources/global-event/shouldPersistGlobalEventType.ts`

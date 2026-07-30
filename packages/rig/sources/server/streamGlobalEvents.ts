@@ -5,8 +5,8 @@ import type {
     GlobalEventQueueEntry,
     GlobalLiveEvent,
 } from "../protocol/index.js";
-import type { GlobalEventQueue } from "./GlobalEventQueue.js";
-import { parseGlobalEventCursor } from "./parseGlobalEventCursor.js";
+import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
+import { parseGlobalEventCursor } from "../global-event/parseGlobalEventCursor.js";
 import { sendJson } from "./sendJson.js";
 import { writeGlobalSseEvent } from "./writeGlobalSseEvent.js";
 

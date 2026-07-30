@@ -5,7 +5,7 @@ import {
     LIVE_GLOBAL_EVENT_GAP,
     type LiveGlobalEventEntry,
     type LiveGlobalEventQueue,
-} from "./LiveGlobalEventQueue.js";
+} from "../global-event/LiveGlobalEventQueue.js";
 import { sendJson } from "./sendJson.js";
 
 /**
