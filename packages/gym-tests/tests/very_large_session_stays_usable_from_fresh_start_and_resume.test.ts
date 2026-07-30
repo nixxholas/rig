@@ -274,12 +274,23 @@ try {
     }
 
     const contextMessages = messages.slice(-contextMessageCount);
+    const insertContextMessage = database.prepare(
+        "INSERT INTO session_context_messages (session_id, position, message_id, role, message_json) VALUES (?, ?, ?, ?, ?)",
+    );
+    for (const [position, message] of contextMessages.entries()) {
+        insertContextMessage.run(
+            sessionId,
+            position,
+            message.id,
+            message.role,
+            JSON.stringify(message),
+        );
+    }
     database
         .prepare(
-            "UPDATE sessions SET status = 'completed', active_run_id = NULL, context_messages_json = ?, last_event_id = ?, last_message_at_ms = ?, title = ?, title_status = 'ready', recap = ?, updated_at_ms = ? WHERE id = ?",
+            "UPDATE sessions SET status = 'completed', active_run_id = NULL, last_event_id = ?, last_message_at_ms = ?, title = ?, title_status = 'ready', recap = ?, updated_at_ms = ? WHERE id = ?",
         )
         .run(
-            JSON.stringify(contextMessages),
             lastEventId,
             createdAt + transientEventCount + semanticMessageCount,
             "Very large historical Gym session",
@@ -295,7 +306,7 @@ try {
 
 const counts = database
     .prepare(
-        "SELECT (SELECT COUNT(*) FROM session_events WHERE session_id = ?) AS eventRows, (SELECT COALESCE(SUM(LENGTH(data_json)), 0) FROM session_events WHERE session_id = ?) AS eventBytes, (SELECT COUNT(*) FROM session_messages WHERE session_id = ?) AS messageRows, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_messages WHERE session_id = ?) AS messageBytes, (SELECT LENGTH(context_messages_json) FROM sessions WHERE id = ?) AS contextBytes",
+        "SELECT (SELECT COUNT(*) FROM session_events WHERE session_id = ?) AS eventRows, (SELECT COALESCE(SUM(LENGTH(data_json)), 0) FROM session_events WHERE session_id = ?) AS eventBytes, (SELECT COUNT(*) FROM session_messages WHERE session_id = ?) AS messageRows, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_messages WHERE session_id = ?) AS messageBytes, (SELECT COALESCE(SUM(LENGTH(message_json)), 0) FROM session_context_messages WHERE session_id = ?) AS contextBytes",
     )
     .get(sessionId, sessionId, sessionId, sessionId, sessionId);
 database.close();

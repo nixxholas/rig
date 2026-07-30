@@ -166,10 +166,11 @@ import {
     type ExternalToolInstallation,
     type ResolveExternalToolCallResponse,
 } from "../external-tools/index.js";
-import type { AgentMessage, ToolResultBlock } from "../agent/types.js";
+import { createErrorMessage } from "../agent/createErrorMessage.js";
 import { createErrorToolResultBlock } from "../agent/createErrorToolResultBlock.js";
-import { createToolResultBlock } from "../agent/createToolResultBlock.js";
 import { createModelSwitchHistoryMessage } from "../agent/createModelSwitchHistoryMessage.js";
+import { createToolResultBlock } from "../agent/createToolResultBlock.js";
+import type { AgentMessage, ErrorMessage, ToolResultBlock } from "../agent/types.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
 import { createDurableSkillTool, type DurableSkillDefinition } from "../external-skills/index.js";
 
@@ -305,6 +306,7 @@ export interface InMemorySessionPersistence {
     pruneExternalToolCalls?(sessionId: string, retain: number): void;
     pruneDurableUserInputs?(sessionId: string, retain: number): void;
     saveSession(state: PersistedSessionState): void;
+    transaction?<T>(body: () => T): T;
     upsertMessage(sessionId: string, message: PersistedSessionMessage): void;
     upsertExternalToolCall?(call: ExternalToolCall): void;
     upsertDurableUserInput?(call: DurableUserInputCall): void;
@@ -314,6 +316,7 @@ export interface InMemorySessionOptions {
     agentManager?: AgentSessionManager;
     createEventId: () => EventId;
     createRuntime?: (options: CreateCodingAssistantAgentOptions) => CodingAssistantRuntime;
+    deferEventNotification?: (notify: () => void) => void;
     emitCreatedEvent?: boolean;
     events?: readonly SessionEvent[];
     initialContextMessages?: readonly Message[];
@@ -728,6 +731,9 @@ export class InMemorySession {
             }
         }
         const eventLogOptions: ConstructorParameters<typeof SessionEventLog>[0] = {};
+        if (options.deferEventNotification !== undefined) {
+            eventLogOptions.deferNotification = options.deferEventNotification;
+        }
         if (options.events !== undefined) eventLogOptions.events = options.events;
         if (options.lastEventId !== undefined) eventLogOptions.lastEventId = options.lastEventId;
         if (options.onAppendEvent !== undefined) eventLogOptions.onAppend = options.onAppendEvent;
@@ -2533,8 +2539,11 @@ export class InMemorySession {
                     stopReason: "aborted",
                 });
             } else {
+                const errorMessage = errorToMessage(error);
+                this.#appendDurableError(compactionRunId, errorMessage, this.#runtime);
+                this.#syncContextMessages();
                 this.#append("run_error", {
-                    errorMessage: errorToMessage(error),
+                    errorMessage,
                     modelLocked: this.#modelLocked(),
                     runId: compactionRunId,
                 });
@@ -2990,10 +2999,10 @@ export class InMemorySession {
         const activeRunId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
         const runtimeSnapshot = this.#runtime?.agent.snapshot();
         const contextMessages =
-            runtimeSnapshot?.contextMessages === undefined
-                ? this.#contextMessages
+            runtimeSnapshot === undefined
+                ? (this.#contextMessages ?? this.#committedMessages())
                 : [
-                      ...runtimeSnapshot.contextMessages,
+                      ...(runtimeSnapshot.contextMessages ?? runtimeSnapshot.messages),
                       ...runtimeSnapshot.queue.map((queued) => queued.message),
                   ];
         const usageSummary = structuredClone(this.usage());
@@ -3013,7 +3022,7 @@ export class InMemorySession {
             ...(this.#draftUpdatedAt === undefined ? {} : { draftUpdatedAt: this.#draftUpdatedAt }),
             elapsedMs: this.#elapsedMs,
             ...(this.#request.docker === undefined ? {} : { docker: this.#request.docker }),
-            ...(contextMessages !== undefined ? { contextMessages: [...contextMessages] } : {}),
+            contextMessages: [...contextMessages],
             ...(this.#effort !== undefined ? { effort: this.#effort } : {}),
             ...(this.#serviceTier !== undefined ? { serviceTier: this.#serviceTier } : {}),
             id: this.id,
@@ -3949,11 +3958,13 @@ export class InMemorySession {
             this.#appendRunFinished(runId, result);
         } catch (error) {
             if (this.#activeRun?.runId !== runId) return;
+            const errorMessage = errorToMessage(error);
+            this.#appendDurableError(runId, errorMessage, runtime);
             if (!this.#workspaceArchived) this.#status = "error";
             this.#finishElapsedInterval();
             this.#activeRun = undefined;
             this.#append("run_error", {
-                errorMessage: errorToMessage(error),
+                errorMessage,
                 modelLocked: this.#modelLocked(),
                 runId,
             });
@@ -3966,6 +3977,13 @@ export class InMemorySession {
 
     #agentSnapshot(): AgentSnapshot {
         const runtimeSnapshot = this.#runtime?.agent.snapshot();
+        const contextMessages = runtimeSnapshot?.contextMessages ?? this.#contextMessages;
+        const visibleContextMessages = contextMessages?.filter(
+            (message) => !isInternalMessage(message),
+        );
+        const visibleMessages = this.#committedMessages().filter(
+            (message) => !isInternalMessage(message),
+        );
         return {
             id: this.#agentId,
             ...(this.#appendSystemPrompt !== undefined
@@ -3979,11 +3997,11 @@ export class InMemorySession {
             tools: this.#tools,
             ...(this.#effort !== undefined ? { effort: this.#effort } : {}),
             ...(this.#serviceTier !== undefined ? { serviceTier: this.#serviceTier } : {}),
-            ...((runtimeSnapshot?.contextMessages ?? this.#contextMessages) !== undefined
+            ...(visibleContextMessages !== undefined &&
+            (contextMessages?.some(isInternalMessage) === true ||
+                !isDeepStrictEqual(visibleContextMessages, visibleMessages))
                 ? {
-                      contextMessages: [
-                          ...(runtimeSnapshot?.contextMessages ?? this.#contextMessages ?? []),
-                      ].filter((message) => !isInternalMessage(message)),
+                      contextMessages: visibleContextMessages,
                   }
                 : {}),
             ...(this.#instructions !== undefined ? { instructions: this.#instructions } : {}),
@@ -4135,7 +4153,6 @@ export class InMemorySession {
         this.#recordRunFacts(event);
         this.#recordPermissionReview(event);
         this.#reportContextSize(previousSessionTokenCount);
-        this.#reportInferenceRetry(event);
         this.#reportActivity(event);
         return event;
     }
@@ -4225,24 +4242,18 @@ export class InMemorySession {
             ]);
             return;
         }
-        if (event.type === "inference_retry") {
-            const openGroupId = this.#openRunGroupId(event.data.runId);
-            const facts = this.#runFacts.get(event.data.runId) ?? {
-                startedAt: event.createdAt,
-            };
-            this.#runFacts.set(event.data.runId, {
-                ...facts,
-                retries: [
-                    ...(facts.retries ?? []),
-                    {
-                        attempt: event.data.attempt,
-                        createdAt: event.createdAt,
-                        ...(openGroupId === undefined ? {} : { groupId: openGroupId }),
-                        id: event.id,
-                        reason: event.data.reason,
+        if (event.type === "agent_message" && event.data.message.role === "error") {
+            const groupId = this.#openRunGroupId(event.data.runId);
+            const facts = this.#runFacts.get(event.data.runId);
+            if (groupId !== undefined && facts !== undefined) {
+                this.#runFacts.set(event.data.runId, {
+                    ...facts,
+                    messageGroupIds: {
+                        ...facts.messageGroupIds,
+                        [event.data.message.id]: groupId,
                     },
-                ],
-            });
+                });
+            }
             return;
         }
         if (event.type === "run_finished") {
@@ -4377,15 +4388,6 @@ export class InMemorySession {
         }
     }
 
-    #reportInferenceRetry(event: SessionEvent): void {
-        if (event.type !== "agent_event" || event.data.event.type !== "retrying") return;
-        this.#append("inference_retry", {
-            attempt: event.data.event.attempt,
-            reason: event.data.event.reason,
-            runId: event.data.runId,
-        });
-    }
-
     /**
      * Drops facts for runs no transcript window can still show.
      *
@@ -4475,11 +4477,22 @@ export class InMemorySession {
     #appendAgentMessage(runId: string, message: Message): void {
         if (
             this.#activeRun?.runId !== runId &&
-            !(this.#compactionActive && message.role === "compaction")
+            !(
+                this.#compactionActive &&
+                this.#compactionRunId === runId &&
+                (message.role === "compaction" || message.role === "error")
+            )
         ) {
             return;
         }
+        if (this.#persistence?.transaction !== undefined) {
+            this.#persistence.transaction(() => this.#commitAgentMessage(runId, message));
+            return;
+        }
+        this.#commitAgentMessage(runId, message);
+    }
 
+    #commitAgentMessage(runId: string, message: Message): void {
         const existingMessage = this.#messages.find(
             (candidate) => !candidate.isPartial && candidate.message.id === message.id,
         );
@@ -4559,6 +4572,9 @@ export class InMemorySession {
 
     #appendRunFinished(runId: string, result: AgentRunResult): SessionRunCompletion["status"] {
         const stopReason: StopReason = result.stopReason;
+        if (result.stopReason === "error") {
+            this.#appendDurableError(runId, result.errorMessage, this.#runtime);
+        }
         const responseText = findLastAgentResponseText(
             this.#messages.filter((entry) => entry.runId === runId).map((entry) => entry.message),
         );
@@ -4613,6 +4629,27 @@ export class InMemorySession {
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
         this.#trimRetainedMessages();
         return stopReason === "aborted" ? "aborted" : "completed";
+    }
+
+    #appendDurableError(
+        runId: string,
+        reason: string,
+        runtime: CodingAssistantRuntime | undefined,
+    ): void {
+        const exists = this.#messages.some(
+            (entry) =>
+                entry.runId === runId &&
+                entry.message.role === "error" &&
+                entry.message.outcome === "failed" &&
+                entry.message.blocks.some(
+                    (block) => block.type === "text" && block.text === reason,
+                ),
+        );
+        if (exists) return;
+        const message: ErrorMessage = createErrorMessage(createId(), reason, "failed");
+        if (runtime === undefined) this.#contextMessages?.push(message);
+        else runtime.agent.recordMessage(message);
+        this.#appendAgentMessage(runId, message);
     }
 
     async #observeProviderQuota(
@@ -5277,6 +5314,8 @@ export class InMemorySession {
             if (this.#activeRun?.runId !== queued.runId) {
                 return;
             }
+            const errorMessage = errorToMessage(error);
+            this.#appendDurableError(queued.runId, errorMessage, runtime);
             if (!this.#workspaceArchived) {
                 this.#status =
                     controller.signal.aborted && this.#suspendOnAbort ? "suspended" : "error";
@@ -5301,7 +5340,7 @@ export class InMemorySession {
                 ?.record("run-error", { error, runId: queued.runId, sessionId: this.id })
                 .catch(() => undefined);
             this.#append("run_error", {
-                errorMessage: errorToMessage(error),
+                errorMessage,
                 modelLocked: this.#modelLocked(),
                 runId: queued.runId,
             });

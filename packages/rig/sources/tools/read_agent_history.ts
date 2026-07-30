@@ -59,6 +59,7 @@ export const readAgentHistoryTool = defineTool({
                 Type.Union([
                     Type.Literal("user"),
                     Type.Literal("assistant"),
+                    Type.Literal("error"),
                     Type.Literal("system"),
                 ]),
                 {

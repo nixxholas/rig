@@ -931,14 +931,71 @@ describe("InMemorySession abort", () => {
             type: "run_finished",
         });
         expect(
-            session
-                .transcriptWindow()
-                .turns.find((turn) => turn.runId === compactionRunId),
+            session.transcriptWindow().turns.find((turn) => turn.runId === compactionRunId),
         ).toMatchObject({
             kind: "compaction",
             outcome: "success",
         });
         expect(session.snapshot().snapshot.messages.at(-1)).toEqual(compactionMessages?.[0]);
+    });
+
+    it("persists a failed standalone compaction in transcript and active context", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/failed-manual-compaction",
+            name: "Failed manual compaction",
+            thinkingLevels: ["off"],
+        });
+        const failure = "The compaction provider was unavailable.";
+        let streamCount = 0;
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream: (_model, _context, options) => {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
+                streamCount += 1;
+                return streamCount === 1 ? responseStream("Earlier answer") : errorStream(failure);
+            },
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => createRuntime(options, provider),
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ models: [model], providerId: provider.id }],
+            },
+            request: {
+                cwd: "/tmp/rig-failed-manual-compaction-test",
+                modelId: model.id,
+                providerId: provider.id,
+            },
+        });
+        const submitted = session.submit({ text: "Earlier request" });
+        await session.waitForRun(submitted.runId);
+
+        await expect(session.compact()).rejects.toThrow(failure);
+
+        const compactionRun = session.events
+            .since(undefined)
+            ?.findLast((event) => event.type === "run_started" && event.data.kind === "compaction");
+        const error =
+            compactionRun?.type === "run_started"
+                ? session
+                      .state()
+                      .messages.find(
+                          (entry) =>
+                              entry.runId === compactionRun.data.runId &&
+                              entry.message.role === "error",
+                      )?.message
+                : undefined;
+        expect(error).toMatchObject({
+            blocks: [{ text: failure, type: "text" }],
+            outcome: "failed",
+            role: "error",
+        });
+        expect(session.state().contextMessages).toContainEqual(error);
     });
 
     it("aborts compaction without overwriting the repaired shutdown state", async () => {
@@ -1147,6 +1204,23 @@ function responseStream(text: string): InferenceStream {
         async *[Symbol.asyncIterator]() {
             yield { partial: message, type: "start" as const };
             yield { message, reason: "stop" as const, type: "done" as const };
+        },
+        async result() {
+            return message;
+        },
+    };
+}
+
+function errorStream(errorMessage: string): InferenceStream {
+    const message: AssistantMessage = {
+        ...assistantMessage("", "test/idle-abort"),
+        content: [],
+        errorMessage,
+        stopReason: "error",
+    };
+    return {
+        async *[Symbol.asyncIterator]() {
+            yield* [];
         },
         async result() {
             return message;

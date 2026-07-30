@@ -4,6 +4,7 @@ import { Value } from "@sinclair/typebox/value";
 import { assistantMessageToAgentMessage } from "./assistantMessageToAgentMessage.js";
 import { boundToolResultBlocks } from "./boundToolResultBlocks.js";
 import { createErrorToolResultBlock } from "./createErrorToolResultBlock.js";
+import { createErrorMessage } from "./createErrorMessage.js";
 import { createToolResultBlock } from "./createToolResultBlock.js";
 import type { AgentContext } from "./context/AgentContext.js";
 import type { BashSessionActivity } from "./context/BashContext.js";
@@ -26,6 +27,7 @@ import type {
     AnyDefinedTool,
     CompactionMessage,
     ContentBlock,
+    ErrorMessage,
     Message,
     ToolResultBlock,
     UserMessage,
@@ -106,7 +108,7 @@ export interface RunAgentLoopOptions {
     now?: () => number;
     onEvent?: (event: AgentLoopEvent) => void | Promise<void>;
     onMessage?: (message: Message) => void | Promise<void>;
-    /** Checkpoints model-only context before a recovery inference begins. */
+    /** Checkpoints canonical model context before its durable messages are published. */
     onContextChanged?: (messages: readonly Message[]) => void | Promise<void>;
     takeSteering?: () => readonly UserMessage[];
     /** Returns the signal aborted by the next scheduled steering message. */
@@ -264,6 +266,19 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             providerPrompt,
             transcript,
         });
+    const appendRetriedError = (reason: string) =>
+        appendError({
+            attempt: 1,
+            contextTranscript,
+            idFactory,
+            now,
+            onContextChanged: options.onContextChanged,
+            onMessage: options.onMessage,
+            outcome: "retried",
+            providerMessages,
+            reason,
+            transcript,
+        });
 
     const permissionDenials = new AutoPermissionDenialCircuitBreaker();
     let iteration = 0;
@@ -325,6 +340,20 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                         pendingStartEvent = undefined;
                     }
                     await options.onEvent?.(event);
+                    if (event.type === "retrying") {
+                        await appendError({
+                            attempt: event.attempt,
+                            contextTranscript,
+                            idFactory,
+                            now,
+                            onContextChanged: options.onContextChanged,
+                            onMessage: options.onMessage,
+                            outcome: "retried",
+                            providerMessages,
+                            reason: event.reason,
+                            transcript,
+                        });
+                    }
                 }
                 return assignRigToolCallIds(await stream.result(), rigToolCallIds, idFactory);
             };
@@ -362,9 +391,11 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                             providerId: options.provider.id,
                         }),
                     );
+                    await options.onContextChanged?.(contextTranscript);
                     for (const replacement of replacements) {
                         await options.onMessage?.(replacement);
                     }
+                    await appendRetriedError(errorToMessage(error));
                     continue;
                 }
             }
@@ -372,11 +403,30 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             if (!contextOverflowRecoveryAttempted && isContextWindowExceededError(error)) {
                 contextOverflowRecoveryAttempted = true;
                 if (await compactCurrentContext({ force: true })) {
+                    await appendRetriedError(errorToMessage(error));
                     continue;
                 }
             }
 
-            throw error;
+            const errorMessage = errorToMessage(error);
+            await appendError({
+                contextTranscript,
+                idFactory,
+                now,
+                onContextChanged: options.onContextChanged,
+                onMessage: options.onMessage,
+                outcome: "failed",
+                providerMessages,
+                reason: errorMessage,
+                transcript,
+            });
+            await appendSteering(options, transcript, contextTranscript, providerMessages, now);
+            return {
+                errorMessage,
+                messages: transcript,
+                contextMessages: contextTranscript,
+                stopReason: "error",
+            };
         }
 
         if (isInvalidImageRequestError(assistantMessage)) {
@@ -392,9 +442,14 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                         providerId: options.provider.id,
                     }),
                 );
+                await options.onContextChanged?.(contextTranscript);
                 for (const replacement of replacements) {
                     await options.onMessage?.(replacement);
                 }
+                await appendRetriedError(
+                    assistantMessage.errorMessage ??
+                        "The provider rejected an image and the request was retried without it.",
+                );
                 continue;
             }
         }
@@ -406,6 +461,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         ) {
             contextOverflowRecoveryAttempted = true;
             if (await compactCurrentContext({ force: true })) {
+                await appendRetriedError(
+                    assistantMessage.errorMessage ??
+                        "The model context was too large and was compacted before retrying.",
+                );
                 continue;
             }
         }
@@ -453,11 +512,15 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             assistantMessage.usage,
         );
         if (finalizedCompaction !== undefined) {
+            await options.onContextChanged?.(contextTranscript);
             await options.onMessage?.(finalizedCompaction);
         }
-        transcript.push(agentMessage);
-        contextTranscript.push(agentMessage);
-        await options.onMessage?.(agentMessage);
+        if (agentMessage.blocks.length > 0 || assistantMessage.stopReason !== "error") {
+            transcript.push(agentMessage);
+            contextTranscript.push(agentMessage);
+            await options.onContextChanged?.(contextTranscript);
+            await options.onMessage?.(agentMessage);
+        }
 
         const incompleteToolCalls = toolCalls.filter((toolCall) => toolCall.incomplete === true);
         if (assistantMessage.stopReason === "length" && incompleteToolCalls.length > 0) {
@@ -469,6 +532,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 idFactory,
                 now,
                 onEvent: options.onEvent,
+                onContextChanged: options.onContextChanged,
                 onMessage: options.onMessage,
                 message:
                     "The tool call was interrupted because the model reached its output limit.",
@@ -485,9 +549,21 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         }
 
         if (assistantMessage.stopReason === "error") {
+            const errorMessage = assistantMessage.errorMessage ?? "The model response failed.";
+            await appendError({
+                contextTranscript,
+                idFactory,
+                now,
+                onContextChanged: options.onContextChanged,
+                onMessage: options.onMessage,
+                outcome: "failed",
+                providerMessages,
+                reason: errorMessage,
+                transcript,
+            });
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
             return {
-                errorMessage: assistantMessage.errorMessage ?? "The model response failed.",
+                errorMessage,
                 messages: transcript,
                 contextMessages: contextTranscript,
                 stopReason: assistantMessage.stopReason,
@@ -539,6 +615,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 idFactory,
                 now,
                 onEvent: options.onEvent,
+                onContextChanged: options.onContextChanged,
                 onMessage: options.onMessage,
             });
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
@@ -584,6 +661,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 idFactory,
                 now,
                 onEvent: options.onEvent,
+                onContextChanged: options.onContextChanged,
                 onMessage: options.onMessage,
             });
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
@@ -794,6 +872,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             };
             transcript.push(toolResultMessage);
             contextTranscript.push(toolResultMessage);
+            await options.onContextChanged?.(contextTranscript);
             await options.onMessage?.(toolResultMessage);
         }
         if (options.signal?.aborted) {
@@ -816,6 +895,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             };
             transcript.push(stopMessage);
             contextTranscript.push(stopMessage);
+            await options.onContextChanged?.(contextTranscript);
             await options.onMessage?.(stopMessage);
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
             return {
@@ -875,7 +955,6 @@ async function compactLoopContext(options: {
     }
 
     options.transcript.push(result.compactionMessage);
-    await options.options.onMessage?.(result.compactionMessage);
     options.contextTranscript.splice(
         0,
         options.contextTranscript.length,
@@ -890,6 +969,8 @@ async function compactLoopContext(options: {
             providerId: options.options.provider.id,
         }),
     );
+    await options.options.onContextChanged?.(options.contextTranscript);
+    await options.options.onMessage?.(result.compactionMessage);
     return true;
 }
 
@@ -911,12 +992,38 @@ async function appendSteering(
         providerMessages.push(toProviderUserMessage(message, now));
     }
     if (steering.length > 0) {
+        await options.onContextChanged?.(contextTranscript);
         await options.onEvent?.({
             messageIds: steering.map((message) => message.id),
             type: "steering_applied",
         });
     }
     return steering.length;
+}
+
+async function appendError(options: {
+    attempt?: number;
+    contextTranscript: Message[];
+    idFactory: () => string;
+    now: () => number;
+    onContextChanged: ((messages: readonly Message[]) => void | Promise<void>) | undefined;
+    onMessage: ((message: Message) => void | Promise<void>) | undefined;
+    outcome: ErrorMessage["outcome"];
+    providerMessages: ProviderMessage[];
+    reason: string;
+    transcript: Message[];
+}): Promise<void> {
+    const message = createErrorMessage(
+        options.idFactory(),
+        options.reason,
+        options.outcome,
+        options.attempt,
+    );
+    options.transcript.push(message);
+    options.contextTranscript.push(message);
+    options.providerMessages.push(toProviderErrorMessage(message, options.now));
+    await options.onContextChanged?.(options.contextTranscript);
+    await options.onMessage?.(message);
 }
 
 async function appendInterruptedToolResults(options: {
@@ -928,6 +1035,7 @@ async function appendInterruptedToolResults(options: {
     idFactory: () => string;
     now: () => number;
     onEvent: ((event: AgentLoopEvent) => void | Promise<void>) | undefined;
+    onContextChanged: ((messages: readonly Message[]) => void | Promise<void>) | undefined;
     onMessage: ((message: Message) => void | Promise<void>) | undefined;
 }): Promise<AgentLoopResult> {
     const toolResultBlocks = options.toolCalls.map((toolCall) =>
@@ -952,6 +1060,7 @@ async function appendInterruptedToolResults(options: {
     };
     options.transcript.push(toolResultMessage);
     options.contextTranscript.push(toolResultMessage);
+    await options.onContextChanged?.(options.contextTranscript);
     await options.onMessage?.(toolResultMessage);
 
     return {
@@ -969,6 +1078,7 @@ async function appendNonExecutedToolResults(options: {
     idFactory: () => string;
     now: () => number;
     onEvent: ((event: AgentLoopEvent) => void | Promise<void>) | undefined;
+    onContextChanged: ((messages: readonly Message[]) => void | Promise<void>) | undefined;
     onMessage: ((message: Message) => void | Promise<void>) | undefined;
     message: string;
 }): Promise<void> {
@@ -991,6 +1101,7 @@ async function appendNonExecutedToolResults(options: {
     };
     options.transcript.push(toolResultMessage);
     options.contextTranscript.push(toolResultMessage);
+    await options.onContextChanged?.(options.contextTranscript);
     await options.onMessage?.(toolResultMessage);
 }
 
@@ -1075,10 +1186,29 @@ export function toProviderMessages(
             continue;
         }
 
+        if (message.role === "error") {
+            providerMessages.push(toProviderErrorMessage(message, options.now));
+            continue;
+        }
+
         providerMessages.push(...toProviderMessagesFromAgentMessage(message, options));
     }
 
     return providerMessages;
+}
+
+function toProviderErrorMessage(message: ErrorMessage, now: () => number): ProviderMessage {
+    const attempt = message.attempt === undefined ? "" : ` attempt ${String(message.attempt)}`;
+    const heading =
+        message.outcome === "retried"
+            ? `Rig inference${attempt} failed and was retried.`
+            : "Rig's previous work stopped with an error.";
+    return {
+        content: [{ text: heading, type: "text" }, ...message.blocks.map(toProviderUserContent)],
+        role: "user",
+        sourceMessageId: message.id,
+        timestamp: now(),
+    };
 }
 
 function toProviderUserMessage(message: UserMessage, now: () => number): ProviderMessage {

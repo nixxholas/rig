@@ -11,6 +11,7 @@ import { affectsSessionUsage } from "./affectsSessionUsage.js";
 
 export type SessionEventListener = (event: SessionEvent) => void;
 export type SessionEventAppendHook = (event: SessionEvent) => void;
+export type SessionEventNotificationScheduler = (notify: () => void) => void;
 const SESSION_EVENT_RETENTION_LIMIT = 4_096;
 
 export class SessionEventLog {
@@ -30,6 +31,7 @@ export class SessionEventLog {
     #messageSubmissions = new Map<string, SessionEvent & { type: "message_submitted" }>();
     #providerQuotas = new Map<string, ProviderQuota>();
     #shellCommands = new Map<string, ShellCommandState>();
+    #deferNotification: SessionEventNotificationScheduler | undefined;
     #onAppend: SessionEventAppendHook | undefined;
     #retentionLimit: number;
     #revision = 0;
@@ -37,12 +39,14 @@ export class SessionEventLog {
 
     constructor(
         options: {
+            deferNotification?: SessionEventNotificationScheduler;
             events?: readonly SessionEvent[];
             lastEventId?: EventId;
             onAppend?: SessionEventAppendHook;
             retentionLimit?: number;
         } = {},
     ) {
+        this.#deferNotification = options.deferNotification;
         this.#retentionLimit = options.retentionLimit ?? SESSION_EVENT_RETENTION_LIMIT;
         this.#events = [...(options.events ?? [])]
             .filter((event) => !isLiveOnlySessionEvent(event))
@@ -88,14 +92,19 @@ export class SessionEventLog {
         this.#revision += 1;
         if (affectsSessionUsage(event)) this.#usageRevision += 1;
         this.#lastEventId = event.id;
-        for (const listener of this.#listeners) {
-            try {
-                listener(event);
-            } catch {
-                // Subscribers are optional observers. A disconnected or broken
-                // consumer must not roll back an event that is already durable.
+        const listeners = [...this.#listeners];
+        const notify = () => {
+            for (const listener of listeners) {
+                try {
+                    listener(event);
+                } catch {
+                    // Subscribers are optional observers. A disconnected or broken
+                    // consumer must not roll back an event that is already durable.
+                }
             }
-        }
+        };
+        if (this.#deferNotification === undefined) notify();
+        else this.#deferNotification(notify);
         return event;
     }
 

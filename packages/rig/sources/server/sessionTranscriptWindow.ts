@@ -2,7 +2,6 @@ import type { Message } from "../agent/types.js";
 import type {
     EventId,
     SessionTranscriptGroup,
-    SessionTranscriptRetry,
     SessionTranscriptTurn,
     SessionTranscriptWindow,
 } from "../protocol/index.js";
@@ -16,9 +15,10 @@ export interface TranscriptRunFacts {
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
     groups?: readonly SessionTranscriptGroup[];
-    retries?: readonly SessionTranscriptRetry[];
     /** The group each boundary message closed, keyed by message ID. */
     boundaryGroupIds?: Readonly<Record<string, string>>;
+    /** The inference group each durable error occurred in, keyed by message ID. */
+    messageGroupIds?: Readonly<Record<string, string>>;
 }
 
 export interface TranscriptEntry {
@@ -75,7 +75,7 @@ export function transcriptRunFacts(
             },
         });
     };
-    /** The group open for a run, which is what a retry or compaction sits in. */
+    /** The group open for a run, which is what an error or compaction sits in. */
     const openGroupId = (runId: string): string | undefined =>
         facts.get(runId)?.groups?.findLast((group) => group.endedAt === undefined)?.id;
     for (const event of events) {
@@ -125,22 +125,18 @@ export function transcriptRunFacts(
             const closedGroupId = openGroupId(event.data.runId);
             closeGroup(event.data.runId, event.createdAt, "compaction", "success");
             rememberBoundary(event.data.runId, closedGroupId, [event.data.event.compactionId]);
-        } else if (event.type === "inference_retry") {
-            const retryGroupId = openGroupId(event.data.runId);
-            const known = facts.get(event.data.runId) ?? { startedAt: event.createdAt };
-            facts.set(event.data.runId, {
-                ...known,
-                retries: [
-                    ...(known.retries ?? []),
-                    {
-                        attempt: event.data.attempt,
-                        createdAt: event.createdAt,
-                        ...(retryGroupId === undefined ? {} : { groupId: retryGroupId }),
-                        id: event.id,
-                        reason: event.data.reason,
+        } else if (event.type === "agent_message" && event.data.message.role === "error") {
+            const groupId = openGroupId(event.data.runId);
+            const known = facts.get(event.data.runId);
+            if (groupId !== undefined && known !== undefined) {
+                facts.set(event.data.runId, {
+                    ...known,
+                    messageGroupIds: {
+                        ...known.messageGroupIds,
+                        [event.data.message.id]: groupId,
                     },
-                ],
-            });
+                });
+            }
         } else if (event.type === "run_finished") {
             const known = facts.get(event.data.runId);
             facts.set(event.data.runId, {
@@ -263,7 +259,6 @@ export function sessionTranscriptWindow(
             ...(facts?.outcome === undefined ? {} : { outcome: facts.outcome }),
             ...(facts?.errorMessage === undefined ? {} : { errorMessage: facts.errorMessage }),
             ...(facts?.groups === undefined ? {} : { groups: facts.groups }),
-            ...(facts?.retries === undefined ? {} : { retries: facts.retries }),
         };
     });
 
@@ -291,12 +286,22 @@ export function sessionTranscriptWindow(
             return groupId === undefined ? [] : [[entry.message.id, groupId]];
         }),
     );
+    const messageGroupId = Object.fromEntries(
+        keptEntries.flatMap((entry) => {
+            const groupId =
+                entry.runId === undefined
+                    ? undefined
+                    : runFacts.get(entry.runId)?.messageGroupIds?.[entry.message.id];
+            return groupId === undefined ? [] : [[entry.message.id, groupId]];
+        }),
+    );
     return {
         complete: kept.length === earlier.length,
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
         ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
         ...(Object.keys(messageBoundaryGroupId).length === 0 ? {} : { messageBoundaryGroupId }),
+        ...(Object.keys(messageGroupId).length === 0 ? {} : { messageGroupId }),
         messages: keptEntries.map((entry) => entry.message),
         turns,
     };

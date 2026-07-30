@@ -61,6 +61,55 @@ describe("createSubagentMonitor", () => {
         expect(render(monitor)).toContain("STREAM_LOG_6");
         expect(render(monitor)).not.toContain("STREAM_LOG_10");
     });
+
+    it("reconciles a durable inference failure with its terminal boundary", async () => {
+        let publish: ((event: SessionEvent) => void) | undefined;
+        const monitor = createSubagentMonitor({
+            getHeight: () => 12,
+            getSubagents: () => [subagent("agent-1", "Inspect failures", "openai/gpt-5.6", 0)],
+            modelName: () => "GPT-5.6",
+            onCancel: vi.fn(),
+            watchSubagent: vi.fn(
+                async (
+                    _agentId: string,
+                    _signal: AbortSignal,
+                    onEvent: (event: SessionEvent) => void,
+                ) => {
+                    publish = onEvent;
+                },
+            ),
+        });
+        monitor.handleInput?.("\r");
+        await vi.waitFor(() => expect(publish).toBeDefined());
+        publish?.({
+            createdAt: 1,
+            data: {
+                message: {
+                    blocks: [{ text: "Provider unavailable.", type: "text" }],
+                    id: "failure-1",
+                    outcome: "failed",
+                    role: "error",
+                },
+                runId: "run-1",
+            },
+            id: "failure-message",
+            sessionId: "agent-1",
+            type: "agent_message",
+        });
+        publish?.({
+            createdAt: 2,
+            data: {
+                errorMessage: "Provider unavailable.",
+                modelLocked: false,
+                runId: "run-1",
+            },
+            id: "run-error",
+            sessionId: "agent-1",
+            type: "run_error",
+        });
+
+        expect(render(monitor).match(/Provider unavailable\./gu)).toHaveLength(1);
+    });
 });
 
 function render(component: ReturnType<typeof createSubagentMonitor>): string {

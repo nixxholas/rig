@@ -6,6 +6,7 @@ import type {
     BackgroundProcess,
     ContentBlock,
     CompactionMessage,
+    ErrorMessage,
     ExternalToolCall,
     GitChangeSnapshot,
     McpServerSummary,
@@ -989,16 +990,6 @@ export class ChatStore {
                 }
                 break;
             }
-            case "inference_retry": {
-                const data = event.data as { attempt: number; reason: string; runId: string };
-                this.#appendRetry(event.id, data.runId, event.createdAt, data.attempt, data.reason);
-                deltas.push({
-                    attempt: data.attempt,
-                    reason: data.reason,
-                    type: "retry_started",
-                });
-                break;
-            }
             case "agent_message":
                 {
                     const data = event.data as { message: Message; runId: string };
@@ -1372,7 +1363,16 @@ export class ChatStore {
                 if (message.role === "user") {
                     this.#pendingNextGroupElementIds.push(`message:${message.id}`);
                 }
-                this.#applyMessage(message, 0, deltas, this.#turnId);
+                this.#applyMessage(
+                    message,
+                    0,
+                    deltas,
+                    this.#turnId,
+                    "sent",
+                    undefined,
+                    undefined,
+                    false,
+                );
             }
             if (activeTurn === undefined) this.#endGroup("completed", "success", 0, deltas);
             this.#turnId = undefined;
@@ -1409,14 +1409,6 @@ export class ChatStore {
                   runId: string;
                   /** A boundary message heads its group rather than sitting in it. */
                   steered?: boolean;
-              }
-            | {
-                  at: number;
-                  eventId: string;
-                  kind: "retry";
-                  order: number;
-                  retry: NonNullable<SessionTranscriptWindow["turns"][number]["retries"]>[number];
-                  runId: string;
               }
             | {
                   at: number;
@@ -1489,6 +1481,11 @@ export class ChatStore {
             // The agent message an inference produced belongs to that inference,
             // whatever millisecond it was finally persisted in.
             const groupIndex = groupIndexByMessageId.get(message.id);
+            const containingGroupId = transcript.messageGroupId?.[message.id];
+            const containingGroupIndex =
+                containingGroupId === undefined
+                    ? undefined
+                    : groupIndexByMessageId.get(containingGroupId);
             const group = (turn.groups ?? []).find((known) => known.id === message.id);
             const at =
                 group?.startedAt ??
@@ -1501,7 +1498,11 @@ export class ChatStore {
                     ...(transcript.messageEventId?.[message.id] === undefined
                         ? {}
                         : { eventId: transcript.messageEventId[message.id] }),
-                    groupIndex: groupIndex ?? boundaryGroupIndex(message.id) ?? groupsClosedBy(at),
+                    groupIndex:
+                        groupIndex ??
+                        containingGroupIndex ??
+                        boundaryGroupIndex(message.id) ??
+                        groupsClosedBy(at),
                     kind: "message" as const,
                     message,
                     order,
@@ -1536,24 +1537,6 @@ export class ChatStore {
                     });
                     order += 1;
                 }
-            }
-            for (const retry of turn.retries ?? []) {
-                // The group it happened in is recorded, because an attempt and
-                // the boundary beside it routinely share a millisecond.
-                const inGroup =
-                    retry.groupId === undefined
-                        ? undefined
-                        : groupIndexByMessageId.get(retry.groupId);
-                timeline.push({
-                    at: retry.createdAt,
-                    eventId: retry.id,
-                    groupIndex: inGroup ?? groupsClosedBy(retry.createdAt),
-                    kind: "retry" as const,
-                    order,
-                    retry,
-                    runId: turn.runId,
-                });
-                order += 1;
             }
             if (turn.endedAt !== undefined) {
                 timeline.push({
@@ -1609,6 +1592,7 @@ export class ChatStore {
                     steeredAt === undefined
                         ? undefined
                         : this.#steeringTiming(item.runId, steeredAt),
+                    false,
                 );
                 if (steeredAt !== undefined) {
                     this.#update(`message:${item.message.id}`, {
@@ -1616,14 +1600,6 @@ export class ChatStore {
                     });
                     this.#pendingNextGroupElementIds.push(`message:${item.message.id}`);
                 }
-            } else if (item.kind === "retry") {
-                this.#appendRetry(
-                    item.retry.id,
-                    item.runId,
-                    item.retry.createdAt,
-                    item.retry.attempt,
-                    item.retry.reason,
-                );
             } else {
                 this.#endGroup(
                     item.outcome === "error"
@@ -1826,7 +1802,13 @@ export class ChatStore {
         // A real failure gets its own line, the same line a failed attempt gets.
         // Steering, compaction, and abort stop the group without failing it, so
         // they get none.
-        if (reason === "error" && errorMessage !== undefined) {
+        const alreadyHasTerminalFailure = [...this.#byId.values()].some(
+            (element) =>
+                element.kind === "failure" &&
+                element.groupId === groupId &&
+                element.outcome === "failed",
+        );
+        if (reason === "error" && errorMessage !== undefined && !alreadyHasTerminalFailure) {
             this.#append({
                 createdAt: at,
                 groupId,
@@ -2006,25 +1988,6 @@ export class ChatStore {
         this.#session = { ...this.#session, shellCommands };
     }
 
-    /**
-     * Records an attempt that failed and was tried again.
-     *
-     * It lands in the group that was open, because a run fighting its way
-     * through provider failures is still answering the one question the group
-     * is about.
-     */
-    #appendRetry(id: string, turnId: string, at: number, attempt: number, reason: string): void {
-        this.#append({
-            attempt,
-            createdAt: at,
-            id: `retry:${id}`,
-            kind: "failure",
-            outcome: "retried",
-            reason,
-            ...this.#elementIdentity(turnId),
-        });
-    }
-
     #recordAgentUsage(message: AgentMessage): void {
         if (
             message.usage === undefined ||
@@ -2125,6 +2088,7 @@ export class ChatStore {
         delivery: UserMessageElement["delivery"] = "sent",
         source?: "notification",
         steering?: Pick<UserMessageElement, "steeredAt" | "steeringElapsedMs">,
+        emitRetryDelta = true,
     ): void {
         if (message.internal === true) return;
         if (this.#appliedMessageIds.has(message.id)) {
@@ -2158,9 +2122,50 @@ export class ChatStore {
             this.#applyCompactionMessage(message, at, turnId, deltas);
             return;
         }
+        if (message.role === "error") {
+            this.#applyErrorMessage(message, at, turnId, deltas, emitRetryDelta);
+            return;
+        }
         const runId = turnId ?? this.#turnId ?? `history:${message.id}`;
         this.#startGroup(message.id, runId, at, deltas);
         this.#appendAgentBlocks(message, at, deltas, turnId);
+    }
+
+    #applyErrorMessage(
+        message: ErrorMessage,
+        at: number,
+        turnId: string | undefined,
+        deltas: ChatDelta[],
+        emitRetryDelta: boolean,
+    ): void {
+        const reason = textOf(message.blocks);
+        const runId = turnId ?? `history:${message.id}`;
+        const terminalFallbackAlreadyRendered =
+            message.outcome === "failed" &&
+            [...this.#byId.values()].some(
+                (element) =>
+                    element.kind === "failure" &&
+                    element.outcome === "failed" &&
+                    element.reason === reason &&
+                    element.runId === runId,
+            );
+        if (terminalFallbackAlreadyRendered) return;
+        this.#append({
+            ...(message.attempt === undefined ? {} : { attempt: message.attempt }),
+            createdAt: at,
+            id: `message:${message.id}`,
+            kind: "failure",
+            outcome: message.outcome,
+            reason,
+            ...this.#elementIdentity(runId),
+        });
+        if (message.outcome === "retried" && emitRetryDelta) {
+            deltas.push({
+                attempt: message.attempt ?? 1,
+                reason,
+                type: "retry_started",
+            });
+        }
     }
 
     /**

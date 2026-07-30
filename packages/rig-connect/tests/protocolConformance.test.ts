@@ -59,7 +59,6 @@ type ApplicationReadEventType =
     | "steering_applied"
     | "message_submitted"
     | "run_started"
-    | "inference_retry"
     | "agent_message"
     | "agent_event"
     | "provider_quota_observed"

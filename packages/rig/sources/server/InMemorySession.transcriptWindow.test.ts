@@ -109,40 +109,61 @@ describe("InMemorySession transcript window", () => {
         const turn = session
             .transcriptWindow()
             .turns.find((candidate) => candidate.runId === submitted.runId);
-        expect(turn?.retries).toHaveLength(1);
-        expect(turn?.retries).toEqual(derived?.retries);
         expect(turn?.groups).toEqual(derived?.groups);
 
         await session.beginShutdown();
     });
 
-    it("persists provider retries inside their transcript turn", async () => {
+    it("persists provider retries as messages inside their transcript turn", async () => {
         const session = createSession({ retry: true });
         const submitted = session.submit({ text: "Retry if needed." });
         await session.waitForRun(submitted.runId);
 
-        const retry = (session.events.since(undefined) ?? []).find(
-            (event) => event.type === "inference_retry" && event.data.runId === submitted.runId,
-        );
+        const retry = session
+            .transcriptWindow()
+            .messages.find((message) => message.role === "error");
         expect(retry).toMatchObject({
-            data: { attempt: 1, reason: "Connection lost" },
-            type: "inference_retry",
+            blocks: [{ text: "Connection lost", type: "text" }],
+            outcome: "retried",
+            role: "error",
+            attempt: 1,
         });
         expect(
+            (session.events.since(undefined) ?? []).some(
+                (event) => (event.type as string) === "inference_retry",
+            ),
+        ).toBe(false);
+        expect(
             session.transcriptWindow().turns.find((turn) => turn.runId === submitted.runId)
-                ?.retries,
-        ).toEqual([
-            {
-                attempt: 1,
-                createdAt: retry?.createdAt,
-                // The attempt records the group it happened in, because time
-                // alone cannot place it against a boundary it shares one with.
-                groupId: expect.any(String),
-                id: retry?.id,
-                reason: "Connection lost",
-            },
-        ]);
+                ?.messageIds,
+        ).toContain(retry?.id);
+        expect(session.transcriptWindow().messageGroupId?.[retry?.id ?? ""]).toEqual(
+            expect.any(String),
+        );
+        expect(
+            session.state().contextMessages?.find((message) => message.role === "error"),
+        ).toEqual(retry);
 
+        await session.beginShutdown();
+    });
+
+    it("rebuilds provider retry messages from durable transcript rows after restart", async () => {
+        const session = createSession({ retry: true });
+        const submitted = session.submit({ text: "Retry and restart." });
+        await session.waitForRun(submitted.runId);
+        const expected = session
+            .transcriptWindow()
+            .messages.find((message) => message.role === "error");
+        const restored = createSession({
+            events: session.events.since(undefined) ?? [],
+            restore: session.state(),
+        });
+
+        expect(
+            restored.transcriptWindow().messages.find((message) => message.role === "error"),
+        ).toEqual(expected);
+
+        await restored.beginShutdown();
         await session.beginShutdown();
     });
 

@@ -44,7 +44,7 @@ event queue. Durable events remain available after a server restart.
 | `steering_applied`              | One or more accepted steering messages are incorporated into an active run.                           | `messageIds`, `runId`                                                                                      | Yes    |
 | `run_started`                   | A queued run begins executing.                                                                        | `runId`                                                                                                    | Yes    |
 | `agent_event`                   | Inference streams, tools execute, permissions are reviewed, or background process state changes.      | `event`: one `AgentLoopEvent`; `runId`                                                                     | **No** |
-| `agent_message`                 | The agent loop commits a complete assistant or tool-result message to the transcript.                 | `message`, `runId`                                                                                         | Yes    |
+| `agent_message`                 | The agent loop commits an assistant, tool-result, compaction, or inference-error message.             | `message`, `runId`                                                                                         | Yes    |
 | `run_finished`                  | A run reaches a provider-reported terminal stop reason.                                               | `runId`, optional `agentRunId`, `modelLocked`, `stopReason`                                                | Yes    |
 | `provider_quota_observed`       | An account quota snapshot is captured before or after a primary-session provider run.                 | `observationId`, `phase`, `providerId`, `quota`, `runId`                                                   | **No** |
 | `run_error`                     | A run fails outside the normal completion path, or an accepted queued run is stopped before starting. | `runId`, `errorMessage`, `modelLocked`                                                                     | Yes    |
@@ -121,6 +121,18 @@ queue.
 The terminal `done` and `error` stream events are not global queue entries. The
 fully materialized message is subsequently emitted as `agent_message`, and the
 run outcome is emitted as `run_finished` or `run_error`.
+
+A `retrying` update is live progress, but its failure is also committed as an
+`agent_message` with `role: "error"`, `outcome: "retried"`, `attempt`, and
+human-readable text blocks. A terminal run failure uses the same message role
+with `outcome: "failed"`. These messages remain in visible history and in
+the active model context after restart; run boundary events carry the terminal
+status but are not a second source of failure history.
+
+The active model context is persisted independently from visible history as
+ordered rows in `session_context_messages`. Compaction, internal context, and
+durable errors are restored from those rows; compaction and error messages
+update them in the same transaction as their committed `agent_message` event.
 
 Presentation-only inference message stream events are not written to
 `session_events`. A `block_reset` is retained so reconnecting clients can erase

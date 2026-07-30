@@ -1,6 +1,7 @@
 import {
     createSubagentInstructions,
     findLastAgentResponseText,
+    type ChatHistoryRole,
     type ChatHistoryPage,
     type AgentCommunicationContext,
     type AgentCommunicationInfo,
@@ -311,7 +312,7 @@ export class AgentSessionManager {
             from?: "end" | "start";
             limit: number;
             query?: string;
-            roles?: readonly ("assistant" | "system" | "user")[];
+            roles?: readonly ChatHistoryRole[];
             target?: string;
         },
     ): ChatHistoryPage {

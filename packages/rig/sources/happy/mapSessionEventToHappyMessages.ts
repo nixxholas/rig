@@ -20,6 +20,7 @@ export class HappyMessageMapper {
     readonly #pendingSteering = new Map<string, Map<string, SessionEvent>>();
     readonly #pendingSteeringHeaders = new Map<string, SessionEvent[]>();
     readonly #runStartedAt = new Map<string, number>();
+    readonly #runsWithTerminalFailureMessage = new Set<string>();
     readonly #terminalRunIds = new Set<string>();
 
     map(event: SessionEvent): readonly HappySessionProtocolMessage[] {
@@ -89,21 +90,6 @@ export class HappyMessageMapper {
             this.#pendingGroupStartedAt.set(event.data.runId, event.createdAt);
             return output;
         }
-        if (event.type === "inference_retry") {
-            const group = this.#activeGroups.get(event.data.runId);
-            return group === undefined
-                ? []
-                : [
-                      failureMessage(
-                          event,
-                          `${event.id}:failure`,
-                          group.id,
-                          "retried",
-                          event.data.reason,
-                          event.data.attempt,
-                      ),
-                  ];
-        }
         if (event.type === "abort_requested" && event.data.runId !== undefined) {
             const output = this.#close(event, event.data.runId, "abort", "cancelled");
             this.#markRunTerminal(event.data.runId);
@@ -128,7 +114,9 @@ export class HappyMessageMapper {
                     ? this.#ensureFailureGroup(event, event.data.runId)
                     : this.#activeGroups.get(event.data.runId);
             const output =
-                event.data.stopReason === "error" && group !== undefined
+                event.data.stopReason === "error" &&
+                group !== undefined &&
+                !this.#runsWithTerminalFailureMessage.has(event.data.runId)
                     ? [
                           ...this.#takePendingGroupHeaders(event.data.runId, group.id),
                           failureMessage(
@@ -149,13 +137,17 @@ export class HappyMessageMapper {
             const group = this.#ensureFailureGroup(event, event.data.runId);
             const output = [
                 ...this.#takePendingGroupHeaders(event.data.runId, group.id),
-                failureMessage(
-                    event,
-                    `${event.id}:failure`,
-                    group.id,
-                    "failed",
-                    event.data.errorMessage,
-                ),
+                ...(this.#runsWithTerminalFailureMessage.has(event.data.runId)
+                    ? []
+                    : [
+                          failureMessage(
+                              event,
+                              `${event.id}:failure`,
+                              group.id,
+                              "failed",
+                              event.data.errorMessage,
+                          ),
+                      ]),
                 ...this.#close(event, event.data.runId, "error", "failed"),
             ];
             this.#markRunTerminal(event.data.runId);
@@ -168,6 +160,31 @@ export class HappyMessageMapper {
         if (event.type === "agent_message" && event.data.message.role === "agent") {
             const groupId = this.#activeGroups.get(event.data.runId)?.id ?? event.data.message.id;
             return mapAgentMessage(event, event.data.message, groupId);
+        }
+        if (event.type === "agent_message" && event.data.message.role === "error") {
+            if (
+                event.data.message.outcome === "failed" &&
+                this.#terminalRunIds.has(event.data.runId)
+            ) {
+                return [];
+            }
+            const group = this.#ensureFailureGroup(event, event.data.runId);
+            if (event.data.message.outcome === "failed") {
+                this.#runsWithTerminalFailureMessage.add(event.data.runId);
+            }
+            return [
+                ...this.#takePendingGroupHeaders(event.data.runId, group.id),
+                failureMessage(
+                    event,
+                    event.data.message.id,
+                    group.id,
+                    event.data.message.outcome,
+                    event.data.message.blocks
+                        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+                        .join("\n"),
+                    event.data.message.attempt,
+                ),
+            ];
         }
         return [];
     }
@@ -194,6 +211,7 @@ export class HappyMessageMapper {
         this.#pendingSteering.delete(runId);
         this.#pendingSteeringHeaders.delete(runId);
         this.#runStartedAt.delete(runId);
+        this.#runsWithTerminalFailureMessage.delete(runId);
         this.#terminalRunIds.add(runId);
         if (this.#terminalRunIds.size > 16_384) {
             const oldest = this.#terminalRunIds.values().next().value;

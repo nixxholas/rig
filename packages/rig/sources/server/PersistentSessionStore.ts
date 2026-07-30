@@ -380,6 +380,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ...(this.#createRuntime === undefined
                     ? {}
                     : { createRuntime: this.#createRuntime }),
+                deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
                 emitCreatedEvent: false,
                 ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
                 modelCatalog: this.#modelCatalog,
@@ -465,6 +466,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 ...(this.#createRuntime === undefined
                     ? {}
                     : { createRuntime: this.#createRuntime }),
+                deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
                 emitCreatedEvent: false,
                 modelCatalog: this.#modelCatalog,
                 onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
@@ -1310,9 +1312,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     saveSession(state: PersistedSessionState): void {
         const projectId = state.projectId ?? this.#projects.resolve(state.cwd).project.id;
-        this.#database
-            .prepare(
-                `
+        const contextMessages =
+            state.contextMessages ??
+            state.messages
+                .filter((message) => !message.isPartial)
+                .sort((left, right) => left.position - right.position)
+                .map((message) => message.message);
+        this.#transaction(() => {
+            this.#database
+                .prepare(
+                    `
                 INSERT INTO sessions (
                     id,
                     agent_id,
@@ -1352,7 +1361,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     session_token_count_json,
                     usage_json,
                     permission_mode,
-                    context_messages_json,
                     models_json,
                     tools_json,
                     tasks_json,
@@ -1372,7 +1380,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     created_at_ms,
                     updated_at_ms
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     agent_id = excluded.agent_id,
                     project_id = excluded.project_id,
@@ -1411,7 +1419,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     session_token_count_json = excluded.session_token_count_json,
                     usage_json = excluded.usage_json,
                     permission_mode = excluded.permission_mode,
-                    context_messages_json = excluded.context_messages_json,
                     models_json = excluded.models_json,
                     tools_json = excluded.tools_json,
                     tasks_json = excluded.tasks_json,
@@ -1430,79 +1437,113 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     last_message_at_ms = excluded.last_message_at_ms,
                     updated_at_ms = excluded.updated_at_ms
                 `,
+                )
+                .run(
+                    state.id,
+                    state.agentId,
+                    projectId,
+                    state.workspaceId ?? null,
+                    state.orderKey,
+                    state.agent.type,
+                    state.agent.parentSessionId ?? null,
+                    state.agent.rootSessionId,
+                    state.agent.depth,
+                    state.agent.parentToolCallId ?? null,
+                    state.agent.taskName ?? null,
+                    state.agent.description ?? null,
+                    state.archived === true ? 1 : 0,
+                    state.trackUnread === true ? 1 : 0,
+                    state.unread?.reason ?? null,
+                    state.unread?.since ?? null,
+                    state.cwd,
+                    state.draft ?? null,
+                    state.draftUpdatedAt ?? null,
+                    state.docker === undefined ? null : JSON.stringify(state.docker),
+                    JSON.stringify(state.secretIds ?? []),
+                    state.providerId,
+                    state.modelId,
+                    state.effort ?? null,
+                    state.serviceTier ?? null,
+                    state.instructions ?? null,
+                    state.appendSystemPrompt ?? null,
+                    state.systemPrompt ?? null,
+                    JSON.stringify(state.externalTools ?? []),
+                    JSON.stringify(state.skills ?? []),
+                    state.status,
+                    state.activeRunId ?? null,
+                    state.activeSince ?? null,
+                    state.elapsedMs ?? 0,
+                    state.totalTokens ?? 0,
+                    state.sessionTokenCount === undefined
+                        ? null
+                        : JSON.stringify(state.sessionTokenCount),
+                    state.usage === undefined
+                        ? null
+                        : JSON.stringify({
+                              committed: state.usage,
+                              ...(state.usageSummary === undefined
+                                  ? {}
+                                  : { summary: state.usageSummary }),
+                              ...(state.usageSummaryEventId === undefined
+                                  ? {}
+                                  : { throughEventId: state.usageSummaryEventId }),
+                              permissionReviews: state.permissionReviews ?? [],
+                          } satisfies PersistedUsageEnvelope),
+                    state.permissionMode,
+                    JSON.stringify(state.models),
+                    JSON.stringify(state.tools),
+                    JSON.stringify(state.tasks),
+                    JSON.stringify(state.workflows ?? []),
+                    state.workflowsEnabled === false ? 0 : 1,
+                    state.goal === undefined ? null : JSON.stringify(state.goal),
+                    state.nextTaskId,
+                    state.title ?? null,
+                    state.titleStatus,
+                    state.titleError ?? null,
+                    state.recap ?? null,
+                    state.metadataUpdatedAt ?? null,
+                    state.metadataRunId ?? null,
+                    state.interruption === undefined ? 0 : 1,
+                    state.interruption === undefined ? null : JSON.stringify(state.interruption),
+                    state.lastMessageAt ?? null,
+                    this.#now(),
+                    this.#now(),
+                );
+            this.#replaceContextMessages(state.id, contextMessages);
+        });
+    }
+
+    transaction<T>(body: () => T): T {
+        return this.#transaction(body);
+    }
+
+    #replaceContextMessages(sessionId: string, messages: readonly Message[]): void {
+        this.#database
+            .prepare(
+                `
+                DELETE FROM session_context_messages
+                WHERE session_id = ? AND position >= ?
+                `,
             )
-            .run(
-                state.id,
-                state.agentId,
-                projectId,
-                state.workspaceId ?? null,
-                state.orderKey,
-                state.agent.type,
-                state.agent.parentSessionId ?? null,
-                state.agent.rootSessionId,
-                state.agent.depth,
-                state.agent.parentToolCallId ?? null,
-                state.agent.taskName ?? null,
-                state.agent.description ?? null,
-                state.archived === true ? 1 : 0,
-                state.trackUnread === true ? 1 : 0,
-                state.unread?.reason ?? null,
-                state.unread?.since ?? null,
-                state.cwd,
-                state.draft ?? null,
-                state.draftUpdatedAt ?? null,
-                state.docker === undefined ? null : JSON.stringify(state.docker),
-                JSON.stringify(state.secretIds ?? []),
-                state.providerId,
-                state.modelId,
-                state.effort ?? null,
-                state.serviceTier ?? null,
-                state.instructions ?? null,
-                state.appendSystemPrompt ?? null,
-                state.systemPrompt ?? null,
-                JSON.stringify(state.externalTools ?? []),
-                JSON.stringify(state.skills ?? []),
-                state.status,
-                state.activeRunId ?? null,
-                state.activeSince ?? null,
-                state.elapsedMs ?? 0,
-                state.totalTokens ?? 0,
-                state.sessionTokenCount === undefined
-                    ? null
-                    : JSON.stringify(state.sessionTokenCount),
-                state.usage === undefined
-                    ? null
-                    : JSON.stringify({
-                          committed: state.usage,
-                          ...(state.usageSummary === undefined
-                              ? {}
-                              : { summary: state.usageSummary }),
-                          ...(state.usageSummaryEventId === undefined
-                              ? {}
-                              : { throughEventId: state.usageSummaryEventId }),
-                          permissionReviews: state.permissionReviews ?? [],
-                      } satisfies PersistedUsageEnvelope),
-                state.permissionMode,
-                state.contextMessages === undefined ? null : JSON.stringify(state.contextMessages),
-                JSON.stringify(state.models),
-                JSON.stringify(state.tools),
-                JSON.stringify(state.tasks),
-                JSON.stringify(state.workflows ?? []),
-                state.workflowsEnabled === false ? 0 : 1,
-                state.goal === undefined ? null : JSON.stringify(state.goal),
-                state.nextTaskId,
-                state.title ?? null,
-                state.titleStatus,
-                state.titleError ?? null,
-                state.recap ?? null,
-                state.metadataUpdatedAt ?? null,
-                state.metadataRunId ?? null,
-                state.interruption === undefined ? 0 : 1,
-                state.interruption === undefined ? null : JSON.stringify(state.interruption),
-                state.lastMessageAt ?? null,
-                this.#now(),
-                this.#now(),
-            );
+            .run(sessionId, messages.length);
+        const upsert = this.#database.prepare(
+            `
+            INSERT INTO session_context_messages (
+                session_id, position, message_id, role, message_json
+            ) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(session_id, position) DO UPDATE SET
+                message_id = excluded.message_id,
+                role = excluded.role,
+                message_json = excluded.message_json
+            WHERE
+                message_id != excluded.message_id OR
+                role != excluded.role OR
+                message_json != excluded.message_json
+            `,
+        );
+        messages.forEach((message, position) => {
+            upsert.run(sessionId, position, message.id, message.role, JSON.stringify(message));
+        });
     }
 
     #assertAcceptingMutations(): void {
@@ -1770,12 +1811,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     UPDATE sessions
                     SET last_event_id = ?, updated_at_ms = ?
                     WHERE id = ?
-                    `,
+                `,
                 )
                 .run(event.id, this.#now(), event.sessionId);
-            this.#publishLiveStream(event);
-            this.#publishGlobalEvent(event);
-            this.#notifySessionEvent(event);
+            this.#afterTransactionCommit(() => {
+                this.#publishLiveStream(event);
+                this.#publishGlobalEvent(event);
+                this.#notifySessionEvent(event);
+            });
             return;
         }
         const eventFacts = sessionEventFacts(event);
@@ -1822,7 +1865,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         // The live stream carries this event whether or not the durable log
         // keeps it, but never before the row it describes is committed.
-        this.#publishLiveStream(event);
+        this.#afterTransactionCommit(() => this.#publishLiveStream(event));
         if (this.#globalEventQueue.durable && globalEntry !== undefined) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => queue.publish(globalEntry!));
@@ -1993,6 +2036,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 }
                 return message;
             });
+    }
+
+    #loadContextMessages(sessionId: string): Message[] {
+        return this.#database
+            .prepare(
+                `
+                SELECT message_json
+                FROM session_context_messages
+                WHERE session_id = ?
+                ORDER BY position
+                `,
+            )
+            .all(sessionId)
+            .map((row) => JSON.parse(readString(row, "message_json")) as Message);
     }
 
     #loadQueuedRuns(sessionId: string): PersistedQueuedRun[] {
@@ -2179,7 +2236,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const metadataRunId = readOptionalString(row, "metadata_run_id");
         const activeRunId = readOptionalString(row, "active_run_id");
         const activeSince = readOptionalNumber(row, "active_since_ms");
-        const contextMessagesJson = readOptionalString(row, "context_messages_json");
+        const contextMessages = this.#loadContextMessages(sessionId);
         const permissionMode = parsePermissionMode(readString(row, "permission_mode"));
         const parentSessionId = readOptionalString(row, "parent_session_id");
         const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
@@ -2224,9 +2281,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             ...(dockerJson !== undefined
                 ? { docker: JSON.parse(dockerJson) as DockerExecutionConfig }
                 : {}),
-            ...(contextMessagesJson !== undefined
-                ? { contextMessages: JSON.parse(contextMessagesJson) as Message[] }
-                : {}),
+            contextMessages,
             ...(effort !== undefined ? { effort } : {}),
             ...(serviceTier === "fast" ? { serviceTier } : {}),
             id,
@@ -2307,6 +2362,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 lastEventId === undefined ? {} : { after: lastEventId },
             ),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
+            deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
             events: this.#loadEvents(sessionId),
             ...(lastEventId !== undefined ? { lastEventId } : {}),
             modelCatalog: this.#modelCatalog,

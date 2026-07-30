@@ -29,7 +29,7 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived"),
             ).toMatchObject({ dflt_value: "0", notnull: 1, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
         } finally {
             database.close();
         }
@@ -49,7 +49,7 @@ describe("initializeSessionDatabase", () => {
             expect(
                 columnInfo(database, "external_tool_calls", "provider_tool_call_id"),
             ).toBeDefined();
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
         } finally {
             database.close();
         }
@@ -69,7 +69,7 @@ describe("initializeSessionDatabase", () => {
             expect(
                 columnInfo(database, "durable_user_inputs", "provider_tool_call_id"),
             ).toBeDefined();
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
         } finally {
             database.close();
         }
@@ -90,7 +90,7 @@ describe("initializeSessionDatabase", () => {
                 notnull: 0,
                 type: "TEXT",
             });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
         } finally {
             database.close();
         }
@@ -191,7 +191,7 @@ describe("initializeSessionDatabase", () => {
                     session_id: "session-with-history",
                 },
             ]);
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
 
             // The schema version may already be committed when a later migration batch is
             // interrupted. Startup must resume migration 12 from its durable cursor.
@@ -224,6 +224,263 @@ describe("initializeSessionDatabase", () => {
         }
     });
 
+    it("moves active inference context out of the sessions row", () => {
+        const database = new DatabaseSync(":memory:");
+        const context = [
+            {
+                blocks: [{ text: "Compacted context", type: "text" }],
+                id: "context-1",
+                role: "user",
+            },
+            {
+                blocks: [{ text: "Connection lost", type: "text" }],
+                id: "context-2",
+                outcome: "retried",
+                role: "error",
+            },
+        ];
+        const transcriptFallback = {
+            blocks: [{ text: "Visible transcript fallback", type: "text" }],
+            id: "transcript-1",
+            role: "user",
+        };
+        try {
+            initializeSessionDatabase(database);
+            database.exec(`
+                ALTER TABLE sessions
+                    ADD COLUMN context_messages_json TEXT;
+            `);
+            const insertSession = database.prepare(
+                `
+                    INSERT INTO sessions (
+                        id, agent_id, cwd, provider_id, model_id, status,
+                        models_json, tools_json, context_messages_json,
+                        created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+            );
+            insertSession.run(
+                "session-with-context",
+                "agent-with-context",
+                "/tmp/rig-context",
+                "codex",
+                "openai/gpt-test",
+                "idle",
+                "[]",
+                "[]",
+                JSON.stringify(context),
+                1,
+                1,
+            );
+            insertSession.run(
+                "session-with-transcript-context",
+                "agent-with-transcript-context",
+                "/tmp/rig-transcript-context",
+                "codex",
+                "openai/gpt-test",
+                "idle",
+                "[]",
+                "[]",
+                null,
+                2,
+                2,
+            );
+            database
+                .prepare(
+                    `
+                    INSERT INTO session_messages (
+                        session_id, position, message_id, role, is_partial,
+                        run_id, message_json, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                )
+                .run(
+                    "session-with-transcript-context",
+                    7,
+                    transcriptFallback.id,
+                    transcriptFallback.role,
+                    0,
+                    "run-1",
+                    JSON.stringify(transcriptFallback),
+                    2,
+                );
+            database.exec("PRAGMA user_version = 12");
+
+            initializeSessionDatabase(database);
+
+            expect(columnInfo(database, "sessions", "context_messages_json")).toBeUndefined();
+            expect(
+                database
+                    .prepare(
+                        `
+                        SELECT position, message_id, role, message_json
+                        FROM session_context_messages
+                        WHERE session_id = ?
+                        ORDER BY position
+                        `,
+                    )
+                    .all("session-with-context"),
+            ).toEqual(
+                context.map((message, position) => ({
+                    message_id: message.id,
+                    message_json: JSON.stringify(message),
+                    position,
+                    role: message.role,
+                })),
+            );
+            expect(
+                database
+                    .prepare(
+                        `
+                        SELECT position, message_id, role, message_json
+                        FROM session_context_messages
+                        WHERE session_id = ?
+                        ORDER BY position
+                        `,
+                    )
+                    .all("session-with-transcript-context"),
+            ).toEqual([
+                {
+                    message_id: transcriptFallback.id,
+                    message_json: JSON.stringify(transcriptFallback),
+                    position: 0,
+                    role: transcriptFallback.role,
+                },
+            ]);
+        } finally {
+            database.close();
+        }
+    });
+
+    it("rolls back instead of dropping malformed active inference context", () => {
+        const database = new DatabaseSync(":memory:");
+        try {
+            initializeSessionDatabase(database);
+            database.exec(`
+                ALTER TABLE sessions
+                    ADD COLUMN context_messages_json TEXT NOT NULL DEFAULT '[]';
+            `);
+            database
+                .prepare(
+                    `
+                    INSERT INTO sessions (
+                        id, agent_id, cwd, provider_id, model_id, status,
+                        models_json, tools_json, context_messages_json,
+                        created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                )
+                .run(
+                    "session-with-invalid-context",
+                    "agent-with-invalid-context",
+                    "/tmp/rig-invalid-context",
+                    "codex",
+                    "openai/gpt-test",
+                    "idle",
+                    "[]",
+                    "[]",
+                    "{not-json",
+                    1,
+                    1,
+                );
+            database.exec("PRAGMA user_version = 12");
+
+            expect(() => initializeSessionDatabase(database)).toThrow(
+                "has invalid active inference context",
+            );
+            expect(columnInfo(database, "sessions", "context_messages_json")).toBeDefined();
+            expect(
+                database
+                    .prepare(
+                        "SELECT COUNT(*) AS count FROM session_context_messages WHERE session_id = ?",
+                    )
+                    .get("session-with-invalid-context"),
+            ).toEqual({ count: 0 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+        } finally {
+            database.close();
+        }
+    });
+
+    it("backfills transcript context for databases that predate the legacy JSON column", () => {
+        const database = new DatabaseSync(":memory:");
+        const message = {
+            blocks: [{ text: "Older visible context", type: "text" }],
+            id: "older-context-1",
+            role: "user",
+        };
+        try {
+            initializeSessionDatabase(database);
+            database
+                .prepare(
+                    `
+                    INSERT INTO sessions (
+                        id, agent_id, cwd, provider_id, model_id, status,
+                        models_json, tools_json, created_at_ms, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                )
+                .run(
+                    "older-session",
+                    "older-agent",
+                    "/tmp/rig-older-context",
+                    "codex",
+                    "openai/gpt-test",
+                    "idle",
+                    "[]",
+                    "[]",
+                    1,
+                    1,
+                );
+            database
+                .prepare(
+                    `
+                    INSERT INTO session_messages (
+                        session_id, position, message_id, role, is_partial,
+                        run_id, message_json, updated_at_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    `,
+                )
+                .run(
+                    "older-session",
+                    5,
+                    message.id,
+                    message.role,
+                    0,
+                    "older-run",
+                    JSON.stringify(message),
+                    1,
+                );
+            database.exec(`
+                DELETE FROM session_context_messages;
+                PRAGMA user_version = 12;
+            `);
+
+            initializeSessionDatabase(database);
+
+            expect(
+                database
+                    .prepare(
+                        `
+                        SELECT position, message_id, role, message_json
+                        FROM session_context_messages
+                        WHERE session_id = ?
+                        `,
+                    )
+                    .all("older-session"),
+            ).toEqual([
+                {
+                    message_id: message.id,
+                    message_json: JSON.stringify(message),
+                    position: 0,
+                    role: message.role,
+                },
+            ]);
+        } finally {
+            database.close();
+        }
+    });
+
     it("adds project archive state to earlier project databases", () => {
         const database = new DatabaseSync(":memory:");
         try {
@@ -241,7 +498,7 @@ describe("initializeSessionDatabase", () => {
                     .all()
                     .find((column) => column.name === "archived_at_ms"),
             ).toMatchObject({ notnull: 0, type: "INTEGER" });
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
         } finally {
             database.close();
         }
@@ -313,7 +570,7 @@ describe("initializeSessionDatabase", () => {
 
             expect(() => initializeSessionDatabase(database)).not.toThrow();
 
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
             const project = database
                 .prepare("SELECT presence FROM projects WHERE path = ?")
                 .get("/tmp/rig-legacy");
@@ -355,10 +612,10 @@ describe("initializeSessionDatabase", () => {
     it("refuses to open a database from a newer Rig schema", () => {
         const database = new DatabaseSync(":memory:");
         try {
-            database.exec("PRAGMA user_version = 13");
+            database.exec("PRAGMA user_version = 14");
 
             expect(() => initializeSessionDatabase(database)).toThrow(
-                "The session database uses schema version 13, but this Rig version supports up to 12.",
+                "The session database uses schema version 14, but this Rig version supports up to 13.",
             );
             expect(
                 database.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all(),
@@ -625,7 +882,7 @@ describe("initializeSessionDatabase", () => {
             expect(columnInfo(database, "project_workspaces", "base_commit")).toBeDefined();
             expect(columnInfo(database, "project_workspaces", "git_branch")).toBeDefined();
             expect(columnInfo(database, "project_workspaces", "branch")).toBeUndefined();
-            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 12 });
+            expect(database.prepare("PRAGMA user_version").get()).toEqual({ user_version: 13 });
         } finally {
             database.close();
         }

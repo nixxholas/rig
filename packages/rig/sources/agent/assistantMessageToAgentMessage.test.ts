@@ -112,6 +112,37 @@ describe("assistantMessageToAgentMessage", () => {
             },
         ]);
     });
+
+    it("replays durable inference errors as model-readable untrusted context", () => {
+        expect(
+            toProviderMessages(
+                [
+                    {
+                        attempt: 2,
+                        blocks: [{ text: "The provider connection was lost.", type: "text" }],
+                        id: "retry-2",
+                        outcome: "retried",
+                        role: "error",
+                    },
+                ],
+                {
+                    model: modelOpenaiGpt56Sol,
+                    now: () => 2,
+                    providerId: "codex",
+                },
+            ),
+        ).toEqual([
+            {
+                content: [
+                    { text: "Rig inference attempt 2 failed and was retried.", type: "text" },
+                    { text: "The provider connection was lost.", type: "text" },
+                ],
+                role: "user",
+                sourceMessageId: "retry-2",
+                timestamp: 2,
+            },
+        ]);
+    });
 });
 
 function providerMessage(options: { responseModel?: string } = {}): AssistantMessage {

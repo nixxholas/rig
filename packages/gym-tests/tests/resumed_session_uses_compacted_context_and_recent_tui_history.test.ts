@@ -125,18 +125,21 @@ try {
             }),
         );
     }
+    const contextMessage = {
+        blocks: [{ text: "<conversation_summary>Earlier work was compacted.</conversation_summary>", type: "text" }],
+        id: "summary-1",
+        role: "user",
+    };
     database
         .prepare(
-            "UPDATE sessions SET context_messages_json = ?, last_event_id = ?, status = 'completed', updated_at_ms = ? WHERE id = ?",
+            "INSERT INTO session_context_messages (session_id, position, message_id, role, message_json) VALUES (?, 0, ?, ?, ?)",
+        )
+        .run(session.id, contextMessage.id, contextMessage.role, JSON.stringify(contextMessage));
+    database
+        .prepare(
+            "UPDATE sessions SET last_event_id = ?, status = 'completed', updated_at_ms = ? WHERE id = ?",
         )
         .run(
-            JSON.stringify([
-                {
-                    blocks: [{ text: "<conversation_summary>Earlier work was compacted.</conversation_summary>", type: "text" }],
-                    id: "summary-1",
-                    role: "user",
-                },
-            ]),
             lastEventId,
             createdAt + 32,
             session.id,

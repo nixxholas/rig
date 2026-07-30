@@ -10,6 +10,23 @@ const OTHER_SESSION = "018bcfe5-6800-7002-8000-00000000bbbb";
 const FUTURE = "018bcfe5-6800-7005-8000-00000000aaaa";
 
 describe("SessionEventLog", () => {
+    it("can defer subscriber delivery until durable work commits", () => {
+        const pending: (() => void)[] = [];
+        const observed: SessionEvent[] = [];
+        const log = new SessionEventLog({
+            deferNotification: (notify) => pending.push(notify),
+        });
+        log.subscribe((next) => observed.push(next));
+
+        const appended = event(FIRST);
+        log.append(appended);
+
+        expect(observed).toEqual([]);
+        expect(pending).toHaveLength(1);
+        pending[0]?.();
+        expect(observed).toEqual([appended]);
+    });
+
     it("offers reducers one allocation-free read-only view of a long log", () => {
         const log = new SessionEventLog();
         const view = log.all();

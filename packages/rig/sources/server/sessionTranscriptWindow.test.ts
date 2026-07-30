@@ -155,18 +155,13 @@ describe("sessionTranscriptWindow", () => {
         ]);
     });
 
-    it("records which group a steering message and an attempt belong to", () => {
+    it("records which group a steering message closes", () => {
         // The clock cannot say: a boundary and the group it opens routinely
-        // share a millisecond, and so do an attempt and the boundary beside it.
+        // share a millisecond.
         const facts = transcriptRunFacts([
             sessionEvent("run_started", 10, { runId: "run-1" }),
             sessionEvent("agent_event", 20, {
                 event: { iteration: 1, messageId: "message-1", type: "inference_iteration_start" },
-                runId: "run-1",
-            }),
-            sessionEvent("inference_retry", 20, {
-                attempt: 1,
-                reason: "Connection lost",
                 runId: "run-1",
             }),
             sessionEvent("steering_applied", 20, { messageIds: ["steer-1"], runId: "run-1" }),
@@ -181,7 +176,6 @@ describe("sessionTranscriptWindow", () => {
             }),
         ]);
 
-        expect(facts.get("run-1")?.retries?.[0]?.groupId).toBe("message-1");
         expect(facts.get("run-1")?.boundaryGroupIds).toEqual({ "steer-1": "message-1" });
     });
 
@@ -258,32 +252,31 @@ describe("sessionTranscriptWindow", () => {
         expect(window.turns[1]).toMatchObject({ errorMessage: "Boom", outcome: "error" });
     });
 
-    it("carries durable retries with the turn where they occurred", () => {
-        const facts = new Map<string, TranscriptRunFacts>([
-            [
-                "run-1",
-                {
-                    retries: [
-                        {
-                            attempt: 2,
-                            createdAt: 50,
-                            id: "retry-1",
-                            reason: "Connection lost",
-                        },
-                    ],
-                    startedAt: 10,
-                },
-            ],
+    it("carries durable inference errors as messages in their turn", () => {
+        const error: Message = {
+            attempt: 2,
+            blocks: [{ text: "Connection lost", type: "text" }],
+            id: "retry-1",
+            outcome: "retried",
+            role: "error",
+        };
+        const facts = transcriptRunFacts([
+            sessionEvent("run_started", 10, { runId: "run-1" }),
+            sessionEvent("agent_event", 20, {
+                event: { iteration: 1, messageId: "message-1", type: "inference_iteration_start" },
+                runId: "run-1",
+            }),
+            sessionEvent("agent_message", 50, { message: error, runId: "run-1" }),
         ]);
+        const window = newest(
+            [...turn("run-1"), { createdAt: 50, message: error, runId: "run-1" }],
+            facts,
+            20,
+        );
 
-        expect(newest(turn("run-1"), facts, 20).turns[0]?.retries).toEqual([
-            {
-                attempt: 2,
-                createdAt: 50,
-                id: "retry-1",
-                reason: "Connection lost",
-            },
-        ]);
+        expect(window.messages).toContainEqual(error);
+        expect(window.messageGroupId).toEqual({ "retry-1": "message-1" });
+        expect(window.turns[0]?.messageIds).toContain("retry-1");
     });
 
     it("carries each message's own occurrence time", () => {

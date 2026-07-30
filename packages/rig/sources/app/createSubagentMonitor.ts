@@ -70,6 +70,7 @@ class LiveSubagentMonitor implements SubagentMonitor {
     #scrollFromBottom = 0;
     #selectedIndex = 0;
     #streamEntryId: string | undefined;
+    #terminalFailureRunIds = new Set<string>();
     #watchController: AbortController | undefined;
 
     constructor(options: CreateSubagentMonitorOptions) {
@@ -167,6 +168,7 @@ class LiveSubagentMonitor implements SubagentMonitor {
         this.#entries = [];
         this.#scrollFromBottom = 0;
         this.#streamEntryId = undefined;
+        this.#terminalFailureRunIds.clear();
     }
 
     #applyEvent(event: SessionEvent): void {
@@ -176,6 +178,13 @@ class LiveSubagentMonitor implements SubagentMonitor {
             this.#appendEntry(event.data.message.id, subagentLogMessageText(event.data.message));
         } else if (event.type === "agent_message") {
             const text = subagentLogMessageText(event.data.message);
+            if (event.data.message.role === "error" && event.data.message.outcome === "failed") {
+                this.#terminalFailureRunIds.add(event.data.runId);
+                if (this.#terminalFailureRunIds.size > MAX_LOG_ENTRIES) {
+                    const oldest = this.#terminalFailureRunIds.values().next().value;
+                    if (oldest !== undefined) this.#terminalFailureRunIds.delete(oldest);
+                }
+            }
             if (text.length > 0) {
                 if (this.#streamEntryId !== undefined) {
                     this.#replaceEntry(this.#streamEntryId, text);
@@ -215,11 +224,11 @@ class LiveSubagentMonitor implements SubagentMonitor {
                     `progress:${inference.toolCallId}`,
                     `Working · ${sanitizeTerminalText(inference.status)}`,
                 );
-            } else if (inference.type === "error") {
-                this.#appendEntry(`error:${event.id}`, "The model response failed.");
             }
         } else if (event.type === "run_error") {
-            this.#appendEntry(`error:${event.id}`, `Error · ${event.data.errorMessage}`);
+            if (!this.#terminalFailureRunIds.has(event.data.runId)) {
+                this.#appendEntry(`error:${event.id}`, `Error · ${event.data.errorMessage}`);
+            }
         }
         this.#onRequestRender?.();
     }

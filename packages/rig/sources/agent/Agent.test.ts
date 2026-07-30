@@ -916,20 +916,37 @@ describe("Agent", () => {
         expect(result.stopReason).toBe("stop");
         expect(contexts).toHaveLength(3);
         expect(contexts[1]?.systemPrompt).toBe(contexts[0]?.systemPrompt);
-        expect(contexts[2]?.messages).toMatchObject([
-            {
-                role: "user",
-                content: [
-                    {
-                        type: "text",
-                        text: expect.stringContaining("Earlier work was summarized."),
-                    },
-                ],
-            },
-        ]);
+        expect(contexts[2]?.messages[0]).toMatchObject({
+            role: "user",
+            content: [
+                {
+                    type: "text",
+                    text: expect.stringContaining("Earlier work was summarized."),
+                },
+            ],
+        });
+        expect(contexts[2]?.messages.at(-1)).toMatchObject({
+            role: "user",
+            content: [
+                {
+                    type: "text",
+                    text: "Rig inference attempt 1 failed and was retried.",
+                },
+                {
+                    type: "text",
+                    text: expect.stringContaining("exceeds the context window"),
+                },
+            ],
+        });
         expect(observedEventTypes).not.toContain("error");
         expect(result.messages).not.toContainEqual(
             expect.objectContaining({ role: "agent", blocks: [] }),
+        );
+        expect(result.messages).toContainEqual(
+            expect.objectContaining({
+                outcome: "retried",
+                role: "error",
+            }),
         );
         expect(result.messages.at(-1)).toMatchObject({
             role: "agent",
@@ -937,7 +954,7 @@ describe("Agent", () => {
         });
     });
 
-    it("does not replay transient provider errors outside the provider", async () => {
+    it("records a terminal provider error without starting another inference", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
             name: "GPT Test",
@@ -988,6 +1005,14 @@ describe("Agent", () => {
         expect(agent.messages).not.toContainEqual(
             expect.objectContaining({ blocks: [{ type: "text", text: "recovered" }] }),
         );
+        expect(agent.messages).not.toContainEqual(
+            expect.objectContaining({ blocks: [], role: "agent" }),
+        );
+        expect(agent.messages.at(-1)).toMatchObject({
+            blocks: [{ text: "fetch failed", type: "text" }],
+            outcome: "failed",
+            role: "error",
+        });
     });
 
     it("does not replay an incomplete response after visible content", async () => {
@@ -1068,9 +1093,14 @@ describe("Agent", () => {
         expect(result.stopReason).toBe("error");
         expect(requestCount).toBe(1);
         expect(observedEventTypes).not.toContain("retrying");
-        expect(result.messages.at(-1)).toMatchObject({
+        expect(result.messages.findLast((message) => message.role === "agent")).toMatchObject({
             role: "agent",
             blocks: [{ type: "text", text: "partial answer" }],
+        });
+        expect(result.messages.at(-1)).toMatchObject({
+            blocks: [{ text: "The response ended early.", type: "text" }],
+            outcome: "failed",
+            role: "error",
         });
     });
 
@@ -1479,14 +1509,34 @@ describe("Agent", () => {
                 },
             ],
         });
-        expect(contexts[2]?.messages.at(-1)).toMatchObject({
+        expect(
+            contexts[2]?.messages.findLast((message) => message.role === "toolResult"),
+        ).toMatchObject({
             role: "toolResult",
             content: [{ type: "text", text: "Invalid image" }],
             isError: false,
         });
+        expect(contexts[2]?.messages.at(-1)).toMatchObject({
+            role: "user",
+            content: [
+                { type: "text", text: "Rig inference attempt 1 failed and was retried." },
+                {
+                    type: "text",
+                    text: expect.stringContaining(
+                        "The image data you provided does not represent a valid image.",
+                    ),
+                },
+            ],
+        });
         expect(observedEventTypes).not.toContain("error");
         expect(observedToolResults).toHaveLength(2);
         expect(observedToolResults[1]?.id).toBe(observedToolResults[0]?.id);
+        expect(result.messages).toContainEqual(
+            expect.objectContaining({
+                outcome: "retried",
+                role: "error",
+            }),
+        );
         expect(result.messages.at(-1)).toMatchObject({
             role: "agent",
             blocks: [{ type: "text", text: "recovered" }],

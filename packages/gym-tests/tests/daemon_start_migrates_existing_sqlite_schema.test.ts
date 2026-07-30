@@ -160,7 +160,6 @@ const queuedRunColumns = new Set(
 const expectedSessionColumns = [
     "active_since_ms",
     "append_system_prompt",
-    "context_messages_json",
     "docker_json",
     "durable_skills_json",
     "elapsed_ms",
@@ -185,6 +184,9 @@ const expectedQueuedRunColumns = ["debug", "debug_directory", "integration_confi
 for (const column of expectedSessionColumns) {
     if (!sessionColumns.has(column)) throw new Error("Missing migrated sessions column: " + column);
 }
+if (sessionColumns.has("context_messages_json")) {
+    throw new Error("The obsolete sessions context column still exists.");
+}
 for (const column of expectedQueuedRunColumns) {
     if (!queuedRunColumns.has(column)) throw new Error("Missing migrated queued_runs column: " + column);
 }
@@ -206,9 +208,15 @@ const durableUserInputsTable = database
 if (durableUserInputsTable?.name !== "durable_user_inputs") {
     throw new Error("Missing migrated durable_user_inputs table.");
 }
+const contextMessagesTable = database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'session_context_messages'")
+    .get();
+if (contextMessagesTable?.name !== "session_context_messages") {
+    throw new Error("Missing migrated session_context_messages table.");
+}
 
 const version = database.prepare("PRAGMA user_version").get().user_version;
-if (version !== 4) throw new Error("Expected schema version 4, received " + String(version));
+if (version !== 13) throw new Error("Expected schema version 13, received " + String(version));
 
 const session = database
     .prepare("SELECT id, permission_mode, tasks_json, workflows_json FROM sessions WHERE id = ?")

@@ -25,6 +25,7 @@ export { createSubagentInstructions } from "./prompt/instructions.js";
 export { findLastAgentResponseText } from "./findLastAgentResponseText.js";
 export { findFirstUserRequestText } from "./findFirstUserRequestText.js";
 export { contentBlockToText } from "./contentBlockToText.js";
+export { createErrorMessage } from "./createErrorMessage.js";
 export { selectChatHistoryPage } from "./selectChatHistoryPage.js";
 export type {
     AgentBlock,
@@ -33,6 +34,7 @@ export type {
     ContentBlock,
     DefinedTool,
     ImageBlock,
+    ErrorMessage,
     Message,
     SystemMessage,
     TextBlock,

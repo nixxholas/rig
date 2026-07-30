@@ -6457,6 +6457,89 @@ describe("CodingAssistantApp", () => {
         expect(rendered).not.toContain("Failed Bash");
     });
 
+    it("renders durable retry and terminal inference errors once", () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamText("unused");
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const app = new CodingAssistantApp({
+            agent: new Agent({
+                context: harness.context,
+                modelId: model.id,
+                printToConsole: false,
+                provider,
+            }),
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            sessionBacked: true,
+            tui: fakeTui(),
+        });
+        app.applySessionEvent({
+            createdAt: 1,
+            data: { runId: "run-1" },
+            id: "run-started",
+            sessionId: "session-1",
+            type: "run_started",
+        });
+        app.applySessionEvent({
+            createdAt: 2,
+            data: {
+                message: {
+                    attempt: 2,
+                    blocks: [{ text: "Connection lost.", type: "text" }],
+                    id: "retry-2",
+                    outcome: "retried",
+                    role: "error",
+                },
+                runId: "run-1",
+            },
+            id: "retry-message",
+            sessionId: "session-1",
+            type: "agent_message",
+        });
+        app.applySessionEvent({
+            createdAt: 3,
+            data: {
+                message: {
+                    blocks: [{ text: "Provider unavailable.", type: "text" }],
+                    id: "failed-message",
+                    outcome: "failed",
+                    role: "error",
+                },
+                runId: "run-1",
+            },
+            id: "failure-message",
+            sessionId: "session-1",
+            type: "agent_message",
+        });
+        app.applySessionEvent({
+            createdAt: 4,
+            data: {
+                errorMessage: "Provider unavailable.",
+                modelLocked: false,
+                runId: "run-1",
+            },
+            id: "run-error",
+            sessionId: "session-1",
+            type: "run_error",
+        });
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("Inference attempt 2 failed and was retried");
+        expect(rendered).toContain("Connection lost.");
+        expect(rendered.match(/Provider unavailable\./gu)).toHaveLength(1);
+    });
+
     it("renders structured MCP calls, replayed results, errors, and approval detail", () => {
         const model = defineModel({
             id: "openai/gpt-test",

@@ -95,6 +95,20 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
             }
             continue;
         }
+        if (message.role === "error") {
+            const text = renderContent(message.blocks, "[Image attached to inference error]");
+            if (text.length > 0) {
+                entries.push({
+                    category: "message",
+                    ordinal: entries.length,
+                    text: truncateEntry(
+                        `${message.outcome === "retried" ? "Retried inference error" : "Run error"}:\n${text}`,
+                    ),
+                    trustedUserEvidence: false,
+                });
+            }
+            continue;
+        }
 
         for (const block of message.blocks) {
             if (block.type === "thinking") continue;

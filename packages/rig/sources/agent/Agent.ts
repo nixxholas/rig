@@ -324,6 +324,20 @@ export class Agent {
         return queued;
     }
 
+    /**
+     * Adds a durable message after a run failed outside the normal loop result.
+     *
+     * This is only valid once the run has unwound; mutating the transcript held
+     * by an active loop would create two competing context owners.
+     */
+    recordMessage(message: Message): void {
+        if (this.#activeRunId !== undefined) {
+            throw new Error("Cannot record a message while the agent is running.");
+        }
+        this.#messages.push(message);
+        this.#contextMessages?.push(message);
+    }
+
     async send(
         text: string | readonly ContentBlock[],
         options: AgentRunOptions = {},
@@ -441,6 +455,7 @@ export class Agent {
                 this.#contextMessages = [...withAgentsMd];
             }
 
+            const contextWasExplicit = this.#contextMessages !== undefined;
             let contextCompactedDuringRun = false;
             const loopOptions: Parameters<typeof runAgentLoop>[0] = {
                 ...(this.#allowReviewerModel ? { allowReviewerModel: true } : {}),
@@ -522,8 +537,10 @@ export class Agent {
             this.#steeringController = new AbortController();
             if (this.#resetVersion === resetVersion) {
                 this.#messages = [...result.messages];
-                if (this.#contextMessages !== undefined || contextCompactedDuringRun) {
+                if (contextWasExplicit || contextCompactedDuringRun) {
                     this.#contextMessages = [...result.contextMessages];
+                } else {
+                    this.#contextMessages = undefined;
                 }
                 this.#status = result.stopReason === "aborted" ? "aborted" : "idle";
             } else if (this.#status === "running") {

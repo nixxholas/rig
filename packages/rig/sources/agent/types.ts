@@ -150,6 +150,23 @@ export interface CompactionMessage {
     internal?: never;
 }
 
+/**
+ * A run failure preserved in both visible history and model context.
+ *
+ * Retried attempts and terminal failures are the same durable message kind. The
+ * outcome tells readers whether Rig continued after this failure or stopped.
+ */
+export interface ErrorMessage {
+    role: "error";
+    id: string;
+    blocks: readonly ContentBlock[];
+    outcome: "retried" | "failed";
+    /** Present when the provider identified which retry attempt failed. */
+    attempt?: number;
+    /** Inference failures are always visible transcript history. */
+    internal?: never;
+}
+
 export interface AgentMessage {
     role: "agent";
     id: string;
@@ -166,7 +183,7 @@ export interface AgentMessage {
     internal?: true;
 }
 
-export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage;
+export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage | ErrorMessage;
 
 /** A fixed lock key shared across all invocations. */
 export type LockConstant = string;

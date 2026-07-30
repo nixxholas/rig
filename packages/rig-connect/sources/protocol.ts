@@ -236,7 +236,16 @@ export interface CompactionMessage {
     internal?: never;
 }
 
-export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage;
+export interface ErrorMessage {
+    role: "error";
+    id: string;
+    blocks: readonly ContentBlock[];
+    outcome: "retried" | "failed";
+    attempt?: number;
+    internal?: never;
+}
+
+export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage | ErrorMessage;
 
 export interface Usage {
     input: number;
@@ -681,7 +690,6 @@ export interface SessionTranscriptTurn {
     outcome?: "success" | "error" | "stopped";
     errorMessage?: string;
     groups?: readonly SessionTranscriptGroup[];
-    retries?: readonly SessionTranscriptRetry[];
 }
 
 export interface SessionTranscriptGroup {
@@ -693,14 +701,6 @@ export interface SessionTranscriptGroup {
     errorMessage?: string;
 }
 
-export interface SessionTranscriptRetry {
-    id: EventId;
-    groupId?: string;
-    createdAt: number;
-    attempt: number;
-    reason: string;
-}
-
 export interface SessionTranscriptWindow {
     messages: readonly Message[];
     messageCreatedAt?: Readonly<Record<string, number>>;
@@ -708,6 +708,7 @@ export interface SessionTranscriptWindow {
     /** When each steering message was actually applied to its run. */
     messageSteeredAt?: Readonly<Record<string, number>>;
     messageBoundaryGroupId?: Readonly<Record<string, string>>;
+    messageGroupId?: Readonly<Record<string, string>>;
     permissionReviews?: readonly PermissionReviewState[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
@@ -855,7 +856,6 @@ export type InterpretedSessionEvent =
       >
     | BaseSessionEvent<"run_started", { runId: string; kind?: "compaction" }>
     | BaseSessionEvent<"abort_requested", { mutationId?: MutationId; runId?: string }>
-    | BaseSessionEvent<"inference_retry", { attempt: number; reason: string; runId: string }>
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
     | BaseSessionEvent<

@@ -1033,8 +1033,11 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#runningToolCallIds.clear();
             this.#toolStatusByCallId.clear();
             this.#clearUserInputRequests();
+            const alreadyRendered = this.#hasActiveInferenceFailure(event.data.errorMessage);
             this.#activeTurnEntryStart = undefined;
-            this.#appendEntry({ role: "error", text: event.data.errorMessage });
+            if (!alreadyRendered) {
+                this.#appendEntry({ role: "error", text: event.data.errorMessage });
+            }
             this.#startDrainQueue();
             return;
         }
@@ -3574,6 +3577,28 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     #applyAgentMessage(message: Message): void {
+        if (message.role === "error") {
+            const text = message.blocks
+                .map((block) =>
+                    block.type === "text" ? block.text : `[Image: ${block.mediaType}]`,
+                )
+                .join("\n");
+            if (message.outcome === "failed" && this.#hasActiveInferenceFailure(text)) return;
+            this.#deferredTurnSeparator = false;
+            this.#appendEntry({
+                id: message.id,
+                role: "error",
+                text,
+                title:
+                    message.outcome === "retried"
+                        ? message.attempt === undefined
+                            ? "Inference failed and was retried"
+                            : `Inference attempt ${String(message.attempt)} failed and was retried`
+                        : "Run failed",
+            });
+            this.#requestRender();
+            return;
+        }
         if (message.role !== "agent") {
             return;
         }
@@ -3639,6 +3664,17 @@ export class CodingAssistantApp implements Component, Focusable {
         flushText();
         this.#refreshToolActivityStatus();
         this.#requestRender();
+    }
+
+    #hasActiveInferenceFailure(reason: string): boolean {
+        const start = this.#activeTurnEntryStart ?? this.#entries.length;
+        return this.#entries
+            .slice(start)
+            .some(
+                (entry) =>
+                    entry.role === "error" &&
+                    (entry.text === reason || entry.providerErrorFallback === reason),
+            );
     }
 
     #ensureStreamEntry(): AppTranscriptEntry {

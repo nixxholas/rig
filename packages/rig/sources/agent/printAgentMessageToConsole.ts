@@ -9,7 +9,12 @@ export interface AgentConsole {
 
 export function printAgentMessageToConsole(message: Message, output: AgentConsole = console): void {
     const text = (() => {
-        if (message.role === "system" || message.role === "user" || message.role === "compaction") {
+        if (
+            message.role === "system" ||
+            message.role === "user" ||
+            message.role === "compaction" ||
+            message.role === "error"
+        ) {
             return message.blocks.map(contentBlockToText).join("");
         }
 

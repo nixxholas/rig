@@ -43,7 +43,6 @@ const sessionColumnMigrations = [
     ["total_tokens", "INTEGER NOT NULL DEFAULT 0"],
     ["session_token_count_json", "TEXT"],
     ["usage_json", "TEXT"],
-    ["context_messages_json", "TEXT"],
     ["service_tier", "TEXT"],
     ["append_system_prompt", "TEXT"],
     ["system_prompt", "TEXT"],
@@ -262,7 +261,6 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 usage_json TEXT,
                 last_event_id TEXT,
                 permission_mode TEXT NOT NULL DEFAULT 'workspace_write',
-                context_messages_json TEXT,
                 models_json TEXT NOT NULL,
                 tools_json TEXT NOT NULL,
                 tasks_json TEXT NOT NULL DEFAULT '[]',
@@ -307,6 +305,15 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 run_id TEXT,
                 message_json TEXT NOT NULL,
                 updated_at_ms INTEGER NOT NULL,
+                PRIMARY KEY (session_id, position)
+            );
+
+            CREATE TABLE IF NOT EXISTS session_context_messages (
+                session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                position INTEGER NOT NULL,
+                message_id TEXT NOT NULL,
+                role TEXT NOT NULL,
+                message_json TEXT NOT NULL,
                 PRIMARY KEY (session_id, position)
             );
 
@@ -421,6 +428,103 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
         `);
 
         prepareSessionDatabaseMigrations(database, schemaVersion);
+
+        // Active inference context used to be one JSON array on `sessions`.
+        // Move it into its ordered row store in the same schema transaction,
+        // then remove the obsolete column so there is only one context owner.
+        if (hasColumn(database, "sessions", "context_messages_json")) {
+            const invalidContext = database
+                .prepare(
+                    `
+                    SELECT id
+                    FROM sessions
+                    WHERE context_messages_json IS NOT NULL
+                        AND (
+                            json_valid(context_messages_json) = 0
+                            OR substr(ltrim(context_messages_json), 1, 1) != '['
+                        )
+                    LIMIT 1
+                    `,
+                )
+                .get();
+            if (invalidContext !== undefined) {
+                throw new Error(
+                    `Session '${readString(invalidContext, "id")}' has invalid active inference context.`,
+                );
+            }
+            database.exec(`
+                INSERT INTO session_context_messages (
+                    session_id, position, message_id, role, message_json
+                )
+                SELECT
+                    session_messages.session_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_messages.session_id
+                        ORDER BY session_messages.position
+                    ) - 1,
+                    session_messages.message_id,
+                    session_messages.role,
+                    session_messages.message_json
+                FROM session_messages
+                JOIN sessions ON sessions.id = session_messages.session_id
+                WHERE
+                    sessions.context_messages_json IS NULL
+                    AND session_messages.is_partial = 0
+                ON CONFLICT(session_id, position) DO UPDATE SET
+                    message_id = excluded.message_id,
+                    role = excluded.role,
+                    message_json = excluded.message_json;
+
+                INSERT INTO session_context_messages (
+                    session_id, position, message_id, role, message_json
+                )
+                SELECT
+                    sessions.id,
+                    CAST(context.key AS INTEGER),
+                    json_extract(context.value, '$.id'),
+                    json_extract(context.value, '$.role'),
+                    json(context.value)
+                FROM sessions
+                JOIN json_each(
+                    CASE
+                        WHEN json_valid(sessions.context_messages_json)
+                            AND substr(ltrim(sessions.context_messages_json), 1, 1) = '['
+                        THEN sessions.context_messages_json
+                        ELSE '[]'
+                    END
+                ) AS context
+                ON TRUE
+                ON CONFLICT(session_id, position) DO UPDATE SET
+                    message_id = excluded.message_id,
+                    role = excluded.role,
+                    message_json = excluded.message_json;
+
+                ALTER TABLE sessions DROP COLUMN context_messages_json;
+            `);
+        } else if (schemaVersion < 13) {
+            // Databases that predate the legacy JSON column used the committed
+            // transcript itself as inference context.
+            database.exec(`
+                INSERT INTO session_context_messages (
+                    session_id, position, message_id, role, message_json
+                )
+                SELECT
+                    session_messages.session_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_messages.session_id
+                        ORDER BY session_messages.position
+                    ) - 1,
+                    session_messages.message_id,
+                    session_messages.role,
+                    session_messages.message_json
+                FROM session_messages
+                WHERE session_messages.is_partial = 0
+                ON CONFLICT(session_id, position) DO UPDATE SET
+                    message_id = excluded.message_id,
+                    role = excluded.role,
+                    message_json = excluded.message_json;
+            `);
+        }
 
         ensureColumn(database, "projects", "order_key", "TEXT NOT NULL COLLATE BINARY DEFAULT ''");
         ensureColumn(database, "projects", "archived_at_ms", "INTEGER");
@@ -601,6 +705,8 @@ export function initializeSessionDatabase(database: DatabaseSync): void {
                 ON session_events(session_id, seq);
             CREATE INDEX IF NOT EXISTS session_messages_session_message
                 ON session_messages(session_id, message_id);
+            CREATE INDEX IF NOT EXISTS session_context_messages_session_message
+                ON session_context_messages(session_id, message_id);
             CREATE INDEX IF NOT EXISTS sessions_parent_created
                 ON sessions(parent_session_id, created_at_ms);
             CREATE INDEX IF NOT EXISTS sessions_project_activity

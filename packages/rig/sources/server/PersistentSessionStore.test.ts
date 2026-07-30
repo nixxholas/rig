@@ -1896,6 +1896,59 @@ describe("PersistentSessionStore", () => {
         }
     });
 
+    it("stores the complete active inference context in its own ordered table", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const first = textUserMessage("context-1", "First inference message.");
+        const second = textUserMessage("context-2", "Second inference message.");
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            const state = sessionState({ contextMessages: [first, second] });
+            store.saveSession(state);
+            store.saveSession({ ...state, contextMessages: [second] });
+            store.close();
+
+            const database = new DatabaseSync(databasePath);
+            try {
+                expect(
+                    database
+                        .prepare("PRAGMA table_info(sessions)")
+                        .all()
+                        .map((column) => String(column.name)),
+                ).not.toContain("context_messages_json");
+                expect(
+                    database
+                        .prepare(
+                            `
+                            SELECT position, message_id, role, message_json
+                            FROM session_context_messages
+                            WHERE session_id = ?
+                            ORDER BY position
+                            `,
+                        )
+                        .all(state.id),
+                ).toEqual([
+                    {
+                        message_id: second.id,
+                        message_json: JSON.stringify(second),
+                        position: 0,
+                        role: "user",
+                    },
+                ]);
+            } finally {
+                database.close();
+            }
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                expect(restoredStore.get(state.id)?.state().contextMessages).toEqual([second]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
+
     it("persists internal context messages without exposing them in the session snapshot", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const internalContinuation: UserMessage = {
@@ -1987,12 +2040,17 @@ describe("PersistentSessionStore", () => {
             });
 
             expect(requests).toHaveLength(1);
-            expect(session.state().contextMessages?.slice(-1)).toMatchObject([
-                {
-                    role: "agent",
-                    blocks: [{ type: "text", text: "DURABLE_PARTIAL" }],
-                },
-            ]);
+            expect(
+                session.state().contextMessages?.findLast((message) => message.role === "agent"),
+            ).toMatchObject({
+                role: "agent",
+                blocks: [{ type: "text", text: "DURABLE_PARTIAL" }],
+            });
+            expect(session.state().contextMessages?.at(-1)).toMatchObject({
+                blocks: [{ type: "text", text: "WebSocket error" }],
+                outcome: "failed",
+                role: "error",
+            });
             expect(JSON.stringify(session.snapshot().snapshot)).not.toContain(
                 "Continue after the inference crash.",
             );
@@ -2007,8 +2065,17 @@ describe("PersistentSessionStore", () => {
             try {
                 const restored = restoredStore.get(session.id);
                 expect(restored?.state().contextMessages?.at(-1)).toMatchObject({
-                    role: "agent",
+                    blocks: [{ type: "text", text: "WebSocket error" }],
+                    outcome: "failed",
+                    role: "error",
+                });
+                expect(
+                    restored
+                        ?.state()
+                        .contextMessages?.findLast((message) => message.role === "agent"),
+                ).toMatchObject({
                     blocks: [{ type: "text", text: "DURABLE_PARTIAL" }],
+                    role: "agent",
                 });
                 expect(restored?.state().contextMessages).not.toContainEqual(
                     expect.objectContaining({ internal: true }),
@@ -2252,13 +2319,13 @@ describe("PersistentSessionStore", () => {
             try {
                 expect(restoredStore.get(state.id)?.snapshot()).toMatchObject({
                     archived: true,
-                        trackUnread: true,
+                    trackUnread: true,
                     unread: state.unread,
                 });
                 expect(restoredStore.list()).toMatchObject([
                     {
                         archived: true,
-                                id: state.id,
+                        id: state.id,
                         trackUnread: true,
                         unread: state.unread,
                     },
@@ -2571,6 +2638,12 @@ describe("PersistentSessionStore", () => {
         const originalInferenceUrl = process.env.RIG_GYM_INFERENCE_URL;
         let restoredStore: PersistentSessionStore | undefined;
         try {
+            const oldTask = textUserMessage("old-task", "Remember the original delegated context.");
+            const oldResponse = {
+                blocks: [{ text: "Original work stopped.", type: "text" }],
+                id: "old-response",
+                role: "agent",
+            } as const;
             const store = new PersistentSessionStore({ databasePath, modelCatalog: catalog });
             store.saveSession(
                 sessionState({
@@ -2593,6 +2666,7 @@ describe("PersistentSessionStore", () => {
                     },
                     agentId: "agent-2",
                     id: "subagent-1",
+                    contextMessages: [oldTask, oldResponse],
                     modelId: model.id,
                     models: [model],
                     providerId: "gym",
@@ -2603,17 +2677,13 @@ describe("PersistentSessionStore", () => {
             );
             store.upsertMessage("subagent-1", {
                 isPartial: false,
-                message: textUserMessage("old-task", "Remember the original delegated context."),
+                message: oldTask,
                 position: 0,
                 runId: "old-run",
             });
             store.upsertMessage("subagent-1", {
                 isPartial: false,
-                message: {
-                    blocks: [{ text: "Original work stopped.", type: "text" }],
-                    id: "old-response",
-                    role: "agent",
-                },
+                message: oldResponse,
                 position: 1,
                 runId: "old-run",
             });

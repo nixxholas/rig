@@ -26,6 +26,7 @@ export function selectCodexForkMessages(
                 : [message];
         }
         if (message.role === "compaction") return [message];
+        if (message.role === "error") return [message];
         const responseItems = selectCodexFinalAnswerItems(message.responseItems);
         const blocks = selectCodexFinalAnswerBlocks(responseItems);
         if (blocks.length === 0) return [];

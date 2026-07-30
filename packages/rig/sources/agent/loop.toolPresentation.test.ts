@@ -11,6 +11,56 @@ import {
 } from "@slopus/rig-execution";
 
 describe("agent loop tool presentations", () => {
+    it("checkpoints each durable message before publishing it", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "mock/model",
+            name: "Mock Model",
+            thinkingLevels: ["off"],
+        });
+        const provider = defineProvider({
+            id: "mock",
+            models: [model],
+            stream() {
+                const message = assistantMessage([{ type: "text", text: "done" }], "stop");
+                return createInferenceStream(async function* () {
+                    yield { partial: message, type: "start" };
+                    yield { attempt: 1, reason: "Connection lost", type: "retrying" };
+                    yield { message, reason: "stop", type: "done" };
+                    return message;
+                });
+            },
+        });
+        const harness = createJustBashToolHarness();
+        let checkpoint: readonly string[] = [];
+        const published: { id: string; checkpoint: readonly string[]; role: string }[] = [];
+
+        await runAgentLoop({
+            context: harness.context,
+            messages: [
+                {
+                    blocks: [{ text: "Try once.", type: "text" }],
+                    id: "user-1",
+                    role: "user",
+                },
+            ],
+            modelId: model.id,
+            onContextChanged(messages) {
+                checkpoint = messages.map((message) => message.id);
+            },
+            onMessage(message) {
+                published.push({ checkpoint: [...checkpoint], id: message.id, role: message.role });
+            },
+            provider,
+            tools: [],
+        });
+
+        expect(published.map((message) => message.role)).toEqual(["error", "agent"]);
+        for (const message of published) {
+            expect(message.checkpoint.at(-1)).toBe(message.id);
+        }
+    });
+
     it("publishes the Bash command presentation before execution starts", async () => {
         const model = defineModel({
             id: "mock/model",

@@ -26,6 +26,20 @@ describe("InMemorySession provider failures", () => {
 
         const boundary = runBoundary(session, run.runId);
         expect(boundary.data).toMatchObject({ errorMessage: PROVIDER_FAILURE });
+        expect(session.state().messages.map((entry) => entry.message)).toContainEqual(
+            expect.objectContaining({
+                blocks: [{ text: PROVIDER_FAILURE, type: "text" }],
+                outcome: "failed",
+                role: "error",
+            }),
+        );
+        expect(session.state().contextMessages).toContainEqual(
+            expect.objectContaining({
+                blocks: [{ text: PROVIDER_FAILURE, type: "text" }],
+                outcome: "failed",
+                role: "error",
+            }),
+        );
     });
 
     it("reports the failed turn to external consumers instead of a completed one", async () => {

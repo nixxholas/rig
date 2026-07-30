@@ -1,7 +1,7 @@
 import type { Message } from "../types.js";
 import type { ChatHistoryStats } from "../summarizeChatHistory.js";
 
-export type ChatHistoryRole = "assistant" | "system" | "user";
+export type ChatHistoryRole = "assistant" | "error" | "system" | "user";
 
 export interface ChatHistoryAgentSummary {
     description?: string;

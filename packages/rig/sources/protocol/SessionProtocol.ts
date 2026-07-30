@@ -323,7 +323,6 @@ export interface SessionTranscriptTurn {
     errorMessage?: string;
     /** Inference segments inside this run, in start order. */
     groups?: readonly SessionTranscriptGroup[];
-    retries?: readonly SessionTranscriptRetry[];
 }
 
 export interface SessionTranscriptGroup {
@@ -334,20 +333,6 @@ export interface SessionTranscriptGroup {
     outcome?: "success" | "error" | "stopped";
     reason?: "completed" | "steering" | "compaction" | "abort" | "error";
     errorMessage?: string;
-}
-
-export interface SessionTranscriptRetry {
-    id: EventId;
-    /**
-     * The group this attempt happened in.
-     *
-     * Wall-clock alone cannot say, because an attempt and the boundary it sits
-     * beside routinely share a millisecond. Absent when no group was open.
-     */
-    groupId?: string;
-    createdAt: number;
-    attempt: number;
-    reason: string;
 }
 
 /**
@@ -373,6 +358,8 @@ export interface SessionTranscriptWindow {
      * boundary and the group it opens routinely share a millisecond.
      */
     messageBoundaryGroupId?: Readonly<Record<string, string>>;
+    /** The inference group each durable error occurred in, keyed by message ID. */
+    messageGroupId?: Readonly<Record<string, string>>;
     /** Resolved permission facts for tool calls contained in this page. */
     permissionReviews?: readonly SessionPermissionReview[];
     turns: readonly SessionTranscriptTurn[];
@@ -911,7 +898,6 @@ export type SessionEvent =
     | MessageSubmittedEvent
     | SteeringAppliedEvent
     | RunStartedEvent
-    | InferenceRetryEvent
     | AgentStreamEvent
     | AgentMessageEvent
     | RunFinishedEvent
@@ -992,11 +978,6 @@ export type SteeringAppliedEvent = BaseSessionEvent<
 export type RunStartedEvent = BaseSessionEvent<
     "run_started",
     { runId: string; kind?: "compaction" }
->;
-
-export type InferenceRetryEvent = BaseSessionEvent<
-    "inference_retry",
-    { attempt: number; reason: string; runId: string }
 >;
 
 export type AgentStreamEvent = BaseSessionEvent<

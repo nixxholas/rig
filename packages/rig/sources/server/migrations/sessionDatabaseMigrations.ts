@@ -5,7 +5,7 @@ import type { SessionDatabaseMigration } from "./SessionDatabaseMigration.js";
 
 const migrations: readonly SessionDatabaseMigration[] = [migration12];
 
-export const CURRENT_SESSION_DATABASE_VERSION = migrations.at(-1)?.version ?? 0;
+export const CURRENT_SESSION_DATABASE_VERSION = 13;
 
 export function prepareSessionDatabaseMigrations(
     database: DatabaseSync,

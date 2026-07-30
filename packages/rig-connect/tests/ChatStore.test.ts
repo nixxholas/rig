@@ -1373,16 +1373,29 @@ describe("ChatStore", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
         store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
         const started = store.apply(
-            event("inference_retry", {
-                attempt: 2,
-                reason: "rate limited",
+            event("agent_message", {
+                message: {
+                    attempt: 2,
+                    blocks: [{ text: "rate limited", type: "text" }],
+                    id: "retry-2",
+                    outcome: "retried",
+                    role: "error",
+                },
                 runId: "run-1",
             }),
         );
-        expect(started.map((delta) => delta.type)).toContain("retry_started");
+        expect(started).toContainEqual({
+            attempt: 2,
+            reason: "rate limited",
+            type: "retry_started",
+        });
         expect(store.elements().at(-1)).toMatchObject({
             attempt: 2,
+            id: "message:retry-2",
             kind: "failure",
             outcome: "retried",
             reason: "rate limited",
@@ -1406,6 +1419,72 @@ describe("ChatStore", () => {
             }),
         );
         expect(finished.map((delta) => delta.type)).toContain("retry_finished");
+    });
+
+    it("never reports an unnumbered durable retry as attempt zero", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+
+        expect(
+            store.apply(
+                event("agent_message", {
+                    message: {
+                        blocks: [{ text: "connection lost", type: "text" }],
+                        id: "retry-without-attempt",
+                        outcome: "retried",
+                        role: "error",
+                    },
+                    runId: "run-1",
+                }),
+            ),
+        ).toContainEqual({
+            attempt: 1,
+            reason: "connection lost",
+            type: "retry_started",
+        });
+    });
+
+    it("reconciles a durable terminal error delivered after its run boundary", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+        store.apply(
+            event("run_finished", {
+                errorMessage: "Provider unavailable.",
+                modelLocked: false,
+                runId: "run-1",
+                stopReason: "error",
+            }),
+        );
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [{ text: "Provider unavailable.", type: "text" }],
+                    id: "failure-1",
+                    outcome: "failed",
+                    role: "error",
+                },
+                runId: "run-1",
+            }),
+        );
+
+        expect(
+            store
+                .elements()
+                .filter(
+                    (element) =>
+                        element.kind === "failure" &&
+                        element.outcome === "failed" &&
+                        element.reason === "Provider unavailable.",
+                ),
+        ).toHaveLength(1);
     });
 
     it("renders the message a run is part-way through when a client attaches mid-turn", () => {
@@ -2677,40 +2756,60 @@ describe("ChatStore", () => {
             });
         });
 
-        it("rebuilds durable retries in their historical time position", () => {
+        it("rebuilds durable retries in their historical group and time", () => {
             const store = new ChatStore("session-1");
             const opening = withTurns();
+            const retry = {
+                attempt: 1,
+                blocks: [{ text: "Connection lost", type: "text" }],
+                id: "retry-1",
+                outcome: "retried",
+                role: "error",
+            } as const;
             store.applyHello({
                 ...opening,
                 transcript: {
                     ...opening.transcript!,
-                    messageCreatedAt: { a1: 1_200, a2: 2_700, u1: 1_050, u2: 2_100 },
+                    messageCreatedAt: {
+                        a1: 1_200,
+                        a2: 2_700,
+                        "retry-1": 1_200,
+                        u1: 1_050,
+                        u2: 2_100,
+                    },
                     messageEventId: {
                         a1: "018bcfe5-6800-7002-8000-00000000aaaa",
+                        "retry-1": "018bcfe5-6800-7001-8000-00000000aaaa",
                     },
+                    messageGroupId: { "retry-1": "a1" },
+                    messages: [messages[0], retry, ...messages.slice(1)],
                     turns: [
                         {
                             ...opening.transcript!.turns[0]!,
-                            retries: [
+                            groups: [
                                 {
-                                    attempt: 1,
-                                    createdAt: 1_200,
-                                    id: "018bcfe5-6800-7001-8000-00000000aaaa",
-                                    reason: "Connection lost",
+                                    endedAt: 1_500,
+                                    id: "a1",
+                                    outcome: "success",
+                                    reason: "completed",
+                                    startedAt: 1_200,
                                 },
                             ],
+                            messageIds: ["u1", "retry-1", "a1"],
                         },
                         opening.transcript!.turns[1]!,
                     ],
                 },
             });
 
-            expect(
-                store.elements().map((element) => [element.kind, element.createdAt]),
-            ).toContainEqual(["failure", 1_200]);
-            expect(store.elements().findIndex((element) => element.kind === "failure")).toBe(
-                store.elements().findIndex((element) => element.kind === "agent_text") - 1,
-            );
+            const failure = store
+                .elements()
+                .find(
+                    (element) => element.kind === "failure" && element.reason === "Connection lost",
+                );
+            const answer = store.elements().find((element) => element.kind === "agent_text");
+            expect(failure).toMatchObject({ createdAt: 1_200, outcome: "retried" });
+            expect(failure?.groupId).toBe(answer?.groupId);
         });
 
         it("leaves a turn that is still running open for live events to finish", () => {
@@ -3377,14 +3476,43 @@ describe("ChatStore and the failures inside a group", () => {
             agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
         );
         store.apply(
-            event("inference_retry", { attempt: 1, reason: "connection lost", runId: "run-1" }),
+            event("agent_message", {
+                message: {
+                    attempt: 1,
+                    blocks: [{ text: "connection lost", type: "text" }],
+                    id: "retry-1",
+                    outcome: "retried",
+                    role: "error",
+                },
+                runId: "run-1",
+            }),
         );
         store.apply(
-            event("inference_retry", { attempt: 2, reason: "rate limited", runId: "run-1" }),
+            event("agent_message", {
+                message: {
+                    attempt: 2,
+                    blocks: [{ text: "rate limited", type: "text" }],
+                    id: "retry-2",
+                    outcome: "retried",
+                    role: "error",
+                },
+                runId: "run-1",
+            }),
         );
         store.apply(agentEvent({ contentIndex: 0, messageId: "m1", type: "text_start" }));
         store.apply(
             agentEvent({ content: "Trying", contentIndex: 0, messageId: "m1", type: "text_end" }),
+        );
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [{ text: "It broke", type: "text" }],
+                    id: "failed-1",
+                    outcome: "failed",
+                    role: "error",
+                },
+                runId: "run-1",
+            }),
         );
         store.apply(
             event("run_finished", {
@@ -4048,7 +4176,23 @@ describe("ChatStore when a boundary shares its millisecond", () => {
                 "e7",
             ),
         );
-        live.apply(at(30, "inference_retry", { attempt: 1, reason: "lost", runId: "r" }, "e8"));
+        live.apply(
+            at(
+                30,
+                "agent_message",
+                {
+                    message: {
+                        attempt: 1,
+                        blocks: [{ text: "lost", type: "text" }],
+                        id: "retry-1",
+                        outcome: "retried",
+                        role: "error",
+                    },
+                    runId: "r",
+                },
+                "e8",
+            ),
+        );
         live.apply(
             at(
                 30,
@@ -4063,17 +4207,25 @@ describe("ChatStore when a boundary shares its millisecond", () => {
         live.apply(at(40, "run_finished", { runId: "r", stopReason: "stop" }, "e10"));
 
         const rebuilt = new ChatStore("session-1");
-        rebuilt.applyHello({
+        const replayDeltas = rebuilt.applyHello({
             ...hello(),
             transcript: {
                 complete: true,
                 messageBoundaryGroupId: { c1: "m1" },
-                messageCreatedAt: { c1: 30, m1: 20, m2: 30, u1: 10 },
-                messageEventId: { m1: "e4", m2: "e9", u1: "e1" },
+                messageGroupId: { "retry-1": "m2" },
+                messageCreatedAt: { c1: 30, m1: 20, m2: 30, "retry-1": 30, u1: 10 },
+                messageEventId: { m1: "e4", m2: "e9", "retry-1": "e8", u1: "e1" },
                 messages: [
                     { blocks: [{ text: "Ask", type: "text" }], id: "u1", role: "user" },
                     { blocks: [{ text: "A", type: "text" }], id: "m1", role: "agent" },
                     compactionMessage("c1", 0, 100, 100),
+                    {
+                        attempt: 1,
+                        blocks: [{ text: "lost", type: "text" }],
+                        id: "retry-1",
+                        outcome: "retried",
+                        role: "error",
+                    },
                     { blocks: [{ text: "B", type: "text" }], id: "m2", role: "agent" },
                 ],
                 turns: [
@@ -4095,17 +4247,15 @@ describe("ChatStore when a boundary shares its millisecond", () => {
                                 startedAt: 30,
                             },
                         ],
-                        messageIds: ["u1", "m1", "c1", "m2"],
+                        messageIds: ["u1", "m1", "c1", "retry-1", "m2"],
                         outcome: "success",
-                        retries: [
-                            { attempt: 1, createdAt: 30, groupId: "m2", id: "e8", reason: "lost" },
-                        ],
                         runId: "r",
                         startedAt: 10,
                     },
                 ],
             },
         });
+        expect(replayDeltas).not.toContainEqual(expect.objectContaining({ type: "retry_started" }));
         const shape = (store: ChatStore) =>
             store.elements().map((element) => [element.kind, element.groupId]);
         expect(shape(rebuilt)).toEqual(shape(live));

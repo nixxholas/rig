@@ -50,6 +50,21 @@ export function mergeTranscriptWindow(
             return steeredAt === undefined ? [] : [[message.id, steeredAt]];
         }),
     );
+    const messageBoundaryGroupId = Object.fromEntries(
+        messages.flatMap((message) => {
+            const groupId =
+                incoming.messageBoundaryGroupId?.[message.id] ??
+                loaded.messageBoundaryGroupId?.[message.id];
+            return groupId === undefined ? [] : [[message.id, groupId]];
+        }),
+    );
+    const messageGroupId = Object.fromEntries(
+        messages.flatMap((message) => {
+            const groupId =
+                incoming.messageGroupId?.[message.id] ?? loaded.messageGroupId?.[message.id];
+            return groupId === undefined ? [] : [[message.id, groupId]];
+        }),
+    );
     const permissionReviews = [
         ...(loaded.permissionReviews ?? []),
         ...(incoming.permissionReviews ?? []),
@@ -64,6 +79,8 @@ export function mergeTranscriptWindow(
         ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
         ...(Object.keys(messageEventId).length === 0 ? {} : { messageEventId }),
         ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
+        ...(Object.keys(messageBoundaryGroupId).length === 0 ? {} : { messageBoundaryGroupId }),
+        ...(Object.keys(messageGroupId).length === 0 ? {} : { messageGroupId }),
         ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         messages,
         turns,

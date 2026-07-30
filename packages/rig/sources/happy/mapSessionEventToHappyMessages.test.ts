@@ -243,13 +243,33 @@ describe("HappyMessageMapper", () => {
             ),
             ...mapper.map(
                 sessionEvent(
-                    "inference_retry",
+                    "agent_message",
                     {
-                        attempt: 1,
-                        reason: "The provider connection was lost.",
+                        message: {
+                            attempt: 1,
+                            blocks: [{ text: "The provider connection was lost.", type: "text" }],
+                            id: "retry-1",
+                            outcome: "retried",
+                            role: "error",
+                        },
                         runId: "run-1",
                     },
                     120,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_message",
+                    {
+                        message: {
+                            blocks: [{ text: "The provider remained unavailable.", type: "text" }],
+                            id: "failure-1",
+                            outcome: "failed",
+                            role: "error",
+                        },
+                        runId: "run-1",
+                    },
+                    149,
                 ),
             ),
             ...mapper.map(
@@ -284,6 +304,60 @@ describe("HappyMessageMapper", () => {
             reason: "The provider remained unavailable.",
             t: "failure",
         });
+    });
+
+    it("does not duplicate a terminal failure when its durable message arrives late", () => {
+        const mapper = new HappyMessageMapper();
+        const output = [
+            ...mapper.map(sessionEvent("run_started", { runId: "run-1" }, 90)),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_event",
+                    {
+                        event: {
+                            iteration: 1,
+                            messageId: "agent-1",
+                            type: "inference_iteration_start",
+                        },
+                        runId: "run-1",
+                    },
+                    100,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "run_finished",
+                    {
+                        errorMessage: "Provider unavailable.",
+                        modelLocked: false,
+                        runId: "run-1",
+                        stopReason: "error",
+                    },
+                    120,
+                ),
+            ),
+            ...mapper.map(
+                sessionEvent(
+                    "agent_message",
+                    {
+                        message: {
+                            blocks: [{ text: "Provider unavailable.", type: "text" }],
+                            id: "failure-1",
+                            outcome: "failed",
+                            role: "error",
+                        },
+                        runId: "run-1",
+                    },
+                    110,
+                ),
+            ),
+        ];
+
+        expect(output.map((message) => message.content.ev.t)).toEqual([
+            "turn-start",
+            "failure",
+            "turn-end",
+        ]);
     });
 
     it("reports a run error that happens before the first inference", () => {

@@ -93,6 +93,9 @@ describe("read_agent_history", () => {
             target: "/root/audit",
         });
 
+        readAgentHistoryTool.execute({ roles: ["error"] }, context, {});
+        expect(read).toHaveBeenLastCalledWith({ limit: 100, roles: ["error"] });
+
         readAgentHistoryTool.execute({}, context, {});
         expect(read).toHaveBeenLastCalledWith({ limit: 100 });
     });
