@@ -6,6 +6,8 @@ import type {
 } from "@/core/SessionContext.js";
 
 export interface SessionCompactionOptions {
+    /** Model selected by the caller for this compaction. */
+    readonly model?: string;
     /** Provider-native instructions describing what the compaction should retain. */
     readonly instructions?: string;
     /** Rebuilt conversation prefix selected by the caller for this compaction. */

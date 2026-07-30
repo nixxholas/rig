@@ -351,6 +351,7 @@ export class Executor {
                 ...(options.instructions === undefined
                     ? {}
                     : { instructions: options.instructions }),
+                model: profile.id,
                 ...(options.signal === undefined ? {} : { signal: options.signal }),
             });
             return toExecutionCompactionResult(result, sourceContext);

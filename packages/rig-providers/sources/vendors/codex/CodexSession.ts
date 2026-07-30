@@ -150,8 +150,9 @@ export class CodexSession extends BaseSession {
     async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
         const { signal } = options;
         if (signal?.aborted) return { status: "cancelled", context: this.context };
-        const model = this.activeModel ?? this.model;
+        const model = options.model ?? this.activeModel ?? this.model;
         if (model === undefined) throw new Error("A model is required for Codex compaction.");
+        this.activeModel = model;
         const effort = resolveCodexReasoningEffort(model, this.activeEffort);
         this.beginTurn(`compaction:${randomUUID()}`);
         return this.compactContext(

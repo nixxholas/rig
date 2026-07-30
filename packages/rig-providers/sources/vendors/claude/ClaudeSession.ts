@@ -104,8 +104,11 @@ export class ClaudeSession extends BaseSession {
                   };
         const { instructions, signal } = options;
         if (signal?.aborted) return { status: "cancelled", context: original };
-        const model = this.activeModel ?? this.model;
+        const requestedModel = options.model ?? this.activeModel ?? this.model;
+        const model =
+            requestedModel === undefined ? undefined : resolveClaudeModelId(requestedModel);
         if (model === undefined) throw new Error("A model is required for Claude compaction.");
+        this.activeModel = model;
         const compactContext: SessionContext = {
             instructions: original.instructions,
             messages: [

@@ -90,10 +90,11 @@ export class AnthropicBedrockSession extends BaseSession {
                       messages: [...options.context.messages],
                   };
         if (options.signal?.aborted) return { status: "cancelled", context: original };
-        const model = this.activeModel ?? this.model;
+        const model = options.model ?? this.activeModel ?? this.model;
         if (model === undefined) {
             throw new Error("A model is required for Anthropic Bedrock compaction.");
         }
+        this.activeModel = model;
         try {
             const native = await requestAnthropicBedrockCompaction({
                 client: this.connection.client(),

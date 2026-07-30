@@ -41,6 +41,12 @@ describe("Executor", () => {
             }),
         ).resolves.toMatchObject({ status: "completed" });
         expect(native.sessions).toHaveLength(1);
+        expect(native.sessions[0]?.compactions).toEqual([
+            {
+                context: { messages: [{ role: "user", content: "Restored history." }] },
+                model: "openai/sol",
+            },
+        ]);
     });
 
     it("assembles prompts and preserves caller-owned tools while continuing compatible models", async () => {
@@ -153,6 +159,7 @@ describe("Executor", () => {
                 },
                 inputTokens: 60_000,
                 instructions: "Keep decisions.",
+                model: "openai/terra",
             },
         ]);
     });

@@ -78,7 +78,7 @@ export class ResponsesSession extends BaseSession {
                 context,
             };
         }
-        const model = this.activeModel ?? this.model;
+        const model = options.model ?? this.activeModel ?? this.model;
         if (model === undefined) {
             return {
                 status: "failed",
@@ -87,6 +87,7 @@ export class ResponsesSession extends BaseSession {
                 context,
             };
         }
+        this.activeModel = model;
         const compactedContext =
             options.context === undefined
                 ? context
