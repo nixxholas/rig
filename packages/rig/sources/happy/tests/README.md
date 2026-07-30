@@ -11,12 +11,14 @@ tests/
   HappySessionClient.test.ts
   HappySyncRepository.test.ts
   HappySyncService.test.ts
+  createHappyAgentState.test.ts
   handleHappySessionRpc.test.ts
   handleHappySpawnSession.test.ts
   happyEncryption.test.ts
   importHappyCredentials.test.ts
   loadOrCreateHappyMachineId.test.ts
   mapSessionEventToHappyMessages.test.ts
+  resolveHappyUserInputAnswers.test.ts
   runHappyAuthCommand.test.ts
 ```
 

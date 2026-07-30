@@ -460,7 +460,7 @@ describe("HappySessionClient", () => {
         await waitFor(() => socket.emitted.some(([event]) => event === "session-alive"));
 
         // Nothing is asked yet, so Happy should not have been told about any
-        // pending permission request.
+        // pending communication.
         expect(socket.emitted.some(([event]) => event === "update-state")).toBe(false);
 
         harness.snapshot.pendingUserInputs = [
@@ -490,15 +490,16 @@ describe("HappySessionClient", () => {
             Buffer.from(published.agentState, "base64"),
         ) as any;
         expect(pendingState).toMatchObject({
-            requests: {
+            communications: {
                 "call-1": {
-                    arguments: {
+                    createdAt: 1_000,
+                    form: {
                         questions: [
                             expect.objectContaining({ question: "Where should the order live?" }),
                         ],
                     },
-                    createdAt: 1_000,
-                    tool: "AskUserQuestion",
+                    kind: "form",
+                    toolUseId: "call-1",
                 },
             },
         });
@@ -511,15 +512,15 @@ describe("HappySessionClient", () => {
         );
         expect(socket.emitted.filter(([event]) => event === "update-state")).toHaveLength(1);
 
-        // Happy answers through the permission channel, keyed by question text.
+        // Happy answers on the communication channel, keyed by question id.
         now = 3_000;
         const rpcResponse = await socket.requestRpc({
-            method: "remote-1:permission",
+            method: "remote-1:communication",
             params: encodeRemote(sessionKey, {
-                approved: true,
-                decision: "approved",
+                answers: { question_1: { options: ["Locally"] } },
                 id: "call-1",
-                updatedInput: { answers: { "Where should the order live?": "Locally" } },
+                kind: "form",
+                status: "answered",
             }),
         });
         expect(
@@ -535,12 +536,13 @@ describe("HappySessionClient", () => {
         expect(
             decryptHappyPayload(sessionKey, "dataKey", Buffer.from(completed.agentState, "base64")),
         ).toMatchObject({
-            completedRequests: {
+            completedCommunications: {
                 "call-1": {
+                    answers: { question_1: { options: ["Locally"] } },
                     completedAt: 3_000,
                     createdAt: 1_000,
-                    status: "approved",
-                    tool: "AskUserQuestion",
+                    kind: "form",
+                    status: "answered",
                 },
             },
         });
@@ -567,11 +569,11 @@ describe("HappySessionClient", () => {
 
         now = 5_000;
         const deniedResponse = await socket.requestRpc({
-            method: "remote-1:permission",
+            method: "remote-1:communication",
             params: encodeRemote(sessionKey, {
-                approved: false,
-                decision: "denied",
                 id: "call-2",
+                kind: "form",
+                status: "cancelled",
             }),
         });
         expect(
@@ -586,11 +588,11 @@ describe("HappySessionClient", () => {
         expect(
             decryptHappyPayload(sessionKey, "dataKey", Buffer.from(cancelled.agentState, "base64")),
         ).toMatchObject({
-            completedRequests: {
+            completedCommunications: {
                 "call-2": {
                     completedAt: 5_000,
                     createdAt: 4_000,
-                    status: "canceled",
+                    status: "cancelled",
                 },
             },
         });
@@ -615,14 +617,14 @@ describe("HappySessionClient", () => {
                 return Response.json({
                     session: {
                         agentState: encodeRemote(sessionKey, {
-                            completedRequests: {},
-                            requests: {
+                            communications: {
                                 stale: {
-                                    arguments: { questions: [] },
                                     createdAt: 1,
-                                    tool: "AskUserQuestion",
+                                    form: { questions: [] },
+                                    kind: "form",
                                 },
                             },
+                            completedCommunications: {},
                         }),
                         agentStateVersion: 7,
                         id: "remote-1",

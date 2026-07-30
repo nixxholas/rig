@@ -93,7 +93,7 @@ sent back in place of `code`.
         "reasoningSelection": true,
         "permissionModeSelection": true,
         "resume": false,
-        "rpcMethods": ["abort", "bash", "readFile", "writeFile", "ripgrep"],
+        "rpcMethods": ["abort", "bash", "communication", "readFile", "writeFile", "ripgrep"],
         "shell": true,
         "steering": true
     },
@@ -174,6 +174,22 @@ shutdown when permissions are reduced. Model and reasoning selection applies
 before an idle turn. A selection attached to a steering message cannot replace
 the model of an already-running inference; the same persisted Happy selection
 applies to the next idle turn.
+
+A question Rig is waiting on — from `AskUserQuestion`, Codex's
+`request_user_input`, Grok's `ask_user_question`, or MCP elicitation — is
+published on Happy's agent-to-user communication channel, as `communications`
+in the encrypted agent state, keyed by the question's request id. Rig publishes
+the `form` kind: a title for clients that cannot render the payload, and one
+entry per question with its options, `multiSelect`, and `allowCustom`, since
+Rig accepts any answer text and not only the labels it offered. Answering a
+question anywhere moves it into `completedCommunications` with the answers, so
+another device settles the card it is still showing.
+
+Happy replies with the session RPC method `{happySessionId}:communication`,
+carrying the request id and either `status: "answered"` with answers keyed by
+question id, or `status: "cancelled"`. Rig cannot decline a single question, so
+a dismissal — including one from a client that could not render the kind —
+aborts the run that asked it, which is what makes the waiting tool throw.
 
 Happy invokes abort through the standard encrypted session RPC method
 `{happySessionId}:abort`. Rig registers that method on every socket connection

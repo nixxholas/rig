@@ -8,7 +8,7 @@ const MAX_OUTPUT_BYTES = 1024 * 1024;
 export const HAPPY_SESSION_RPC_METHODS = [
     "abort",
     "bash",
-    "permission",
+    "communication",
     "readFile",
     "writeFile",
     "ripgrep",
@@ -28,23 +28,18 @@ export async function handleHappySessionRpc(options: {
     const { method } = options;
     if (method === "abort") return options.abort();
     const params = requireRecord(options.params);
-    if (method === "permission") {
-        // Happy answers an interactive question over its permission channel:
-        // the chosen labels arrive in `updatedInput.answers`, keyed by question
-        // text. A denial or abort cancels the question instead of answering it.
+    if (method === "communication") {
+        // A reply to an agent-to-user communication. Answers arrive keyed by
+        // question id; a dismissal, including one from a client that could not
+        // render the form, cancels the question instead of answering it.
         const id = requireString(params.id, "id");
-        if (
-            params.approved !== true ||
-            params.decision === "denied" ||
-            params.decision === "abort"
-        ) {
+        if (params.status !== "answered") {
             await options.cancelQuestion(id);
             return { success: true };
         }
-        const updatedInput = isRecord(params.updatedInput) ? params.updatedInput : undefined;
-        const answers = isRecord(updatedInput?.answers) ? updatedInput.answers : undefined;
+        const answers = isRecord(params.answers) ? params.answers : undefined;
         if (answers === undefined) {
-            throw new Error("Happy approved a question without any answers.");
+            throw new Error("Happy answered a question without any answers.");
         }
         await options.answerQuestion(id, answers);
         return { success: true };

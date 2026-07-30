@@ -1,38 +1,51 @@
 import type { UserInputRequest } from "../user-input/index.js";
 
 /**
- * Happy only knows how to render one interactive form, the one Claude's
- * `AskUserQuestion` tool produces. Rig asks the same shape from several tools
- * (`AskUserQuestion`, Codex's `request_user_input`, MCP elicitation), so every
- * pending question is published under that name regardless of its origin.
+ * Happy carries agent-to-user questions on its own channel, separate from
+ * permission requests: a permission gates something the agent wants to do, a
+ * communication asks the user for something the agent does not know. The
+ * payload's `kind` selects its shape, and a client that does not implement a
+ * kind still shows the request and lets the user dismiss it. Rig asks the same
+ * question shape from several tools (`AskUserQuestion`, Codex's
+ * `request_user_input`, MCP elicitation), so every pending question is
+ * published as the `form` kind regardless of its origin.
  */
-const HAPPY_QUESTION_TOOL = "AskUserQuestion";
-const MAX_COMPLETED_REQUESTS = 100;
+const HAPPY_FORM_KIND = "form";
+const MAX_COMPLETED_COMMUNICATIONS = 100;
 
-export interface HappyResolvedRequest {
-    arguments: unknown;
-    completedAt: number;
+export interface HappyCommunication {
     createdAt: number;
-    status: "approved" | "canceled";
+    form: unknown;
+    kind: string;
+    title: string;
+    toolUseId: string;
+}
+
+export interface HappyResolvedCommunication {
+    answers?: Record<string, unknown>;
+    communication: HappyCommunication;
+    completedAt: number;
+    status: "answered" | "cancelled";
 }
 
 interface HappyAgentState {
-    completedRequests: Record<string, unknown>;
-    requests: Record<string, unknown>;
+    communications: Record<string, HappyCommunication>;
+    completedCommunications: Record<string, unknown>;
 }
 
 /**
- * Keeps enough recent completions for Happy to settle delayed permission cards
- * without letting a months-long session grow this live-state payload forever.
+ * Keeps enough recent completions for Happy to settle a form that was answered
+ * on another device without letting a months-long session grow this live-state
+ * payload forever.
  */
-export function rememberHappyResolvedRequest(
-    completed: Map<string, HappyResolvedRequest>,
+export function rememberHappyResolvedCommunication(
+    completed: Map<string, HappyResolvedCommunication>,
     requestId: string,
-    request: HappyResolvedRequest,
+    resolved: HappyResolvedCommunication,
 ): void {
     completed.delete(requestId);
-    completed.set(requestId, request);
-    while (completed.size > MAX_COMPLETED_REQUESTS) {
+    completed.set(requestId, resolved);
+    while (completed.size > MAX_COMPLETED_COMMUNICATIONS) {
         const oldestRequestId = completed.keys().next().value;
         if (oldestRequestId === undefined) return;
         completed.delete(oldestRequestId);
@@ -40,14 +53,14 @@ export function rememberHappyResolvedRequest(
 }
 
 /**
- * Projects Rig's pending questions into Happy's permission-request state. Happy
+ * Projects Rig's pending questions into Happy's communication state. Happy
  * joins each entry onto its tool call by id, and Rig uses the tool call id as
  * the question's request id, so the two line up without extra bookkeeping.
  *
  * Returns null when there is nothing to publish, which clears the remote state.
  */
 export function createHappyAgentState(options: {
-    completed: ReadonlyMap<string, HappyResolvedRequest>;
+    completed: ReadonlyMap<string, HappyResolvedCommunication>;
     /**
      * When the question was first seen. This has to stay stable across
      * publishes: the caller skips the round trip only when the serialized state
@@ -56,50 +69,64 @@ export function createHappyAgentState(options: {
     createdAt: (requestId: string) => number;
     pending: readonly UserInputRequest[];
 }): HappyAgentState | null {
-    const requests: Record<string, unknown> = {};
+    const communications: Record<string, HappyCommunication> = {};
     for (const request of options.pending) {
-        requests[request.requestId] = {
-            arguments: toHappyArguments(request),
-            createdAt: options.createdAt(request.requestId),
-            tool: HAPPY_QUESTION_TOOL,
-        };
+        communications[request.requestId] = toHappyCommunication(
+            request,
+            options.createdAt(request.requestId),
+        );
     }
 
-    const completedRequests: Record<string, unknown> = {};
+    const completedCommunications: Record<string, unknown> = {};
     for (const [requestId, resolved] of options.completed) {
         // A question that is pending again takes precedence over a stale answer.
-        if (requests[requestId] !== undefined) continue;
-        completedRequests[requestId] = {
-            arguments: resolved.arguments,
+        if (communications[requestId] !== undefined) continue;
+        completedCommunications[requestId] = {
+            ...resolved.communication,
             completedAt: resolved.completedAt,
-            createdAt: resolved.createdAt,
             status: resolved.status,
-            ...(resolved.status === "approved" ? { decision: "approved" } : {}),
-            tool: HAPPY_QUESTION_TOOL,
+            ...(resolved.answers === undefined ? {} : { answers: resolved.answers }),
         };
     }
 
-    if (Object.keys(requests).length === 0 && Object.keys(completedRequests).length === 0) {
+    if (
+        Object.keys(communications).length === 0 &&
+        Object.keys(completedCommunications).length === 0
+    ) {
         return null;
     }
-    return { completedRequests, requests };
+    return { communications, completedCommunications };
 }
 
 /**
- * Happy reads `question`, `header`, `options`, and `multiSelect`; the request id
- * rides along untouched so an answer can be matched back to its question.
+ * Builds the `form` payload Happy renders. Every question also accepts an
+ * answer the user writes themselves, because Rig takes any answer text and not
+ * only the labels it offered.
  */
-export function toHappyArguments(request: UserInputRequest): unknown {
+export function toHappyCommunication(
+    request: UserInputRequest,
+    createdAt: number,
+): HappyCommunication {
     return {
-        questions: request.questions.map((question) => ({
-            header: question.header,
-            id: question.id,
-            multiSelect: question.multiSelect,
-            options: question.options.map((option) => ({
-                description: option.description,
-                label: option.label,
+        createdAt,
+        form: {
+            questions: request.questions.map((question) => ({
+                allowCustom: true,
+                header: question.header,
+                id: question.id,
+                multiSelect: question.multiSelect,
+                options: question.options.map((option) => ({
+                    description: option.description,
+                    label: option.label,
+                })),
+                question: question.question,
+                required: question.required !== false,
             })),
-            question: question.question,
-        })),
+        },
+        kind: HAPPY_FORM_KIND,
+        // Shown by a client that cannot render this kind, so the user still
+        // learns what the agent is waiting on.
+        title: request.questions[0]?.header ?? "Question",
+        toolUseId: request.requestId,
     };
 }

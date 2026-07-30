@@ -74,23 +74,31 @@ describe("handleHappySessionRpc", () => {
         });
 
         await expect(
-            call("permission", {
-                approved: true,
-                decision: "approved",
+            call("communication", {
+                answers: { question_1: { options: ["Locally"] } },
                 id: "call-1",
-                updatedInput: { answers: { "Where to?": "Locally" } },
+                kind: "form",
+                status: "answered",
             }),
         ).resolves.toMatchObject({ success: true });
-        expect(answered).toEqual([{ answers: { "Where to?": "Locally" }, requestId: "call-1" }]);
+        expect(answered).toEqual([
+            { answers: { question_1: { options: ["Locally"] } }, requestId: "call-1" },
+        ]);
 
         await expect(
-            call("permission", { approved: false, decision: "denied", id: "call-2" }),
+            call("communication", { id: "call-2", kind: "form", status: "cancelled" }),
         ).resolves.toMatchObject({ success: true });
         expect(cancelled).toEqual(["call-2"]);
 
-        await expect(call("permission", { approved: true, id: "call-3" })).rejects.toThrow(
-            "Happy approved a question without any answers.",
-        );
+        // A client that could not render the form dismisses it the same way.
+        await expect(
+            call("communication", { id: "call-3", kind: "diff", status: "cancelled" }),
+        ).resolves.toMatchObject({ success: true });
+        expect(cancelled).toEqual(["call-2", "call-3"]);
+
+        await expect(
+            call("communication", { id: "call-4", kind: "form", status: "answered" }),
+        ).rejects.toThrow("Happy answered a question without any answers.");
 
         context.permissions?.setMode("read_only");
         await expect(
@@ -102,7 +110,7 @@ describe("handleHappySessionRpc", () => {
         ).rejects.toThrow("File changes are disabled in read-only mode");
     });
 
-    it("waits for a denied question to finish cancelling", async () => {
+    it("waits for a dismissed question to finish cancelling", async () => {
         let finishCancellation = () => {};
         let cancelled = false;
         const cancellation = new Promise<void>((resolve) => {
@@ -116,10 +124,10 @@ describe("handleHappySessionRpc", () => {
                 cancelled = true;
             },
             context: () => {
-                throw new Error("The permission RPC does not need an agent context.");
+                throw new Error("The communication RPC does not need an agent context.");
             },
-            method: "permission",
-            params: { approved: false, decision: "denied", id: "call-1" },
+            method: "communication",
+            params: { id: "call-1", kind: "form", status: "cancelled" },
         });
         let settled = false;
         void result.then(() => {

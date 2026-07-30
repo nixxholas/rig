@@ -14,9 +14,9 @@ import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
 import {
     createHappyAgentState,
-    rememberHappyResolvedRequest,
-    toHappyArguments,
-    type HappyResolvedRequest,
+    rememberHappyResolvedCommunication,
+    toHappyCommunication,
+    type HappyResolvedCommunication,
 } from "./createHappyAgentState.js";
 import { createHappySessionMetadata } from "./createHappySessionMetadata.js";
 import { resolveHappyUserInputAnswers } from "./resolveHappyUserInputAnswers.js";
@@ -76,7 +76,7 @@ export class HappySessionClient {
     // Sessions are created with a null agent state, so nothing needs publishing
     // until a question actually arrives.
     #lastAgentState: string | undefined = "null";
-    readonly #resolvedQuestions = new Map<string, HappyResolvedRequest>();
+    readonly #resolvedQuestions = new Map<string, HappyResolvedCommunication>();
     readonly #questionFirstSeen = new Map<string, number>();
     #lastMetadata: string | undefined;
     #metadataBase: Record<string, unknown> = {};
@@ -525,9 +525,9 @@ export class HappySessionClient {
     }
 
     /**
-     * Publishes Rig's pending questions as Happy permission requests. Happy has
-     * no other way to surface an interactive prompt, so without this a session
-     * that asks a question simply stalls with nothing on screen.
+     * Publishes Rig's pending questions on Happy's communication channel, which
+     * is how a remote client learns the agent is waiting on an answer. Without
+     * this a session that asks a question simply stalls with nothing on screen.
      */
     async #syncAgentState(state: HappySessionState): Promise<void> {
         if (
@@ -600,12 +600,17 @@ export class HappySessionClient {
         const request = this.#pendingQuestion(requestId);
         if (request === undefined) return;
         const createdAt = this.#firstSeen(requestId);
-        this.#session.answerUserInput(requestId, resolveHappyUserInputAnswers(request, answers));
-        rememberHappyResolvedRequest(this.#resolvedQuestions, requestId, {
-            arguments: toHappyArguments(request),
+        const response = resolveHappyUserInputAnswers(request, answers);
+        this.#session.answerUserInput(requestId, response);
+        rememberHappyResolvedCommunication(this.#resolvedQuestions, requestId, {
+            // Echoed back so every client shows the same answer, including the
+            // one that is only now catching up with it.
+            answers: Object.fromEntries(
+                Object.entries(response.answers).map(([id, labels]) => [id, { options: labels }]),
+            ),
+            communication: toHappyCommunication(request, createdAt),
             completedAt: Date.now(),
-            createdAt,
-            status: "approved",
+            status: "answered",
         });
         this.#questionFirstSeen.delete(requestId);
         this.kick();
@@ -614,7 +619,7 @@ export class HappySessionClient {
     /**
      * Rig cannot decline a single question: a question is cancelled by aborting
      * the run that asked it, which is what makes the waiting tool throw. So a
-     * denial from Happy aborts rather than inventing an empty answer, which
+     * dismissal from Happy aborts rather than inventing an empty answer, which
      * `answerUserInput` would reject anyway.
      */
     async #cancelQuestion(requestId: string): Promise<void> {
@@ -622,11 +627,10 @@ export class HappySessionClient {
         if (request === undefined) return;
         const createdAt = this.#firstSeen(requestId);
         const cancellation = this.#session.abort();
-        rememberHappyResolvedRequest(this.#resolvedQuestions, requestId, {
-            arguments: toHappyArguments(request),
+        rememberHappyResolvedCommunication(this.#resolvedQuestions, requestId, {
+            communication: toHappyCommunication(request, createdAt),
             completedAt: Date.now(),
-            createdAt,
-            status: "canceled",
+            status: "cancelled",
         });
         try {
             await cancellation;
