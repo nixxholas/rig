@@ -23,6 +23,7 @@ describe("loadProjectManagedNetworkPolicy", () => {
             join(workspace, "rig.toml"),
             [
                 "[network]",
+                "allow_local_binding = true",
                 'allowed_domains = ["coderabbit.ai", "*.coderabbit.ai"]',
                 'denied_domains = ["blocked.example"]',
                 "allowed_ports = [443, 8443]",
@@ -31,6 +32,7 @@ describe("loadProjectManagedNetworkPolicy", () => {
         );
 
         await expect(loadProjectManagedNetworkPolicy(workspace)).resolves.toEqual({
+            allowLocalBinding: true,
             allowedDomains: [
                 { domain: "coderabbit.ai", ports: [443, 8443] },
                 { domain: "*.coderabbit.ai", ports: [443, 8443] },

@@ -9,6 +9,95 @@ import { createDockerBashContext } from "./createDockerBashContext.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
 
 describe("createDockerBashContext", () => {
+    it("does not start a prepared exec after the permission mode changes", async () => {
+        const permissions = createPermissionContext("full_access");
+        let releaseContainer!: () => void;
+        const containerReleased = new Promise<void>((resolve) => {
+            releaseContainer = resolve;
+        });
+        let markContainerRequested!: () => void;
+        const containerRequested = new Promise<void>((resolve) => {
+            markContainerRequested = resolve;
+        });
+        const start = vi.fn(async () => new PassThrough());
+        const container = {
+            async inspect() {
+                return { Config: { Env: [] } };
+            },
+            async exec() {
+                return {
+                    inspect: async () => ({ ExitCode: 0 }),
+                    start,
+                };
+            },
+            modem: { demuxStream: vi.fn() },
+        } as unknown as Dockerode.Container;
+        const environment = {
+            config: { workingDirectory: "/workspace" },
+            container: async () => {
+                markContainerRequested();
+                await containerReleased;
+                return container;
+            },
+        } as unknown as DockerEnvironment;
+        const context = createDockerBashContext(environment, permissions);
+
+        const pending = context.startSession({ command: "printf should-not-run" });
+        await containerRequested;
+        permissions.setMode("read_only");
+        releaseContainer();
+
+        await expect(pending).rejects.toThrow(
+            "Permission mode changed before the command could start.",
+        );
+        expect(start).not.toHaveBeenCalled();
+    });
+
+    it("does not release an exec whose permission changes while Docker starts it", async () => {
+        const permissions = createPermissionContext("full_access");
+        let releaseStart!: () => void;
+        const startReleased = new Promise<void>((resolve) => {
+            releaseStart = resolve;
+        });
+        let markStartRequested!: () => void;
+        const startRequested = new Promise<void>((resolve) => {
+            markStartRequested = resolve;
+        });
+        const stream = new PassThrough();
+        const write = vi.spyOn(stream, "write");
+        const container = {
+            async inspect() {
+                return { Config: { Env: [] } };
+            },
+            async exec() {
+                return {
+                    inspect: async () => ({ ExitCode: 0 }),
+                    async start() {
+                        markStartRequested();
+                        await startReleased;
+                        return stream;
+                    },
+                };
+            },
+            modem: { demuxStream: vi.fn() },
+        } as unknown as Dockerode.Container;
+        const environment = {
+            config: { workingDirectory: "/workspace" },
+            container: async () => container,
+        } as unknown as DockerEnvironment;
+        const context = createDockerBashContext(environment, permissions);
+
+        const pending = context.startSession({ command: "printf should-not-run" });
+        await startRequested;
+        permissions.setMode("read_only");
+        releaseStart();
+
+        await expect(pending).rejects.toThrow(
+            "Permission mode changed before the command could start.",
+        );
+        expect(write).not.toHaveBeenCalled();
+    });
+
     it("uses distinct pid files for contexts sharing a container", async () => {
         const fake = createFakeDockerEnvironment();
         const first = createDockerBashContext(
@@ -51,6 +140,29 @@ describe("createDockerBashContext", () => {
             await expect(resultPromise).resolves.toMatchObject({ timedOut: false });
         } finally {
             timeoutSpy.mockRestore();
+        }
+    });
+
+    it("finishes and reports an error when Docker exec inspection hangs", async () => {
+        vi.useFakeTimers();
+        try {
+            const fake = createFakeDockerEnvironment([], () => new Promise(() => {}));
+            const context = createDockerBashContext(
+                fake.environment,
+                createPermissionContext("full_access"),
+            );
+            await context.startSession({ command: "finish despite hung inspect" });
+            fake.foregroundStreams[0]?.end();
+
+            await vi.advanceTimersByTimeAsync(10_000);
+
+            await expect(context.readSession(1)).resolves.toMatchObject({
+                exitCode: null,
+                status: "killed",
+                stderr: expect.stringContaining("Timed out waiting for Docker command status."),
+            });
+        } finally {
+            vi.useRealTimers();
         }
     });
 
@@ -184,7 +296,12 @@ describe("createDockerBashContext", () => {
     });
 });
 
-function createFakeDockerEnvironment(environmentVariables: readonly string[] = []): {
+function createFakeDockerEnvironment(
+    environmentVariables: readonly string[] = [],
+    inspectForeground: () => Promise<{ ExitCode: number | null }> = async () => ({
+        ExitCode: 0,
+    }),
+): {
     container: Dockerode.Container;
     controlCommands: string[][];
     environment: DockerEnvironment;
@@ -211,7 +328,12 @@ function createFakeDockerEnvironment(environmentVariables: readonly string[] = [
                 queueMicrotask(() => stream.end());
             }
             return {
-                inspect: async () => ({ ExitCode: 0 }),
+                inspect:
+                    options.AttachStdin === true
+                        ? inspectForeground
+                        : async () => ({
+                              ExitCode: 0,
+                          }),
                 start: async () => stream,
             };
         },

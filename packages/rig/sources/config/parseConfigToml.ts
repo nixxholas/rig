@@ -205,12 +205,19 @@ function readNetworkConfig(
     if (value === undefined) return undefined;
     if (!isTomlTable(value)) throw new Error("network must be a TOML table.");
     assertKnownKeys(value, "network", [
+        "allow_local_binding",
         "allowed_domains",
         "allowed_loopback_ports",
         "allowed_ports",
         "denied_domains",
     ]);
     const network = {
+        ...readOptionalBoolean(
+            value,
+            "allow_local_binding",
+            "allowLocalBinding",
+            "network.allow_local_binding",
+        ),
         ...readOptionalStringArray(
             value,
             "allowed_domains",
@@ -555,7 +562,7 @@ function readMcpServer(name: string, table: TomlTable): McpServerConfig {
     }
 
     const common = {
-        ...readOptionalBoolean(table, "enabled", `${path}.enabled`),
+        ...readOptionalBoolean(table, "enabled", "enabled", `${path}.enabled`),
         ...readOptionalSeconds(
             table,
             "startup_timeout_sec",
@@ -638,11 +645,16 @@ function readMcpServer(name: string, table: TomlTable): McpServerConfig {
     };
 }
 
-function readOptionalBoolean(table: TomlTable, key: string, path = key): { enabled?: boolean } {
+function readOptionalBoolean<TKey extends string>(
+    table: TomlTable,
+    key: string,
+    outputKey: TKey,
+    path = key,
+): Partial<Record<TKey, boolean>> {
     const value = table[key];
     if (value === undefined) return {};
     if (typeof value !== "boolean") throw new Error(`${path} must be a boolean.`);
-    return { enabled: value };
+    return { [outputKey]: value } as Partial<Record<TKey, boolean>>;
 }
 
 function readOptionalSeconds<TKey extends "startupTimeoutMs" | "toolTimeoutMs">(

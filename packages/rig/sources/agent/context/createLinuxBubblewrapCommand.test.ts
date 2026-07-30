@@ -26,6 +26,7 @@ describe("createLinuxBubblewrapCommand", () => {
             cwd: root,
             mode: "workspace_write",
             networkUnixProxySockets: {
+                authenticationToken: "command-secret",
                 http: "/tmp/rig-network/http.sock",
                 loopback: [{ path: "/tmp/rig-network/loopback-443.sock", port: 443 }],
                 socks: "/tmp/rig-network/socks.sock",
@@ -35,12 +36,111 @@ describe("createLinuxBubblewrapCommand", () => {
         });
 
         expect(result.args).toContain("--unshare-net");
+        const bridgeMount = result.args.findIndex(
+            (argument, index) =>
+                argument === "/dev/rig-network" && result.args[index - 2] === "--ro-bind",
+        );
+        expect(result.args.slice(bridgeMount - 2, bridgeMount + 1)).toEqual([
+            "--ro-bind",
+            "/tmp/rig-network",
+            "/dev/rig-network",
+        ]);
+        expect(result.args).toContain("--tmpfs");
         const script = result.args.at(-1);
+        expect(script).toContain("Managed network access requires socat on PATH.");
         expect(script).toContain("TCP-LISTEN:3128,bind=127.0.0.1");
-        expect(script).toContain("UNIX-CONNECT:'/tmp/rig-network/http.sock'");
+        expect(script).toContain("/dev/rig-network/http.sock");
+        expect(script).not.toContain("/tmp/rig-network/http.sock");
+        expect(script).toContain("command-secret");
         expect(script).toContain("TCP-LISTEN:1080,bind=127.0.0.1");
         expect(script).toContain("TCP-LISTEN:443,bind=127.0.0.1");
         expect(script).toContain("curl https://example.com");
+    });
+
+    it("does not re-expose the host /tmp after installing the private network tmpfs", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-private-tmp-"));
+        temporaryDirectories.push(root);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: root,
+            cwd: root,
+            mode: "workspace_write",
+            networkUnixProxySockets: {
+                authenticationToken: "command-secret",
+                http: "/tmp/rig-network/http.sock",
+                socks: "/tmp/rig-network/socks.sock",
+            },
+            shell: "/bin/sh",
+            temporaryDirectory: "/tmp",
+        });
+
+        expect(result.args).toContain("--tmpfs");
+        expect(bindMode(result.args, await realpath("/tmp"))).toBeUndefined();
+    });
+
+    it("keeps host /tmp private even when the command has no managed network policy", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-private-default-tmp-"));
+        temporaryDirectories.push(root);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: root,
+            cwd: root,
+            mode: "workspace_write",
+            shell: "/bin/sh",
+            temporaryDirectory: "/tmp",
+        });
+
+        expect(result.args).toContain("--tmpfs");
+        expect(bindMode(result.args, await realpath("/tmp"))).toBeUndefined();
+    });
+
+    it("keeps protected project files read-only when the workspace is below /tmp", async () => {
+        const privateTemporaryRoot = await realpath("/tmp");
+        const root = await mkdtemp(join(privateTemporaryRoot, "rig-bwrap-protected-project-"));
+        temporaryDirectories.push(root);
+        await Promise.all([
+            mkdir(join(root, ".agents")),
+            mkdir(join(root, ".codex")),
+            writeFile(join(root, "rig.toml"), "[network]\n"),
+        ]);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "true",
+            commandCwd: root,
+            cwd: root,
+            mode: "workspace_write",
+            shell: "/bin/sh",
+            temporaryDirectory: privateTemporaryRoot,
+        });
+
+        for (const name of [".agents", ".codex", "rig.toml"]) {
+            expect(bindMode(result.args, join(root, name))).toBe("--ro-bind");
+        }
+    });
+
+    it("rebinds a Read only workspace below /tmp after the private tmpfs mount", async () => {
+        const privateTemporaryRoot = await realpath("/tmp");
+        const root = await mkdtemp(join(privateTemporaryRoot, "rig-bwrap-read-only-project-"));
+        temporaryDirectories.push(root);
+
+        const result = await createLinuxBubblewrapCommand({
+            bwrapPath: "/usr/bin/bwrap",
+            command: "pwd",
+            commandCwd: root,
+            cwd: root,
+            mode: "read_only",
+            shell: "/bin/sh",
+            temporaryDirectory: privateTemporaryRoot,
+        });
+
+        const temporaryMount = mountIndex(result.args, "--tmpfs", "/tmp");
+        const restoredMount = mountIndex(result.args, "--ro-bind", root, root);
+        expect(restoredMount).toBeGreaterThan(temporaryMount);
     });
 
     it("uses a read-only host view with isolated networking in Read only mode", async () => {
@@ -63,6 +163,7 @@ describe("createLinuxBubblewrapCommand", () => {
         expect(result.args).toContain("--unshare-net");
         expect(result.args).toContain("--unshare-user");
         expect(result.args).toContain("--unshare-pid");
+        expect(result.args).not.toContain("CAP_NET_BIND_SERVICE");
         expect(result.args.slice(-4)).toEqual(["--", "/bin/sh", "-lc", "git status --short"]);
     });
 
@@ -143,7 +244,7 @@ describe("createLinuxBubblewrapCommand", () => {
         ]);
     });
 
-    it("reports absent protected paths for monitoring without creating placeholders", async () => {
+    it("atomically masks an absent rig.toml and monitors other absent protected paths", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-bwrap-missing-protected-"));
         temporaryDirectories.push(root);
         const cwd = join(root, "workspace");
@@ -160,12 +261,20 @@ describe("createLinuxBubblewrapCommand", () => {
         });
         const canonicalCwd = await realpath(cwd);
 
-        expect(result.protectedCreatePaths).not.toContain(join(canonicalCwd, ".git"));
-        for (const name of [".agents", ".codex"]) {
+        for (const name of [".agents", ".codex", ".git"]) {
             const path = join(cwd, name);
             expect(result.protectedCreatePaths).toContain(join(canonicalCwd, name));
             await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
         }
+        const projectConfigPath = join(canonicalCwd, "rig.toml");
+        expect(result.protectedCreatePaths).not.toContain(projectConfigPath);
+        expect(
+            mountIndex(result.args, "--ro-bind", projectConfigPath, projectConfigPath),
+        ).toBeGreaterThan(lastBindIndex(result.args, canonicalCwd));
+        expect(result.projectConfigPlaceholder?.path).toBe(projectConfigPath);
+        await expect(access(projectConfigPath)).resolves.toBeUndefined();
+        await result.projectConfigPlaceholder?.close();
+        await expect(access(projectConfigPath)).rejects.toMatchObject({ code: "ENOENT" });
     });
 });
 
@@ -177,5 +286,19 @@ function bindMode(command: readonly string[], target: string): string | undefine
 function lastBindIndex(command: readonly string[], target: string): number {
     return command.findLastIndex(
         (argument, index) => argument === target && command[index - 1] === target,
+    );
+}
+
+function mountIndex(
+    command: readonly string[],
+    mode: string,
+    sourceOrTarget: string,
+    target?: string,
+): number {
+    return command.findIndex(
+        (argument, index) =>
+            argument === mode &&
+            command[index + 1] === sourceOrTarget &&
+            (target === undefined || command[index + 2] === target),
     );
 }

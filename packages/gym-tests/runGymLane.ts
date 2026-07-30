@@ -28,6 +28,7 @@ const slowTests = new Set([
 ]);
 const timingSensitiveTests = new Set([
     "account_quota_observations_survive_rollover_and_resume.test.ts",
+    "docker_managed_network_reaches_allowed_http_service.test.ts",
     "docker_session_routes_files_and_commands_to_container.test.ts",
     "docker_shell_respects_permission_mode.test.ts",
     "messages_sent_during_inference_stay_pending_until_consumed.test.ts",

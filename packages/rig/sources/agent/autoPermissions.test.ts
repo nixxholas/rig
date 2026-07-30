@@ -380,6 +380,102 @@ describe("Auto permissions", () => {
         );
     });
 
+    it("evaluates the full-access boundary once immediately before execution", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const observedModes: string[] = [];
+        let boundaryChecks = 0;
+        const tool = defineTool({
+            name: "exec_command",
+            label: "Boundary probe",
+            description: "Checks a context-sensitive execution boundary.",
+            arguments: Type.Object({
+                target: Type.String(),
+                sandbox_permissions: Type.Literal("require_escalated"),
+            }),
+            returnType: Type.Object({ ok: Type.Boolean() }),
+            describeAutoPermissionAction: ({ target }) =>
+                `checking boundary target ${JSON.stringify(target)}. Access: unrestricted filesystem and network access`,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: () => {
+                boundaryChecks += 1;
+                return true;
+            },
+            execute: (_args, context) => {
+                observedModes.push(context.permissions?.mode ?? "missing");
+                return { ok: true };
+            },
+            toLLM: () => [{ type: "text", text: "Boundary target checked." }],
+            toUI: () => "Checked boundary target",
+            locks: [],
+        });
+        const provider = autoReviewProvider("allow");
+        const agent = new Agent({
+            context: harness.context,
+            createPermissionReviewAgent: () => reviewAgentFor(provider),
+            modelId: provider.models[0]?.id ?? "",
+            printToConsole: false,
+            provider,
+            tools: [tool],
+        });
+
+        await agent.send("Run the boundary check.");
+
+        expect(boundaryChecks).toBe(1);
+        expect(observedModes).toEqual(["full_access"]);
+        expect(harness.context.permissions.mode).toBe("auto");
+    });
+
+    it("discloses temporary Full access when a synchronous tool throws after starting", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const observedModes: string[] = [];
+        const events: string[] = [];
+        const tool = defineTool({
+            name: "exec_command",
+            label: "Failing boundary probe",
+            description: "Starts a context-sensitive action and fails synchronously.",
+            arguments: Type.Object({
+                target: Type.String(),
+                sandbox_permissions: Type.Literal("require_escalated"),
+            }),
+            returnType: Type.Object({ ok: Type.Boolean() }),
+            describeAutoPermissionAction: ({ target }) =>
+                `checking failing boundary target ${JSON.stringify(target)}. Access: unrestricted filesystem and network access`,
+            shouldReviewInAutoMode: () => true,
+            shouldRunInFullAccessInAutoMode: () => true,
+            execute: (_args, context) => {
+                observedModes.push(context.permissions?.mode ?? "missing");
+                throw new Error("Synchronous boundary failure.");
+            },
+            toLLM: () => [{ type: "text", text: "Boundary target checked." }],
+            toUI: () => "Checked failing boundary target",
+            locks: [],
+        });
+        const provider = autoReviewProvider("allow");
+        const agent = new Agent({
+            context: harness.context,
+            createPermissionReviewAgent: () => reviewAgentFor(provider),
+            modelId: provider.models[0]?.id ?? "",
+            printToConsole: false,
+            provider,
+            tools: [tool],
+        });
+
+        await agent.send("Run the failing boundary check.", {
+            onEvent: (event) => {
+                if (event.type === "temporary_full_access_started") {
+                    events.push(event.toolCallId);
+                }
+            },
+        });
+
+        expect(observedModes).toEqual(["full_access"]);
+        expect(events).toHaveLength(1);
+        expect(harness.context.permissions.mode).toBe("auto");
+        expect(JSON.stringify(agent.messages)).toContain("Synchronous boundary failure.");
+    });
+
     it("sends reviewer-approved shell input without a second prompt", async () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");
@@ -610,10 +706,15 @@ describe("Auto permissions", () => {
                 tools: [tool as AnyDefinedTool],
             });
             const actions: string[] = [];
+            const fullAccessGrants: boolean[] = [];
 
             await agent.send("Run the command even if the workspace sandbox blocks it.", {
                 onEvent: (event) => {
-                    if (event.type === "permission_review") actions.push(event.action);
+                    if (event.type === "permission_review") {
+                        actions.push(event.action);
+                    } else if (event.type === "temporary_full_access_started") {
+                        fullAccessGrants.push(true);
+                    }
                 },
             });
 
@@ -622,6 +723,7 @@ describe("Auto permissions", () => {
             expect(actions).toEqual([
                 expect.stringContaining("Access: unrestricted filesystem and network access"),
             ]);
+            expect(fullAccessGrants).toEqual([true]);
             expect(harness.context.permissions.mode).toBe("auto");
         },
     );

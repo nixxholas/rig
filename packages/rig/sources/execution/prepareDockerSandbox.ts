@@ -10,8 +10,10 @@ export interface PreparedDockerSandbox {
 
 export async function prepareDockerSandbox(
     container: Dockerode.Container,
+    options: { run?: typeof runDockerExec } = {},
 ): Promise<PreparedDockerSandbox> {
-    const metadata = await runDockerExec(container, [
+    const run = options.run ?? runDockerExec;
+    const metadata = await run(container, [
         "/bin/sh",
         "-c",
         'bwrap=$(command -v bwrap) || exit 20; command -v socat >/dev/null || exit 22; readlink -f "$bwrap" || exit 21',
@@ -23,7 +25,7 @@ export async function prepareDockerSandbox(
         throw dockerSandboxRequirementsError(metadata.stderr);
     }
 
-    const probe = await runDockerExec(container, [
+    const probe = await run(container, [
         bwrapPath,
         "--new-session",
         "--die-with-parent",
@@ -33,10 +35,11 @@ export async function prepareDockerSandbox(
         "/",
         "--dev",
         "/dev",
+        "--tmpfs",
+        "/tmp",
         "--unshare-pid",
         "--unshare-user",
-        "--bind",
-        "/proc",
+        "--tmpfs",
         "/proc",
         "--",
         "/bin/sh",

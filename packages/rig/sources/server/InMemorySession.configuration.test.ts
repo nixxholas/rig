@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../agent/index.js";
 import type { CodingAssistantRuntime } from "../runtime/CodingAssistantRuntime.js";
@@ -6,6 +6,7 @@ import type { CreateCodingAssistantAgentOptions } from "../runtime/createCodingA
 import { NativeProcessManager } from "../processes/index.js";
 import { createEventIdFactory, type ModelCatalog } from "../protocol/index.js";
 import { defineModel, defineProvider } from "@slopus/rig-execution";
+import type { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession } from "./InMemorySession.js";
 
 /**
@@ -14,6 +15,192 @@ import { InMemorySession } from "./InMemorySession.js";
  * visible as pending rather than already applied.
  */
 describe("InMemorySession queued configuration", () => {
+    it("publishes a reduced permission mode before awaiting process shutdown", async () => {
+        const processManager = new NativeProcessManager();
+        let runtime: CodingAssistantRuntime | undefined;
+        let modeWhenKilled: string | undefined;
+        vi.spyOn(processManager, "activeCount").mockReturnValue(1);
+        vi.spyOn(processManager, "killAll").mockImplementation(async () => {
+            modeWhenKilled = runtime?.context.permissions?.mode;
+        });
+        const { session, started, release } = runningSession({
+            onRuntime(created) {
+                runtime = created;
+            },
+            processManager,
+        });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+
+        await session.changePermissionMode({ permissionMode: "read_only" });
+
+        expect(modeWhenKilled).toBe("read_only");
+        release.resolve();
+        await session.beginShutdown();
+    });
+
+    it("starts descendant permission reduction before root process shutdown settles", async () => {
+        const processManager = new NativeProcessManager();
+        const killStarted = deferred<void>();
+        const releaseKill = deferred<void>();
+        const changeSubagentPermissionModes = vi.fn(async () => {});
+        vi.spyOn(processManager, "activeCount").mockReturnValue(1);
+        vi.spyOn(processManager, "killAll").mockImplementation(async () => {
+            killStarted.resolve();
+            await releaseKill.promise;
+        });
+        const { session, started, release } = runningSession({
+            agentManager: {
+                changeSubagentPermissionModes,
+                communicationContext: vi.fn(),
+            } as unknown as AgentSessionManager,
+            processManager,
+        });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+
+        const changing = session.changePermissionMode({ permissionMode: "read_only" });
+        await killStarted.promise;
+
+        expect(changeSubagentPermissionModes).toHaveBeenCalledWith(session.id, "read_only");
+        releaseKill.resolve();
+        await changing;
+        release.resolve();
+        await session.beginShutdown();
+    });
+
+    it("waits for local shutdown when descendant permission propagation fails", async () => {
+        const processManager = new NativeProcessManager();
+        const killStarted = deferred<void>();
+        const releaseKill = deferred<void>();
+        vi.spyOn(processManager, "activeCount").mockReturnValue(1);
+        vi.spyOn(processManager, "killAll").mockImplementation(async () => {
+            killStarted.resolve();
+            await releaseKill.promise;
+        });
+        const { session, started, release } = runningSession({
+            agentManager: {
+                changeSubagentPermissionModes: vi.fn(async () => {
+                    throw new Error("descendant propagation failed");
+                }),
+                communicationContext: vi.fn(),
+            } as unknown as AgentSessionManager,
+            processManager,
+        });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+
+        const changing = session.changePermissionMode({ permissionMode: "read_only" });
+        let settled = false;
+        void changing.then(
+            () => {
+                settled = true;
+            },
+            () => {
+                settled = true;
+            },
+        );
+        await killStarted.promise;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+
+        expect(settled).toBe(false);
+        releaseKill.resolve();
+        await expect(changing).rejects.toThrow("descendant propagation failed");
+        release.resolve();
+        await session.beginShutdown();
+    });
+
+    it("keeps a reduced permission mode durable when process shutdown fails", async () => {
+        const processManager = new NativeProcessManager();
+        vi.spyOn(processManager, "activeCount").mockReturnValue(1);
+        vi.spyOn(processManager, "killAll").mockRejectedValueOnce(
+            new Error("could not stop process"),
+        );
+        const { session, started, release } = runningSession({ processManager });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+
+        await expect(session.changePermissionMode({ permissionMode: "read_only" })).rejects.toThrow(
+            "could not stop process",
+        );
+
+        expect(session.snapshot().permissionMode).toBe("read_only");
+        expect(session.events.since(undefined)).toContainEqual(
+            expect.objectContaining({
+                data: { permissionMode: "read_only" },
+                type: "permission_mode_changed",
+            }),
+        );
+        release.resolve();
+        await session.beginShutdown();
+    });
+
+    it("stops running processes before a fallible MCP projection after permission reduction", async () => {
+        const processManager = new NativeProcessManager();
+        const killAll = vi.spyOn(processManager, "killAll").mockResolvedValue();
+        vi.spyOn(processManager, "activeCount").mockReturnValue(1);
+        let reductionDurable = false;
+        let rejectMcpProjection = true;
+        const { session, started, release } = runningSession({
+            onAppendEvent(event) {
+                if (
+                    event.type === "permission_mode_changed" &&
+                    event.data.permissionMode === "read_only"
+                ) {
+                    reductionDurable = true;
+                } else if (
+                    reductionDurable &&
+                    rejectMcpProjection &&
+                    event.type === "mcp_servers_changed"
+                ) {
+                    rejectMcpProjection = false;
+                    throw new Error("could not persist MCP projection");
+                }
+            },
+            processManager,
+        });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+
+        await expect(session.changePermissionMode({ permissionMode: "read_only" })).rejects.toThrow(
+            "could not persist MCP projection",
+        );
+
+        expect(killAll).toHaveBeenCalledOnce();
+        expect(session.snapshot().permissionMode).toBe("read_only");
+        release.resolve();
+        await session.beginShutdown();
+    });
+
+    it("fails closed when a permission reduction cannot be made durable", async () => {
+        let runtime: CodingAssistantRuntime | undefined;
+        const processManager = new NativeProcessManager();
+        const killAll = vi.spyOn(processManager, "killAll").mockResolvedValue();
+        vi.spyOn(processManager, "activeCount").mockReturnValue(1);
+        const { session, started, release } = runningSession({
+            onAppendEvent(event) {
+                if (event.type === "permission_mode_changed") {
+                    throw new Error("could not persist permission mode");
+                }
+            },
+            onRuntime(created) {
+                runtime = created;
+            },
+            processManager,
+        });
+        session.submit({ text: "Start a long run." });
+        await started.promise;
+
+        const changing = session.changePermissionMode({ permissionMode: "read_only" });
+        release.resolve();
+        await expect(changing).rejects.toThrow("could not persist permission mode");
+
+        expect(session.snapshot().permissionMode).toBe("read_only");
+        expect(runtime?.context.permissions?.mode).toBe("read_only");
+        expect(killAll).toHaveBeenCalled();
+        expect(session.isClosing()).toBe(true);
+    });
+
     it("validates reasoning against a model an earlier queued message has not applied yet", async () => {
         const { session, started, release } = runningSession();
 
@@ -116,7 +303,14 @@ function testModels() {
     return { capableModel, catalog, limitedModel };
 }
 
-function runningSession() {
+function runningSession(
+    options: {
+        agentManager?: AgentSessionManager;
+        onAppendEvent?: ConstructorParameters<typeof InMemorySession>[0]["onAppendEvent"];
+        onRuntime?: (runtime: CodingAssistantRuntime) => void;
+        processManager?: NativeProcessManager;
+    } = {},
+) {
     const started = deferred<void>();
     const release = deferred<void>();
     const { capableModel, catalog, limitedModel } = testModels();
@@ -137,9 +331,15 @@ function runningSession() {
         },
     });
     const session = new InMemorySession({
+        ...(options.agentManager === undefined ? {} : { agentManager: options.agentManager }),
         createEventId: createEventIdFactory(),
-        createRuntime: (options) => createRuntime(options, provider),
+        createRuntime: (runtimeOptions) => {
+            const runtime = createRuntime(runtimeOptions, provider, options.processManager);
+            options.onRuntime?.(runtime);
+            return runtime;
+        },
         modelCatalog: catalog,
+        ...(options.onAppendEvent === undefined ? {} : { onAppendEvent: options.onAppendEvent }),
         request: { cwd: "/tmp/rig-queued-configuration", modelId: capableModel.id },
     });
     return { release, session, started };
@@ -148,8 +348,8 @@ function runningSession() {
 function createRuntime(
     options: CreateCodingAssistantAgentOptions,
     provider: ReturnType<typeof defineProvider>,
+    processManager = new NativeProcessManager(),
 ): CodingAssistantRuntime {
-    const processManager = new NativeProcessManager();
     const context = createNodeAgentContext({ cwd: options.cwd, processManager });
     return {
         agent: new Agent({

@@ -189,6 +189,14 @@ export type AgentLoopEvent =
           userAuthorization: AutoPermissionUserAuthorization;
       }
     | {
+          action: string;
+          reason: string;
+          risk: AutoPermissionRisk;
+          type: "temporary_full_access_started";
+          toolCallId: string;
+          userAuthorization: AutoPermissionUserAuthorization;
+      }
+    | {
           type: "permission_denial_limit_reached";
           reason: string;
       }
@@ -783,6 +791,14 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                                               ...review,
                                                           }),
                                                       ),
+                                            onTemporaryFullAccessStarted: (review) =>
+                                                ignoreOptionalFailure(() =>
+                                                    options.onEvent?.({
+                                                        type: "temporary_full_access_started",
+                                                        toolCallId: toolCall.id,
+                                                        ...review,
+                                                    }),
+                                                ),
                                             onRawResult: (rawResult) =>
                                                 options.signal?.aborted
                                                     ? Promise.resolve()
@@ -1462,6 +1478,12 @@ async function executeToolCall(
             transcript?: PermissionReviewTranscript;
             userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
+        onTemporaryFullAccessStarted?: (review: {
+            action: string;
+            reason: string;
+            risk: AutoPermissionRisk;
+            userAuthorization: AutoPermissionUserAuthorization;
+        }) => void | Promise<void>;
         onError?: (error: unknown) => void | Promise<void>;
         onRawResult?: (result: unknown) => void | Promise<void>;
         preparedPermission: PreparedToolPermission;
@@ -1578,10 +1600,32 @@ async function executeToolCall(
             }
             runWithFullAccess = false;
         }
-        const result =
-            runWithFullAccess && context.permissions !== undefined
-                ? await context.permissions.runWithMode("full_access", run)
-                : await run();
+        let result: unknown;
+        if (runWithFullAccess && context.permissions !== undefined) {
+            if (options.preparedPermission.kind !== "review") {
+                throw new Error(
+                    `Tool '${tool.name}' cannot start temporary Full access without an Auto review.`,
+                );
+            }
+            const { action, review } = options.preparedPermission;
+            // runWithMode invokes the action synchronously, so there is no await between the fresh
+            // boundary check above and starting the exact call under its temporary override.
+            const execution = context.permissions.runWithMode("full_access", run).then(
+                (value) => ({ status: "fulfilled", value }) as const,
+                (reason: unknown) => ({ status: "rejected", reason }) as const,
+            );
+            await options.onTemporaryFullAccessStarted?.({
+                action,
+                reason: review.reason,
+                risk: review.risk,
+                userAuthorization: review.userAuthorization,
+            });
+            const settled = await execution;
+            if (settled.status === "rejected") throw settled.reason;
+            result = settled.value;
+        } else {
+            result = await run();
+        }
         options.signal?.throwIfAborted();
         await options.onRawResult?.(result);
         return createToolResultBlock(

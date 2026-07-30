@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+const SHARED_DOCKER_RUNNER_VERSION = "2";
 const runners = new Map<string, Promise<SharedDockerRunner>>();
 
 export interface SharedDockerRunner {
@@ -19,7 +20,7 @@ export function acquireSharedDockerRunner(options: {
     imageId: string;
     repositoryRoot: string;
 }): Promise<SharedDockerRunner> {
-    const key = `${options.imageId}\0${String(options.dockerSocket)}\0${options.repositoryRoot}`;
+    const key = `${SHARED_DOCKER_RUNNER_VERSION}\0${options.imageId}\0${String(options.dockerSocket)}\0${options.repositoryRoot}`;
     let runner = runners.get(key);
     if (runner === undefined) {
         runner = startSharedDockerRunner(options).catch((error: unknown) => {
@@ -96,6 +97,7 @@ async function startSharedDockerRunner(options: {
     const runId = process.env.RIG_GYM_RUN_ID ?? `process-${String(process.pid)}`;
     const safeRunId = runId.replaceAll(/[^A-Za-z0-9_.-]/gu, "-").slice(0, 48);
     const keyHash = createHash("sha256")
+        .update(SHARED_DOCKER_RUNNER_VERSION)
         .update(options.imageId)
         .update(String(options.dockerSocket))
         .update(options.repositoryRoot)
@@ -125,6 +127,7 @@ async function startSharedDockerRunner(options: {
             "NODE_OPTIONS=--import=/app/rig-source-hook.mjs",
             "--volume",
             `${hostRoot}:${containerRoot}`,
+            ...(options.dockerSocket ? ["--volume", `${hostRoot}:${hostRoot}`] : []),
             "--volume",
             `${join(options.repositoryRoot, "packages/rig/sources")}:/app/packages/rig/sources:ro`,
             "--volume",

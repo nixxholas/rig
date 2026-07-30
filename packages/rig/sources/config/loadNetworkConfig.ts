@@ -9,12 +9,11 @@ export async function loadNetworkConfig(
     options: LoadConfigOptions = {},
 ): Promise<ConfigNetwork | undefined> {
     const paths = resolveConfigPaths(options);
-    const [globalSource, localSource, runtimeSource] = await Promise.all([
+    const [globalSource, localSource] = await Promise.all([
         readConfigFile(paths.global),
         readConfigFile(paths.local),
-        readConfigFile(paths.runtime),
     ]);
-    return mergeNetworkConfig(globalSource.values, localSource.values, runtimeSource.values);
+    return mergeNetworkConfig(globalSource.values, localSource.values);
 }
 
 export async function loadNetworkConfigForProject(
@@ -22,22 +21,25 @@ export async function loadNetworkConfigForProject(
     options: Omit<LoadConfigOptions, "cwd"> = {},
 ): Promise<ConfigNetwork | undefined> {
     const paths = resolveConfigPaths(options);
-    const [globalSource, runtimeSource] = await Promise.all([
-        readConfigFile(paths.global),
-        readConfigFile(paths.runtime),
-    ]);
-    return mergeNetworkConfig(globalSource.values, project, runtimeSource.values);
+    const globalSource = await readConfigFile(paths.global);
+    return mergeNetworkConfig(globalSource.values, project);
 }
 
 function mergeNetworkConfig(
     global: PartialRigConfig,
     project: PartialRigConfig,
-    runtime: PartialRigConfig,
 ): ConfigNetwork | undefined {
-    return mergeConfigValues(
+    const network = mergeConfigValues(
         DEFAULT_RIG_CONFIG,
         global,
         withoutProjectMachineSettings(project),
-        runtime,
     ).network;
+    if (network === undefined) return undefined;
+    const deniedDomains = [
+        ...(global.network?.deniedDomains ?? []),
+        ...(project.network?.deniedDomains ?? []),
+    ];
+    return deniedDomains.length === 0
+        ? network
+        : { ...network, deniedDomains: [...new Set(deniedDomains)] };
 }

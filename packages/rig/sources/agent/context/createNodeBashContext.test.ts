@@ -7,6 +7,10 @@ import { createNodeBashContext } from "./createNodeBashContext.js";
 import { MAX_ACTIVE_BASH_SESSIONS } from "./bashSessionLimits.js";
 import { createPermissionContext } from "../../permissions/index.js";
 import {
+    type ManagedNetworkBlockedRequest,
+    type ManagedNetworkProxyHandle,
+} from "./ManagedNetworkPolicy.js";
+import {
     type ManagedProcess,
     NativeProcessManager,
     type ProcessRunResult,
@@ -20,6 +24,209 @@ afterEach(async () => {
 });
 
 describe("createNodeBashContext", () => {
+    it("reports a proxy block as sandbox policy instead of an unexplained 403", async () => {
+        const cwd = await makeTempDir();
+        let blockedRequest: ManagedNetworkBlockedRequest | undefined;
+        let block!: (request: ManagedNetworkBlockedRequest) => void;
+        const proxy: ManagedNetworkProxyHandle = {
+            blockedRequest: () => blockedRequest,
+            close: async () => {},
+            onBlockedRequest(listener) {
+                block = (request) => {
+                    blockedRequest = request;
+                    listener(request);
+                };
+                return () => {};
+            },
+            port: 31_128,
+            socksPort: 31_080,
+        };
+        const run = vi.fn(
+            async (
+                options: Parameters<NativeProcessManager["run"]>[0],
+            ): Promise<ProcessRunResult> => {
+                block({
+                    host: "blocked.example",
+                    port: 443,
+                    protocol: "https_connect",
+                    reason: "not_allowed",
+                });
+                expect(options.signal?.aborted).toBe(true);
+                return {
+                    aborted: true,
+                    command: options.command,
+                    cwd: options.cwd,
+                    exitCode: null,
+                    id: "network-denied",
+                    killed: true,
+                    pid: 1,
+                    signal: "SIGTERM",
+                    status: "killed",
+                    stderr: "CONNECT tunnel failed, response 403\n",
+                    stdout: "",
+                    timedOut: false,
+                };
+            },
+        );
+        const context = createNodeBashContext({
+            cwd,
+            loadManagedNetworkPolicy: async () => ({
+                allowedDomains: [{ domain: "allowed.example" }],
+            }),
+            permissions: createPermissionContext("workspace_write"),
+            processManager: { run } as unknown as NativeProcessManager,
+            startManagedNetwork: async () => ({
+                close: async () => {},
+                proxy,
+            }),
+        });
+
+        await expect(context.run({ command: "curl https://blocked.example" })).resolves.toEqual({
+            exitCode: 1,
+            stderr: expect.stringContaining(
+                "Network access to blocked.example:443 was denied by Rig's sandbox network policy",
+            ),
+            stdout: "",
+            timedOut: false,
+        });
+        expect(run).toHaveBeenCalledOnce();
+    });
+
+    it("aborts a pending command when its permission mode changes before spawn", async () => {
+        const cwd = await makeTempDir();
+        const permissions = createPermissionContext("workspace_write");
+        let releasePolicy!: () => void;
+        const policyReleased = new Promise<void>((resolve) => {
+            releasePolicy = resolve;
+        });
+        let markPolicyStarted!: () => void;
+        const policyStarted = new Promise<void>((resolve) => {
+            markPolicyStarted = resolve;
+        });
+        const run = vi.fn();
+        const context = createNodeBashContext({
+            cwd,
+            loadManagedNetworkPolicy: async () => {
+                markPolicyStarted();
+                await policyReleased;
+                return { allowLocalBinding: true };
+            },
+            permissions,
+            processManager: { run } as unknown as NativeProcessManager,
+        });
+
+        const pending = context.run({ command: "printf should-not-run" });
+        await policyStarted;
+        permissions.setMode("read_only");
+        releasePolicy();
+
+        await expect(pending).rejects.toThrow(
+            "Permission mode changed before the command could start.",
+        );
+        expect(run).not.toHaveBeenCalled();
+    });
+
+    it("finishes a background session even when managed network cleanup fails", async () => {
+        const cwd = await makeTempDir();
+        const result: ProcessRunResult = {
+            aborted: false,
+            command: "completed",
+            cwd,
+            exitCode: 0,
+            id: "cleanup-failure",
+            killed: false,
+            pid: 1,
+            signal: null,
+            status: "exited",
+            stderr: "",
+            stdout: "done",
+            timedOut: false,
+        };
+        const process = {
+            interrupt: vi.fn(),
+            kill: vi.fn(),
+            readOutput: vi.fn(() => ({
+                ...result,
+                stderrDelta: "",
+                stderrOffset: 0,
+                stdoutDelta: "done",
+                stdoutOffset: 4,
+            })),
+            wait: async () => result,
+            writeStdin: vi.fn(),
+        } as unknown as ManagedProcess;
+        const context = createNodeBashContext({
+            cwd,
+            loadManagedNetworkPolicy: async () => ({
+                allowedDomains: [{ domain: "example.com", ports: [443] }],
+            }),
+            permissions: createPermissionContext("workspace_write"),
+            processManager: {
+                start: vi.fn(() => process),
+            } as unknown as NativeProcessManager,
+            startManagedNetwork: async () => ({
+                close: async () => {
+                    throw new Error("proxy cleanup failed");
+                },
+            }),
+        });
+
+        const sessionId = await context.startSession({ command: "completed" });
+
+        await expect(context.readSession(sessionId, { waitMs: 1_000 })).resolves.toMatchObject({
+            exitCode: 1,
+            status: "completed",
+            stderr: expect.stringContaining("Command cleanup failed: proxy cleanup failed"),
+            stderrDelta: expect.stringContaining("Command cleanup failed: proxy cleanup failed"),
+        });
+    });
+
+    it.each(["read_only", "full_access"] as const)(
+        "does not apply configured managed networking in %s mode",
+        async (permissionMode) => {
+            const cwd = await makeTempDir();
+            const rigHome = join(cwd, "rig-home");
+            await writeFile(
+                join(cwd, "rig.toml"),
+                '[network]\nallowed_domains = ["example.com"]\n',
+            );
+            vi.stubEnv("RIG_HOME", rigHome);
+            vi.stubEnv("HTTP_PROXY", "http://ambient-proxy.example:8080");
+            vi.stubEnv("NODE_USE_ENV_PROXY", "ambient");
+            const run = vi.fn(
+                async (
+                    options: Parameters<NativeProcessManager["run"]>[0],
+                ): Promise<ProcessRunResult> => ({
+                    aborted: false,
+                    command: options.command,
+                    cwd: options.cwd,
+                    exitCode: 0,
+                    id: "network-mode-test",
+                    killed: false,
+                    pid: 1,
+                    signal: null,
+                    status: "exited",
+                    stderr: "",
+                    stdout: "",
+                    timedOut: false,
+                }),
+            );
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext(permissionMode),
+                processManager: { run } as unknown as NativeProcessManager,
+            });
+
+            await context.run({ command: "printf done" });
+
+            expect(run).toHaveBeenCalledOnce();
+            expect(run.mock.calls[0]?.[0].env?.HTTP_PROXY).toBe(
+                "http://ambient-proxy.example:8080",
+            );
+            expect(run.mock.calls[0]?.[0].env?.NODE_USE_ENV_PROXY).toBe("ambient");
+        },
+    );
+
     it("rejects background work beyond the active session limit", async () => {
         const cwd = await makeTempDir();
         const completion = new Promise<ProcessRunResult>(() => {});

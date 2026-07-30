@@ -6,32 +6,47 @@ import {
     type NativeProcessManager,
     type ProcessRunResult,
 } from "../../processes/index.js";
-import type { PermissionContext } from "../../permissions/index.js";
+import { assertPermissionRevision, type PermissionContext } from "../../permissions/index.js";
 import type { BashContext, BashSessionSnapshot } from "./BashContext.js";
 import { assertCanUseCustomShell } from "./assertCanUseCustomShell.js";
 import { createSandboxedCommand } from "./createSandboxedCommand.js";
-import type { ManagedNetworkProxyHandle } from "./ManagedNetworkPolicy.js";
+import {
+    type ManagedNetworkBlockedRequest,
+    type ManagedNetworkProxyHandle,
+    shouldApplyManagedNetworkPolicy,
+    shouldBypassManagedProxyForLoopback,
+    validateManagedNetworkLoopbackPorts,
+} from "./ManagedNetworkPolicy.js";
 import { startManagedNetworkProxy } from "./startManagedNetworkProxy.js";
 import {
     startLinuxManagedNetworkBridge,
     type LinuxManagedNetworkBridge,
 } from "./startLinuxManagedNetworkBridge.js";
 import { loadProjectManagedNetworkPolicy } from "./loadProjectManagedNetworkPolicy.js";
-import { createProtectedPathMonitor } from "./createProtectedPathMonitor.js";
+import {
+    createProtectedPathMonitor,
+    type ProtectedPathMonitor,
+} from "./createProtectedPathMonitor.js";
 import { createToolEnvironment } from "./createToolEnvironment.js";
 import { waitForBashSessionCompletion } from "./waitForBashSessionCompletion.js";
 import { MAX_ACTIVE_BASH_SESSIONS, MAX_RETAINED_BASH_SESSIONS } from "./bashSessionLimits.js";
 import { createCommandEnvironment, type SessionSecretContext } from "../../secrets/index.js";
+import { errorToMessage } from "../../errorToMessage.js";
+import { runCleanupSteps } from "./runCleanupSteps.js";
+import { formatManagedNetworkDenial } from "./formatManagedNetworkDenial.js";
 
 export interface CreateNodeBashContextOptions {
     cwd: string;
+    loadManagedNetworkPolicy?: typeof loadProjectManagedNetworkPolicy;
     processManager: NativeProcessManager;
     permissions: PermissionContext;
     secrets?: SessionSecretContext;
+    startManagedNetwork?: typeof startCommandManagedNetwork;
 }
 
 interface NodeBashSession {
     command: string;
+    completionStderrDelta?: string;
     completionWaiters: Set<() => void>;
     cwd: string;
     process: ManagedProcess;
@@ -76,6 +91,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
     };
     const runCwd = (cwd: string | undefined) =>
         cwd === undefined ? options.cwd : isAbsolute(cwd) ? cwd : resolve(options.cwd, cwd);
+    const loadManagedNetworkPolicy =
+        options.loadManagedNetworkPolicy ?? loadProjectManagedNetworkPolicy;
+    const startManagedNetwork = options.startManagedNetwork ?? startCommandManagedNetwork;
 
     const readSession = async (
         sessionId: number,
@@ -96,6 +114,8 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             session.stdoutOffset,
             session.stderrOffset,
         );
+        const completionStderrDelta = session.completionStderrDelta ?? "";
+        delete session.completionStderrDelta;
         session.stdoutOffset = processSnapshot.stdoutOffset;
         session.stderrOffset = processSnapshot.stderrOffset;
         return {
@@ -109,9 +129,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     : session.result.killed
                       ? "killed"
                       : "completed",
-            stderr: processSnapshot.stderr,
-            stderrDelta: processSnapshot.stderrDelta,
-            stdout: processSnapshot.stdout,
+            stderr: session.result?.stderr ?? processSnapshot.stderr,
+            stderrDelta: `${processSnapshot.stderrDelta}${completionStderrDelta}`,
+            stdout: session.result?.stdout ?? processSnapshot.stdout,
             stdoutDelta: processSnapshot.stdoutDelta,
             timedOut: session.timedOut,
         };
@@ -141,23 +161,27 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         },
         readSession,
         async run(runOptions) {
-            assertCanUseCustomShell(options.permissions.mode, runOptions.shell);
+            const permissionMode = options.permissions.mode;
+            const permissionRevision = options.permissions.revision;
+            assertCanUseCustomShell(permissionMode, runOptions.shell);
             const cwd = runCwd(runOptions.cwd);
             const shell = runOptions.shell ?? resolveSystemShell();
             const toolEnvironment = await createToolEnvironment(
-                options.permissions.mode,
+                permissionMode,
                 globalThis.process.env,
                 { cwd: options.cwd },
             );
-            const networkPolicy = await loadProjectManagedNetworkPolicy(options.cwd);
-            const managedNetwork = await startCommandManagedNetwork(networkPolicy);
+            const networkPolicy = shouldApplyManagedNetworkPolicy(permissionMode)
+                ? await loadManagedNetworkPolicy(options.cwd)
+                : undefined;
+            const managedNetwork = await startManagedNetwork(networkPolicy);
             let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
             try {
                 sandboxedCommand = await createSandboxedCommand({
                     command: runOptions.command,
                     commandCwd: cwd,
                     cwd: options.cwd,
-                    mode: options.permissions.mode,
+                    mode: permissionMode,
                     ...networkSandboxOptions(networkPolicy, managedNetwork),
                     ...(toolEnvironment.PATH === undefined ? {} : { path: toolEnvironment.PATH }),
                     shell,
@@ -182,49 +206,90 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             } else {
                 processRunOptions.shell = shell;
             }
-            if (runOptions.signal !== undefined) processRunOptions.signal = runOptions.signal;
-
-            const protectedPathMonitor = await createProtectedPathMonitor(
-                sandboxedCommand.protectedCreatePaths ?? [],
+            let networkDenial: ManagedNetworkBlockedRequest | undefined;
+            const commandAbort = new AbortController();
+            const abortFromCaller = () => commandAbort.abort();
+            runOptions.signal?.addEventListener("abort", abortFromCaller, { once: true });
+            if (runOptions.signal?.aborted) commandAbort.abort();
+            const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
+                (request) => {
+                    networkDenial ??= request;
+                    commandAbort.abort();
+                },
             );
-            let result: ProcessRunResult;
-            let protectedPathViolation = false;
+            if (runOptions.signal !== undefined || managedNetwork?.proxy !== undefined) {
+                processRunOptions.signal = commandAbort.signal;
+            }
+
+            let protectedPathMonitor: ProtectedPathMonitor;
             try {
+                protectedPathMonitor = await createProtectedPathMonitor(
+                    sandboxedCommand.protectedCreatePaths ?? [],
+                );
+            } catch (error) {
+                await cleanUpCommandResources(
+                    { stop: async () => false },
+                    managedNetwork,
+                    sandboxedCommand.projectConfigPlaceholder,
+                );
+                throw error;
+            }
+            let result: ProcessRunResult;
+            let cleanup: CommandCleanupResult = { protectedPathViolation: false };
+            try {
+                assertPermissionRevision(options.permissions, permissionRevision);
                 result = await options.processManager.run(processRunOptions);
             } finally {
-                protectedPathViolation = await protectedPathMonitor.stop();
-                await managedNetwork?.close();
+                stopObservingNetworkDenials?.();
+                runOptions.signal?.removeEventListener("abort", abortFromCaller);
+                cleanup = await cleanUpCommandResources(
+                    protectedPathMonitor,
+                    managedNetwork,
+                    sandboxedCommand.projectConfigPlaceholder,
+                );
             }
+            const protectedPathMessage =
+                cleanup.protectedPathViolation && result.exitCode === 0
+                    ? "Sandbox blocked creation of protected agent metadata.\n"
+                    : "";
+            const networkDenialMessage =
+                networkDenial === undefined ? "" : formatManagedNetworkDenial(networkDenial);
             return {
                 stdout: result.stdout,
-                stderr:
-                    protectedPathViolation && result.exitCode === 0
-                        ? `${result.stderr}Sandbox blocked creation of protected agent metadata.\n`
-                        : result.stderr,
-                exitCode: protectedPathViolation && result.exitCode === 0 ? 1 : result.exitCode,
+                stderr: `${result.stderr}${networkDenialMessage}${protectedPathMessage}${cleanup.errorMessage ?? ""}`,
+                exitCode:
+                    networkDenial !== undefined ||
+                    cleanup.errorMessage !== undefined ||
+                    (cleanup.protectedPathViolation && result.exitCode === 0)
+                        ? 1
+                        : result.exitCode,
                 timedOut: result.timedOut,
             };
         },
         async startSession(runOptions) {
             const releaseSessionStart = reserveSessionStart();
             try {
-                assertCanUseCustomShell(options.permissions.mode, runOptions.shell);
+                const permissionMode = options.permissions.mode;
+                const permissionRevision = options.permissions.revision;
+                assertCanUseCustomShell(permissionMode, runOptions.shell);
                 const cwd = runCwd(runOptions.cwd);
                 const shell = runOptions.shell ?? resolveSystemShell();
                 const toolEnvironment = await createToolEnvironment(
-                    options.permissions.mode,
+                    permissionMode,
                     globalThis.process.env,
                     { cwd: options.cwd },
                 );
-                const networkPolicy = await loadProjectManagedNetworkPolicy(options.cwd);
-                const managedNetwork = await startCommandManagedNetwork(networkPolicy);
+                const networkPolicy = shouldApplyManagedNetworkPolicy(permissionMode)
+                    ? await loadManagedNetworkPolicy(options.cwd)
+                    : undefined;
+                const managedNetwork = await startManagedNetwork(networkPolicy);
                 let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
                 try {
                     sandboxedCommand = await createSandboxedCommand({
                         command: runOptions.command,
                         commandCwd: cwd,
                         cwd: options.cwd,
-                        mode: options.permissions.mode,
+                        mode: permissionMode,
                         ...networkSandboxOptions(networkPolicy, managedNetwork),
                         ...(toolEnvironment.PATH === undefined
                             ? {}
@@ -255,15 +320,29 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 } else {
                     processStartOptions.shell = shell;
                 }
-                const protectedPathMonitor = await createProtectedPathMonitor(
-                    sandboxedCommand.protectedCreatePaths ?? [],
-                );
+                let protectedPathMonitor: ProtectedPathMonitor;
+                try {
+                    protectedPathMonitor = await createProtectedPathMonitor(
+                        sandboxedCommand.protectedCreatePaths ?? [],
+                    );
+                } catch (error) {
+                    await cleanUpCommandResources(
+                        { stop: async () => false },
+                        managedNetwork,
+                        sandboxedCommand.projectConfigPlaceholder,
+                    );
+                    throw error;
+                }
                 let process: ManagedProcess;
                 try {
+                    assertPermissionRevision(options.permissions, permissionRevision);
                     process = options.processManager.start(processStartOptions);
                 } catch (error) {
-                    await protectedPathMonitor.stop();
-                    await managedNetwork?.close();
+                    await cleanUpCommandResources(
+                        protectedPathMonitor,
+                        managedNetwork,
+                        sandboxedCommand.projectConfigPlaceholder,
+                    );
                     throw error;
                 }
                 const completion = process.wait();
@@ -280,6 +359,13 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     stdoutOffset: 0,
                     timedOut: false,
                 };
+                let networkDenial: ManagedNetworkBlockedRequest | undefined;
+                const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
+                    (request) => {
+                        networkDenial ??= request;
+                        void process.kill("SIGTERM", { forceAfterMs: 500 });
+                    },
+                );
                 sessions.set(sessionId, session);
                 onActiveSessionCountChange?.(activeSessionCount());
                 if (runOptions.timeoutMs !== undefined) {
@@ -290,16 +376,35 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     session.timeout.unref();
                 }
                 void completion.then(async (result) => {
-                    const protectedPathViolation = await protectedPathMonitor.stop();
-                    await managedNetwork?.close();
-                    session.result =
-                        protectedPathViolation && result.exitCode === 0
-                            ? {
-                                  ...result,
-                                  exitCode: 1,
-                                  stderr: `${result.stderr}Sandbox blocked creation of protected agent metadata.\n`,
-                              }
-                            : result;
+                    stopObservingNetworkDenials?.();
+                    const cleanup = await cleanUpCommandResources(
+                        protectedPathMonitor,
+                        managedNetwork,
+                        sandboxedCommand.projectConfigPlaceholder,
+                    );
+                    const protectedPathMessage =
+                        cleanup.protectedPathViolation && result.exitCode === 0
+                            ? "Sandbox blocked creation of protected agent metadata.\n"
+                            : "";
+                    const networkDenialMessage =
+                        networkDenial === undefined
+                            ? ""
+                            : formatManagedNetworkDenial(networkDenial);
+                    const completionStderrDelta = `${networkDenialMessage}${protectedPathMessage}${cleanup.errorMessage ?? ""}`;
+                    if (completionStderrDelta !== "") {
+                        session.completionStderrDelta = completionStderrDelta;
+                    }
+                    session.result = {
+                        ...result,
+                        exitCode:
+                            networkDenial !== undefined ||
+                            cleanup.errorMessage !== undefined ||
+                            (cleanup.protectedPathViolation && result.exitCode === 0)
+                                ? 1
+                                : result.exitCode,
+                        killed: networkDenial === undefined ? result.killed : false,
+                        stderr: `${result.stderr}${completionStderrDelta}`,
+                    };
                     if (session.timeout !== undefined) clearTimeout(session.timeout);
                     for (const finish of session.completionWaiters) finish();
                     onActiveSessionCountChange?.(activeSessionCount());
@@ -343,29 +448,30 @@ async function startCommandManagedNetwork(
         (policy.allowedDomains?.length ?? 0) === 0 &&
         (policy.allowedLoopbackPorts?.length ?? 0) === 0
     ) {
-        throw new Error(
-            "Managed network access requires an allowed domain or an allowed loopback port.",
-        );
+        return undefined;
     }
-    validateLoopbackPorts(policy.allowedLoopbackPorts ?? []);
+    validateManagedNetworkLoopbackPorts(policy.allowedLoopbackPorts ?? []);
     if ((policy.allowedDomains?.length ?? 0) === 0 && process.platform !== "linux")
         return { close: async () => {} };
     const proxy = await startManagedNetworkProxy(policy);
     try {
         const bridge =
             process.platform === "linux"
-                ? await startLinuxManagedNetworkBridge(proxy, {
-                      ...(policy.allowedLoopbackPorts === undefined
+                ? await startLinuxManagedNetworkBridge(
+                      proxy,
+                      policy.allowedLoopbackPorts === undefined
                           ? {}
-                          : { loopbackPorts: policy.allowedLoopbackPorts }),
-                  })
+                          : { loopbackPorts: policy.allowedLoopbackPorts },
+                  )
                 : undefined;
         return {
             ...(bridge === undefined ? {} : { bridge }),
             proxy,
             async close() {
-                await bridge?.close();
-                await proxy.close();
+                await runCleanupSteps("managed network", [
+                    ...(bridge === undefined ? [] : [() => bridge.close()]),
+                    () => proxy.close(),
+                ]);
             },
         };
     } catch (error) {
@@ -374,12 +480,48 @@ async function startCommandManagedNetwork(
     }
 }
 
+interface CommandCleanupResult {
+    errorMessage?: string;
+    protectedPathViolation: boolean;
+}
+
+async function cleanUpCommandResources(
+    protectedPathMonitor: ProtectedPathMonitor,
+    managedNetwork: CommandManagedNetwork | undefined,
+    projectConfigPlaceholder:
+        | import("./prepareProjectConfigPlaceholder.js").ProjectConfigPlaceholder
+        | undefined,
+): Promise<CommandCleanupResult> {
+    const [protectedPathResult, managedNetworkResult, projectConfigResult] =
+        await Promise.allSettled([
+            protectedPathMonitor.stop(),
+            managedNetwork?.close() ?? Promise.resolve(),
+            projectConfigPlaceholder?.close() ?? Promise.resolve(),
+        ]);
+    const errors = [
+        ...(protectedPathResult.status === "rejected" ? [protectedPathResult.reason] : []),
+        ...(managedNetworkResult.status === "rejected" ? [managedNetworkResult.reason] : []),
+        ...(projectConfigResult.status === "rejected" ? [projectConfigResult.reason] : []),
+    ];
+    return {
+        ...(errors.length === 0
+            ? {}
+            : {
+                  errorMessage: `Command cleanup failed: ${errors.map(errorToMessage).join("; ")}\n`,
+              }),
+        protectedPathViolation:
+            protectedPathResult.status === "fulfilled" ? protectedPathResult.value : true,
+    };
+}
+
 function networkSandboxOptions(
     policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
     managedNetwork: CommandManagedNetwork | undefined,
 ): {
+    networkAllowLocalBinding?: boolean;
     networkAllowedLoopbackPorts?: readonly number[];
     networkUnixProxySockets?: {
+        authenticationToken: string;
         http: string;
         loopback?: readonly { path: string; port: number }[];
         socks: string;
@@ -391,25 +533,21 @@ function networkSandboxOptions(
         ...(proxy === undefined ? [] : [proxy.port, proxy.socksPort]),
     ];
     return {
+        ...(process.platform === "darwin" && policy?.allowLocalBinding === true
+            ? { networkAllowLocalBinding: true }
+            : {}),
         ...(ports.length === 0 ? {} : { networkAllowedLoopbackPorts: [...new Set(ports)] }),
         ...(managedNetwork?.bridge === undefined
             ? {}
             : {
                   networkUnixProxySockets: {
+                      authenticationToken: managedNetwork.bridge.authenticationToken,
                       http: managedNetwork.bridge.httpSocketPath,
                       loopback: managedNetwork.bridge.loopbackSockets,
                       socks: managedNetwork.bridge.socksSocketPath,
                   },
               }),
     };
-}
-
-function validateLoopbackPorts(ports: readonly number[]): void {
-    for (const port of ports) {
-        if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-            throw new Error(`Invalid managed network loopback port: ${String(port)}`);
-        }
-    }
 }
 
 function withManagedNetworkProxy(
@@ -426,8 +564,9 @@ function withManagedNetworkProxy(
         bridge === undefined
             ? `socks5h://127.0.0.1:${String(proxy.socksPort)}`
             : "socks5h://127.0.0.1:1080";
-    const noProxy =
-        (policy?.allowedLoopbackPorts?.length ?? 0) > 0 ? "localhost,127.0.0.1,::1" : "";
+    const noProxy = shouldBypassManagedProxyForLoopback(policy, process.platform === "linux")
+        ? "localhost,127.0.0.1,::1"
+        : "";
     return {
         ...environment,
         ALL_PROXY: socksUrl,

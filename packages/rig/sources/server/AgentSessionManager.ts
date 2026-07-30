@@ -114,13 +114,33 @@ export class AgentSessionManager {
         permissionMode: PermissionMode,
     ): Promise<void> {
         const root = this.#rootFor(parentSessionId);
-        await Promise.all(
-            this.#repository
-                .listByRoot(root.id)
-                .map((session) =>
-                    session.changePermissionMode({ permissionMode }, { updateSubagents: false }),
-                ),
+        const results = await Promise.allSettled(
+            this.#repository.listByRoot(root.id).map(async (session) => {
+                try {
+                    await session.changePermissionMode(
+                        { permissionMode },
+                        { updateSubagents: false },
+                    );
+                } catch (error) {
+                    try {
+                        await session.beginShutdown();
+                    } catch (shutdownError) {
+                        throw new AggregateError(
+                            [error, shutdownError],
+                            `Could not reduce permissions or stop descendant ${session.id}.`,
+                        );
+                    }
+                    throw error;
+                }
+            }),
         );
+        const errors = results.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+        );
+        if (errors.length === 1) throw errors[0];
+        if (errors.length > 1) {
+            throw new AggregateError(errors, "Could not update every descendant permission mode.");
+        }
     }
 
     followUp(

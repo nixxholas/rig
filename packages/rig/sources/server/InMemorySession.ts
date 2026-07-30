@@ -1681,29 +1681,72 @@ export class InMemorySession {
         options: { updateSubagents?: boolean } = {},
     ): Promise<ProtocolSession> {
         const permissionMode = parsePermissionMode(request.permissionMode);
-        if (!this.isSubagent() && options.updateSubagents !== false) {
-            await this.#agentManager?.changeSubagentPermissionModes(this.id, permissionMode);
-        }
         const runtime = this.#runtime;
+        const previousPermissionMode = this.#permissionMode;
+        const permissionChanged = previousPermissionMode !== permissionMode;
+        this.#permissionMode = permissionMode;
+        runtime?.context.permissions?.setMode(permissionMode);
+        try {
+            this.#append("permission_mode_changed", {
+                ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
+                permissionMode,
+            });
+        } catch (error) {
+            if (isPermissionReduction(previousPermissionMode, permissionMode)) {
+                try {
+                    await this.beginShutdown();
+                } catch (shutdownError) {
+                    throw new AggregateError(
+                        [error, shutdownError],
+                        "Could not persist the permission reduction or fully stop the session.",
+                    );
+                }
+                throw error;
+            }
+            this.#permissionMode = previousPermissionMode;
+            runtime?.context.permissions?.setMode(previousPermissionMode);
+            throw error;
+        }
         const running = this.#activeProcessCount();
-        if (running > 0 && isPermissionReduction(this.#permissionMode, permissionMode)) {
+        const descendantChange =
+            !this.isSubagent() && options.updateSubagents !== false
+                ? (this.#agentManager?.changeSubagentPermissionModes(this.id, permissionMode) ??
+                  Promise.resolve())
+                : Promise.resolve();
+        const localProcessShutdown = (async () => {
+            if (running === 0 || !isPermissionReduction(previousPermissionMode, permissionMode)) {
+                return;
+            }
             await this.#killRuntimeProcesses();
             const runId = this.#activeRun?.runId ?? this.#lastSessionRunId ?? "background";
             this.#append("agent_event", {
                 event: { type: "background_processes_stopped", count: running },
                 runId,
             });
-        }
-        const permissionChanged = this.#permissionMode !== permissionMode;
-        this.#permissionMode = permissionMode;
-        runtime?.context.permissions?.setMode(permissionMode);
+        })();
+        const transitionResults = await Promise.allSettled([
+            descendantChange,
+            localProcessShutdown,
+        ]);
+        const transitionErrors = transitionResults.flatMap((result) =>
+            result.status === "rejected" ? [result.reason] : [],
+        );
         if (permissionChanged) {
-            this.#removeMcpTools(runtime);
+            try {
+                this.#removeMcpTools(runtime);
+            } catch (error) {
+                transitionErrors.push(error);
+            }
         }
-        this.#append("permission_mode_changed", {
-            ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
-            permissionMode,
-        });
+        if (transitionErrors.length === 1) {
+            throw transitionErrors[0];
+        }
+        if (transitionErrors.length > 1) {
+            throw new AggregateError(
+                transitionErrors,
+                "Could not fully apply the permission mode change.",
+            );
+        }
         if (
             permissionChanged &&
             runtime !== undefined &&
@@ -4377,7 +4420,21 @@ export class InMemorySession {
             this.#retainPermissionReviewsForMessages(event.data.snapshot.messages);
             return;
         }
-        if (event.type !== "agent_event" || event.data.event.type !== "permission_review") return;
+        if (event.type !== "agent_event") return;
+        if (event.data.event.type === "temporary_full_access_started") {
+            const review = event.data.event;
+            this.#permissionReviews.set(review.toolCallId, {
+                action: review.action,
+                decision: "allow",
+                fullAccessGranted: true,
+                reason: review.reason,
+                risk: review.risk,
+                toolCallId: review.toolCallId,
+                userAuthorization: review.userAuthorization,
+            });
+            return;
+        }
+        if (event.data.event.type !== "permission_review") return;
         const review = event.data.event;
         this.#permissionReviews.set(review.toolCallId, {
             action: review.action,

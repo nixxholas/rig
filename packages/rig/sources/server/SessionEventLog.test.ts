@@ -141,6 +141,47 @@ describe("SessionEventLog", () => {
         ]);
     });
 
+    it("records temporary Full access only after the execution boundary starts", () => {
+        const log = new SessionEventLog({
+            events: [
+                permissionReviewEvent(FIRST, "tool-reviewed"),
+                temporaryFullAccessStartedEvent(OMITTED, "tool-reviewed"),
+            ],
+        });
+
+        expect(log.permissionReviews(new Set(["tool-reviewed"]))).toEqual([
+            expect.objectContaining({
+                fullAccessGranted: true,
+                toolCallId: "tool-reviewed",
+            }),
+        ]);
+    });
+
+    it("reconstructs a temporary Full-access review across the retention boundary", () => {
+        const events = [
+            permissionReviewEvent(FIRST, "tool-reviewed"),
+            temporaryFullAccessStartedEvent(OMITTED, "tool-reviewed"),
+        ];
+        const incremental = new SessionEventLog({ retentionLimit: 1 });
+        for (const event of events) incremental.append(event);
+        const reconstructed = new SessionEventLog({ events, retentionLimit: 1 });
+
+        expect(reconstructed.permissionReviews(new Set(["tool-reviewed"]))).toEqual(
+            incremental.permissionReviews(new Set(["tool-reviewed"])),
+        );
+        expect(reconstructed.permissionReviews(new Set(["tool-reviewed"]))).toEqual([
+            expect.objectContaining({
+                action: "Run tests",
+                decision: "allow",
+                fullAccessGranted: true,
+                reason: "The user explicitly requested verification.",
+                risk: "low",
+                toolCallId: "tool-reviewed",
+                userAuthorization: "high",
+            }),
+        ]);
+    });
+
     it("retains the oldest durable message time independently of earlier session events", () => {
         const firstMessage = messageSubmittedEvent(FIRST, "first-message", 1_700_000_100_000);
         const laterMessage = messageSubmittedEvent(DURABLE, "later-message", 1_700_000_200_000);
@@ -246,6 +287,26 @@ function permissionReviewEvent(id: string, toolCallId: string): SessionEvent {
                 risk: "low",
                 toolCallId,
                 type: "permission_review",
+                userAuthorization: "high",
+            },
+            runId: "run-1",
+        },
+        id,
+        sessionId: "session-1",
+        type: "agent_event",
+    };
+}
+
+function temporaryFullAccessStartedEvent(id: string, toolCallId: string): SessionEvent {
+    return {
+        createdAt: 1_700_000_000_000,
+        data: {
+            event: {
+                action: "Run tests",
+                reason: "The user explicitly requested verification.",
+                risk: "low",
+                toolCallId,
+                type: "temporary_full_access_started",
                 userAuthorization: "high",
             },
             runId: "run-1",

@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 describe("loadNetworkConfig", () => {
-    it("uses the normal global, project, and runtime precedence", async () => {
+    it("uses project policy over global policy and ignores runtime settings", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-network-config-"));
         temporaryDirectories.push(root);
         const homeDirectory = join(root, "home");
@@ -44,7 +44,7 @@ describe("loadNetworkConfig", () => {
             '[network]\nallowed_domains = ["runtime.example"]\n',
         );
         await expect(loadNetworkConfig({ cwd: workspace, homeDirectory })).resolves.toEqual({
-            allowedDomains: ["runtime.example"],
+            allowedDomains: ["project.example"],
         });
     });
 
@@ -65,6 +65,47 @@ describe("loadNetworkConfig", () => {
             loadNetworkConfigForProject(project, { homeDirectory: root }),
         ).resolves.toEqual({
             allowedDomains: ["container-project.example"],
+        });
+    });
+
+    it("preserves global and project denies while ignoring runtime network values", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-network-denies-"));
+        temporaryDirectories.push(root);
+        const homeDirectory = join(root, "home");
+        const workspace = join(root, "workspace");
+        const rigHome = join(homeDirectory, ".rig");
+        await Promise.all([
+            mkdir(rigHome, { recursive: true }),
+            mkdir(workspace, { recursive: true }),
+        ]);
+        await writeFile(
+            join(rigHome, "config.toml"),
+            [
+                "[network]",
+                'allowed_domains = ["global.example"]',
+                'denied_domains = ["global-blocked.example"]',
+            ].join("\n"),
+        );
+        await writeFile(
+            join(workspace, "rig.toml"),
+            [
+                "[network]",
+                'allowed_domains = ["project.example"]',
+                'denied_domains = ["project-blocked.example"]',
+            ].join("\n"),
+        );
+        await writeFile(
+            join(rigHome, "runtime.toml"),
+            [
+                "[network]",
+                'allowed_domains = ["runtime.example"]',
+                'denied_domains = ["runtime-blocked.example", "global-blocked.example"]',
+            ].join("\n"),
+        );
+
+        await expect(loadNetworkConfig({ cwd: workspace, homeDirectory })).resolves.toEqual({
+            allowedDomains: ["project.example"],
+            deniedDomains: ["global-blocked.example", "project-blocked.example"],
         });
     });
 });

@@ -827,6 +827,44 @@ describe("AgentSessionManager", () => {
         );
     });
 
+    it("shuts down a descendant whose permission reduction cannot be persisted", async () => {
+        const failedChange = vi.fn(async () => {
+            throw new Error("could not persist child permission mode");
+        });
+        const successfulChange = vi.fn(async () => ({ permissionMode: "read_only" }));
+        const failedShutdown = vi.fn(async () => {});
+        const root = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            id: "root-1",
+            isSubagent: () => false,
+        } as unknown as InMemorySession;
+        const failedChild = {
+            beginShutdown: failedShutdown,
+            changePermissionMode: failedChange,
+            id: "child-1",
+        } as unknown as InMemorySession;
+        const successfulChild = {
+            beginShutdown: vi.fn(async () => {}),
+            changePermissionMode: successfulChange,
+            id: "child-2",
+        } as unknown as InMemorySession;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (sessionId) => (sessionId === root.id ? root : undefined),
+                listByRoot: () => [failedChild, successfulChild],
+            },
+        });
+
+        await expect(manager.changeSubagentPermissionModes(root.id, "read_only")).rejects.toThrow(
+            "could not persist child permission mode",
+        );
+
+        expect(failedShutdown).toHaveBeenCalledOnce();
+        expect(successfulChange).toHaveBeenCalledOnce();
+        expect(successfulChild.beginShutdown).not.toHaveBeenCalled();
+    });
+
     it("runs background agents, reports completion, and keeps them available for follow-up", async () => {
         let status: "completed" | "error" | "running" = "running";
         let resolveCompletion: ((value: { status: "completed" }) => void) | undefined;

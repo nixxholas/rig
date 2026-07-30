@@ -153,7 +153,9 @@ describe("Auto permission allow and deny decisions are enforced", () => {
         expect(automaticallyApproved.rows.some((row) => row.includes("• Auto permission"))).toBe(
             false,
         );
-        expect(automaticallyApproved.text).not.toContain("Approved automatically");
+        expect(automaticallyApproved.text).toContain(
+            "Approved automatically: temporary Full access.",
+        );
         expect(automaticallyApproved.text).not.toContain("Risk: Low");
         expect(automaticallyApproved.text).not.toContain("User authorization: High");
         expect(automaticallyApproved.text).not.toContain(

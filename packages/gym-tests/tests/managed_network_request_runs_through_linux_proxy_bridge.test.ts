@@ -28,6 +28,9 @@ describe("managed shell network in the Linux sandbox", () => {
                     };
                 }
                 const result = request.context.messages.at(-1);
+                if (result?.role === "toolResult" && result.isError) {
+                    throw new Error(JSON.stringify(result, undefined, 2));
+                }
                 expect(result).toMatchObject({
                     isError: false,
                     role: "toolResult",
@@ -50,5 +53,50 @@ describe("managed shell network in the Linux sandbox", () => {
 
         await gym.terminal.waitForText("MANAGED_NETWORK_BRIDGE_READY", 30_000);
         await expect(gym.readFile("marker.txt")).resolves.toBe("NETWORK_COMMAND_RAN");
+    }, 120_000);
+
+    it("keeps proxy-aware localhost traffic inside the isolated namespace", async () => {
+        const gym = await createGym({
+            files: {
+                "rig.toml": '[network]\nallowed_domains = ["example.com"]\n',
+            },
+            inference(request, callIndex) {
+                if (callIndex === 0) {
+                    return {
+                        content: [
+                            {
+                                arguments: {
+                                    cmd: `node -e 'const fs=require("node:fs");const http=require("node:http");const server=http.createServer((_,response)=>response.end("loopback-ok"));server.listen(0,"127.0.0.1",async()=>{try{const result=await fetch("http://localhost:"+server.address().port);fs.writeFileSync("loopback.txt",await result.text())}finally{server.close()}})'`,
+                                },
+                                id: "local-binding-command",
+                                name: "exec_command",
+                                type: "toolCall",
+                            },
+                        ],
+                    };
+                }
+                const result = request.context.messages.at(-1);
+                if (result?.role === "toolResult" && result.isError) {
+                    throw new Error(JSON.stringify(result, undefined, 2));
+                }
+                expect(result).toMatchObject({
+                    isError: false,
+                    role: "toolResult",
+                    toolName: "exec_command",
+                });
+                return {
+                    content: [{ text: "LOCAL_BINDING_READY", type: "text" }],
+                };
+            },
+            mode: "docker",
+            permissionMode: "workspace_write",
+        });
+        running.add(gym);
+
+        gym.terminal.type("Bind an ephemeral loopback port.");
+        gym.terminal.press("enter");
+
+        await gym.terminal.waitForText("LOCAL_BINDING_READY", 30_000);
+        await expect(gym.readFile("loopback.txt")).resolves.toBe("loopback-ok");
     }, 120_000);
 });

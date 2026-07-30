@@ -357,11 +357,18 @@ AWS can load normal user configuration, while writes remain limited by the
 selected mode and shell network access stays blocked. An AWS command can read
 the configured profile in Workspace write, for example, but needs an approved
 Full access execution to contact AWS. Install `bubblewrap` on Linux before
-using a restricted permission mode.
+using a restricted permission mode. Managed network access on Linux also
+requires `socat`.
 
 Auto mode evaluates the current action against the user's request. It does not
 build a permanent command allowlist. Sensitive escalation requests receive a
 one-call review and fail closed when the review is unavailable or malformed.
+When a review allows one command to run outside the sandbox, that command's
+history explicitly says `Approved automatically: temporary Full access.` This
+applies only to that tool call; the session returns to Auto immediately
+afterward. Removing proxy environment variables does not itself escape
+Seatbelt or Bubblewrap, but an approved temporary Full access command has
+unrestricted network access by design.
 
 Set the default globally or for a repository:
 
@@ -400,6 +407,126 @@ workflows = true
 brand = "ansi:202"
 accent = "cyan"
 ```
+
+### Managed network access
+
+Auto and Workspace write shell commands have no general network access. To let
+those commands use a specific external service, add a managed network policy to
+the global `~/.rig/config.toml` or the repository's root `rig.toml`. Read only
+always keeps shell networking disabled, even when a policy exists. Full access
+is unrestricted and ignores the managed policy. The policy is
+configuration-owned: it is not exposed as a shell-tool argument, so an agent
+cannot request additional domains or ports for itself.
+
+For example, allow CodeRabbit globally over HTTPS:
+
+```toml
+[network]
+allowed_domains = [
+  "coderabbit.ai",
+  "*.coderabbit.ai",
+]
+allowed_ports = [443]
+```
+
+`allowed_domains` accepts exact domain names and `*.` subdomain patterns. A
+wildcard does not include the root domain, so the example lists both
+`coderabbit.ai` and `*.coderabbit.ai`. `allowed_ports` applies to every allowed
+domain and defaults to `[443]` when omitted. `denied_domains` uses the same
+matching syntax and takes precedence over the allowlist:
+
+```toml
+[network]
+allowed_domains = ["*.example.com"]
+denied_domains = ["uploads.example.com"]
+allowed_ports = [443, 8443]
+```
+
+Local services are configured separately by port. This example allows a
+sandboxed command to reach a Portless HTTPS listener on the Rig host:
+
+```toml
+[network]
+allowed_loopback_ports = [8443]
+```
+
+Host-loopback forwarding targets `127.0.0.1` specifically. A service listening
+only on IPv6 `::1` is not reachable through `allowed_loopback_ports`; configure
+it to listen on `127.0.0.1` as well. On Linux and in Docker, the relay also
+remains subject to normal OS privileges for ports below 1024.
+
+The settings can be combined:
+
+```toml
+[network]
+allowed_domains = [
+  "coderabbit.ai",
+  "*.coderabbit.ai",
+]
+denied_domains = []
+allowed_ports = [443]
+allowed_loopback_ports = [8443]
+allow_local_binding = true
+```
+
+On macOS, `allow_local_binding = true` lets an Auto or Workspace write command
+bind any local TCP or UDP port and connect to loopback listeners. It is a
+single all-ports switch, matching Codex; there is no per-bind-port list. The
+listener uses the host loopback interface, while external inbound and outbound
+traffic remains blocked. “All ports” removes Rig's policy restriction; it does
+not bypass normal OS privileges or an existing listener occupying the port.
+
+Linux and Docker commands always retain loopback binding inside their isolated
+network namespace, so `allow_local_binding` does not change their sandbox.
+Those listeners are reachable only by processes in the same command namespace;
+they are not published to the Rig host, the container network, or other
+commands. Proxy-aware clients automatically bypass the managed proxy for this
+namespace-local loopback traffic.
+
+Rig rereads the global and project configuration before every Auto or Workspace
+write shell command. Project policy replaces global policy.
+`denied_domains` is the exception: global and project denies are combined, so a
+repository cannot remove a machine-wide global denial. Runtime settings and
+session state cannot define network policy. Changing a network policy therefore
+does not require restarting Rig. The root project `rig.toml` is protected from
+agent writes in Auto, Workspace write, and Read only modes; explicit Full access
+can still modify it. If the file does not yet exist, Rig atomically creates an
+empty temporary placeholder before starting each writable restricted command,
+mounts it read-only inside the command sandbox, and removes it afterward if it
+is still Rig's unchanged placeholder. This closes the create/read race between
+concurrent commands without leaving a configuration file in the repository.
+
+For allowed external domains, Rig starts per-command HTTP CONNECT and SOCKS5
+proxies, points common clients at them with standard proxy environment
+variables, and closes them when the command finishes. The proxy resolves DNS
+outside the sandbox with a two-second limit, treats lookup failures as policy
+denials, rejects private or loopback resolutions, checks the destination domain
+and port, and applies deny rules before allow rules. A blocked HTTP client still
+receives a conventional `403`, but Rig also attributes the blocked destination
+to the owning command, stops it, and reports a clear sandbox-policy error to the
+agent. Removing the managed proxy variables is not a fallback route. A command
+that ignores them still cannot connect directly:
+
+- On macOS, Seatbelt permits outbound connections only to the temporary proxy
+  ports and configured loopback ports.
+- On Linux, Bubblewrap removes the command's network namespace. `socat` bridges
+  only the configured endpoints through temporary Unix sockets.
+- Inside a Docker-backed session, the nested Bubblewrap sandbox uses the same
+  Unix-socket bridge. Rig keeps the sockets under an empty `.rig-network`
+  runtime directory and remounts that directory read-only over the writable
+  workspace in every restricted command. A neighboring command therefore
+  cannot rename or replace a live socket to intercept authentication. Every
+  bridge also requires a random per-command token, so finding and connecting
+  to another command's socket is insufficient. Each restricted command also
+  receives a private `/tmp`, hiding Rig's outer process-control files and other
+  commands' temporary state. Per-command directories are removed on completion;
+  the empty root is harmless and is not tracked by Git. The container needs
+  `bubblewrap` and `socat`, and its working directory must be a host bind mount
+  so Rig can share the temporary sockets without publishing a TCP proxy.
+
+In restricted Docker sessions, `allowed_loopback_ports` refers to loopback on
+the machine running Rig, not an arbitrary container port. Full access remains
+unrestricted and can bypass the managed proxy by design.
 
 Provider availability is machine-wide because the local daemon owns the model
 catalog and authentication paths. Configure it in `~/.rig/config.toml`:
@@ -556,11 +683,17 @@ Image-backed containers are created on the first message and keep a stable,
 session-derived name so their files survive daemon restarts. Rig never pulls an
 image implicitly and leaves managed containers in place for you to remove with
 Docker. Images and connected containers need `/bin/sh`, `readlink`, and common
-POSIX file utilities. Restricted permission modes also need `bubblewrap` in the
-container. Rig configures image-backed containers for Bubblewrap automatically;
-start a container that Rig will connect to with
+POSIX file utilities. Restricted permission modes also need `bubblewrap` and
+`socat` in the container. Rig configures image-backed containers for Bubblewrap
+automatically; start a container that Rig will connect to with
 `--security-opt seccomp=unconfined` so restricted shell commands can create their
-nested filesystem, process, and network boundary.
+nested filesystem, process, and network boundary. Docker commonly blocks a
+second procfs mount even with nested user namespaces, so Rig gives restricted
+commands an empty private `/proc` instead of exposing the container's parent
+process table. Restricted commands also receive a private `/tmp`; temporary
+files belonging to the parent container or another command are not visible.
+Tools that require the parent `/proc` or shared `/tmp` should run in an
+appropriately isolated Full access container.
 
 </details>
 

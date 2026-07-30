@@ -457,6 +457,7 @@ export interface SessionActiveTurn {
 export interface PermissionReviewState {
     action: string;
     decision: "allow" | "deny";
+    fullAccessGranted?: true;
     reason: string;
     risk: "low" | "medium" | "high" | "critical";
     toolCallId: string;
@@ -972,6 +973,14 @@ export type AgentLoopEvent =
               providerId: string;
               usage: Usage;
           };
+          userAuthorization: "unknown" | "low" | "medium" | "high";
+      }
+    | {
+          action: string;
+          reason: string;
+          risk: "low" | "medium" | "high" | "critical";
+          type: "temporary_full_access_started";
+          toolCallId: string;
           userAuthorization: "unknown" | "low" | "medium" | "high";
       }
     | {

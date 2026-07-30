@@ -685,10 +685,12 @@ describe("InMemorySession", () => {
 
         expect(session.snapshot().permissionMode).toBe("full_access");
         expect(session.requestForSubagent().permissionMode).toBe("full_access");
-        expect(session.events.since(undefined)?.at(-1)).toMatchObject({
-            data: { permissionMode: "full_access" },
-            type: "permission_mode_changed",
-        });
+        expect(session.events.since(undefined)).toContainEqual(
+            expect.objectContaining({
+                data: { permissionMode: "full_access" },
+                type: "permission_mode_changed",
+            }),
+        );
     });
 
     it("broadcasts a composer draft to attached clients and clears it", () => {

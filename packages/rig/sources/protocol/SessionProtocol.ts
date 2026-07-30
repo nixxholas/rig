@@ -227,6 +227,7 @@ export interface SessionActiveTurn {
 export interface SessionPermissionReview {
     action: string;
     decision: "allow" | "deny";
+    fullAccessGranted?: true;
     reason: string;
     risk: "low" | "medium" | "high" | "critical";
     toolCallId: string;

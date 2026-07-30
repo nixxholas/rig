@@ -11,6 +11,7 @@ import { createMacOsSeatbeltCommand } from "./createMacOsSeatbeltCommand.js";
 import { materializeSandboxConfig } from "./materializeSandboxConfig.js";
 import type { PermissionMode } from "../../permissions/index.js";
 import { quoteShellArgument } from "./quoteShellArgument.js";
+import type { ProjectConfigPlaceholder } from "./prepareProjectConfigPlaceholder.js";
 
 const require = createRequire(import.meta.url);
 const getConfigDirectory = createSandboxConfigDirectoryCache(() =>
@@ -20,6 +21,7 @@ const getConfigDirectory = createSandboxConfigDirectoryCache(() =>
 export interface SandboxedCommand {
     args?: readonly string[];
     command: string;
+    projectConfigPlaceholder?: ProjectConfigPlaceholder;
     protectedCreatePaths?: readonly string[];
 }
 
@@ -33,8 +35,10 @@ export async function createSandboxedCommand(options: {
     commandCwd?: string;
     cwd: string;
     mode: PermissionMode;
+    networkAllowLocalBinding?: boolean;
     networkAllowedLoopbackPorts?: readonly number[];
     networkUnixProxySockets?: {
+        authenticationToken: string;
         http: string;
         loopback?: readonly { path: string; port: number }[];
         socks: string;

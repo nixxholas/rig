@@ -27,6 +27,14 @@ export async function createGym(options: GymOptions): Promise<Gym> {
     const cols = options.cols ?? 100;
     const rows = options.rows ?? 32;
     const execution = resolveGymExecution(options);
+    if (
+        options.mountWorkspaceIntoDockerSession === true &&
+        (execution !== "docker" || options.dockerSocket !== true)
+    ) {
+        throw new Error(
+            'Gym option "mountWorkspaceIntoDockerSession" requires mode: "docker" and dockerSocket: true.',
+        );
+    }
     const image =
         execution === "docker"
             ? (options.image ?? (await resolveGymImageTag(repositoryRoot)))
@@ -68,6 +76,12 @@ export async function createGym(options: GymOptions): Promise<Gym> {
                   options.httpProxy === true ? undefined : options.httpProxy.handler,
               );
     const containerName = dockerRunner?.containerName ?? `rig-gym-${randomUUID()}`;
+    const sessionArguments = [
+        ...(options.args ?? []),
+        ...(options.mountWorkspaceIntoDockerSession === true
+            ? ["--docker-mount", `${workspacePath}:/workspace`]
+            : []),
+    ];
     const profileId = containerName.slice(-8);
     profileGymTiming(profileId, "fixtures", createStartedAt);
     const localRunnerArguments = [
@@ -143,8 +157,8 @@ export async function createGym(options: GymOptions): Promise<Gym> {
         const processStartedAt = performance.now();
         const localCommand =
             options.entrypoint === undefined
-                ? [process.execPath, ...localRunnerArguments, ...(options.args ?? [])]
-                : [...options.entrypoint, ...(options.args ?? [])];
+                ? [process.execPath, ...localRunnerArguments, ...sessionArguments]
+                : [...options.entrypoint, ...sessionArguments];
         const pty =
             execution === "docker"
                 ? spawn(
@@ -161,12 +175,8 @@ export async function createGym(options: GymOptions): Promise<Gym> {
                               dockerFixture?.containerRoot ?? "",
                               dockerFixture?.stateRoot ?? "",
                               options.entrypoint === undefined
-                                  ? [
-                                        "node",
-                                        "/app/packages/rig/dist/main.js",
-                                        ...(options.args ?? []),
-                                    ]
-                                  : [...options.entrypoint, ...(options.args ?? [])],
+                                  ? ["node", "/app/packages/rig/dist/main.js", ...sessionArguments]
+                                  : [...options.entrypoint, ...sessionArguments],
                           ),
                       ],
                       {

@@ -68,6 +68,21 @@ describe("createMacOsSeatbeltCommand", () => {
         expect(result.args[1]).not.toContain("\n(allow network-outbound)\n");
     });
 
+    it("allows binding any local port without opening external egress", async () => {
+        const result = await createMacOsSeatbeltCommand({
+            command: "true",
+            cwd: process.cwd(),
+            mode: "workspace_write",
+            networkAllowLocalBinding: true,
+            shell: "/bin/sh",
+        });
+
+        expect(result.args[1]).toContain('(allow network-bind (local ip "*:*"))');
+        expect(result.args[1]).toContain('(allow network-inbound (local ip "localhost:*"))');
+        expect(result.args[1]).toContain('(allow network-outbound (remote ip "localhost:*"))');
+        expect(result.args[1]).not.toContain("\n(allow network-outbound)\n");
+    });
+
     it.runIf(process.platform === "darwin")(
         "allows a normal commit from a linked worktree in Workspace write mode",
         async () => {

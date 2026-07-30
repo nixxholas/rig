@@ -2580,6 +2580,35 @@ export class ChatStore {
                 };
                 return;
             }
+            case "temporary_full_access_started": {
+                const review = event as PermissionReviewState & {
+                    type: "temporary_full_access_started";
+                };
+                const next: PermissionReviewState = {
+                    action: review.action,
+                    decision: "allow",
+                    fullAccessGranted: true,
+                    reason: review.reason,
+                    risk: review.risk,
+                    toolCallId: review.toolCallId,
+                    userAuthorization: review.userAuthorization,
+                };
+                this.#permissionReviewsByToolCallId.set(next.toolCallId, next);
+                const elementId = this.#toolCallElementIds.get(next.toolCallId);
+                if (elementId !== undefined) {
+                    this.#update(elementId, { permissionReview: next });
+                }
+                this.#session = {
+                    ...this.#session,
+                    permissionReviews: [
+                        ...this.#session.permissionReviews.filter(
+                            (known) => known.toolCallId !== next.toolCallId,
+                        ),
+                        next,
+                    ].slice(-100),
+                };
+                return;
+            }
             default:
         }
     }

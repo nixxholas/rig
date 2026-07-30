@@ -114,6 +114,7 @@ export interface ConfigTheme {
 export type PartialConfigTheme = Partial<ConfigTheme>;
 
 export interface ConfigNetwork {
+    allowLocalBinding?: boolean;
     allowedDomains?: readonly string[];
     allowedLoopbackPorts?: readonly number[];
     allowedPorts?: readonly number[];

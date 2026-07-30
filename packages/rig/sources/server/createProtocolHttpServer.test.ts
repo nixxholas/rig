@@ -1477,10 +1477,12 @@ describe("createProtocolHttpServer", () => {
             const events = await client.getEvents(created.session.id, created.session.lastEventId);
 
             expect(changed.session.permissionMode).toBe("auto");
-            expect(events.events.at(-1)).toMatchObject({
-                data: { permissionMode: "auto" },
-                type: "permission_mode_changed",
-            });
+            expect(events.events).toContainEqual(
+                expect.objectContaining({
+                    data: { permissionMode: "auto" },
+                    type: "permission_mode_changed",
+                }),
+            );
         } finally {
             await close();
         }

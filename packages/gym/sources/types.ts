@@ -39,6 +39,7 @@ export interface GymOptions {
     inference?: readonly GymMockResponse[] | GymInferenceHandler | undefined;
     mode?: "docker" | "just-bash";
     modelId?: string;
+    mountWorkspaceIntoDockerSession?: boolean;
     permissionMode?: "auto" | "from_config" | "full_access" | "read_only" | "workspace_write";
     providerId?: "bedrock" | "claude" | "codex" | "grok" | "gym" | "kimi";
     providerOverrides?: readonly ("claude" | "codex" | "grok" | "kimi")[];

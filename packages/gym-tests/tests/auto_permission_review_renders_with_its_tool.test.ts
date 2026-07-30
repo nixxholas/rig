@@ -10,7 +10,7 @@ afterEach(async () => {
 });
 
 describe("successful Auto permission reviews", () => {
-    it("runs the tool without adding approval details to its history", async () => {
+    it("shows temporary Full access on the command without exposing reviewer rationale", async () => {
         const gym = await createGym({
             mode: "docker",
             cols: 132,
@@ -72,7 +72,7 @@ describe("successful Auto permission reviews", () => {
 
         const toolRow = completed.rows.findIndex((row) => row.includes("INLINE_APPROVAL_MARKER"));
         expect(toolRow).toBeGreaterThanOrEqual(0);
-        expect(completed.text).not.toContain("Approved automatically");
+        expect(completed.text).toContain("Approved automatically: temporary Full access.");
         expect(completed.text).not.toContain("Risk: Low");
         expect(completed.text).not.toContain("User authorization: High");
         expect(completed.text).not.toContain(

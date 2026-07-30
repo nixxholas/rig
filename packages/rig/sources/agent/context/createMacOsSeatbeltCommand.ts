@@ -20,6 +20,7 @@ export async function createMacOsSeatbeltCommand(options: {
     cwd: string;
     environment?: NodeJS.ProcessEnv;
     mode: PermissionMode;
+    networkAllowLocalBinding?: boolean;
     networkAllowedLoopbackPorts?: readonly number[];
     path?: string;
     shell: string;
@@ -73,6 +74,13 @@ export async function createMacOsSeatbeltCommand(options: {
         MACOS_SEATBELT_BASE_POLICY,
         "; allow read-only file operations across the host, matching Codex workspace-write",
         "(allow file-read*)",
+        ...(options.networkAllowLocalBinding === true
+            ? [
+                  '(allow network-bind (local ip "*:*"))',
+                  '(allow network-inbound (local ip "localhost:*"))',
+                  '(allow network-outbound (remote ip "localhost:*"))',
+              ]
+            : []),
         ...(options.networkAllowedLoopbackPorts ?? []).map(
             (port) => `(allow network-outbound (remote ip "localhost:${String(port)}"))`,
         ),

@@ -1,13 +1,19 @@
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative } from "node:path";
+import { basename, dirname, isAbsolute, join, relative } from "node:path";
 
 import type { PermissionMode } from "../../permissions/index.js";
 import { findGitWritablePaths } from "./findGitWritablePaths.js";
+import { MANAGED_NETWORK_SOCAT_PREFLIGHT } from "./managedNetworkSocatPreflight.js";
+import {
+    prepareProjectConfigPlaceholder,
+    type ProjectConfigPlaceholder,
+} from "./prepareProjectConfigPlaceholder.js";
 import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
 const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", "rig.toml"] as const;
+const PROTECTED_CREATE_ONLY_WORKSPACE_NAMES = [".git"] as const;
 
 export async function createLinuxBubblewrapCommand(options: {
     /**
@@ -23,6 +29,7 @@ export async function createLinuxBubblewrapCommand(options: {
     mode: Exclude<PermissionMode, "full_access">;
     mountProc?: boolean;
     networkUnixProxySockets?: {
+        authenticationToken: string;
         http: string;
         loopback?: readonly { path: string; port: number }[];
         socks: string;
@@ -34,25 +41,28 @@ export async function createLinuxBubblewrapCommand(options: {
 }): Promise<{
     args: readonly string[];
     command: string;
+    projectConfigPlaceholder?: ProjectConfigPlaceholder;
     protectedCreatePaths?: readonly string[];
 }> {
     const environment = options.environment ?? process.env;
     const temporaryDirectory = options.temporaryDirectory ?? tmpdir();
+    const privateTemporaryRoot = await resolvePotentialPath("/tmp");
+    const canonicalCwd = await resolvePotentialPath(options.cwd);
+    const projectConfigCandidates = [
+        join(options.cwd, "rig.toml"),
+        await resolvePotentialPath(join(options.cwd, "rig.toml")),
+    ];
+    const projectConfigPath = join(canonicalCwd, "rig.toml");
     // Read only withholds the workspace but still needs a writable temporary directory, matching
     // the Seatbelt policy and the sandbox-runtime filesystem config. Toolchain shims cache into
     // TMPDIR on every invocation, and denying that write costs hundreds of milliseconds per command.
     const writableCandidates =
         options.mode === "read_only"
-            ? [temporaryDirectory, "/tmp"]
-            : [
-                  options.cwd,
-                  ...(await findGitWritablePaths(options.cwd)),
-                  temporaryDirectory,
-                  "/tmp",
-              ];
+            ? [temporaryDirectory]
+            : [canonicalCwd, ...(await findGitWritablePaths(options.cwd)), temporaryDirectory];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
-    ].filter(existsSync);
+    ].filter((path) => existsSync(path) && path !== privateTemporaryRoot);
     const protectedCandidates = [
         ...PROTECTED_WORKSPACE_NAMES.map((name) => join(options.cwd, name)),
         join(temporaryDirectory, `rig-${options.uid ?? process.getuid?.() ?? 0}`),
@@ -66,40 +76,112 @@ export async function createLinuxBubblewrapCommand(options: {
             ...(await Promise.all(protectedCandidates.map(resolvePotentialPath))),
         ]),
     ];
-    const protectedPaths = allProtectedPaths.filter(existsSync);
-    const protectedCreatePaths = allProtectedPaths.filter(
-        (path) =>
-            !existsSync(path) &&
-            writableRoots.some((root) => {
-                const fromRoot = relative(root, path);
-                return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
+    const protectedCreateCandidates = [
+        ...allProtectedPaths,
+        ...(await Promise.all(
+            PROTECTED_CREATE_ONLY_WORKSPACE_NAMES.flatMap((name) => {
+                const path = join(options.cwd, name);
+                return [path, resolvePotentialPath(path)];
             }),
-    );
+        )),
+    ];
     const commandCwd = await resolvePotentialPath(options.commandCwd);
+    const bridgeDirectory =
+        options.networkUnixProxySockets === undefined
+            ? undefined
+            : dirname(options.networkUnixProxySockets.http);
+    if (
+        bridgeDirectory !== undefined &&
+        [
+            options.networkUnixProxySockets!.socks,
+            ...(options.networkUnixProxySockets!.loopback ?? []).map(({ path }) => path),
+        ].some((path) => dirname(path) !== bridgeDirectory)
+    ) {
+        throw new Error("Managed network bridge sockets must share one directory.");
+    }
     const requestedCommand =
         options.path === undefined
             ? options.command
             : `export PATH=${quoteShellArgument(options.path)}\n${options.command}`;
-    const userCommand =
+    const sandboxNetworkSockets =
         options.networkUnixProxySockets === undefined
+            ? undefined
+            : {
+                  ...options.networkUnixProxySockets,
+                  http: join("/dev/rig-network", basename(options.networkUnixProxySockets.http)),
+                  loopback: options.networkUnixProxySockets.loopback?.map(({ path, port }) => ({
+                      path: join("/dev/rig-network", basename(path)),
+                      port,
+                  })),
+                  socks: join("/dev/rig-network", basename(options.networkUnixProxySockets.socks)),
+              };
+    const userCommand =
+        sandboxNetworkSockets === undefined
             ? requestedCommand
             : [
-                  `socat TCP-LISTEN:3128,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${quoteShellArgument(options.networkUnixProxySockets.http)} >/dev/null 2>&1 &`,
-                  `socat TCP-LISTEN:1080,bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${quoteShellArgument(options.networkUnixProxySockets.socks)} >/dev/null 2>&1 &`,
-                  ...(options.networkUnixProxySockets.loopback ?? []).map(
-                      ({ path, port }) =>
-                          `socat TCP-LISTEN:${String(port)},bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:${quoteShellArgument(path)} >/dev/null 2>&1 &`,
+                  MANAGED_NETWORK_SOCAT_PREFLIGHT,
+                  authenticatedSocatCommand(
+                      3128,
+                      sandboxNetworkSockets.http,
+                      sandboxNetworkSockets.authenticationToken,
+                  ),
+                  authenticatedSocatCommand(
+                      1080,
+                      sandboxNetworkSockets.socks,
+                      sandboxNetworkSockets.authenticationToken,
+                  ),
+                  ...(sandboxNetworkSockets.loopback ?? []).map(({ path, port }) =>
+                      authenticatedSocatCommand(
+                          port,
+                          path,
+                          sandboxNetworkSockets.authenticationToken,
+                      ),
                   ),
                   `trap 'kill $(jobs -p) 2>/dev/null || true' EXIT`,
                   readinessCheck([
                       3128,
                       1080,
-                      ...(options.networkUnixProxySockets.loopback ?? []).map(({ port }) => port),
+                      ...(sandboxNetworkSockets.loopback ?? []).map(({ port }) => port),
                   ]),
                   requestedCommand,
               ].join("\n");
-    const args = ["--new-session", "--die-with-parent", "--ro-bind", "/", "/", "--dev", "/dev"];
+    const projectConfigPlaceholder =
+        options.mode !== "read_only" && !projectConfigCandidates.some((path) => existsSync(path))
+            ? await prepareProjectConfigPlaceholder(projectConfigPath)
+            : undefined;
+    const protectedPaths = allProtectedPaths.filter(
+        (path) =>
+            existsSync(path) &&
+            (!isAtOrBelow(privateTemporaryRoot, path) ||
+                writableRoots.some((root) => isAtOrBelow(root, path))),
+    );
+    const protectedCreatePaths = [...new Set(protectedCreateCandidates)].filter(
+        (path) =>
+            !existsSync(path) &&
+            !projectConfigCandidates.includes(path) &&
+            writableRoots.some((root) => {
+                const fromRoot = relative(root, path);
+                return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
+            }),
+    );
+    const args = [
+        "--new-session",
+        "--die-with-parent",
+        "--ro-bind",
+        "/",
+        "/",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+    ];
+    if (options.mode === "read_only" && isAtOrBelow(privateTemporaryRoot, canonicalCwd)) {
+        args.push("--ro-bind", canonicalCwd, canonicalCwd);
+    }
 
+    if (bridgeDirectory !== undefined) {
+        args.push("--dir", "/dev/rig-network", "--ro-bind", bridgeDirectory, "/dev/rig-network");
+    }
     for (const writableRoot of writableRoots) args.push("--bind", writableRoot, writableRoot);
     for (const protectedPath of protectedPaths)
         args.push("--ro-bind", protectedPath, protectedPath);
@@ -117,15 +199,31 @@ export async function createLinuxBubblewrapCommand(options: {
     return {
         args,
         command: options.bwrapPath ?? "bwrap",
+        ...(projectConfigPlaceholder === undefined ? {} : { projectConfigPlaceholder }),
         ...(protectedCreatePaths.length === 0 ? {} : { protectedCreatePaths }),
     };
+}
+
+function authenticatedSocatCommand(port: number, socketPath: string, token: string): string {
+    const relay = `{ printf %s "$RIG_NETWORK_TOKEN"; cat; } | ` + `socat - "$RIG_NETWORK_ADDRESS"`;
+    return (
+        `RIG_NETWORK_TOKEN=${quoteShellArgument(token)} ` +
+        `RIG_NETWORK_ADDRESS=${quoteShellArgument(`UNIX-CONNECT:${socketPath}`)} ` +
+        `socat TCP-LISTEN:${String(port)},bind=127.0.0.1,fork,reuseaddr ` +
+        `SYSTEM:${quoteShellArgument(relay)} >/dev/null 2>&1 &`
+    );
 }
 
 function readinessCheck(ports: readonly number[]): string {
     return ports
         .map(
             (port) =>
-                `attempt=0; until socat -u /dev/null TCP4:127.0.0.1:${String(port)} >/dev/null 2>&1; do attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || { echo "Managed network bridge did not become ready." >&2; exit 1; }; sleep 0.01; done`,
+                `attempt=0; until socat -T 0.1 -u /dev/null TCP4:127.0.0.1:${String(port)} >/dev/null 2>&1; do attempt=$((attempt + 1)); [ "$attempt" -lt 100 ] || { echo "Managed network bridge did not become ready." >&2; exit 1; }; sleep 0.01; done`,
         )
         .join("\n");
+}
+
+function isAtOrBelow(root: string, path: string): boolean {
+    const fromRoot = relative(root, path);
+    return fromRoot === "" || (!fromRoot.startsWith("..") && !isAbsolute(fromRoot));
 }

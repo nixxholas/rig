@@ -234,7 +234,22 @@ export class SessionEventLog {
             this.#permissionReviewEventIds.clear();
             return;
         }
-        if (event.type !== "agent_event" || event.data.event.type !== "permission_review") return;
+        if (event.type !== "agent_event") return;
+        if (event.data.event.type === "temporary_full_access_started") {
+            const review = event.data.event;
+            this.#permissionReviews.set(review.toolCallId, {
+                action: review.action,
+                decision: "allow",
+                fullAccessGranted: true,
+                reason: review.reason,
+                risk: review.risk,
+                toolCallId: review.toolCallId,
+                userAuthorization: review.userAuthorization,
+            });
+            this.#permissionReviewEventIds.set(review.toolCallId, event.id);
+            return;
+        }
+        if (event.data.event.type !== "permission_review") return;
         const review = event.data.event;
         this.#permissionReviews.set(review.toolCallId, {
             action: review.action,
@@ -268,7 +283,11 @@ export class SessionEventLog {
                 this.#messageSteeringEventId.delete(messageId);
             }
         }
-        if (event.type === "agent_event" && event.data.event.type === "permission_review") {
+        if (
+            event.type === "agent_event" &&
+            (event.data.event.type === "permission_review" ||
+                event.data.event.type === "temporary_full_access_started")
+        ) {
             const toolCallId = event.data.event.toolCallId;
             if (this.#permissionReviewEventIds.get(toolCallId) === event.id) {
                 this.#permissionReviews.delete(toolCallId);

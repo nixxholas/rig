@@ -2131,6 +2131,16 @@ describe("ChatStore", () => {
                     userAuthorization: "high",
                 }),
             );
+            store.apply(
+                agentEvent({
+                    action: "Run tests",
+                    reason: "The user asked for verification.",
+                    risk: "low",
+                    toolCallId: "call-1",
+                    type: "temporary_full_access_started",
+                    userAuthorization: "high",
+                }),
+            );
 
             expect(store.session()).toMatchObject({
                 backgroundProcesses: [{ sessionId: 9 }],
@@ -2143,6 +2153,7 @@ describe("ChatStore", () => {
                     {
                         action: "Run tests",
                         decision: "allow",
+                        fullAccessGranted: true,
                         reason: "The user asked for verification.",
                         risk: "low",
                         toolCallId: "call-1",
@@ -2157,6 +2168,7 @@ describe("ChatStore", () => {
                 permissionReview: {
                     action: "Run tests",
                     decision: "allow",
+                    fullAccessGranted: true,
                     reason: "The user asked for verification.",
                     risk: "low",
                     userAuthorization: "high",

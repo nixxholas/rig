@@ -1,4 +1,5 @@
 export { createPermissionContext } from "./createPermissionContext.js";
+export { assertPermissionRevision } from "./assertPermissionRevision.js";
 export { INVALID_PERMISSION_MODE_MESSAGE } from "./invalidPermissionModeMessage.js";
 export { isPermissionMode } from "./isPermissionMode.js";
 export { isPermissionReduction } from "./isPermissionReduction.js";

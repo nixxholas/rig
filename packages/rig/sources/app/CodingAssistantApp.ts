@@ -3504,6 +3504,11 @@ export class CodingAssistantApp implements Component, Focusable {
                     toolEntry.permissionReview = `Refused: ${event.reason} Risk: ${humanizePermissionReviewLevel(event.risk)}. User authorization: ${humanizePermissionReviewLevel(event.userAuthorization)}.`;
                 }
             }
+        } else if (event.type === "temporary_full_access_started") {
+            const toolEntry = this.#entries.find((entry) => entry.id === event.toolCallId);
+            if (toolEntry !== undefined) {
+                toolEntry.permissionReview = "Approved automatically: temporary Full access.";
+            }
         } else if (event.type === "background_processes_changed") {
             const nextProcesses =
                 event.processes ?? (event.running === 0 ? [] : this.#observedShellProcesses);

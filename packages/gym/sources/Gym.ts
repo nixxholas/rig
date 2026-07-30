@@ -16,6 +16,7 @@ import { dockerSandboxArguments } from "./sharedDockerRunner.js";
 const execFileAsync = promisify(execFile);
 
 export class Gym {
+    readonly dockerContainerName: string;
     readonly httpProxy: InterceptingHttpProxy | undefined;
     readonly inference: MockInferenceServer;
     readonly terminal: GymTerminal;
@@ -52,6 +53,7 @@ export class Gym {
         pty: IPty;
         workspacePath: string;
     }) {
+        this.dockerContainerName = options.containerName;
         this.#containerName = options.containerName;
         this.#disconnectTerminal = connectGymTerminal(options.pty, options.ghostty);
         this.#dockerFixtureRoot = options.dockerFixtureRoot;

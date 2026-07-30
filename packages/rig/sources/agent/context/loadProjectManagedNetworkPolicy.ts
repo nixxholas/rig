@@ -15,6 +15,9 @@ export function toManagedNetworkPolicy(
     if (network === undefined) return undefined;
     const ports = network.allowedPorts ?? [443];
     return {
+        ...(network.allowLocalBinding === undefined
+            ? {}
+            : { allowLocalBinding: network.allowLocalBinding }),
         ...(network.allowedDomains === undefined
             ? {}
             : {
