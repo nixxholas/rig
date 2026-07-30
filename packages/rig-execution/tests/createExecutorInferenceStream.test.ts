@@ -101,7 +101,53 @@ describe("createExecutorInferenceStream", () => {
             attempt: 2,
             reason: "Claude API overloaded (HTTP 529).",
         });
-        await expect(stream.result()).resolves.toMatchObject({ stopReason: "stop" });
+        const result = await stream.result();
+        expect(result).toMatchObject({ stopReason: "stop" });
+        expect(result.contextTokens).toBeUndefined();
+    });
+
+    it("records the latest inference usage as both usage and occupied context", async () => {
+        const executor = {
+            run: async function* () {
+                yield {
+                    type: "token_usage",
+                    usage: {
+                        cacheRead: 70,
+                        cacheWrite: 5,
+                        input: 10,
+                        output: 15,
+                        totalTokens: 100,
+                    },
+                } as const;
+                yield { type: "done", state: "normal" } as const;
+            },
+        } as unknown as Executor;
+        const stream = createExecutorInferenceStream({
+            context: { messages: [] },
+            executor,
+            model: defineModel({
+                id: "openai/test",
+                name: "Test",
+                thinkingLevels: ["off"],
+                defaultThinkingLevel: "off",
+            }),
+            providerId: "codex",
+        });
+
+        for await (const _event of stream) {
+            // Consume the stream as the agent loop does.
+        }
+
+        await expect(stream.result()).resolves.toMatchObject({
+            contextTokens: 100,
+            usage: {
+                cacheRead: 70,
+                cacheWrite: 5,
+                input: 10,
+                output: 15,
+                totalTokens: 100,
+            },
+        });
     });
 
     it("streams tentative provider blocks and rolls them back on reset", async () => {

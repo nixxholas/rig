@@ -2326,6 +2326,7 @@ describe("ChatStore", () => {
                         requestedModelId: "sonnet-5",
                         role: "agent",
                         usage: usage(200, 30, 0.75),
+                        contextTokens: 211,
                     },
                     runId: "run-1",
                 }),
@@ -2382,7 +2383,7 @@ describe("ChatStore", () => {
             );
 
             expect(store.session().usage).toMatchObject({
-                context: { approximate: false, totalTokens: 230 },
+                context: { approximate: false, totalTokens: 211 },
                 currentProviderId: "claude",
                 observedQuota: [
                     {
@@ -2393,6 +2394,61 @@ describe("ChatStore", () => {
                 quotas: [{ providerId: "claude", quota: { capturedAt: 10 } }],
                 totalCost: 0.75,
                 totalTokens: 230,
+            });
+
+            store.apply(
+                event("agent_event", {
+                    event: {
+                        compactedMessageCount: 2,
+                        compactionId: "compact-1",
+                        elapsedMs: 10,
+                        estimatedTokensAfter: 80,
+                        estimatedTokensBefore: 211,
+                        reason: "threshold",
+                        type: "context_compacted",
+                    },
+                    runId: "run-1",
+                }),
+            );
+            const compactionMessage = {
+                blocks: [{ text: "Compacted.", type: "text" }] as const,
+                content: "checkpoint",
+                id: "compact-1",
+                kind: "native" as const,
+                providerId: "claude",
+                requestedModelId: "sonnet-5",
+                replacedMessageIds: [],
+                role: "compaction" as const,
+                statistics: {
+                    after: { exact: false, tokens: 80 },
+                    before: { exact: true, tokens: 211 },
+                },
+                summary: "Compacted.",
+                usage: usage(50, 10, 0.2),
+            };
+            store.apply(
+                event("agent_message", {
+                    message: compactionMessage,
+                    runId: "run-1",
+                }),
+            );
+            store.apply(
+                event("agent_message", {
+                    message: {
+                        ...compactionMessage,
+                        statistics: {
+                            ...compactionMessage.statistics,
+                            after: { exact: true, tokens: 80 },
+                        },
+                    },
+                    runId: "run-1",
+                }),
+            );
+
+            expect(store.session().usage).toMatchObject({
+                context: { approximate: true, totalTokens: 80 },
+                totalCost: 0.95,
+                totalTokens: 290,
             });
         });
 

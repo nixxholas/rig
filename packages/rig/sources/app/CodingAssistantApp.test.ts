@@ -5253,6 +5253,7 @@ describe("CodingAssistantApp", () => {
                     api: "test",
                     provider: "codex",
                     model: model.id,
+                    contextTokens: usage.totalTokens,
                     usage,
                     stopReason: "stop",
                     timestamp: 1,
@@ -5316,14 +5317,14 @@ describe("CodingAssistantApp", () => {
             type: "agent_event",
         });
         expect(stripAnsi(app.render(100).join("\n"))).toContain(
-            "2.2k tokens · 8% cache hit · 100% ctx left",
+            "1.6k tokens · 8% cache hit · 100% ctx left",
         );
 
         submit(app, "/usage");
         const report = stripAnsi(app.render(100).join("\n"));
         expect(report).toContain("Input: 1.2k");
         expect(report).toContain("Output: 300");
-        expect(report).toContain("Session tokens: 2.2k");
+        expect(report).toContain("Session tokens: 1.6k");
 
         submit(app, "/new");
         await app.waitForIdle();

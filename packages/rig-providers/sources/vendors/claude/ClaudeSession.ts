@@ -307,6 +307,7 @@ export class ClaudeSession extends BaseSession {
         let rateLimitInfo: SDKRateLimitInfo | undefined;
         let requestId: string | undefined;
         let usage = { ...EMPTY_SESSION_CACHE_USAGE };
+        let sawInferenceUsage = false;
         try {
             if (!continuingQuery) {
                 const promptQueue = new ClaudePromptQueue();
@@ -401,6 +402,10 @@ export class ClaudeSession extends BaseSession {
                 }
                 if (message.type === "stream_event") {
                     const event = message.event;
+                    if (event.type === "message_start") {
+                        usage = toUsage(event.message.usage);
+                        sawInferenceUsage = true;
+                    }
                     if (
                         event.type === "content_block_start" &&
                         event.content_block.type === "tool_use"
@@ -448,7 +453,8 @@ export class ClaudeSession extends BaseSession {
                         }
                     }
                     if (event.type === "message_delta") {
-                        usage = toUsage(event.usage);
+                        usage = mergeUsage(usage, event.usage);
+                        sawInferenceUsage = true;
                     }
                     if (event.type === "content_block_stop") {
                         const block = activeTools.get(event.index);
@@ -462,7 +468,7 @@ export class ClaudeSession extends BaseSession {
                     }
                     if (event.type === "message_stop" && sawToolCall) {
                         this.lastQueryToolCalls = [...activeTools.values()];
-                        yield { type: "token_usage", usage };
+                        if (sawInferenceUsage) yield { type: "token_usage", usage };
                         yield { type: "block_stop" };
                         yield { type: "done", state: "tool_call" };
                         return;
@@ -486,7 +492,7 @@ export class ClaudeSession extends BaseSession {
                 }
                 this.closeActiveQuery();
                 yield { type: "text_delta", delta: summary };
-                yield { type: "token_usage", usage };
+                if (sawInferenceUsage) yield { type: "token_usage", usage };
                 yield { type: "done", state: "normal" };
                 return;
             }
@@ -494,7 +500,10 @@ export class ClaudeSession extends BaseSession {
                 throw new Error("Claude SDK finished without returning a result.");
             }
             if (result !== undefined) {
-                usage = toUsage(result.usage);
+                // SDK result usage is accumulated across every inference in the active query.
+                // It is only a valid fallback for the query's first inference. Continued
+                // inferences must use their message_delta usage or remain unreported.
+                if (!sawInferenceUsage && !continuingQuery) usage = toUsage(result.usage);
                 if (!sawText && result.subtype === "success" && result.result.length > 0) {
                     yield { type: "text_delta", delta: result.result };
                 }
@@ -528,7 +537,7 @@ export class ClaudeSession extends BaseSession {
                 }
             }
             this.lastQueryToolCalls = [...activeTools.values()];
-            yield { type: "token_usage", usage };
+            if (sawInferenceUsage) yield { type: "token_usage", usage };
             yield { type: "block_stop" };
             yield { type: "done", state: sawToolCall ? "tool_call" : "normal" };
         } catch (error) {
@@ -604,6 +613,28 @@ function toUsage(usage: {
     const output = usage.output_tokens ?? 0;
     const cacheRead = usage.cache_read_input_tokens ?? 0;
     const cacheWrite = usage.cache_creation_input_tokens ?? 0;
+    return {
+        input,
+        output,
+        cacheRead,
+        cacheWrite,
+        totalTokens: input + output + cacheRead + cacheWrite,
+    };
+}
+
+function mergeUsage(
+    current: SessionCacheUsage,
+    update: {
+        input_tokens?: number | null;
+        output_tokens?: number | null;
+        cache_read_input_tokens?: number | null;
+        cache_creation_input_tokens?: number | null;
+    },
+): SessionCacheUsage {
+    const input = update.input_tokens ?? current.input;
+    const output = update.output_tokens ?? current.output;
+    const cacheRead = update.cache_read_input_tokens ?? current.cacheRead;
+    const cacheWrite = update.cache_creation_input_tokens ?? current.cacheWrite;
     return {
         input,
         output,

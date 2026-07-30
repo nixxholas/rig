@@ -9,6 +9,7 @@ import type {
     Model,
     Provider,
     ServiceTier,
+    Usage,
 } from "@slopus/rig-execution";
 
 export interface CompactConversationResult {
@@ -73,6 +74,7 @@ export async function compactConversation(options: {
     const replacement = toAgentReplacementContext({
         compactionId,
         providerId: options.provider.id,
+        requestedModelId: options.model.id,
         replacement: summary.context.messages,
         source: options.messages,
         summary,
@@ -128,14 +130,11 @@ function unchanged(
 function toAgentReplacementContext(options: {
     compactionId: string;
     providerId: string;
+    requestedModelId: string;
     replacement: readonly ProviderMessage[];
     source: readonly Message[];
     summary: {
-        usage: {
-            input: number;
-            cacheRead: number;
-            cacheWrite: number;
-        };
+        usage: Usage;
     };
 }): { contextMessage: CompactionMessage; transcriptMessage: CompactionMessage } {
     const beforeTokens =
@@ -155,6 +154,8 @@ function toAgentReplacementContext(options: {
             },
         },
         providerId: options.providerId,
+        requestedModelId: options.requestedModelId,
+        usage: options.summary.usage,
     };
     return {
         transcriptMessage,

@@ -193,10 +193,25 @@ describe("compactConversation", () => {
                 id: "replacement-id",
                 blocks: [],
                 providerId: "test",
+                requestedModelId: model.id,
                 replacedMessageIds: ["old-user", "old-agent", "current-user"],
                 statistics: {
                     after: { exact: false, tokens: expect.any(Number) },
                     before: { exact: true, tokens: 12 },
+                },
+                usage: {
+                    cacheRead: 4,
+                    cacheWrite: 3,
+                    cost: {
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        input: 0,
+                        output: 0,
+                        total: 0,
+                    },
+                    input: 5,
+                    output: 3,
+                    totalTokens: 15,
                 },
                 replacementMessages: [
                     providerInput.messages[2],

@@ -213,6 +213,7 @@ export interface AgentMessage {
     id: string;
     blocks: readonly AgentBlock[];
     usage?: Usage;
+    contextTokens?: number;
     providerId?: string;
     requestedModelId?: string;
     responseModel?: string;
@@ -229,6 +230,12 @@ export interface CompactionMessage {
         after: { exact: boolean; tokens: number };
     };
     providerId: string;
+    /** Model requested for the compaction inference. */
+    requestedModelId?: string;
+    /** Provider-reported model that performed the compaction inference. */
+    responseModel?: string;
+    /** Provider-reported usage spent producing this compaction. */
+    usage?: Usage;
     internal?: never;
 }
 
@@ -320,7 +327,9 @@ export interface SessionUsageSnapshot {
 }
 
 export interface SessionTokenCount {
+    /** Context window occupied after the latest inference or compaction. */
     lastContextTokens: number;
+    /** Cumulative provider-reported usage across all model requests in the session. */
     totalTokens: number;
 }
 

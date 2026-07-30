@@ -140,6 +140,8 @@ export interface AssistantMessage {
     api: string;
     provider: string;
     model: string;
+    /** Context window occupied immediately after this inference. */
+    contextTokens?: number;
     responseModel?: string;
     /** Ordered opaque provider output items required for native continuation. */
     responseItems?: readonly string[];

@@ -29,6 +29,7 @@ export function aggregateSessionUsage(
 
     let groups: SessionUsageGroup[] = [];
     let attributedGroupIndexes = new Map<string, number>();
+    let countedUsageIds = new Set<string>();
     let activeModel: ActiveModel | undefined;
     let currentContext: SessionContextUsage | undefined;
 
@@ -36,6 +37,7 @@ export function aggregateSessionUsage(
         if (event.type === "session_reset") {
             groups = [];
             attributedGroupIndexes = new Map();
+            countedUsageIds = new Set();
             activeModel = {
                 modelId: event.data.snapshot.modelId,
                 providerId: event.data.snapshot.providerId,
@@ -75,6 +77,9 @@ export function aggregateSessionUsage(
             event.data.event.type === "permission_review" &&
             event.data.event.transcript !== undefined
         ) {
+            const usageId = `permission_review:${event.id}`;
+            if (countedUsageIds.has(usageId)) continue;
+            countedUsageIds.add(usageId);
             // The reviewer spends the user's tokens on its own model, so it is billed under that
             // model. It never becomes the active model, because it is not what the conversation
             // is running on and its history is not the context window the user is watching.
@@ -120,7 +125,42 @@ export function aggregateSessionUsage(
 
         if (event.type !== "agent_message") continue;
         const message = event.data.message;
+        if (message.role === "compaction" && message.usage !== undefined) {
+            const usageId = `message:${message.id}`;
+            if (countedUsageIds.has(usageId)) continue;
+            countedUsageIds.add(usageId);
+            const compactionModel =
+                message.requestedModelId === undefined
+                    ? activeModel
+                    : {
+                          modelId: message.responseModel ?? message.requestedModelId,
+                          providerId: message.providerId,
+                          requestedModelId: message.requestedModelId,
+                          ...(message.responseModel === undefined
+                              ? {}
+                              : { responseModel: message.responseModel }),
+                      };
+            if (compactionModel === undefined) continue;
+            const groupKey = JSON.stringify([message.providerId, compactionModel.modelId]);
+            let groupIndex = attributedGroupIndexes.get(groupKey);
+            if (groupIndex === undefined) {
+                groupIndex = groups.length;
+                attributedGroupIndexes.set(groupKey, groupIndex);
+                groups.push({
+                    kind: "attributed",
+                    ...compactionModel,
+                    providerId: message.providerId,
+                    usage: zeroUsage(),
+                });
+            }
+            const group = groups[groupIndex] as AttributedSessionUsageGroup;
+            groups[groupIndex] = { ...group, usage: addUsage(group.usage, message.usage) };
+            continue;
+        }
         if (message.role !== "agent" || message.usage === undefined) continue;
+        const usageId = `message:${message.id}`;
+        const usageAlreadyCounted = countedUsageIds.has(usageId);
+        countedUsageIds.add(usageId);
 
         const hasCompleteAttribution =
             message.providerId !== undefined &&
@@ -151,8 +191,10 @@ export function aggregateSessionUsage(
             attributedGroupIndexes.set(groupKey, groupIndex);
             groups.push(group);
         }
-        const group = groups[groupIndex] as AttributedSessionUsageGroup;
-        groups[groupIndex] = { ...group, usage: addUsage(group.usage, message.usage) };
+        if (!usageAlreadyCounted) {
+            const group = groups[groupIndex] as AttributedSessionUsageGroup;
+            groups[groupIndex] = { ...group, usage: addUsage(group.usage, message.usage) };
+        }
         activeModel = {
             modelId,
             providerId,
@@ -161,11 +203,13 @@ export function aggregateSessionUsage(
                 ? {}
                 : { responseModel: message.responseModel }),
         };
-        currentContext = {
-            ...activeModel,
-            approximate: false,
-            totalTokens: message.usage.totalTokens,
-        };
+        if (message.contextTokens !== undefined) {
+            currentContext = {
+                ...activeModel,
+                approximate: false,
+                totalTokens: message.contextTokens,
+            };
+        }
     }
 
     return {

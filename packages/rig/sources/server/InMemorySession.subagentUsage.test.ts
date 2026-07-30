@@ -74,11 +74,11 @@ describe("InMemorySession subagent usage", () => {
         });
         expect(session.subagentSummary().sessionTokenCount).toEqual({
             lastContextTokens: 1_100,
-            totalTokens: 1_100,
+            totalTokens: 2_200,
         });
         expect(session.state().sessionTokenCount).toEqual({
             lastContextTokens: 1_100,
-            totalTokens: 1_100,
+            totalTokens: 2_200,
         });
         expect(session.subagentSummary().totalTokens).toBe(1_100);
     });
@@ -109,6 +109,7 @@ function responseStream(model: string, responseUsage: Usage): InferenceStream {
     const message: AssistantMessage = {
         api: "test",
         content: [{ text: "Completed.", type: "text" }],
+        contextTokens: responseUsage.totalTokens,
         model,
         provider: "claude",
         role: "assistant",

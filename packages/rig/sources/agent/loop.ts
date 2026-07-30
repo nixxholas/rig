@@ -515,7 +515,8 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         );
         if (finalizedCompaction !== undefined) {
             await options.onContextChanged?.(contextTranscript);
-            await options.onMessage?.(finalizedCompaction);
+            const { usage: _usage, ...notification } = finalizedCompaction;
+            await options.onMessage?.(notification);
         }
         if (agentMessage.blocks.length > 0 || assistantMessage.stopReason !== "error") {
             transcript.push(agentMessage);
@@ -576,7 +577,9 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             if (assistantMessage.endTurn === false) {
                 await compactCurrentContext({
                     force: false,
-                    reportedTokens: contextTokens(assistantMessage.usage),
+                    ...(assistantMessage.contextTokens === undefined
+                        ? {}
+                        : { reportedTokens: assistantMessage.contextTokens }),
                 });
                 await appendSteering(options, transcript, contextTranscript, providerMessages, now);
                 continue;
@@ -908,7 +911,9 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         }
         await compactCurrentContext({
             force: false,
-            reportedTokens: contextTokens(assistantMessage.usage),
+            ...(assistantMessage.contextTokens === undefined
+                ? {}
+                : { reportedTokens: assistantMessage.contextTokens }),
         });
         await appendSteering(options, transcript, contextTranscript, providerMessages, now);
     }
@@ -974,10 +979,6 @@ async function compactLoopContext(options: {
     await options.options.onContextChanged?.(options.contextTranscript);
     await options.options.onMessage?.(result.compactionMessage);
     return true;
-}
-
-function contextTokens(usage: Usage): number {
-    return usage.input + usage.cacheRead + usage.cacheWrite;
 }
 
 async function appendSteering(

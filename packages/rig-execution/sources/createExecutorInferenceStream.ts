@@ -226,7 +226,11 @@ async function* streamExecutorInference(options: {
                 continue;
             }
             if (event.type === "token_usage") {
-                partial = { ...partial, usage: toUsage(event.usage) };
+                partial = {
+                    ...partial,
+                    contextTokens: event.usage.totalTokens,
+                    usage: toUsage(event.usage),
+                };
                 continue;
             }
             if (event.type !== "done") continue;

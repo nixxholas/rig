@@ -49,6 +49,7 @@ function message() {
         api: "test",
         provider: "test",
         model: "test",
+        contextTokens: 0,
         usage: {
             input: 0,
             output: 0,

@@ -993,7 +993,12 @@ export class ChatStore {
             case "agent_message":
                 {
                     const data = event.data as { message: Message; runId: string };
-                    if (data.message.role === "agent") this.#recordAgentUsage(data.message);
+                    if (!this.#appliedMessageIds.has(data.message.id)) {
+                        if (data.message.role === "agent") this.#recordAgentUsage(data.message);
+                        if (data.message.role === "compaction") {
+                            this.#recordCompactionUsage(data.message);
+                        }
+                    }
                     this.#applyMessage(data.message, event.createdAt, deltas, data.runId);
                 }
                 break;
@@ -2007,6 +2012,7 @@ export class ChatStore {
                 : { responseModel: message.responseModel }),
             usage: message.usage,
         });
+        if (message.contextTokens === undefined) return;
         const usage = this.#session.usage;
         if (usage === undefined) return;
         this.#session = {
@@ -2021,11 +2027,33 @@ export class ChatStore {
                     ...(message.responseModel === undefined
                         ? {}
                         : { responseModel: message.responseModel }),
-                    totalTokens: message.usage.totalTokens,
+                    totalTokens: message.contextTokens,
                 },
                 currentProviderId: message.providerId,
             }),
         };
+    }
+
+    #recordCompactionUsage(message: CompactionMessage): void {
+        const context = this.#session.usage?.context;
+        if (
+            message.usage === undefined ||
+            (context === undefined && message.requestedModelId === undefined)
+        ) {
+            return;
+        }
+        const requestedModelId = message.requestedModelId ?? context?.requestedModelId;
+        if (requestedModelId === undefined) return;
+        this.#recordUsageGroup({
+            kind: "attributed",
+            modelId: message.responseModel ?? requestedModelId,
+            providerId: message.providerId,
+            requestedModelId,
+            ...(message.responseModel === undefined
+                ? {}
+                : { responseModel: message.responseModel }),
+            usage: message.usage,
+        });
     }
 
     #recordUsageGroup(group: SessionUsageSnapshot["groups"][number]): void {

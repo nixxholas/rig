@@ -16,6 +16,11 @@ describe("InMemorySession rewind", () => {
         const result = session.rewind("user-2");
 
         expect(result.message).toMatchObject({ id: "user-2", role: "user" });
+        expect(session.state().totalTokens).toBe(0);
+        expect(result.session.sessionTokenCount).toEqual({
+            lastContextTokens: 0,
+            totalTokens: 0,
+        });
         expect(result.session.snapshot.messages.map((message) => message.id)).toEqual([
             "user-1",
             "agent-1",
@@ -34,6 +39,18 @@ describe("InMemorySession rewind", () => {
         });
         const restarted = createRestoredSession(vi.fn(), session.events.all());
         expect(restarted.snapshot().permissionReviews).toEqual([]);
+    });
+
+    it("invalidates the current context when the model changes", () => {
+        const session = createRestoredSession(vi.fn());
+
+        session.changeModel({ modelId: "test/next-model", providerId: "test" });
+
+        expect(session.state().totalTokens).toBe(0);
+        expect(session.snapshot().sessionTokenCount).toEqual({
+            lastContextTokens: 0,
+            totalTokens: 0,
+        });
     });
 
     it("rejects a message that is not a visible user turn", () => {
@@ -58,11 +75,17 @@ function createRestoredSession(
         name: "Test model",
         thinkingLevels: ["medium"],
     });
+    const nextModel = defineModel({
+        defaultThinkingLevel: "medium",
+        id: "test/next-model",
+        name: "Next model",
+        thinkingLevels: ["medium"],
+    });
     const modelCatalog: ModelCatalog = {
         defaultModelId: model.id,
         defaultProviderId: "test",
-        models: [model],
-        providers: [{ models: [model], providerId: "test" }],
+        models: [model, nextModel],
+        providers: [{ models: [model, nextModel], providerId: "test" }],
     };
     const messages = [
         { blocks: [{ text: "First", type: "text" as const }], id: "user-1", role: "user" as const },
@@ -120,6 +143,8 @@ function createRestoredSession(
         status: "completed",
         tasks: [],
         titleStatus: "ready",
+        totalTokens: 123,
+        sessionTokenCount: { lastContextTokens: 123, totalTokens: 123 },
         tools: [],
     };
     const persistence: InMemorySessionPersistence = {

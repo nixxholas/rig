@@ -9,7 +9,7 @@ import type { Context, Model, Provider, Usage } from "@slopus/rig-execution";
 export interface ProviderCompaction {
     context: Context;
     summary?: string;
-    usage: Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens">;
+    usage: Usage;
 }
 
 export async function requestProviderCompaction(options: {
@@ -21,7 +21,9 @@ export async function requestProviderCompaction(options: {
     now: () => number;
 }): Promise<ProviderCompaction> {
     if (options.provider.compact === undefined) {
-        throw new Error(`Provider '${options.provider.id}' does not support conversation compaction.`);
+        throw new Error(
+            `Provider '${options.provider.id}' does not support conversation compaction.`,
+        );
     }
     const result = await options.provider.compact({
         context: options.context,
@@ -42,9 +44,18 @@ export async function requestProviderCompaction(options: {
 
 function requireCompactionUsage(
     usage: Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens"> | undefined,
-): Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite" | "totalTokens"> {
+): Usage {
     if (usage === undefined) {
         throw new Error("The provider completed compaction without reporting token usage.");
     }
-    return usage;
+    return {
+        ...usage,
+        cost: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            input: 0,
+            output: 0,
+            total: 0,
+        },
+    };
 }

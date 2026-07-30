@@ -255,6 +255,132 @@ describe("ClaudeSession", () => {
         });
     });
 
+    it("reports each inference usage instead of the result's accumulated query usage", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const session = new ClaudeSession("per-inference-usage-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query: (() => accumulatedUsageToolQuery()) as ClaudeSdkQuery,
+            tools: [
+                {
+                    name: "Bash",
+                    type: "local",
+                    description: "Run a command.",
+                    parameters: Type.Object({ command: Type.String() }),
+                },
+            ],
+        });
+
+        const first = await collectSessionEvents(
+            session.run({
+                context: { messages: [{ role: "user", content: "Inspect this." }] },
+            }),
+        );
+        expect(first.find((event) => event.type === "token_usage")).toEqual({
+            type: "token_usage",
+            usage: {
+                cacheRead: 900,
+                cacheWrite: 5,
+                input: 100,
+                output: 10,
+                totalTokens: 1_015,
+            },
+        });
+
+        const second = await collectSessionEvents(
+            session.run({
+                context: {
+                    messages: [
+                        { role: "user", content: "Inspect this." },
+                        {
+                            role: "assistant",
+                            content: "",
+                            toolCalls: [
+                                {
+                                    callId: "usage-call",
+                                    name: "Bash",
+                                    arguments: '{"command":"pwd"}',
+                                },
+                            ],
+                        },
+                        {
+                            role: "tool",
+                            callId: "usage-call",
+                            content: "/workspace",
+                            isError: false,
+                        },
+                    ],
+                },
+            }),
+        );
+        expect(second.find((event) => event.type === "token_usage")).toEqual({
+            type: "token_usage",
+            usage: {
+                cacheRead: 1_000,
+                cacheWrite: 20,
+                input: 150,
+                output: 20,
+                totalTokens: 1_190,
+            },
+        });
+    });
+
+    it("does not report a zero context when continued inference usage is absent", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const session = new ClaudeSession("missing-continued-usage-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query: (() => missingContinuedUsageQuery()) as ClaudeSdkQuery,
+            tools: [
+                {
+                    name: "Bash",
+                    type: "local",
+                    description: "Run a command.",
+                    parameters: Type.Object({ command: Type.String() }),
+                },
+            ],
+        });
+
+        await collectSessionEvents(
+            session.run({
+                context: { messages: [{ role: "user", content: "Inspect this." }] },
+            }),
+        );
+        const continued = await collectSessionEvents(
+            session.run({
+                context: {
+                    messages: [
+                        { role: "user", content: "Inspect this." },
+                        {
+                            role: "assistant",
+                            content: "",
+                            toolCalls: [
+                                {
+                                    callId: "missing-usage-call",
+                                    name: "Bash",
+                                    arguments: '{"command":"pwd"}',
+                                },
+                            ],
+                        },
+                        {
+                            role: "tool",
+                            callId: "missing-usage-call",
+                            content: "/workspace",
+                            isError: false,
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(continued.some((event) => event.type === "token_usage")).toBe(false);
+        expect(continued.at(-1)).toEqual({ type: "done", state: "normal" });
+    });
+
     it("replays after a user message interrupts a completed tool batch", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
@@ -1088,4 +1214,169 @@ function fakeToolCallQuery(close: () => void): ReturnType<ClaudeSdkQuery> {
         };
     }
     return Object.assign(messages(), { close }) as unknown as ReturnType<ClaudeSdkQuery>;
+}
+
+function accumulatedUsageToolQuery(): ReturnType<ClaudeSdkQuery> {
+    async function* messages() {
+        yield streamEvent("first-start", {
+            type: "message_start",
+            message: {
+                usage: {
+                    input_tokens: 100,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 5,
+                    cache_read_input_tokens: 900,
+                },
+            },
+        });
+        yield streamEvent("tool-start", {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+                type: "tool_use",
+                id: "usage-call",
+                name: "Bash",
+                input: {},
+            },
+        });
+        yield streamEvent("tool-delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"command":"pwd"}' },
+        });
+        yield streamEvent("tool-stop", { type: "content_block_stop", index: 0 });
+        yield streamEvent("first-delta", {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use", stop_sequence: null },
+            usage: {
+                input_tokens: null,
+                output_tokens: 10,
+                cache_creation_input_tokens: null,
+                cache_read_input_tokens: null,
+            },
+        });
+        yield streamEvent("first-stop", { type: "message_stop" });
+
+        yield streamEvent("second-start", {
+            type: "message_start",
+            message: {
+                usage: {
+                    input_tokens: 150,
+                    output_tokens: 0,
+                    cache_creation_input_tokens: 20,
+                    cache_read_input_tokens: 1_000,
+                },
+            },
+        });
+        yield streamEvent("text", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Done." },
+        });
+        yield streamEvent("second-delta", {
+            type: "message_delta",
+            delta: { stop_reason: "end_turn", stop_sequence: null },
+            usage: {
+                input_tokens: null,
+                output_tokens: 20,
+                cache_creation_input_tokens: null,
+                cache_read_input_tokens: null,
+            },
+        });
+        yield streamEvent("second-stop", { type: "message_stop" });
+        yield {
+            type: "result",
+            subtype: "success",
+            duration_ms: 1,
+            duration_api_ms: 1,
+            is_error: false,
+            num_turns: 2,
+            result: "Done.",
+            stop_reason: "end_turn",
+            session_id: "per-inference-usage-session",
+            total_cost_usd: 0,
+            usage: {
+                input_tokens: 250,
+                output_tokens: 30,
+                cache_creation_input_tokens: 25,
+                cache_read_input_tokens: 1_900,
+            },
+            modelUsage: {},
+            permission_denials: [],
+            uuid: "result",
+        };
+    }
+    return Object.assign(messages(), { close: () => {} }) as unknown as ReturnType<ClaudeSdkQuery>;
+}
+
+function missingContinuedUsageQuery(): ReturnType<ClaudeSdkQuery> {
+    async function* messages() {
+        yield streamEvent("missing-usage-tool-start", {
+            type: "content_block_start",
+            index: 0,
+            content_block: {
+                type: "tool_use",
+                id: "missing-usage-call",
+                name: "Bash",
+                input: {},
+            },
+        });
+        yield streamEvent("missing-usage-tool-delta", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "input_json_delta", partial_json: '{"command":"pwd"}' },
+        });
+        yield streamEvent("missing-usage-tool-stop", {
+            type: "content_block_stop",
+            index: 0,
+        });
+        yield streamEvent("missing-usage-first-delta", {
+            type: "message_delta",
+            delta: { stop_reason: "tool_use", stop_sequence: null },
+            usage: {
+                input_tokens: 10,
+                output_tokens: 2,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 20,
+            },
+        });
+        yield streamEvent("missing-usage-first-stop", { type: "message_stop" });
+        yield streamEvent("missing-usage-text", {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text: "Done." },
+        });
+        yield {
+            type: "result",
+            subtype: "success",
+            duration_ms: 1,
+            duration_api_ms: 1,
+            is_error: false,
+            num_turns: 2,
+            result: "Done.",
+            stop_reason: "end_turn",
+            session_id: "missing-continued-usage-session",
+            total_cost_usd: 0,
+            usage: {
+                input_tokens: 100,
+                output_tokens: 20,
+                cache_creation_input_tokens: 5,
+                cache_read_input_tokens: 200,
+            },
+            modelUsage: {},
+            permission_denials: [],
+            uuid: "missing-usage-result",
+        };
+    }
+    return Object.assign(messages(), { close: () => {} }) as unknown as ReturnType<ClaudeSdkQuery>;
+}
+
+function streamEvent(uuid: string, event: Record<string, unknown>) {
+    return {
+        type: "stream_event" as const,
+        event,
+        parent_tool_use_id: null,
+        uuid,
+        session_id: "per-inference-usage-session",
+    };
 }

@@ -9,7 +9,7 @@ import { selectToolsForModel } from "../runtime/selectToolsForModel.js";
 import { Agent } from "./Agent.js";
 import { AGENTS_MD_SPEC } from "./prompt/agentsMdSpec.js";
 import type { AgentLoopEvent } from "./loop.js";
-import { defineTool, type Message } from "./types.js";
+import { defineTool, type CompactionMessage, type Message } from "./types.js";
 import {
     defineModel,
     defineProvider,
@@ -638,6 +638,7 @@ describe("Agent", () => {
             contextWindow: 40_000,
         });
         const contexts: Context[] = [];
+        const emittedCompactions: CompactionMessage[] = [];
         const provider = defineProvider({
             id: "codex",
             models: [model],
@@ -677,6 +678,9 @@ describe("Agent", () => {
             messages,
             idFactory: createDeterministicIds(),
             printToConsole: false,
+            onMessage: (message) => {
+                if (message.role === "compaction") emittedCompactions.push(message);
+            },
         });
 
         await agent.send("Continue from there.");
@@ -703,6 +707,9 @@ describe("Agent", () => {
             role: "compaction",
             statistics: { after: { exact: true, tokens: 0 } },
         });
+        expect(emittedCompactions).toHaveLength(2);
+        expect(emittedCompactions[0]?.usage).toBeDefined();
+        expect(emittedCompactions[1]?.usage).toBeUndefined();
     });
 
     it("ends the run when automatic compaction fails instead of retrying unchanged context", async () => {
@@ -812,6 +819,7 @@ describe("Agent", () => {
                             api: "test",
                             provider: "codex",
                             model: model.id,
+                            contextTokens: reportedTokens,
                             usage: usageWithTotalTokens(reportedTokens),
                             stopReason: "toolUse",
                             timestamp: 1,

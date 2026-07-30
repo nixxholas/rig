@@ -172,11 +172,16 @@ describe("aggregateSessionUsage", () => {
     it("tracks exact inference context and approximate compaction context for the active model", () => {
         const initial = [
             created("created", "codex", "openai/gpt-5.6"),
-            inference("codex-inference", usage(12), {
-                providerId: "codex",
-                requestedModelId: "openai/gpt-5.6",
-                responseModel: "gpt-5.6-2026-07-01",
-            }),
+            inference(
+                "codex-inference",
+                usage(12),
+                {
+                    providerId: "codex",
+                    requestedModelId: "openai/gpt-5.6",
+                    responseModel: "gpt-5.6-2026-07-01",
+                },
+                73,
+            ),
         ];
         expect(aggregateSessionUsage(initial, primary).currentContext).toEqual({
             approximate: false,
@@ -184,7 +189,7 @@ describe("aggregateSessionUsage", () => {
             providerId: "codex",
             requestedModelId: "openai/gpt-5.6",
             responseModel: "gpt-5.6-2026-07-01",
-            totalTokens: 120,
+            totalTokens: 73,
         });
 
         const changed = [
@@ -193,22 +198,40 @@ describe("aggregateSessionUsage", () => {
         ];
         expect(aggregateSessionUsage(changed, primary).currentContext).toBeUndefined();
 
-        const compacted = [...changed, contextCompacted("compacted", 45)];
-        expect(aggregateSessionUsage(compacted, primary).currentContext).toEqual({
+        const compactionUsage = compaction("compaction-usage", usage(2), "claude");
+        const compacted = [
+            ...changed,
+            contextCompacted("compacted", 45),
+            compactionUsage,
+            { ...compactionUsage, id: "compaction-usage-republished" },
+        ];
+        const compactedUsage = aggregateSessionUsage(compacted, primary);
+        expect(compactedUsage.currentContext).toEqual({
             approximate: true,
             modelId: "anthropic/claude-sonnet-4-6",
             providerId: "claude",
             requestedModelId: "anthropic/claude-sonnet-4-6",
             totalTokens: 45,
         });
+        expect(compactedUsage.groups.at(-1)).toMatchObject({
+            modelId: "anthropic/claude-sonnet-4-6",
+            providerId: "claude",
+            usage: { input: 2, output: 4, totalTokens: 20 },
+        });
+        expect(compactedUsage.sessionTokenCount.totalTokens).toBe(140);
 
         const refreshed = [
             ...compacted,
-            inference("claude-inference", usage(9), {
-                providerId: "claude",
-                requestedModelId: "anthropic/claude-sonnet-4-6",
-                responseModel: "claude-sonnet-4-6-20260301",
-            }),
+            inference(
+                "claude-inference",
+                usage(9),
+                {
+                    providerId: "claude",
+                    requestedModelId: "anthropic/claude-sonnet-4-6",
+                    responseModel: "claude-sonnet-4-6-20260301",
+                },
+                54,
+            ),
         ];
         expect(aggregateSessionUsage(refreshed, primary).currentContext).toEqual({
             approximate: false,
@@ -216,7 +239,7 @@ describe("aggregateSessionUsage", () => {
             providerId: "claude",
             requestedModelId: "anthropic/claude-sonnet-4-6",
             responseModel: "claude-sonnet-4-6-20260301",
-            totalTokens: 90,
+            totalTokens: 54,
         });
     });
 
@@ -234,9 +257,53 @@ describe("aggregateSessionUsage", () => {
         expect(result).toEqual({
             groups: [],
             observedQuota: [],
-            sessionTokenCount: { lastContextTokens: 35, totalTokens: 35 },
+            sessionTokenCount: { lastContextTokens: 100, totalTokens: 100 },
         });
     });
+
+    it("attributes a compaction-only incremental usage window from the durable message", () => {
+        const result = aggregateSessionUsage(
+            [compaction("compaction-only", usage(3), "claude", "claude-sonnet-4-6-20260301")],
+            primary,
+        );
+
+        expect(result.groups).toMatchObject([
+            {
+                modelId: "claude-sonnet-4-6-20260301",
+                providerId: "claude",
+                requestedModelId: "anthropic/claude-sonnet-4-6",
+                responseModel: "claude-sonnet-4-6-20260301",
+                usage: { input: 3, totalTokens: 30 },
+            },
+        ]);
+    });
+
+    it("uses the same compaction attribution in full and incremental replay", () => {
+        const responseModel = "claude-sonnet-4-6-20260301";
+        const compacted = compaction("compaction", usage(3), "claude", responseModel);
+        const full = aggregateSessionUsage(
+            [
+                created("created", "claude", "anthropic/claude-sonnet-4-6"),
+                inference("inference", usage(5), {
+                    providerId: "claude",
+                    requestedModelId: "anthropic/claude-sonnet-4-6",
+                    responseModel,
+                }),
+                compacted,
+            ],
+            primary,
+        );
+        const incremental = aggregateSessionUsage([compacted], primary);
+
+        expect(full.groups).toHaveLength(1);
+        expect(incremental.groups[0]).toMatchObject({
+            modelId: full.groups[0]?.modelId,
+            providerId: full.groups[0]?.providerId,
+            requestedModelId: full.groups[0]?.requestedModelId,
+            responseModel: full.groups[0]?.responseModel,
+        });
+    });
+
     it("bills permission review usage to the reviewer model without making it the active model", () => {
         const result = aggregateSessionUsage(
             [
@@ -244,8 +311,20 @@ describe("aggregateSessionUsage", () => {
                     providerId: "codex",
                     requestedModelId: "openai/gpt-5.6",
                 }),
-                permissionReview("event-2", usage(3), "codex", "openai/codex-auto-review"),
-                permissionReview("event-3", usage(2), "codex", "openai/codex-auto-review"),
+                permissionReview(
+                    "event-2",
+                    usage(3),
+                    "codex",
+                    "openai/codex-auto-review",
+                    "same-call",
+                ),
+                permissionReview(
+                    "event-3",
+                    usage(2),
+                    "codex",
+                    "openai/codex-auto-review",
+                    "same-call",
+                ),
             ],
             primary,
         );
@@ -304,6 +383,7 @@ function permissionReview(
     reviewUsage: Usage,
     providerId: string,
     modelId: string,
+    toolCallId = `call-${id}`,
 ): SessionEvent {
     return {
         createdAt: 1,
@@ -313,7 +393,7 @@ function permissionReview(
                 decision: "allow",
                 reason: "Routine.",
                 risk: "low",
-                toolCallId: `call-${id}`,
+                toolCallId,
                 transcript: {
                     entries: [{ text: "Routine.", type: "text" }],
                     modelId,
@@ -352,6 +432,7 @@ function inference(
     id: string,
     eventUsage: Usage,
     attribution: { providerId?: string; requestedModelId?: string; responseModel?: string } = {},
+    contextTokens = eventUsage.totalTokens,
 ): SessionEvent {
     return {
         createdAt: 1,
@@ -361,6 +442,7 @@ function inference(
                 id: `message-${id}`,
                 role: "agent",
                 usage: eventUsage,
+                contextTokens,
                 ...attribution,
             },
             runId: `run-${id}`,
@@ -422,6 +504,40 @@ function contextCompacted(id: string, estimatedTokensAfter: number): SessionEven
         id,
         sessionId: "session-1",
         type: "agent_event",
+    } as SessionEvent;
+}
+
+function compaction(
+    id: string,
+    compactionUsage: Usage,
+    providerId: string,
+    responseModel?: string,
+): SessionEvent {
+    return {
+        createdAt: 1,
+        data: {
+            message: {
+                blocks: [{ text: "Compacted.", type: "text" }],
+                content: "checkpoint",
+                id: `message-${id}`,
+                kind: "native",
+                providerId,
+                requestedModelId: "anthropic/claude-sonnet-4-6",
+                ...(responseModel === undefined ? {} : { responseModel }),
+                replacedMessageIds: [],
+                role: "compaction",
+                statistics: {
+                    after: { exact: false, tokens: 45 },
+                    before: { exact: true, tokens: 120 },
+                },
+                summary: "Compacted.",
+                usage: compactionUsage,
+            },
+            runId: `run-${id}`,
+        },
+        id,
+        sessionId: "session-1",
+        type: "agent_message",
     } as SessionEvent;
 }
 

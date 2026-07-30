@@ -150,6 +150,12 @@ export interface CompactionMessage {
      * copy; the visible transcript copy deliberately does not expose provider-native payloads.
      */
     replacementMessages?: readonly ProviderMessage[];
+    /** Model requested for the compaction inference. */
+    requestedModelId?: string;
+    /** Provider-reported model that performed the compaction inference. */
+    responseModel?: string;
+    /** Provider-reported usage spent producing this compaction. */
+    usage?: Usage;
     /** Compaction is durable visible history and can never be hidden as internal context. */
     internal?: never;
 }
@@ -177,6 +183,8 @@ export interface AgentMessage {
     blocks: readonly AgentBlock[];
     /** Provider-reported usage for inference messages. Tool-result messages omit it. */
     usage?: Usage;
+    /** Context window occupied immediately after this inference. */
+    contextTokens?: number;
     /** Durable inference attribution. Tool-result messages omit these fields. */
     providerId?: string;
     requestedModelId?: string;

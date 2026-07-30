@@ -749,6 +749,9 @@ export class InMemorySession {
                 this.#quotaContributionTracker.apply(event);
             }
         }
+        if (options.restore?.usage === undefined) {
+            this.#usage = this.#sumCommittedUsage();
+        }
         if (
             options.restore?.usageSummary === undefined ||
             options.restore.usageSummaryEventId === undefined
@@ -1251,6 +1254,7 @@ export class InMemorySession {
                 event.type === "agent_message" &&
                 event.data.message.role === "agent" &&
                 event.data.message.usage !== undefined &&
+                event.data.message.contextTokens !== undefined &&
                 event.data.message.providerId !== undefined &&
                 event.data.message.requestedModelId !== undefined
             ) {
@@ -1263,7 +1267,7 @@ export class InMemorySession {
                     ...(event.data.message.responseModel === undefined
                         ? {}
                         : { responseModel: event.data.message.responseModel }),
-                    totalTokens: event.data.message.usage.totalTokens,
+                    totalTokens: event.data.message.contextTokens,
                 };
             } else if (
                 event.type === "agent_event" &&
@@ -1443,6 +1447,7 @@ export class InMemorySession {
 
         if (this.#effort !== previousEffort) changed.push("effort");
         if (this.#serviceTier !== previousServiceTier) changed.push("serviceTier");
+        if (changed.includes("model")) this.#totalTokens = 0;
 
         this.#interruption = undefined;
         this.#append("session_configuration_changed", {
@@ -2422,6 +2427,7 @@ export class InMemorySession {
         this.#messages = [];
         this.#rebuildMessagePositionIndex();
         this.#rebuildTranscriptIndex();
+        this.#totalTokens = 0;
         this.#usage = zeroUsage();
         this.#submittedUserMessages.clear();
         this.#contextMessages = undefined;
@@ -2489,6 +2495,7 @@ export class InMemorySession {
         this.#lastSessionRunId = undefined;
         this.#restoredActiveRunId = undefined;
         this.#status = "idle";
+        this.#totalTokens = 0;
         this.#lastMessageAt = this.#now();
         this.#persistence?.deleteMessagesFrom(this.id, target.position);
         this.#append("session_rewound", {
@@ -4158,14 +4165,19 @@ export class InMemorySession {
     }
 
     /**
-     * Publishes the context size when the event just appended changed it.
+     * Publishes current context or cumulative usage when either changes.
      *
-     * Rig already recomputes this on every event, so reporting it costs nothing
-     * and saves every client a polling loop.
+     * Rig already recomputes both on every event, so reporting them costs
+     * nothing and saves every client a polling loop.
      */
     #reportContextSize(previous: SessionTokenCount): void {
         if (this.#reportingActivity) return;
-        if (this.#sessionTokenCount.lastContextTokens === previous.lastContextTokens) return;
+        if (
+            this.#sessionTokenCount.lastContextTokens === previous.lastContextTokens &&
+            this.#sessionTokenCount.totalTokens === previous.totalTokens
+        ) {
+            return;
+        }
         this.#reportingActivity = true;
         try {
             this.#append("session_context_changed", {
@@ -4435,6 +4447,7 @@ export class InMemorySession {
     }
 
     #appendAgentEvent(runId: string, event: AgentLoopEvent): void {
+        if (this.#workspaceArchived) return;
         if (this.#activeRun?.runId !== runId) {
             return;
         }
@@ -4462,19 +4475,30 @@ export class InMemorySession {
             this.#storePartialMessage(runId, event.messageId, event.partial);
         }
 
-        this.#append("agent_event", { event, runId });
+        const previousUsage = this.#usage;
+        if (event.type === "permission_review" && event.transcript !== undefined) {
+            this.#usage = addUsage(this.#usage, event.transcript.usage);
+        }
+        try {
+            this.#append("agent_event", { event, runId });
+        } catch (error) {
+            this.#usage = previousUsage;
+            throw error;
+        }
         if (event.type === "context_compacted" && this.isSubagent()) {
             this.#agentManager?.recordChanged(this);
         }
     }
 
     #appendCompactionAgentEvent(runId: string, event: AgentLoopEvent): void {
+        if (this.#workspaceArchived) return;
         if (!this.#compactionActive) return;
         if (event.type === "context_compacted") this.#totalTokens = event.estimatedTokensAfter;
         this.#append("agent_event", { event, runId });
     }
 
     #appendAgentMessage(runId: string, message: Message): void {
+        if (this.#workspaceArchived) return;
         if (
             this.#activeRun?.runId !== runId &&
             !(
@@ -4497,7 +4521,24 @@ export class InMemorySession {
             (candidate) => !candidate.isPartial && candidate.message.id === message.id,
         );
         const previousUsage =
-            existingMessage?.message.role === "agent" ? existingMessage.message.usage : undefined;
+            existingMessage?.message.role === "agent" ||
+            existingMessage?.message.role === "compaction"
+                ? existingMessage.message.usage
+                : undefined;
+        const incomingUsage =
+            message.role === "agent" || message.role === "compaction" ? message.usage : undefined;
+        const eventMessage =
+            previousUsage !== undefined && incomingUsage !== undefined
+                ? withoutUsage(message)
+                : message;
+        if (
+            message.role === "compaction" &&
+            message.usage === undefined &&
+            existingMessage?.message.role === "compaction" &&
+            existingMessage.message.usage !== undefined
+        ) {
+            message = { ...message, usage: existingMessage.message.usage };
+        }
         const existingPosition = existingMessage?.position;
         const partialPosition =
             message.role === "agent" && this.#activePartial?.runId === runId
@@ -4544,29 +4585,40 @@ export class InMemorySession {
         if (partialPosition !== undefined) {
             this.#activePartial = undefined;
         }
-        if (message.role === "agent" && message.usage !== undefined) {
-            this.#totalTokens = message.usage.totalTokens;
+        if (
+            message.role === "agent" &&
+            message.usage !== undefined &&
+            message.contextTokens !== undefined
+        ) {
+            this.#totalTokens = message.contextTokens;
         }
-        const nextUsage = message.role === "agent" ? message.usage : undefined;
+        const nextUsage =
+            message.role === "agent" || message.role === "compaction" ? message.usage : undefined;
         if (!isDeepStrictEqual(previousUsage, nextUsage)) {
-            this.#usage =
-                previousUsage === undefined && nextUsage !== undefined
-                    ? addUsage(this.#usage, nextUsage)
-                    : this.#sumCommittedUsage();
+            this.#usage = replaceUsage(this.#usage, previousUsage, nextUsage);
         }
-        this.#append("agent_message", { message, runId });
+        this.#append("agent_message", { message: eventMessage, runId });
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
     }
 
     #sumCommittedUsage(): Usage {
-        return this.#messages.reduce(
+        const messageUsage = this.#messages.reduce(
             (total, persisted) =>
                 !persisted.isPartial &&
-                persisted.message.role === "agent" &&
+                (persisted.message.role === "agent" || persisted.message.role === "compaction") &&
                 persisted.message.usage !== undefined
                     ? addUsage(total, persisted.message.usage)
                     : total,
             zeroUsage(),
+        );
+        return (this.events?.all() ?? []).reduce(
+            (total, event) =>
+                event.type === "agent_event" &&
+                event.data.event.type === "permission_review" &&
+                event.data.event.transcript !== undefined
+                    ? addUsage(total, event.data.event.transcript.usage)
+                    : total,
+            messageUsage,
         );
     }
 
@@ -5730,6 +5782,38 @@ function cloneWorkflowRun(run: WorkflowRun): WorkflowRun {
 function usageGroupKey(group: SessionUsageGroup): string {
     const { usage: _usage, ...identity } = group;
     return JSON.stringify(identity);
+}
+
+function withoutUsage(message: Message): Message {
+    if (message.role !== "agent" && message.role !== "compaction") return message;
+    const { usage: _usage, ...without } = message;
+    return without;
+}
+
+function replaceUsage(total: Usage, previous: Usage | undefined, next: Usage | undefined): Usage {
+    const withoutPrevious =
+        previous === undefined
+            ? total
+            : {
+                  cacheRead: Math.max(0, total.cacheRead - previous.cacheRead),
+                  cacheWrite: Math.max(0, total.cacheWrite - previous.cacheWrite),
+                  cost: {
+                      cacheRead: Math.max(0, total.cost.cacheRead - previous.cost.cacheRead),
+                      cacheWrite: Math.max(0, total.cost.cacheWrite - previous.cost.cacheWrite),
+                      input: Math.max(0, total.cost.input - previous.cost.input),
+                      output: Math.max(0, total.cost.output - previous.cost.output),
+                      total: Math.max(0, total.cost.total - previous.cost.total),
+                  },
+                  input: Math.max(0, total.input - previous.input),
+                  output: Math.max(0, total.output - previous.output),
+                  totalTokens: Math.max(0, total.totalTokens - previous.totalTokens),
+                  ...(total.reasoning === undefined
+                      ? {}
+                      : {
+                            reasoning: Math.max(0, total.reasoning - (previous.reasoning ?? 0)),
+                        }),
+              };
+    return next === undefined ? withoutPrevious : addUsage(withoutPrevious, next);
 }
 
 function cloneExternalToolCall(call: ExternalToolCall): ExternalToolCall {

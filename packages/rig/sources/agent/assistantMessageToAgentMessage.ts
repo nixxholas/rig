@@ -18,6 +18,7 @@ export function assistantMessageToAgentMessage(
         blocks: message.content.map((content) =>
             providerAssistantContentToAgentBlock(content, toToolCallPresentation),
         ),
+        ...(message.contextTokens === undefined ? {} : { contextTokens: message.contextTokens }),
         usage: message.usage,
         providerId: attribution.providerId,
         requestedModelId: attribution.requestedModelId,

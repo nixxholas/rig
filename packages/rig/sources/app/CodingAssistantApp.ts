@@ -3478,6 +3478,14 @@ export class CodingAssistantApp implements Component, Focusable {
                       : "Idle";
             }
         } else if (event.type === "permission_review") {
+            if (event.transcript !== undefined && !this.#skipInitialUsageReplay) {
+                this.#usage = addUsage(this.#usage, event.transcript.usage);
+                this.#sessionTokenCount = updateSessionTokenCount(this.#sessionTokenCount, {
+                    type: "usage",
+                    contextTokens: this.#latestContextTokens,
+                    usage: event.transcript.usage,
+                });
+            }
             if (event.decision === "deny") {
                 this.#reviewingPermissionToolCallIds.delete(event.toolCallId);
                 this.#refreshToolActivityStatus();
@@ -3569,10 +3577,7 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     #handleAgentMessage(message: Message, runToken: number): void {
-        if (!this.#isCurrentRun(runToken) || message.role !== "agent") {
-            return;
-        }
-
+        if (!this.#isCurrentRun(runToken)) return;
         this.#applyAgentMessage(message);
     }
 
@@ -3599,6 +3604,17 @@ export class CodingAssistantApp implements Component, Focusable {
             this.#requestRender();
             return;
         }
+        if (message.role === "compaction") {
+            if (message.usage !== undefined && !this.#skipInitialUsageReplay) {
+                this.#usage = addUsage(this.#usage, message.usage);
+                this.#sessionTokenCount = updateSessionTokenCount(this.#sessionTokenCount, {
+                    type: "usage",
+                    contextTokens: this.#latestContextTokens,
+                    usage: message.usage,
+                });
+            }
+            return;
+        }
         if (message.role !== "agent") {
             return;
         }
@@ -3607,10 +3623,13 @@ export class CodingAssistantApp implements Component, Focusable {
                 this.#usage = addUsage(this.#usage, message.usage);
                 this.#sessionTokenCount = updateSessionTokenCount(this.#sessionTokenCount, {
                     type: "usage",
+                    contextTokens: message.contextTokens ?? this.#latestContextTokens,
                     usage: message.usage,
                 });
             }
-            this.#latestContextTokens = message.usage.totalTokens;
+            if (message.contextTokens !== undefined) {
+                this.#latestContextTokens = message.contextTokens;
+            }
         }
 
         let pendingText = "";
@@ -4410,7 +4429,8 @@ export class CodingAssistantApp implements Component, Focusable {
         const usage = this.#sessionUsage();
         const sessionTokens = this.#subagents.reduce(
             (total, subagent) =>
-                total + (subagent.sessionTokenCount?.totalTokens ?? subagent.totalTokens ?? 0),
+                total +
+                (subagent.sessionTokenCount?.totalTokens ?? subagent.usage?.totalTokens ?? 0),
             this.#sessionTokenCount.totalTokens,
         );
         return formatSessionTokenStatus({

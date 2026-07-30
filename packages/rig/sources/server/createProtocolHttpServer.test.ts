@@ -564,6 +564,7 @@ describe("createProtocolHttpServer", () => {
                 data: {
                     message: {
                         blocks: [{ text: "done", type: "text" }],
+                        contextTokens: 19,
                         id: "assistant-1",
                         providerId: "codex",
                         requestedModelId: created.session.modelId,

@@ -4,8 +4,9 @@ import type { SessionTokenCount } from "../protocol/index.js";
 
 type SessionTokenCountUpdate =
     | { type: "compaction"; contextTokens: number }
+    | { type: "invalidate_context" }
     | { type: "reset" }
-    | { type: "usage"; usage: Usage };
+    | { type: "usage"; contextTokens: number; usage: Usage };
 
 const ZERO_SESSION_TOKEN_COUNT: SessionTokenCount = {
     lastContextTokens: 0,
@@ -19,20 +20,15 @@ export function updateSessionTokenCount(
     if (update.type === "reset") return ZERO_SESSION_TOKEN_COUNT;
 
     const previous = current ?? ZERO_SESSION_TOKEN_COUNT;
-    const contextTokens =
-        update.type === "compaction"
-            ? Math.max(0, update.contextTokens)
-            : Math.max(0, update.usage.input) +
-              Math.max(0, update.usage.cacheRead) +
-              Math.max(0, update.usage.cacheWrite) +
-              Math.max(0, update.usage.output);
+    if (update.type === "invalidate_context") {
+        return { ...previous, lastContextTokens: 0 };
+    }
+    const contextTokens = Math.max(0, update.contextTokens);
 
     return {
         lastContextTokens: contextTokens,
         totalTokens:
             previous.totalTokens +
-            (update.type === "compaction"
-                ? contextTokens
-                : Math.max(0, contextTokens - previous.lastContextTokens)),
+            (update.type === "compaction" ? 0 : Math.max(0, update.usage.totalTokens)),
     };
 }

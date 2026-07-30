@@ -101,7 +101,9 @@ export interface SessionActivity {
 export type SessionUnreadReason = "attention_needed" | "turn_finished";
 
 export interface SessionTokenCount {
+    /** Context window occupied after the latest inference or compaction. */
     lastContextTokens: number;
+    /** Cumulative provider-reported usage across all model requests in the session. */
     totalTokens: number;
 }
 

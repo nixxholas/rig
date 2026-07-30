@@ -29,6 +29,7 @@ describe("toSessionMessages", () => {
                     api: "test",
                     provider: "test",
                     model: "test",
+                    contextTokens: 0,
                     usage: zeroUsage,
                     stopReason: "toolUse",
                     timestamp: 0,
@@ -65,6 +66,7 @@ describe("toSessionMessages", () => {
                 api: "rig",
                 provider: "test",
                 model: "test-model",
+                contextTokens: 0,
                 usage: {
                     input: 0,
                     output: 0,
