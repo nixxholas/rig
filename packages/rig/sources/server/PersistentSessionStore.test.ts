@@ -18,6 +18,25 @@ import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
+    it("does not swallow database failures from post-commit observers", () => {
+        const failure = Object.assign(new Error("observer database failed"), {
+            code: "SQLITE_IOERR",
+        });
+        const store = new PersistentSessionStore({
+            databasePath: ":memory:",
+            onSessionEvent: () => {
+                throw failure;
+            },
+        });
+        try {
+            expect(() => store.create({ cwd: "/tmp/rig-observer-database-failure" })).toThrow(
+                failure,
+            );
+        } finally {
+            store.close();
+        }
+    });
+
     it("replays durable usage written after the persisted summary cursor", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         try {
@@ -1186,9 +1205,15 @@ describe("PersistentSessionStore", () => {
             ]);
             const firstCursor = sessionEntries[0]?.cursor;
             const secondCursor = sessionEntries[1]?.cursor;
+            const staleCursor = initial[0]?.cursor;
             expect(firstCursor).toBeDefined();
             expect(secondCursor).toBeDefined();
-            if (firstCursor === undefined || secondCursor === undefined) {
+            expect(staleCursor).toBeDefined();
+            if (
+                firstCursor === undefined ||
+                secondCursor === undefined ||
+                staleCursor === undefined
+            ) {
                 throw new Error("Expected two global event cursors.");
             }
             expect(store.globalEventQueue?.trim(firstCursor)).toEqual({
@@ -1199,6 +1224,7 @@ describe("PersistentSessionStore", () => {
                 trimmed: 0,
                 through: firstCursor,
             });
+            expect(store.globalEventQueue?.list({ after: staleCursor })).toBeUndefined();
             expect(store.globalEventQueue?.list({ after: "missing.0" })).toBeUndefined();
             expect(firstSession.events.since(undefined)).toHaveLength(1);
             store.close();
@@ -1208,6 +1234,7 @@ describe("PersistentSessionStore", () => {
                 durableGlobalEventQueue: true,
             });
             try {
+                expect(restoredStore.globalEventQueue.list({ after: staleCursor })).toBeUndefined();
                 expect(restoredStore.globalEventQueue.list()).toEqual(
                     expect.arrayContaining([
                         expect.objectContaining({
@@ -1285,6 +1312,42 @@ describe("PersistentSessionStore", () => {
             expect(store.listProjects()).toEqual([]);
             expect(store.list()).toEqual([]);
             expect(store.globalEventQueue.list()).toEqual([]);
+        } finally {
+            breaker.close();
+            store.close();
+            await cleanup();
+        }
+    });
+
+    it("rolls back an appended event when its session snapshot cannot be saved", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        const store = new PersistentSessionStore({ databasePath });
+        const session = store.create({ cwd: "/tmp/rig-atomic-event-snapshot" });
+        const breaker = new DatabaseSync(databasePath);
+        try {
+            const before = breaker
+                .prepare("SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?")
+                .get(session.id) as { count: number };
+            breaker.exec(`
+                CREATE TRIGGER reject_session_snapshot
+                BEFORE UPDATE ON sessions
+                WHEN NEW.append_system_prompt = 'reject snapshot'
+                BEGIN
+                    SELECT RAISE(ABORT, 'rejected session snapshot');
+                END;
+            `);
+
+            expect(() => session.update({ appendSystemPrompt: "reject snapshot" })).toThrow(
+                "rejected session snapshot",
+            );
+            const after = breaker
+                .prepare("SELECT COUNT(*) AS count FROM session_events WHERE session_id = ?")
+                .get(session.id) as { count: number };
+            const row = breaker
+                .prepare("SELECT append_system_prompt FROM sessions WHERE id = ?")
+                .get(session.id) as { append_system_prompt: string | null };
+            expect(after.count).toBe(before.count);
+            expect(row.append_system_prompt).toBeNull();
         } finally {
             breaker.close();
             store.close();
@@ -1834,9 +1897,7 @@ describe("PersistentSessionStore", () => {
             blocks: [],
             id: "summary-1",
             providerId: "claude",
-            replacementMessages: [
-                { role: "user", content: "Earlier work.", timestamp: 1 },
-            ],
+            replacementMessages: [{ role: "user", content: "Earlier work.", timestamp: 1 }],
             replacedMessageIds: ["visible-1"],
             role: "compaction",
             statistics: {

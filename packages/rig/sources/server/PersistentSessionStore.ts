@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
+import { sql, type SQL } from "drizzle-orm";
 import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
 import type {
     ChangeEffortRequest,
@@ -55,7 +55,6 @@ import type { SessionUsageSummary } from "./sessionUsage/index.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
 import type { ExternalToolCall, ExternalToolDefinition } from "../external-tools/index.js";
 import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
@@ -80,9 +79,35 @@ import {
     transcriptRunFacts,
     type TranscriptEntry,
 } from "./sessionTranscriptWindow.js";
+import {
+    openSessionDatabase,
+    type SessionDatabase,
+} from "../persistence/database/openSessionDatabase.js";
+import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import { durablePermissionHandoff } from "../persistence/session/durablePermissionHandoff.js";
+import { durableUserInputPrune } from "../persistence/session/durableUserInputPrune.js";
+import { durableUserInputSave } from "../persistence/session/durableUserInputSave.js";
+import { externalToolCallPrune } from "../persistence/session/externalToolCallPrune.js";
+import { externalToolCallSave } from "../persistence/session/externalToolCallSave.js";
+import { projectSecretAttach } from "../persistence/session/projectSecretAttach.js";
+import { projectSecretDetach } from "../persistence/session/projectSecretDetach.js";
+import { secretRegister } from "../persistence/session/secretRegister.js";
+import { secretUnregister } from "../persistence/session/secretUnregister.js";
+import { sessionAdvanceEventCursor } from "../persistence/session/sessionAdvanceEventCursor.js";
+import { sessionAppendEvent } from "../persistence/session/sessionAppendEvent.js";
+import { sessionClearMessages } from "../persistence/session/sessionClearMessages.js";
+import { sessionDeleteQueuedRun } from "../persistence/session/sessionDeleteQueuedRun.js";
+import { sessionReconcileTerminalRun } from "../persistence/session/sessionReconcileTerminalRun.js";
+import { sessionRepairInterruptedTitles } from "../persistence/session/sessionRepairInterruptedTitles.js";
+import { sessionRewind } from "../persistence/session/sessionRewind.js";
+import { sessionSave } from "../persistence/session/sessionSave.js";
+import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js";
+import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRun.js";
+import { inTx } from "../persistence/inTx.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import type { TX } from "../persistence/Transaction.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
-const RESTORED_SESSION_MESSAGE_LIMIT = 256;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -103,9 +128,10 @@ export interface PersistentSessionStoreOptions {
 
 export class PersistentSessionStore implements SessionStore, InMemorySessionPersistence {
     #agentManager: AgentSessionManager;
+    #client: ReturnType<typeof openSessionDatabase>["client"];
     #createRuntime: InMemorySessionOptions["createRuntime"];
     readonly #createTerminalEventId = createEventIdFactory();
-    #database: DatabaseSync;
+    #database: SessionDatabase;
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #now: () => number;
@@ -127,6 +153,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#sessions.get(id) === reference) this.#sessions.delete(id);
     });
     #taskDrain: TaskDrain | undefined;
+    #activeTransaction: TX | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
     readonly liveEvents = new LiveGlobalEventQueue();
     readonly remoteTerminals: ProjectRemoteTerminalStore;
@@ -144,12 +171,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (options.databasePath !== ":memory:") {
             mkdirSync(dirname(options.databasePath), { mode: 0o700, recursive: true });
         }
-        this.#database = new DatabaseSync(options.databasePath, {
-            enableForeignKeyConstraints: true,
-            timeout: 5_000,
-        });
+        const opened = openSessionDatabase(options.databasePath);
+        this.#client = opened.client;
+        this.#database = opened.database;
         if (options.databasePath !== ":memory:") chmodSync(options.databasePath, 0o600);
-        initializeSessionDatabase(this.#database);
+        migrateSessionDatabase(this.#database);
         this.#loadSecretRegistrations();
         for (const secret of options.secrets ?? []) this.registerSecret(secret);
         this.#globalEventQueue =
@@ -203,7 +229,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.repairInterruptedSessions("crash");
         const recover = () => this.#recoverProjectWorkspaces();
         const recovery = this.#taskDrain?.run(recover) ?? recover();
-        void recovery.catch(() => undefined);
+        void recovery.catch((error: unknown) => {
+            if (isDatabaseFailure(error)) throw error;
+        });
     }
 
     changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined {
@@ -227,11 +255,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#secrets.reference(secretId);
         if (scope === "project") {
             const projectId = session.snapshot().projectId;
-            this.#database
-                .prepare(
-                    "INSERT OR IGNORE INTO project_secret_attachments (project_id, secret_id) VALUES (?, ?)",
-                )
-                .run(projectId, secretId);
+            projectSecretAttach(this.#tx(), projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
                 if (candidate.snapshot().projectId === projectId) {
                     candidate.attachSecret(secretId, {
@@ -272,32 +296,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     clearMessages(sessionId: string): void {
-        this.#transaction(() => {
-            this.#database
-                .prepare("DELETE FROM session_messages WHERE session_id = ?")
-                .run(sessionId);
-            this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
-        });
+        sessionClearMessages(this.#tx(), sessionId);
     }
 
     deleteMessagesFrom(sessionId: string, position: number): void {
-        this.#transaction(() => {
-            this.#database
-                .prepare("DELETE FROM session_messages WHERE session_id = ? AND position >= ?")
-                .run(sessionId, position);
-            this.#database.prepare("DELETE FROM session_turns WHERE session_id = ?").run(sessionId);
-            this.#database
-                .prepare(
-                    `
-                INSERT INTO session_turns (session_id, run_id, first_position)
-                SELECT session_id, run_id, MIN(position)
-                FROM session_messages
-                WHERE session_id = ? AND run_id IS NOT NULL AND is_partial = 0
-                GROUP BY session_id, run_id
-                `,
-                )
-                .run(sessionId);
-        });
+        sessionRewind(this.#tx(), sessionId, position);
     }
 
     close(): void {
@@ -305,7 +308,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#projects.close();
         this.liveEvents.close();
         this.#globalEventQueue.deactivate();
-        this.#database.close();
+        this.#client.close();
     }
 
     create(request: CreateSessionRequest): InMemorySession {
@@ -329,11 +332,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (session === undefined) return undefined;
         if (scope === "project") {
             const projectId = session.snapshot().projectId;
-            this.#database
-                .prepare(
-                    "DELETE FROM project_secret_attachments WHERE project_id = ? AND secret_id = ?",
-                )
-                .run(projectId, secretId);
+            projectSecretDetach(this.#tx(), projectId, secretId);
             for (const candidate of this.#cachedSessions()) {
                 if (candidate.snapshot().projectId === projectId) {
                     candidate.detachSecret(secretId, {
@@ -503,9 +502,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     deleteQueuedRun(sessionId: string, runId: string): void {
-        this.#database
-            .prepare("DELETE FROM queued_runs WHERE session_id = ? AND run_id = ?")
-            .run(sessionId, runId);
+        sessionDeleteQueuedRun(this.#tx(), sessionId, runId);
     }
 
     get(sessionId: string): InMemorySession | undefined {
@@ -526,9 +523,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     findByAgentId(agentId: string): InMemorySession | undefined {
-        const rows = this.#database
-            .prepare("SELECT id FROM sessions WHERE agent_id = ? LIMIT 2")
-            .all(agentId) as Record<string, unknown>[];
+        const rows = this.#database.all<Record<string, unknown>>(sql`
+            SELECT id FROM sessions WHERE agent_id = ${agentId} LIMIT 2
+        `);
         if (rows.length !== 1) return undefined;
         return this.get(readString(rows[0] as Record<string, unknown>, "id"));
     }
@@ -547,66 +544,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     insertQueuedRun(sessionId: string, run: PersistedQueuedRun): void {
-        this.#database
-            .prepare(
-                `
-                INSERT INTO queued_runs (
-                    session_id,
-                    run_id,
-                    debug,
-                    debug_directory,
-                    display_text,
-                    kind,
-                    text,
-                    user_message_json,
-                    integration_config_json,
-                    created_at_ms
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, run_id) DO UPDATE SET
-                    debug = excluded.debug,
-                    debug_directory = excluded.debug_directory,
-                    display_text = excluded.display_text,
-                    kind = excluded.kind,
-                    text = excluded.text,
-                    user_message_json = excluded.user_message_json,
-                    integration_config_json = excluded.integration_config_json
-                `,
-            )
-            .run(
-                sessionId,
-                run.runId,
-                run.debug === true ? 1 : 0,
-                run.debugDirectory ?? null,
-                run.displayText,
-                run.kind,
-                run.text,
-                JSON.stringify(run.userMessage),
-                run.effort === undefined &&
-                    run.externalTools === undefined &&
-                    run.modelId === undefined &&
-                    run.providerId === undefined &&
-                    run.serviceTier === undefined &&
-                    run.skills === undefined &&
-                    run.systemPrompt === undefined
-                    ? null
-                    : JSON.stringify({
-                          ...(run.externalTools === undefined
-                              ? {}
-                              : { externalTools: run.externalTools }),
-                          ...(run.skills === undefined ? {} : { skills: run.skills }),
-                          ...(run.effort === undefined ? {} : { effort: run.effort }),
-                          ...(run.modelId === undefined ? {} : { modelId: run.modelId }),
-                          ...(run.providerId === undefined ? {} : { providerId: run.providerId }),
-                          ...(run.serviceTier === undefined
-                              ? {}
-                              : { serviceTier: run.serviceTier }),
-                          ...(run.systemPrompt === undefined
-                              ? {}
-                              : { systemPrompt: run.systemPrompt }),
-                      }),
-                this.#now(),
-            );
+        sessionSaveQueuedRun(this.#tx(), sessionId, run, this.#now());
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {
@@ -618,9 +556,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #listSessions(activeOnly: boolean, options: { limit?: number }): readonly SessionSummary[] {
-        const rows = this.#database
-            .prepare(
-                `
+        const rows = this.#database.all<Record<string, unknown>>(sql`
                 SELECT listed_sessions.*
                 FROM (
                     SELECT
@@ -657,7 +593,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         last_event_id
                     FROM sessions
                     WHERE parent_session_id IS NULL
-                        ${activeOnly ? "AND archived = 0" : ""}
+                        ${activeOnly ? sql`AND archived = 0` : sql``}
                 ) AS listed_sessions
                 JOIN projects ON projects.id = listed_sessions.project_id
                 LEFT JOIN project_workspaces
@@ -668,12 +604,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     project_workspaces.order_key ASC,
                     listed_sessions.order_key ASC,
                     listed_sessions.id ASC
-                LIMIT ?
-                `,
-            )
-            // Active catalogs are complete by design. Historical listings keep
-            // their existing default bound unless a caller asks for another.
-            .all(options.limit ?? (activeOnly ? -1 : 500));
+                LIMIT ${options.limit ?? (activeOnly ? -1 : 500)}
+        `);
 
         return rows.map((row) => {
             const effort = readOptionalString(row, "effort");
@@ -753,27 +685,29 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     ): readonly ExternalToolCall[] {
         const rows =
             options.status === undefined
-                ? this.#database
-                      .prepare(
-                          "SELECT * FROM external_tool_calls ORDER BY created_at_ms ASC, tool_call_index ASC LIMIT ?",
-                      )
-                      .all(options.limit ?? 100)
-                : this.#database
-                      .prepare(
-                          "SELECT * FROM external_tool_calls WHERE status = ? ORDER BY created_at_ms ASC, tool_call_index ASC LIMIT ?",
-                      )
-                      .all(options.status, options.limit ?? 100);
+                ? this.#database.all<Record<string, unknown>>(sql`
+                      SELECT *
+                      FROM external_tool_calls
+                      ORDER BY created_at_ms ASC, tool_call_index ASC
+                      LIMIT ${options.limit ?? 100}
+                  `)
+                : this.#database.all<Record<string, unknown>>(sql`
+                      SELECT *
+                      FROM external_tool_calls
+                      WHERE status = ${options.status}
+                      ORDER BY created_at_ms ASC, tool_call_index ASC
+                      LIMIT ${options.limit ?? 100}
+                  `);
         return rows.map(readExternalToolCallRow);
     }
 
     listSubagents(parentSessionId: string): readonly SubagentSummary[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 WITH RECURSIVE descendants(id) AS (
                     SELECT id
                     FROM sessions
-                    WHERE parent_session_id = ?
+                    WHERE parent_session_id = ${parentSessionId}
                     UNION ALL
                     SELECT sessions.id
                     FROM sessions
@@ -799,9 +733,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 FROM sessions
                 WHERE id IN descendants
                 ORDER BY created_at_ms ASC
-                `,
-            )
-            .all(parentSessionId)
+            `)
             .map((row) => {
                 const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
                 const taskName = readOptionalString(row, "task_name");
@@ -980,13 +912,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             project = this.#projects.archiveProject(projectId, expectedVersion);
             if (project === undefined) return;
             const rootSessionIds = this.#database
-                .prepare(
-                    `
-                    SELECT id FROM sessions
-                    WHERE project_id = ? AND workspace_id IS NULL AND parent_session_id IS NULL
-                    `,
-                )
-                .all(projectId)
+                .all<Record<string, unknown>>(sql`
+                    SELECT id
+                    FROM sessions
+                    WHERE project_id = ${projectId}
+                        AND workspace_id IS NULL
+                        AND parent_session_id IS NULL
+                `)
                 .map((row) => readString(row, "id"));
             for (const sessionId of rootSessionIds) this.get(sessionId)?.setArchived(true);
             workspaces = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
@@ -998,8 +930,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 return [
                     {
                         cleanup: this.#database
-                            .prepare("SELECT id FROM sessions WHERE workspace_id = ?")
-                            .all(workspace.id)
+                            .all<Record<string, unknown>>(sql`
+                                SELECT id FROM sessions WHERE workspace_id = ${workspace.id}
+                            `)
                             .map((row) =>
                                 this.get(readString(row, "id"))?.archiveForWorkspace(workspace.id),
                             )
@@ -1045,8 +978,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             );
             if (workspace === undefined || workspace.status === "archived") return;
             cleanup = this.#database
-                .prepare("SELECT id FROM sessions WHERE workspace_id = ?")
-                .all(workspaceId)
+                .all<Record<string, unknown>>(sql`
+                    SELECT id FROM sessions WHERE workspace_id = ${workspaceId}
+                `)
                 .map((row) => this.get(readString(row, "id"))?.archiveForWorkspace(workspaceId))
                 .filter((task): task is Promise<void> => task !== undefined);
         });
@@ -1096,52 +1030,14 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     registerSecret(request: RegisterSecretRequest): SecretSummary {
         const candidate = new SecretRegistry([request]);
-        this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    INSERT INTO secret_registrations (id, description, environment_json)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(id) DO UPDATE SET
-                        description = excluded.description,
-                        environment_json = excluded.environment_json
-                    `,
-                )
-                .run(request.id, request.description.trim(), JSON.stringify(request.environment));
-            const rememberEnvironmentVariable = this.#database.prepare(
-                `
-                INSERT INTO secret_environment_variables (secret_id, normalized_name, name)
-                VALUES (?, ?, ?)
-                ON CONFLICT(secret_id, normalized_name) DO UPDATE SET name = excluded.name
-                `,
-            );
-            for (const name of Object.keys(request.environment)) {
-                rememberEnvironmentVariable.run(request.id, name.toUpperCase(), name);
-            }
-        });
+        secretRegister(this.#tx(), request);
         this.#secrets.register(request);
         return candidate.reference(request.id);
     }
 
     unregisterSecret(secretId: string): boolean {
         if (!this.#secrets.references().some((secret) => secret.id === secretId)) return false;
-        const rows = this.#database.prepare("SELECT id, secret_ids_json FROM sessions").all();
-        const update = this.#database.prepare(
-            "UPDATE sessions SET secret_ids_json = ? WHERE id = ?",
-        );
-        this.#transaction(() => {
-            this.#database.prepare("DELETE FROM secret_registrations WHERE id = ?").run(secretId);
-            for (const row of rows) {
-                const ids = JSON.parse(readString(row, "secret_ids_json")) as string[];
-                update.run(
-                    JSON.stringify(ids.filter((id) => id !== secretId)),
-                    readString(row, "id"),
-                );
-            }
-            this.#database
-                .prepare("DELETE FROM project_secret_attachments WHERE secret_id = ?")
-                .run(secretId);
-        });
+        secretUnregister(this.#tx(), secretId);
         this.#secrets.unregister(secretId);
         for (const session of this.#cachedSessions()) {
             session.detachSecret(secretId, { scope: "project" });
@@ -1152,32 +1048,25 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     #listSubagentSessionsByRoot(rootSessionId: string): readonly InMemorySession[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT id
                 FROM sessions
-                WHERE root_session_id = ? AND session_kind = 'subagent'
+                WHERE root_session_id = ${rootSessionId} AND session_kind = 'subagent'
                 ORDER BY created_at_ms ASC
-                `,
-            )
-            .all(rootSessionId)
+            `)
             .map((row) => this.get(readString(row, "id")))
             .filter((session): session is InMemorySession => session !== undefined);
     }
 
     repairInterruptedSessions(reason: SessionInterruption["reason"]): void {
-        const rows = this.#database
-            .prepare(
-                `
+        const rows = this.#database.all<Record<string, unknown>>(sql`
                 SELECT DISTINCT sessions.id, sessions.active_run_id
                 FROM sessions
                 LEFT JOIN queued_runs ON queued_runs.session_id = sessions.id
                 WHERE sessions.status IN ('queued', 'running')
                     OR sessions.active_run_id IS NOT NULL
                     OR queued_runs.run_id IS NOT NULL
-                `,
-            )
-            .all();
+        `);
 
         for (const row of rows) {
             const sessionId = readString(row, "id");
@@ -1227,19 +1116,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #reconcileTerminalRunState(sessionId: string, runId: string): boolean {
-        const row = this.#database
-            .prepare(
-                `
-                SELECT type, data_json
+        const row = this.#database.get<Record<string, unknown>>(sql`
+                SELECT
+                    type,
+                    data_json,
+                    (
+                        SELECT event_id
+                        FROM session_events AS latest
+                        WHERE latest.session_id = ${sessionId}
+                        ORDER BY seq DESC
+                        LIMIT 1
+                    ) AS last_event_id
                 FROM session_events
-                WHERE session_id = ?
+                WHERE session_id = ${sessionId}
                     AND type IN ('run_finished', 'run_error')
-                    AND json_extract(data_json, '$.runId') = ?
+                    AND json_extract(data_json, '$.runId') = ${runId}
                 ORDER BY seq DESC
                 LIMIT 1
-                `,
-            )
-            .get(sessionId, runId);
+        `);
         if (row === undefined) return false;
 
         const type = readString(row, "type");
@@ -1250,32 +1144,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : data.stopReason === "aborted"
                   ? "aborted"
                   : "completed";
-        this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE sessions
-                    SET
-                        status = ?,
-                        active_run_id = NULL,
-                        active_since_ms = NULL,
-                        interrupted = 0,
-                        interruption_json = NULL,
-                        last_event_id = (
-                            SELECT event_id
-                            FROM session_events
-                            WHERE session_id = ?
-                            ORDER BY seq DESC
-                            LIMIT 1
-                        ),
-                        updated_at_ms = ?
-                    WHERE id = ?
-                    `,
-                )
-                .run(status, sessionId, this.#now(), sessionId);
-            this.#database
-                .prepare("DELETE FROM queued_runs WHERE session_id = ? AND run_id = ?")
-                .run(sessionId, runId);
+        sessionReconcileTerminalRun(this.#tx(), {
+            lastEventId: readOptionalString(row, "last_event_id") ?? null,
+            runId,
+            sessionId,
+            status,
+            updatedAt: this.#now(),
         });
         return true;
     }
@@ -1318,232 +1192,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 .filter((message) => !message.isPartial)
                 .sort((left, right) => left.position - right.position)
                 .map((message) => message.message);
-        this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                INSERT INTO sessions (
-                    id,
-                    agent_id,
-                    project_id,
-                    workspace_id,
-                    order_key,
-                    session_kind,
-                    parent_session_id,
-                    root_session_id,
-                    depth,
-                    parent_tool_call_id,
-                    task_name,
-                    description,
-                    archived,
-                    track_unread,
-                    unread_reason,
-                    unread_since_ms,
-                    cwd,
-                    draft,
-                    draft_updated_at_ms,
-                    docker_json,
-                    secret_ids_json,
-                    provider_id,
-                    model_id,
-                    effort,
-                    service_tier,
-                    instructions,
-                    append_system_prompt,
-                    system_prompt,
-                    external_tools_json,
-                    durable_skills_json,
-                    status,
-                    active_run_id,
-                    active_since_ms,
-                    elapsed_ms,
-                    total_tokens,
-                    session_token_count_json,
-                    usage_json,
-                    permission_mode,
-                    models_json,
-                    tools_json,
-                    tasks_json,
-                    workflows_json,
-                    workflows_enabled,
-                    goal_json,
-                    next_task_id,
-                    title,
-                    title_status,
-                    title_error,
-                    recap,
-                    metadata_updated_at_ms,
-                    metadata_run_id,
-                    interrupted,
-                    interruption_json,
-                    last_message_at_ms,
-                    created_at_ms,
-                    updated_at_ms
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    agent_id = excluded.agent_id,
-                    project_id = excluded.project_id,
-                    workspace_id = excluded.workspace_id,
-                    order_key = excluded.order_key,
-                    session_kind = excluded.session_kind,
-                    parent_session_id = excluded.parent_session_id,
-                    root_session_id = excluded.root_session_id,
-                    depth = excluded.depth,
-                    parent_tool_call_id = excluded.parent_tool_call_id,
-                    task_name = excluded.task_name,
-                    description = excluded.description,
-                    archived = excluded.archived,
-                    track_unread = excluded.track_unread,
-                    unread_reason = excluded.unread_reason,
-                    unread_since_ms = excluded.unread_since_ms,
-                    cwd = excluded.cwd,
-                    draft = excluded.draft,
-                    draft_updated_at_ms = excluded.draft_updated_at_ms,
-                    docker_json = excluded.docker_json,
-                    secret_ids_json = excluded.secret_ids_json,
-                    provider_id = excluded.provider_id,
-                    model_id = excluded.model_id,
-                    effort = excluded.effort,
-                    service_tier = excluded.service_tier,
-                    instructions = excluded.instructions,
-                    append_system_prompt = excluded.append_system_prompt,
-                    system_prompt = excluded.system_prompt,
-                    external_tools_json = excluded.external_tools_json,
-                    durable_skills_json = excluded.durable_skills_json,
-                    status = excluded.status,
-                    active_run_id = excluded.active_run_id,
-                    active_since_ms = excluded.active_since_ms,
-                    elapsed_ms = excluded.elapsed_ms,
-                    total_tokens = excluded.total_tokens,
-                    session_token_count_json = excluded.session_token_count_json,
-                    usage_json = excluded.usage_json,
-                    permission_mode = excluded.permission_mode,
-                    models_json = excluded.models_json,
-                    tools_json = excluded.tools_json,
-                    tasks_json = excluded.tasks_json,
-                    workflows_json = excluded.workflows_json,
-                    workflows_enabled = excluded.workflows_enabled,
-                    goal_json = excluded.goal_json,
-                    next_task_id = excluded.next_task_id,
-                    title = excluded.title,
-                    title_status = excluded.title_status,
-                    title_error = excluded.title_error,
-                    recap = excluded.recap,
-                    metadata_updated_at_ms = excluded.metadata_updated_at_ms,
-                    metadata_run_id = excluded.metadata_run_id,
-                    interrupted = excluded.interrupted,
-                    interruption_json = excluded.interruption_json,
-                    last_message_at_ms = excluded.last_message_at_ms,
-                    updated_at_ms = excluded.updated_at_ms
-                `,
-                )
-                .run(
-                    state.id,
-                    state.agentId,
-                    projectId,
-                    state.workspaceId ?? null,
-                    state.orderKey,
-                    state.agent.type,
-                    state.agent.parentSessionId ?? null,
-                    state.agent.rootSessionId,
-                    state.agent.depth,
-                    state.agent.parentToolCallId ?? null,
-                    state.agent.taskName ?? null,
-                    state.agent.description ?? null,
-                    state.archived === true ? 1 : 0,
-                    state.trackUnread === true ? 1 : 0,
-                    state.unread?.reason ?? null,
-                    state.unread?.since ?? null,
-                    state.cwd,
-                    state.draft ?? null,
-                    state.draftUpdatedAt ?? null,
-                    state.docker === undefined ? null : JSON.stringify(state.docker),
-                    JSON.stringify(state.secretIds ?? []),
-                    state.providerId,
-                    state.modelId,
-                    state.effort ?? null,
-                    state.serviceTier ?? null,
-                    state.instructions ?? null,
-                    state.appendSystemPrompt ?? null,
-                    state.systemPrompt ?? null,
-                    JSON.stringify(state.externalTools ?? []),
-                    JSON.stringify(state.skills ?? []),
-                    state.status,
-                    state.activeRunId ?? null,
-                    state.activeSince ?? null,
-                    state.elapsedMs ?? 0,
-                    state.totalTokens ?? 0,
-                    state.sessionTokenCount === undefined
-                        ? null
-                        : JSON.stringify(state.sessionTokenCount),
-                    state.usage === undefined
-                        ? null
-                        : JSON.stringify({
-                              committed: state.usage,
-                              ...(state.usageSummary === undefined
-                                  ? {}
-                                  : { summary: state.usageSummary }),
-                              ...(state.usageSummaryEventId === undefined
-                                  ? {}
-                                  : { throughEventId: state.usageSummaryEventId }),
-                              permissionReviews: state.permissionReviews ?? [],
-                          } satisfies PersistedUsageEnvelope),
-                    state.permissionMode,
-                    JSON.stringify(state.models),
-                    JSON.stringify(state.tools),
-                    JSON.stringify(state.tasks),
-                    JSON.stringify(state.workflows ?? []),
-                    state.workflowsEnabled === false ? 0 : 1,
-                    state.goal === undefined ? null : JSON.stringify(state.goal),
-                    state.nextTaskId,
-                    state.title ?? null,
-                    state.titleStatus,
-                    state.titleError ?? null,
-                    state.recap ?? null,
-                    state.metadataUpdatedAt ?? null,
-                    state.metadataRunId ?? null,
-                    state.interruption === undefined ? 0 : 1,
-                    state.interruption === undefined ? null : JSON.stringify(state.interruption),
-                    state.lastMessageAt ?? null,
-                    this.#now(),
-                    this.#now(),
-                );
-            this.#replaceContextMessages(state.id, contextMessages);
+        sessionSave(this.#tx(), state, {
+            contextMessages,
+            now: this.#now(),
+            projectId,
         });
     }
 
     transaction<T>(body: () => T): T {
-        return this.#transaction(body);
-    }
-
-    #replaceContextMessages(sessionId: string, messages: readonly Message[]): void {
-        this.#database
-            .prepare(
-                `
-                DELETE FROM session_context_messages
-                WHERE session_id = ? AND position >= ?
-                `,
-            )
-            .run(sessionId, messages.length);
-        const upsert = this.#database.prepare(
-            `
-            INSERT INTO session_context_messages (
-                session_id, position, message_id, role, message_json
-            ) VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(session_id, position) DO UPDATE SET
-                message_id = excluded.message_id,
-                role = excluded.role,
-                message_json = excluded.message_json
-            WHERE
-                message_id != excluded.message_id OR
-                role != excluded.role OR
-                message_json != excluded.message_json
-            `,
-        );
-        messages.forEach((message, position) => {
-            upsert.run(sessionId, position, message.id, message.role, JSON.stringify(message));
-        });
+        return this.#transaction(() => body());
     }
 
     #assertAcceptingMutations(): void {
@@ -1553,53 +1210,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     upsertMessage(sessionId: string, message: PersistedSessionMessage): void {
-        this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                INSERT INTO session_messages (
-                    session_id,
-                    position,
-                    message_id,
-                    role,
-                    is_partial,
-                    run_id,
-                    message_json,
-                    updated_at_ms
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, position) DO UPDATE SET
-                    message_id = excluded.message_id,
-                    role = excluded.role,
-                    is_partial = excluded.is_partial,
-                    run_id = excluded.run_id,
-                    message_json = excluded.message_json,
-                    updated_at_ms = excluded.updated_at_ms
-                `,
-                )
-                .run(
-                    sessionId,
-                    message.position,
-                    message.message.id,
-                    message.message.role,
-                    message.isPartial ? 1 : 0,
-                    message.runId ?? null,
-                    JSON.stringify(message.message),
-                    this.#now(),
-                );
-            if (!message.isPartial && message.runId !== undefined) {
-                this.#database
-                    .prepare(
-                        `
-                    INSERT INTO session_turns (session_id, run_id, first_position)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(session_id, run_id) DO UPDATE SET
-                        first_position = MIN(first_position, excluded.first_position)
-                    `,
-                    )
-                    .run(sessionId, message.runId, message.position);
-            }
-        });
+        sessionSaveMessage(this.#tx(), sessionId, message, this.#now());
     }
 
     loadTranscriptPage(
@@ -1612,17 +1223,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const firstPosition = messages[0]?.position;
         const hasEarlier =
             firstPosition !== undefined &&
-            this.#database
-                .prepare(
-                    `
+            this.#database.get(sql`
                     SELECT 1
                     FROM session_messages
-                    WHERE session_id = ? AND position < ? AND is_partial = 0
+                    WHERE session_id = ${sessionId}
+                      AND position < ${firstPosition}
+                      AND is_partial = 0
                       AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
                     LIMIT 1
-                    `,
-                )
-                .get(sessionId, firstPosition) !== undefined;
+            `) !== undefined;
         return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasEarlier);
     }
 
@@ -1636,184 +1245,44 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const lastPosition = messages.at(-1)?.position;
         const hasLater =
             lastPosition !== undefined &&
-            this.#database
-                .prepare(
-                    `
+            this.#database.get(sql`
                     SELECT 1
                     FROM session_messages
-                    WHERE session_id = ? AND position > ? AND is_partial = 0
+                    WHERE session_id = ${sessionId}
+                      AND position > ${lastPosition}
+                      AND is_partial = 0
                       AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
                     LIMIT 1
-                    `,
-                )
-                .get(sessionId, lastPosition) !== undefined;
+            `) !== undefined;
         return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasLater);
     }
 
     upsertExternalToolCall(call: ExternalToolCall): void {
-        this.#database
-            .prepare(
-                `
-                INSERT INTO external_tool_calls (
-                    id,
-                    session_id,
-                    run_id,
-                    batch_id,
-                    tool_call_id,
-                    provider_tool_call_id,
-                    tool_call_index,
-                    definition_json,
-                    skill_json,
-                    arguments_json,
-                    status,
-                    resolution_json,
-                    consumed,
-                    created_at_ms,
-                    resolved_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    status = excluded.status,
-                    resolution_json = excluded.resolution_json,
-                    consumed = excluded.consumed,
-                    resolved_at_ms = excluded.resolved_at_ms
-                `,
-            )
-            .run(
-                call.id,
-                call.sessionId,
-                call.runId,
-                call.batchId,
-                call.toolCallId,
-                call.providerToolCallId ?? null,
-                call.toolCallIndex,
-                JSON.stringify(call.definition),
-                call.skill === undefined ? null : JSON.stringify(call.skill),
-                JSON.stringify(call.arguments),
-                call.status,
-                call.resolution === undefined ? null : JSON.stringify(call.resolution),
-                call.consumed ? 1 : 0,
-                call.createdAt,
-                call.resolvedAt ?? null,
-            );
+        externalToolCallSave(this.#tx(), call);
     }
 
     handoffDurablePermissionToExternalTool(
         externalCall: ExternalToolCall,
         permissionCall: DurableUserInputCall,
     ): void {
-        this.#transaction(() => {
-            this.upsertExternalToolCall(externalCall);
-            this.upsertDurableUserInput(permissionCall);
-        });
+        durablePermissionHandoff(this.#tx(), externalCall, permissionCall);
     }
 
     upsertDurableUserInput(call: DurableUserInputCall): void {
-        this.#database
-            .prepare(
-                `
-                INSERT INTO durable_user_inputs (
-                    session_id,
-                    request_id,
-                    run_id,
-                    batch_id,
-                    tool_call_id,
-                    provider_tool_call_id,
-                    tool_call_index,
-                    tool_name,
-                    tool_arguments_json,
-                    kind,
-                    permission_json,
-                    request_json,
-                    response_json,
-                    result_json,
-                    status,
-                    consumed,
-                    created_at_ms,
-                    resolved_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(session_id, request_id) DO UPDATE SET
-                    response_json = excluded.response_json,
-                    result_json = excluded.result_json,
-                    status = excluded.status,
-                    consumed = excluded.consumed,
-                    resolved_at_ms = excluded.resolved_at_ms
-                `,
-            )
-            .run(
-                call.sessionId,
-                call.request.requestId,
-                call.runId,
-                call.batchId,
-                call.toolCallId,
-                call.providerToolCallId ?? null,
-                call.toolCallIndex,
-                call.toolName,
-                JSON.stringify(call.toolArguments),
-                call.kind,
-                call.permission === undefined ? null : JSON.stringify(call.permission),
-                JSON.stringify(call.request),
-                call.response === undefined ? null : JSON.stringify(call.response),
-                call.result === undefined ? null : JSON.stringify(call.result),
-                call.status,
-                call.consumed ? 1 : 0,
-                call.createdAt,
-                call.resolvedAt ?? null,
-            );
+        durableUserInputSave(this.#tx(), call);
     }
 
     pruneExternalToolCalls(sessionId: string, retain: number): void {
-        this.#database
-            .prepare(
-                `
-                DELETE FROM external_tool_calls
-                WHERE session_id = ?
-                    AND (status = 'cancelled' OR consumed = 1)
-                    AND id NOT IN (
-                        SELECT id
-                        FROM external_tool_calls
-                        WHERE session_id = ?
-                            AND (status = 'cancelled' OR consumed = 1)
-                        ORDER BY COALESCE(resolved_at_ms, created_at_ms) DESC,
-                            tool_call_index DESC
-                        LIMIT ?
-                    )
-                `,
-            )
-            .run(sessionId, sessionId, retain);
+        externalToolCallPrune(this.#tx(), sessionId, retain);
     }
 
     pruneDurableUserInputs(sessionId: string, retain: number): void {
-        this.#database
-            .prepare(
-                `
-                DELETE FROM durable_user_inputs
-                WHERE session_id = ?
-                    AND (status = 'cancelled' OR consumed = 1)
-                    AND request_id NOT IN (
-                        SELECT request_id
-                        FROM durable_user_inputs
-                        WHERE session_id = ?
-                            AND (status = 'cancelled' OR consumed = 1)
-                        ORDER BY COALESCE(resolved_at_ms, created_at_ms) DESC,
-                            tool_call_index DESC
-                        LIMIT ?
-                    )
-                `,
-            )
-            .run(sessionId, sessionId, retain);
+        durableUserInputPrune(this.#tx(), sessionId, retain);
     }
 
     #appendEvent(event: SessionEvent): void {
         if (isLiveOnlySessionEvent(event)) {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE sessions
-                    SET last_event_id = ?, updated_at_ms = ?
-                    WHERE id = ?
-                `,
-                )
-                .run(event.id, this.#now(), event.sessionId);
+            sessionAdvanceEventCursor(this.#tx(), event.sessionId, event.id, this.#now());
             this.#afterTransactionCommit(() => {
                 this.#publishLiveStream(event);
                 this.#publishGlobalEvent(event);
@@ -1823,45 +1292,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         const eventFacts = sessionEventFacts(event);
         let globalEntry: ReturnType<GlobalEventQueue["append"]>;
-        this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    INSERT INTO session_events (
-                        session_id,
-                        event_id,
-                        type,
-                        created_at_ms,
-                        data_json,
-                        run_id,
-                        message_id,
-                        tool_call_id
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    `,
-                )
-                .run(
-                    event.sessionId,
-                    event.id,
-                    event.type,
-                    event.createdAt,
-                    JSON.stringify(event.data),
-                    eventFacts.runId ?? null,
-                    eventFacts.messageId ?? null,
-                    eventFacts.toolCallId ?? null,
-                );
+        this.#transaction((tx) => {
+            sessionAppendEvent(tx, event, eventFacts, this.#now());
             if (this.#globalEventQueue.durable) {
-                globalEntry = this.#globalEventQueue.append(event);
+                globalEntry = this.#globalEventQueue.append(event, tx);
             }
-            this.#database
-                .prepare(
-                    `
-                    UPDATE sessions
-                    SET last_event_id = ?, updated_at_ms = ?
-                    WHERE id = ?
-                    `,
-                )
-                .run(event.id, this.#now(), event.sessionId);
         });
         // The live stream carries this event whether or not the durable log
         // keeps it, but never before the row it describes is committed.
@@ -1908,7 +1343,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             });
             return;
         }
-        const entry = queue.append(event);
+        const entry = queue.append(event, this.#tx());
         if (entry !== undefined) {
             this.#afterTransactionCommit(() => queue.publish(entry));
         }
@@ -1917,7 +1352,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #notifySessionAccess(session: InMemorySession): void {
         try {
             this.#onSessionAccess?.(session);
-        } catch {
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             // External synchronization must never interrupt local session access.
         }
     }
@@ -1925,15 +1361,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #notifySessionEvent(event: SessionEvent): void {
         try {
             this.#onSessionEvent?.(event, this.#sessions.get(event.sessionId)?.deref());
-        } catch {
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             // The event is already durable; optional observers cannot roll it back.
         }
     }
 
     #loadSecretRegistrations(): void {
-        const rows = this.#database
-            .prepare("SELECT id, description, environment_json FROM secret_registrations")
-            .all();
+        const rows = this.#database.all<Record<string, unknown>>(
+            sql`SELECT id, description, environment_json FROM secret_registrations`,
+        );
         for (const row of rows) {
             this.#secrets.register({
                 description: readString(row, "description"),
@@ -1943,20 +1380,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 id: readString(row, "id"),
             });
         }
-        const rememberEnvironmentVariable = this.#database.prepare(
-            `
-            INSERT OR IGNORE INTO secret_environment_variables (secret_id, normalized_name, name)
-            VALUES (?, ?, ?)
-            `,
+        const environmentRows = this.#database.all<Record<string, unknown>>(
+            sql`SELECT secret_id, name FROM secret_environment_variables`,
         );
-        for (const secret of this.#secrets.references()) {
-            for (const name of secret.environmentVariables) {
-                rememberEnvironmentVariable.run(secret.id, name.toUpperCase(), name);
-            }
-        }
-        const environmentRows = this.#database
-            .prepare("SELECT secret_id, name FROM secret_environment_variables")
-            .all();
         for (const row of environmentRows) {
             this.#secrets.rememberEnvironmentVariables(readString(row, "secret_id"), [
                 readString(row, "name"),
@@ -1965,28 +1391,26 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #loadEvents(sessionId: string, bounded = true): SessionEvent[] {
-        const rows = this.#database
-            .prepare(
-                bounded
-                    ? `
+        const rows = this.#database.all<Record<string, unknown>>(
+            bounded
+                ? sql`
                 SELECT event_id, type, created_at_ms, data_json
                 FROM (
                     SELECT seq, event_id, type, created_at_ms, data_json
                     FROM session_events
-                    WHERE session_id = ?
+                    WHERE session_id = ${sessionId}
                     ORDER BY seq DESC
-                    LIMIT ?
+                    LIMIT ${RESTORED_SESSION_EVENT_LIMIT}
                 )
                 ORDER BY seq ASC
                 `
-                    : `
+                : sql`
                 SELECT event_id, type, created_at_ms, data_json
                 FROM session_events
-                WHERE session_id = ?
+                WHERE session_id = ${sessionId}
                 ORDER BY seq ASC
                 `,
-            )
-            .iterate(...(bounded ? [sessionId, RESTORED_SESSION_EVENT_LIMIT] : [sessionId]));
+        );
         const events: SessionEvent[] = [];
         for (const row of rows) {
             const event = {
@@ -2001,69 +1425,26 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return events;
     }
 
-    #loadMessages(sessionId: string, bounded = true): PersistedSessionMessage[] {
-        return this.#database
-            .prepare(
-                bounded
-                    ? `
-                SELECT position, is_partial, run_id, message_json
-                FROM (
-                    SELECT position, is_partial, run_id, message_json
-                    FROM session_messages
-                    WHERE session_id = ?
-                    ORDER BY position DESC
-                    LIMIT ?
-                )
-                ORDER BY position ASC
-                `
-                    : `
-                SELECT position, is_partial, run_id, message_json
-                FROM session_messages
-                WHERE session_id = ?
-                ORDER BY position ASC
-                `,
-            )
-            .all(...(bounded ? [sessionId, RESTORED_SESSION_MESSAGE_LIMIT] : [sessionId]))
-            .map((row) => {
-                const runId = readOptionalString(row, "run_id");
-                const message: PersistedSessionMessage = {
-                    isPartial: readNumber(row, "is_partial") !== 0,
-                    message: JSON.parse(readString(row, "message_json")) as Message,
-                    position: readNumber(row, "position"),
-                };
-                if (runId !== undefined) {
-                    message.runId = runId;
-                }
-                return message;
-            });
-    }
-
     #loadContextMessages(sessionId: string): Message[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT message_json
                 FROM session_context_messages
-                WHERE session_id = ?
+                WHERE session_id = ${sessionId}
                 ORDER BY position
-                `,
-            )
-            .all(sessionId)
+            `)
             .map((row) => JSON.parse(readString(row, "message_json")) as Message);
     }
 
     #loadQueuedRuns(sessionId: string): PersistedQueuedRun[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT run_id, debug, debug_directory, display_text, kind, text, user_message_json,
                     integration_config_json
                 FROM queued_runs
-                WHERE session_id = ?
+                WHERE session_id = ${sessionId}
                 ORDER BY created_at_ms ASC
-                `,
-            )
-            .all(sessionId)
+            `)
             .map((row) => {
                 const debugDirectory = readOptionalString(row, "debug_directory");
                 const integrationConfigJson = readOptionalString(row, "integration_config_json");
@@ -2094,29 +1475,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     #loadExternalToolCalls(sessionId: string): ExternalToolCall[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT *
                 FROM external_tool_calls
-                WHERE session_id = ?
+                WHERE session_id = ${sessionId}
                 ORDER BY created_at_ms ASC, tool_call_index ASC
-                `,
-            )
-            .all(sessionId)
+            `)
             .map(readExternalToolCallRow);
     }
 
     #loadDurableUserInputs(sessionId: string): DurableUserInputCall[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT *
                 FROM durable_user_inputs
-                WHERE session_id = ?
+                WHERE session_id = ${sessionId}
                 ORDER BY created_at_ms ASC, tool_call_index ASC
-                `,
-            )
-            .all(sessionId)
+            `)
             .map((row) => {
                 const permissionJson = readOptionalString(row, "permission_json");
                 const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
@@ -2150,17 +1525,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #inheritWorkspaceTitle(
         metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
     ): void {
-        const first = this.#database
-            .prepare(
-                `
+        const first = this.#database.get<Record<string, unknown>>(sql`
                 SELECT id
                 FROM sessions
-                WHERE project_id = ? AND workspace_id = ? AND parent_session_id IS NULL
+                WHERE project_id = ${metadata.projectId}
+                    AND workspace_id = ${metadata.workspaceId}
+                    AND parent_session_id IS NULL
                 ORDER BY created_at_ms ASC, id ASC
                 LIMIT 1
-                `,
-            )
-            .get(metadata.projectId, metadata.workspaceId);
+        `);
         if (first === undefined || readString(first, "id") !== metadata.sessionId) return;
         this.#projects.inheritWorkspaceTitle(
             metadata.projectId,
@@ -2170,15 +1543,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #loadSession(sessionId: string): InMemorySession | undefined {
-        const row = this.#database
-            .prepare(
-                `
+        const row = this.#database.get<Record<string, unknown>>(sql`
                 SELECT *
                 FROM sessions
-                WHERE id = ?
-                `,
-            )
-            .get(sessionId);
+                WHERE id = ${sessionId}
+        `);
         if (row === undefined) {
             return undefined;
         }
@@ -2206,27 +1575,23 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         );
         const earliestTranscriptPosition = transcriptMessages[0]?.position;
         const hasEarlierTranscript =
-            this.#database
-                .prepare(
-                    earliestTranscriptPosition === undefined
-                        ? `
+            this.#database.get(
+                earliestTranscriptPosition === undefined
+                    ? sql`
                           SELECT 1
                           FROM session_messages
-                          WHERE session_id = ? AND is_partial = 0
+                          WHERE session_id = ${sessionId} AND is_partial = 0
                           LIMIT 1
                           `
-                        : `
+                    : sql`
                           SELECT 1
                           FROM session_messages
-                          WHERE session_id = ? AND is_partial = 0 AND position < ?
+                          WHERE session_id = ${sessionId}
+                            AND is_partial = 0
+                            AND position < ${earliestTranscriptPosition}
                           LIMIT 1
                           `,
-                )
-                .get(
-                    ...(earliestTranscriptPosition === undefined
-                        ? [sessionId]
-                        : [sessionId, earliestTranscriptPosition]),
-                ) !== undefined;
+            ) !== undefined;
         const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
         const modelId = readString(row, "model_id");
         const title = readOptionalString(row, "title");
@@ -2415,30 +1780,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     ): { id: string; orderKey: string }[] {
         const rows =
             workspaceId === undefined
-                ? this.#database
-                      .prepare(
-                          `
+                ? this.#database.all<Record<string, unknown>>(sql`
                           SELECT id, order_key
                           FROM sessions
                           WHERE parent_session_id IS NULL
-                              AND project_id = ?
+                              AND project_id = ${projectId}
                               AND workspace_id IS NULL
                           ORDER BY order_key ASC, id ASC
-                          `,
-                      )
-                      .all(projectId)
-                : this.#database
-                      .prepare(
-                          `
+                `)
+                : this.#database.all<Record<string, unknown>>(sql`
                           SELECT id, order_key
                           FROM sessions
                           WHERE parent_session_id IS NULL
-                              AND project_id = ?
-                              AND workspace_id = ?
+                              AND project_id = ${projectId}
+                              AND workspace_id = ${workspaceId}
                           ORDER BY order_key ASC, id ASC
-                          `,
-                      )
-                      .all(projectId, workspaceId);
+                `);
         return rows.map((row) => ({
             id: readString(row, "id"),
             orderKey: readString(row, "order_key"),
@@ -2450,46 +1807,45 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         before?: string,
     ): PersistedSessionMessage[] | undefined {
-        const runRows = this.#database
-            .prepare(
-                `
+        const runRows = this.#database.all<Record<string, unknown>>(sql`
                 WITH ordered_runs AS (
                     SELECT run_id, first_position
                     FROM session_turns
-                    WHERE session_id = ?
+                    WHERE session_id = ${sessionId}
                 ),
                 anchor AS (
-                    SELECT first_position FROM ordered_runs WHERE run_id = ?
+                    SELECT first_position FROM ordered_runs WHERE run_id = ${before ?? null}
                 )
                 SELECT run_id
                 FROM ordered_runs
-                WHERE ? IS NULL OR first_position < (SELECT first_position FROM anchor)
+                WHERE ${before ?? null} IS NULL
+                    OR first_position < (SELECT first_position FROM anchor)
                 ORDER BY first_position DESC
-                LIMIT ?
-                `,
-            )
-            .all(sessionId, before ?? null, before ?? null, turnLimit) as Record<string, unknown>[];
+                LIMIT ${turnLimit}
+        `);
         if (before !== undefined && runRows.length === 0) {
-            const known = this.#database
-                .prepare(
-                    "SELECT 1 FROM session_messages WHERE session_id = ? AND run_id = ? LIMIT 1",
-                )
-                .get(sessionId, before);
+            const known = this.#database.get(sql`
+                SELECT 1
+                FROM session_messages
+                WHERE session_id = ${sessionId} AND run_id = ${before}
+                LIMIT 1
+            `);
             if (known === undefined) return undefined;
         }
         const runIds = runRows.map((row) => readString(row, "run_id")).reverse();
         if (runIds.length === 0) return [];
-        const placeholders = runIds.map(() => "?").join(", ");
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT position, is_partial, run_id, message_json
                 FROM session_messages
-                WHERE session_id = ? AND is_partial = 0 AND run_id IN (${placeholders})
+                WHERE session_id = ${sessionId}
+                    AND is_partial = 0
+                    AND run_id IN (${sql.join(
+                        runIds.map((runId) => sql`${runId}`),
+                        sql`, `,
+                    )})
                 ORDER BY position ASC
-                `,
-            )
-            .all(sessionId, ...runIds)
+            `)
             .map((row) => ({
                 isPartial: readNumber(row, "is_partial") !== 0,
                 message: JSON.parse(readString(row, "message_json")) as Message,
@@ -2503,9 +1859,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         after: EventId,
     ): PersistedSessionMessage[] | undefined {
-        const runRows = this.#database
-            .prepare(
-                `
+        const runRows = this.#database.all<Record<string, unknown>>(sql`
                 WITH anchor_run AS (
                     SELECT turns.first_position
                     FROM session_events AS events
@@ -2516,31 +1870,30 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     JOIN session_turns AS turns
                       ON turns.session_id = messages.session_id
                      AND turns.run_id = messages.run_id
-                    WHERE events.session_id = ? AND events.event_id = ?
+                    WHERE events.session_id = ${sessionId} AND events.event_id = ${after}
                     LIMIT 1
                 )
                 SELECT turns.run_id
                 FROM session_turns AS turns
-                WHERE turns.session_id = ?
+                WHERE turns.session_id = ${sessionId}
                   AND turns.first_position >= (SELECT first_position FROM anchor_run)
                 ORDER BY turns.first_position ASC
-                LIMIT ?
-                `,
-            )
-            .all(sessionId, after, sessionId, turnLimit) as Record<string, unknown>[];
+                LIMIT ${turnLimit}
+        `);
         if (runRows.length === 0) return undefined;
         const runIds = runRows.map((row) => readString(row, "run_id"));
-        const placeholders = runIds.map(() => "?").join(", ");
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT position, is_partial, run_id, message_json
                 FROM session_messages
-                WHERE session_id = ? AND is_partial = 0 AND run_id IN (${placeholders})
+                WHERE session_id = ${sessionId}
+                    AND is_partial = 0
+                    AND run_id IN (${sql.join(
+                        runIds.map((runId) => sql`${runId}`),
+                        sql`, `,
+                    )})
                 ORDER BY position ASC
-                `,
-            )
-            .all(sessionId, ...runIds)
+            `)
             .map((row) => ({
                 isPartial: readNumber(row, "is_partial") !== 0,
                 message: JSON.parse(readString(row, "message_json")) as Message,
@@ -2596,15 +1949,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     #loadPartialMessages(sessionId: string): PersistedSessionMessage[] {
         return this.#database
-            .prepare(
-                `
+            .all<Record<string, unknown>>(sql`
                 SELECT position, is_partial, run_id, message_json
                 FROM session_messages
-                WHERE session_id = ? AND is_partial = 1
+                WHERE session_id = ${sessionId} AND is_partial = 1
                 ORDER BY position ASC
-                `,
-            )
-            .all(sessionId)
+            `)
             .map((row) => {
                 const runId = readOptionalString(row, "run_id");
                 return {
@@ -2625,27 +1975,38 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const toolCallIds = messages.flatMap((entry) =>
             entry.message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
         );
-        const clauses: string[] = [];
-        const values: string[] = [];
-        const addClause = (column: string, candidates: readonly string[]): void => {
-            if (candidates.length === 0) return;
-            clauses.push(`${column} IN (${candidates.map(() => "?").join(", ")})`);
-            values.push(...candidates);
-        };
-        addClause("run_id", runIds);
-        addClause("message_id", messageIds);
-        addClause("tool_call_id", toolCallIds);
+        const clauses: SQL[] = [];
+        if (runIds.length > 0) {
+            clauses.push(
+                sql`run_id IN (${sql.join(
+                    runIds.map((runId) => sql`${runId}`),
+                    sql`, `,
+                )})`,
+            );
+        }
+        if (messageIds.length > 0) {
+            clauses.push(
+                sql`message_id IN (${sql.join(
+                    messageIds.map((messageId) => sql`${messageId}`),
+                    sql`, `,
+                )})`,
+            );
+        }
+        if (toolCallIds.length > 0) {
+            clauses.push(
+                sql`tool_call_id IN (${sql.join(
+                    toolCallIds.map((toolCallId) => sql`${toolCallId}`),
+                    sql`, `,
+                )})`,
+            );
+        }
         if (clauses.length === 0) return [];
-        const rows = this.#database
-            .prepare(
-                `
+        const rows = this.#database.all<Record<string, unknown>>(sql`
                 SELECT event_id, type, created_at_ms, data_json
                 FROM session_events
-                WHERE session_id = ? AND (${clauses.join(" OR ")})
+                WHERE session_id = ${sessionId} AND (${sql.join(clauses, sql` OR `)})
                 ORDER BY seq ASC
-                `,
-            )
-            .all(sessionId, ...values);
+        `);
         return rows.map(
             (row) =>
                 ({
@@ -2676,32 +2037,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         const row =
             scope.workspaceId === undefined
-                ? this.#database
-                      .prepare(
-                          `
+                ? this.#database.get<Record<string, unknown>>(sql`
                           SELECT docker_json
                           FROM sessions
-                          WHERE project_id = ?
+                          WHERE project_id = ${scope.projectId}
                               AND workspace_id IS NULL
                               AND parent_session_id IS NULL
                           ORDER BY updated_at_ms DESC, id DESC
                           LIMIT 1
-                          `,
-                      )
-                      .get(scope.projectId)
-                : this.#database
-                      .prepare(
-                          `
+                `)
+                : this.#database.get<Record<string, unknown>>(sql`
                           SELECT docker_json
                           FROM sessions
-                          WHERE project_id = ?
-                              AND workspace_id = ?
+                          WHERE project_id = ${scope.projectId}
+                              AND workspace_id = ${scope.workspaceId}
                               AND parent_session_id IS NULL
                           ORDER BY updated_at_ms DESC, id DESC
                           LIMIT 1
-                          `,
-                      )
-                      .get(scope.projectId, scope.workspaceId);
+                `);
         const dockerJson = row === undefined ? undefined : readOptionalString(row, "docker_json");
         return {
             cwd: workspace?.path ?? project.path,
@@ -2713,10 +2066,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     #projectSecrets(projectId: string): readonly string[] {
         return this.#database
-            .prepare(
-                "SELECT secret_id FROM project_secret_attachments WHERE project_id = ? ORDER BY secret_id",
-            )
-            .all(projectId)
+            .all<Record<string, unknown>>(sql`
+                SELECT secret_id
+                FROM project_secret_attachments
+                WHERE project_id = ${projectId}
+                ORDER BY secret_id
+            `)
             .map((row) => readString(row, "secret_id"));
     }
 
@@ -2732,53 +2087,46 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #repairInterruptedTitleGenerations(): void {
-        this.#database
-            .prepare(
-                `
-                UPDATE sessions
-                SET
-                    title_status = 'error',
-                    title_error = 'Title generation was interrupted because the local server stopped.',
-                    updated_at_ms = ?
-                WHERE title_status = 'generating'
-                `,
-            )
-            .run(this.#now());
+        sessionRepairInterruptedTitles(this.#tx(), this.#now());
     }
 
-    #transaction<T>(body: () => T): T {
-        if (this.#database.isTransaction) return body();
+    #tx(): TX {
+        return this.#activeTransaction ?? this.#database;
+    }
+
+    #transaction<T>(body: (tx: TX) => T): T {
+        if (this.#activeTransaction !== undefined) return body(this.#activeTransaction);
         this.#transactionCommitCallbacks = [];
-        this.#database.exec("BEGIN IMMEDIATE");
         try {
-            const value = body();
-            this.#database.exec("COMMIT");
+            const value = inTx(this.#database, (tx) => {
+                this.#activeTransaction = tx;
+                try {
+                    return body(tx);
+                } finally {
+                    this.#activeTransaction = undefined;
+                }
+            });
             const callbacks = this.#transactionCommitCallbacks;
             this.#transactionCommitCallbacks = undefined;
             for (const callback of callbacks) {
                 try {
                     callback();
-                } catch {
+                } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     // The durable transaction already committed; observers are best effort.
                 }
             }
             return value;
         } catch (error) {
+            this.#activeTransaction = undefined;
             this.#transactionCommitCallbacks = undefined;
-            if (this.#database.isTransaction) {
-                try {
-                    this.#database.exec("ROLLBACK");
-                } catch {
-                    // Preserve the transaction's original failure.
-                }
-            }
             throw error;
         }
     }
 
     #afterTransactionCommit(callback: () => void): void {
-        if (this.#database.isTransaction) {
-            this.#transactionCommitCallbacks?.push(callback);
+        if (this.#transactionCommitCallbacks !== undefined) {
+            this.#transactionCommitCallbacks.push(callback);
             return;
         }
         callback();

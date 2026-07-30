@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 
 import { isPermissionMode } from "../permissions/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { CreateSessionRequest, ModelCatalog } from "../protocol/index.js";
 import { createHappySpawnSessionId } from "./createHappySpawnSessionId.js";
 import type { HappySpawnSessionRequest, HappySpawnSessionResult } from "./types.js";
@@ -69,6 +70,7 @@ export async function handleHappySpawnSession(options: {
         }
         return { sessionId: remoteSessionId, type: "success" };
     } catch (error) {
+        if (isDatabaseFailure(error)) throw error;
         return {
             errorMessage: error instanceof Error ? error.message : "Rig could not start a session.",
             type: "error",

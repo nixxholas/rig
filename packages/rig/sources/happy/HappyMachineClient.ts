@@ -1,6 +1,7 @@
 import { io, type Socket } from "socket.io-client";
 
 import type { ModelCatalog } from "../protocol/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { createHappyMachineMetadata } from "./createHappyMachineMetadata.js";
 import { decryptHappyPayload, encryptHappyPayload, wrapHappyDataKey } from "./happyEncryption.js";
@@ -164,6 +165,7 @@ export class HappyMachineClient {
                 try {
                     response = await this.#spawnSession(params, this.#closeController.signal);
                 } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     response = {
                         errorMessage:
                             error instanceof Error

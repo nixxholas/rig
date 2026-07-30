@@ -26,7 +26,7 @@ running, including streaming `agent_event` updates. High-volume provider stream
 updates are live-only: completed messages and run outcomes remain durable.
 
 When the durable global event queue is enabled, non-streaming events are also
-assigned a numeric global cursor and exposed through `GET /events` and
+assigned a monotonic UUIDv7 global cursor and exposed through `GET /events` and
 `GET /events/stream`. The global queue does not persist or publish
 `agent_event`; completed messages and terminal run outcomes are delivered by
 `agent_message`, `run_finished`, and `run_error` instead.

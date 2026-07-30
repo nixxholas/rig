@@ -1,5 +1,4 @@
 import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
-import { DatabaseSync } from "node:sqlite";
 import type { Message } from "../agent/types.js";
 import type {
     ChangeEffortRequest,
@@ -26,7 +25,9 @@ import type { McpToolProvider } from "../mcp/index.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
-import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
+import { inTx } from "../persistence/inTx.js";
+import type { TX } from "../persistence/Transaction.js";
+import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
 import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "./LiveGlobalEventQueue.js";
 import { ProjectRepository, type ProjectAvatarAsset } from "./ProjectRepository.js";
@@ -39,6 +40,10 @@ import {
     type ProjectRemoteTerminalContext,
     type RemoteTerminalScope,
 } from "../terminal/index.js";
+import {
+    openSessionDatabase,
+    type SessionDatabase,
+} from "../persistence/database/openSessionDatabase.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -59,7 +64,8 @@ export class InMemorySessionStore implements SessionStore {
         | ((error: unknown, projectId: string, workspaceId: string) => void)
         | undefined;
     #projectSecretIds = new Map<string, Set<string>>();
-    #database = new DatabaseSync(":memory:", { enableForeignKeyConstraints: true });
+    readonly #client: ReturnType<typeof openSessionDatabase>["client"];
+    readonly #database: SessionDatabase;
     readonly #createTerminalEventId = createEventIdFactory();
     readonly #projects: ProjectRepository;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
@@ -67,10 +73,14 @@ export class InMemorySessionStore implements SessionStore {
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
+    #activeTransaction: TX | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
 
     constructor(options: InMemorySessionStoreOptions = {}) {
-        initializeSessionDatabase(this.#database);
+        const opened = openSessionDatabase(":memory:");
+        this.#client = opened.client;
+        this.#database = opened.database;
+        migrateSessionDatabase(this.#database);
         this.#projects = new ProjectRepository({
             database: this.#database,
             ...(options.homeDirectory === undefined
@@ -718,13 +728,18 @@ export class InMemorySessionStore implements SessionStore {
         });
     }
 
-    #transaction<T>(body: () => T): T {
-        if (this.#database.isTransaction) return body();
+    #transaction<T>(body: (tx: TX) => T): T {
+        if (this.#activeTransaction !== undefined) return body(this.#activeTransaction);
         this.#transactionCommitCallbacks = [];
-        this.#database.exec("BEGIN IMMEDIATE");
         try {
-            const value = body();
-            this.#database.exec("COMMIT");
+            const value = inTx(this.#database, (tx) => {
+                this.#activeTransaction = tx;
+                try {
+                    return body(tx);
+                } finally {
+                    this.#activeTransaction = undefined;
+                }
+            });
             const callbacks = this.#transactionCommitCallbacks;
             this.#transactionCommitCallbacks = undefined;
             for (const callback of callbacks) {
@@ -736,20 +751,14 @@ export class InMemorySessionStore implements SessionStore {
             }
             return value;
         } catch (error) {
+            this.#activeTransaction = undefined;
             this.#transactionCommitCallbacks = undefined;
-            if (this.#database.isTransaction) {
-                try {
-                    this.#database.exec("ROLLBACK");
-                } catch {
-                    // Preserve the transaction's original failure.
-                }
-            }
             throw error;
         }
     }
 
     #afterTransactionCommit(callback: () => void): void {
-        if (this.#database.isTransaction) {
+        if (this.#client.inTransaction) {
             this.#transactionCommitCallbacks?.push(callback);
             return;
         }

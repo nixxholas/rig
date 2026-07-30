@@ -6,6 +6,7 @@ import type {
     SessionEvent,
     SubagentSummary,
 } from "../protocol/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { InMemorySession } from "../server/InMemorySession.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
 import { HappySessionClient, type HappySessionClientOptions } from "./HappySessionClient.js";
@@ -131,10 +132,11 @@ export class HappySyncService {
                 client.start();
                 this.#attachRetryAfter.delete(session.id);
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 this.#clients.delete(session.id);
                 this.#messageMappers.delete(session.id);
                 this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
-                void client?.close().catch(() => undefined);
+                void client?.close().catch(rethrowDatabaseFailure);
                 console.error(
                     `Happy sync could not attach session '${session.id}': ${String(error)}`,
                 );
@@ -170,6 +172,7 @@ export class HappySyncService {
             this.#messageMappers.set(session.id, mapper);
             this.#clients.get(session.id)?.enqueue(mapper.map(event));
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             const client = this.#clients.get(session.id);
             if (error instanceof HappySyncOutboxFullError) {
                 this.#scheduleBackfill(session);
@@ -177,7 +180,7 @@ export class HappySyncService {
                 this.#clients.delete(session.id);
                 this.#messageMappers.delete(session.id);
                 this.#attachRetryAfter.set(session.id, Date.now() + ATTACH_RETRY_DELAY_MS);
-                void client.close().catch(() => undefined);
+                void client.close().catch(rethrowDatabaseFailure);
             }
             console.error(`Happy sync could not observe session '${session.id}': ${String(error)}`);
         }
@@ -202,6 +205,7 @@ export class HappySyncService {
                 this.#messageMappers.set(session.id, backfill.mapper);
                 client.enqueue(backfill.messages);
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 this.#scheduleBackfill(session);
                 console.error(
                     `Happy sync could not recover session '${session.id}': ${String(error)}`,
@@ -211,6 +215,10 @@ export class HappySyncService {
         timer.unref();
         this.#backfillTimers.set(session.id, timer);
     }
+}
+
+function rethrowDatabaseFailure(error: unknown): void {
+    if (isDatabaseFailure(error)) throw error;
 }
 
 function backfillMessages(session: InMemorySession): {

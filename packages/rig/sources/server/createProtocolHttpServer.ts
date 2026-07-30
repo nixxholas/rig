@@ -995,7 +995,7 @@ async function handleRequest(
         if (request.method === "GET" && route.name === "global-events") {
             const after = parseGlobalEventCursor(url.searchParams.get("after"));
             if (url.searchParams.has("after") && after === undefined) {
-                sendJson(response, 400, { error: "The event cursor must be a whole number." });
+                sendJson(response, 400, { error: "The event cursor must be a UUIDv7 value." });
                 return;
             }
             const limit = parseGlobalEventLimit(url.searchParams.get("limit"));

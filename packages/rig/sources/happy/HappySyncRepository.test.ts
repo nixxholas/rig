@@ -1,11 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { sql } from "drizzle-orm";
 
-import { initializeSessionDatabase } from "../server/initializeSessionDatabase.js";
+import { openSessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import { createSessionDatabaseFixture } from "../persistence/database/test/createSessionDatabaseFixture.js";
 import { HappySyncRepository } from "./HappySyncRepository.js";
 
 const directories: string[] = [];
@@ -55,6 +56,21 @@ describe("HappySyncRepository", () => {
         reopened.close();
     });
 
+    it("never moves the remote sequence backwards", async () => {
+        const { repository } = await createRepository();
+        repository.ensureSession({
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+
+        repository.updateLastRemoteSeq("session-1", 12);
+        repository.updateLastRemoteSeq("session-1", 5);
+
+        expect(repository.getSession("session-1")?.lastRemoteSeq).toBe(12);
+        repository.close();
+    });
+
     it("rotates remote state when the authenticated Happy account changes", async () => {
         const { repository } = await createRepository();
         const first = repository.ensureSession({
@@ -76,6 +92,43 @@ describe("HappySyncRepository", () => {
         expect(repository.pending("session-1")).toEqual([]);
         repository.close();
     });
+
+    it("rolls back session rotation when clearing the stale outbox fails", async () => {
+        const { databasePath, repository } = await createRepository();
+        repository.ensureSession({
+            credentialFingerprint: "account-1",
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        const pending = createMessage("encrypted-for-account-1");
+        repository.enqueue("session-1", [pending]);
+        repository.close();
+
+        const opened = openSessionDatabase(databasePath);
+        opened.database.run(
+            sql.raw(`
+            CREATE TRIGGER reject_happy_outbox_delete
+            BEFORE DELETE ON happy_outbox
+            BEGIN
+                SELECT RAISE(ABORT, 'forced outbox delete failure');
+            END
+        `),
+        );
+        opened.client.close();
+
+        const reopened = new HappySyncRepository(databasePath);
+        expect(() =>
+            reopened.ensureSession({
+                credentialFingerprint: "account-2",
+                encryptionKey: new Uint8Array(32).fill(2),
+                encryptionVariant: "dataKey",
+                sessionId: "session-1",
+            }),
+        ).toThrow("forced outbox delete failure");
+        expect(reopened.getSession("session-1")?.credentialFingerprint).toBe("account-1");
+        expect(reopened.pending("session-1")).toEqual([pending]);
+        reopened.close();
+    });
 });
 
 function createMessage(localId: string) {
@@ -96,18 +149,6 @@ async function createRepository() {
     const directory = await mkdtemp(join(tmpdir(), "rig-happy-repository-"));
     directories.push(directory);
     const databasePath = join(directory, "sessions.sqlite");
-    const database = new DatabaseSync(databasePath);
-    initializeSessionDatabase(database);
-    database
-        .prepare(
-            `
-            INSERT INTO sessions (
-                id, agent_id, cwd, provider_id, model_id, status, models_json, tools_json,
-                created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-        )
-        .run("session-1", "agent-1", "/workspace", "codex", "model", "idle", "[]", "[]", 1, 1);
-    database.close();
+    createSessionDatabaseFixture(databasePath);
     return { databasePath, repository: new HappySyncRepository(databasePath) };
 }

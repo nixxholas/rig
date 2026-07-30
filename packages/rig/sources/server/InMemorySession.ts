@@ -4180,6 +4180,16 @@ export class InMemorySession {
             type,
         } as Extract<SessionEvent, { type: TType }>;
         if (this.#workspaceArchived) return event;
+        const append = (): Extract<SessionEvent, { type: TType }> => {
+            this.#appendDurableEvent(event);
+            return event;
+        };
+        return this.#persistence?.transaction === undefined
+            ? append()
+            : this.#persistence.transaction(append);
+    }
+
+    #appendDurableEvent(event: SessionEvent): void {
         if (!this.isSubagent() && this.#request.trackUnread === true) {
             this.#unread = sessionUnreadStateAfterEvent(this.#unread, event);
         }
@@ -4204,7 +4214,6 @@ export class InMemorySession {
         this.#recordPermissionReview(event);
         this.#reportContextSize(previousSessionTokenCount);
         this.#reportActivity(event);
-        return event;
     }
 
     /**

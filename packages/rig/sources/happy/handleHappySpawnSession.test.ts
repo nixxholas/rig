@@ -114,4 +114,29 @@ describe("handleHappySpawnSession", () => {
             type: "pending",
         });
     });
+
+    it("does not downgrade a database failure to a Happy RPC error", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-happy-spawn-database-failure-"));
+        directories.push(directory);
+        const failure = Object.assign(new Error("database write failed"), {
+            code: "SQLITE_IOERR",
+        });
+
+        await expect(
+            handleHappySpawnSession({
+                createSession: () => {
+                    throw failure;
+                },
+                machineId: "rig-machine",
+                modelCatalog: catalog,
+                params: {
+                    agent: "rig",
+                    clientRequestId: "mobile-request-database-failure",
+                    directory,
+                    type: "spawn-in-directory",
+                },
+                waitForRemoteSession: async () => undefined,
+            }),
+        ).rejects.toBe(failure);
+    });
 });

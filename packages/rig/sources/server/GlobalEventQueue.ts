@@ -5,6 +5,7 @@ import type {
     GlobalLiveEvent,
     TrimGlobalEventsResponse,
 } from "../protocol/index.js";
+import type { TX } from "../persistence/Transaction.js";
 
 export interface ListGlobalEventQueueOptions {
     after?: string;
@@ -15,7 +16,7 @@ export type GlobalEventQueueListener = (delivery: GlobalEventDelivery) => void;
 
 export interface GlobalEventQueue {
     readonly durable: boolean;
-    append(event: GlobalEvent): GlobalEventQueueEntry | undefined;
+    append(event: GlobalEvent, tx?: TX): GlobalEventQueueEntry | undefined;
     cursor(): string;
     deactivate(): void;
     list(options?: ListGlobalEventQueueOptions): readonly GlobalEventQueueEntry[] | undefined;

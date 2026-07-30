@@ -1,6 +1,6 @@
-import { createId } from "@paralleldrive/cuid2";
-
+import { createEventIdFactory, eventIdsShareScope } from "../protocol/index.js";
 import type {
+    EventId,
     GlobalEvent,
     GlobalEventQueueEntry,
     GlobalLiveEvent,
@@ -16,31 +16,34 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
     readonly durable = false;
     readonly #capacity: number;
     readonly #closeListeners = new Set<() => void>();
+    readonly #createCursor: () => EventId;
     readonly #entries: GlobalEventQueueEntry[] = [];
     readonly #listeners = new Set<GlobalEventQueueListener>();
-    readonly #streamId = createId();
-    #lastPosition = 0;
-    #trimmedThrough = 0;
+    #head: EventId;
+    #trimmedThrough: EventId;
 
-    constructor(options: { capacity?: number } = {}) {
+    constructor(options: { capacity?: number; now?: () => number } = {}) {
         this.#capacity = options.capacity ?? 10_000;
+        this.#createCursor = createEventIdFactory(
+            options.now === undefined ? {} : { now: options.now },
+        );
+        this.#head = this.#createCursor();
+        this.#trimmedThrough = this.#head;
     }
 
     append(event: GlobalEvent): GlobalEventQueueEntry {
-        this.#lastPosition += 1;
-        const entry = { cursor: this.#cursor(this.#lastPosition), event };
+        const entry = { cursor: this.#createCursor(), event };
+        this.#head = entry.cursor;
         this.#entries.push(entry);
         while (this.#entries.length > this.#capacity) {
             const removed = this.#entries.shift();
-            if (removed !== undefined) {
-                this.#trimmedThrough = this.#position(removed.cursor) ?? this.#trimmedThrough;
-            }
+            if (removed !== undefined) this.#trimmedThrough = removed.cursor;
         }
         return entry;
     }
 
     cursor(): string {
-        return this.#cursor(this.#lastPosition);
+        return this.#head;
     }
 
     deactivate(): void {
@@ -50,14 +53,15 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
     }
 
     list(options: ListGlobalEventQueueOptions = {}): readonly GlobalEventQueueEntry[] | undefined {
-        const after =
-            options.after === undefined ? this.#trimmedThrough : this.#position(options.after);
-        if (after === undefined || after < this.#trimmedThrough || after > this.#lastPosition) {
+        const after = options.after?.toLowerCase() ?? this.#trimmedThrough;
+        if (
+            !eventIdsShareScope(after, this.#head) ||
+            after < this.#trimmedThrough ||
+            after > this.#head
+        ) {
             return undefined;
         }
-        const entries = this.#entries.filter(
-            (entry) => (this.#position(entry.cursor) ?? 0) > after,
-        );
+        const entries = this.#entries.filter((entry) => entry.cursor > after);
         return options.limit === undefined ? entries : entries.slice(0, options.limit);
     }
 
@@ -89,30 +93,15 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
     }
 
     trim(through: string): TrimGlobalEventsResponse | undefined {
-        const position = this.#position(through);
-        if (position === undefined || position > this.#lastPosition) return undefined;
-        if (position <= this.#trimmedThrough) return { through, trimmed: 0 };
+        const normalized = through.toLowerCase();
+        if (!eventIdsShareScope(normalized, this.#head) || normalized > this.#head)
+            return undefined;
+        if (normalized <= this.#trimmedThrough) return { through: normalized, trimmed: 0 };
         const before = this.#entries.length;
-        while (
-            this.#entries.length > 0 &&
-            (this.#position(this.#entries[0]!.cursor) ?? 0) <= position
-        ) {
+        while (this.#entries.length > 0 && this.#entries[0]!.cursor <= normalized) {
             this.#entries.shift();
         }
-        this.#trimmedThrough = position;
-        return { through, trimmed: before - this.#entries.length };
-    }
-
-    #cursor(position: number): string {
-        return `${this.#streamId}.${position.toString(36)}`;
-    }
-
-    #position(cursor: string): number | undefined {
-        const [streamId, encoded, extra] = cursor.split(".");
-        if (streamId !== this.#streamId || encoded === undefined || extra !== undefined) {
-            return undefined;
-        }
-        const position = Number.parseInt(encoded, 36);
-        return Number.isSafeInteger(position) && position >= 0 ? position : undefined;
+        this.#trimmedThrough = normalized;
+        return { through: normalized, trimmed: before - this.#entries.length };
     }
 }

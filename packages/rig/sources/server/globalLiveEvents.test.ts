@@ -1,12 +1,18 @@
-import { DatabaseSync } from "node:sqlite";
-
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { GitChangeSnapshot, GlobalEventDelivery, GlobalLiveEvent } from "../protocol/index.js";
+import { inTx } from "../persistence/inTx.js";
+import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import { openSessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
-import { initializeSessionDatabase } from "./initializeSessionDatabase.js";
 import { PersistentGlobalEventQueue } from "./PersistentGlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "./shouldPublishGlobalEvent.js";
+
+const clients: ReturnType<typeof openSessionDatabase>["client"][] = [];
+
+afterEach(() => {
+    for (const client of clients.splice(0)) client.close();
+});
 
 describe("live global events", () => {
     for (const [name, create] of [
@@ -14,9 +20,10 @@ describe("live global events", () => {
         [
             "durable",
             () => {
-                const database = new DatabaseSync(":memory:");
-                initializeSessionDatabase(database);
-                return new PersistentGlobalEventQueue(database);
+                const opened = openSessionDatabase(":memory:");
+                clients.push(opened.client);
+                migrateSessionDatabase(opened.database);
+                return new PersistentGlobalEventQueue(opened.database);
             },
         ],
     ] as const) {
@@ -66,6 +73,32 @@ describe("live global events", () => {
                 type: "project_created",
             }),
         ).toBe(true);
+    });
+
+    it("rolls a durable append back with its caller transaction", () => {
+        const opened = openSessionDatabase(":memory:");
+        clients.push(opened.client);
+        migrateSessionDatabase(opened.database);
+        const queue = new PersistentGlobalEventQueue(opened.database);
+        const before = queue.cursor();
+        const event = {
+            createdAt: 1,
+            data: { project: { id: "p1" } as never },
+            id: "rolled-back-event" as never,
+            projectId: "p1",
+            type: "project_created" as const,
+        };
+
+        expect(() =>
+            inTx(opened.database, (tx) => {
+                expect(queue.append(event, tx)?.event).toBe(event);
+                expect(queue.list()).toHaveLength(1);
+                throw new Error("roll back caller");
+            }),
+        ).toThrow("roll back caller");
+
+        expect(queue.cursor() > before).toBe(true);
+        expect(queue.list()).toEqual([]);
     });
 });
 

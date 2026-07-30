@@ -1,6 +1,9 @@
 export function parseGlobalEventCursor(value: string | null): string | undefined {
-    if (value === null || value.length > 200 || !/^[a-z0-9]+\.[a-z0-9]+$/iu.test(value)) {
+    if (
+        value === null ||
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value)
+    ) {
         return undefined;
     }
-    return value;
+    return value.toLowerCase();
 }

@@ -1,0 +1,40 @@
+import { sql } from "drizzle-orm";
+
+import { durableUserInputs } from "../database/schema.js";
+import type { DurableUserInputCall } from "../../user-input/index.js";
+import type { TX } from "../Transaction.js";
+
+export function durableUserInputSave(tx: TX, call: DurableUserInputCall): void {
+    tx.insert(durableUserInputs)
+        .values({
+            batchId: call.batchId,
+            consumed: call.consumed,
+            createdAtMs: call.createdAt,
+            kind: call.kind,
+            permissionJson: call.permission === undefined ? null : JSON.stringify(call.permission),
+            providerToolCallId: call.providerToolCallId ?? null,
+            requestId: call.request.requestId,
+            requestJson: JSON.stringify(call.request),
+            resolvedAtMs: call.resolvedAt ?? null,
+            responseJson: call.response === undefined ? null : JSON.stringify(call.response),
+            resultJson: call.result === undefined ? null : JSON.stringify(call.result),
+            runId: call.runId,
+            sessionId: call.sessionId,
+            status: call.status,
+            toolArgumentsJson: JSON.stringify(call.toolArguments),
+            toolCallId: call.toolCallId,
+            toolCallIndex: call.toolCallIndex,
+            toolName: call.toolName,
+        })
+        .onConflictDoUpdate({
+            set: {
+                consumed: sql`excluded.consumed`,
+                resolvedAtMs: sql`excluded.resolved_at_ms`,
+                responseJson: sql`excluded.response_json`,
+                resultJson: sql`excluded.result_json`,
+                status: sql`excluded.status`,
+            },
+            target: [durableUserInputs.sessionId, durableUserInputs.requestId],
+        })
+        .run();
+}

@@ -22,6 +22,7 @@ const externalPackages = [
     "@pydantic/monty",
     "@slopus/ghostty-wasm",
     "@vscode/ripgrep",
+    "better-sqlite3",
     "bufferutil",
     "cpu-features",
     "node-liblzma",

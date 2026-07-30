@@ -29,6 +29,7 @@ import { resolveProviderDisabledReasons } from "../executor/resolveProviderDisab
 import { createCodingAssistantAgent } from "../runtime/createCodingAssistantAgent.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { getNodeInspectorUrl, openNodeInspector, registerRigDebugRoot } from "../debug/index.js";
 import type { HappySyncService } from "../happy/index.js";
 
@@ -211,6 +212,7 @@ export async function runLocalProtocolServer(
                 "Rig daemon could not close Happy sync.",
                 { error: errorToMessage(error) },
             );
+            if (isDatabaseFailure(error)) throw error;
         }
         try {
             store?.close();
@@ -451,6 +453,7 @@ export async function runLocalProtocolServer(
                                           modelCatalog,
                                       });
                                   } catch (error) {
+                                      if (isDatabaseFailure(error)) throw error;
                                       daemonLog.record(
                                           "error",
                                           "daemon_happy_reload_failed",
@@ -464,6 +467,7 @@ export async function runLocalProtocolServer(
                                   try {
                                       await previous?.close();
                                   } catch (error) {
+                                      if (isDatabaseFailure(error)) throw error;
                                       daemonLog.record(
                                           "warning",
                                           "daemon_happy_previous_close_failed",

@@ -7,6 +7,7 @@ import type {
     ProjectWorkspace,
     SubagentSummary,
 } from "../protocol/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { InMemorySession } from "../server/InMemorySession.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
@@ -99,7 +100,9 @@ export class HappySessionClient {
         this.#socket = undefined;
         for (const resolve of this.#remoteSessionWaiters) resolve(undefined);
         this.#remoteSessionWaiters.clear();
-        await this.#syncPromise?.catch(() => undefined);
+        await this.#syncPromise?.catch((error: unknown) => {
+            if (isDatabaseFailure(error)) throw error;
+        });
     }
 
     enqueue(messages: readonly HappySessionProtocolMessage[]): void {
@@ -153,7 +156,8 @@ export class HappySessionClient {
                 await this.#fetchIncoming(state);
                 await this.#syncMetadata(state);
                 this.#sendKeepAlive(state.remoteSessionId!);
-            } catch {
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 // Happy is optional. The durable outbox and periodic sync retain work for retry.
             }
         } while (this.#needsAnotherSync && !this.#closed);
@@ -328,7 +332,8 @@ export class HappySessionClient {
             try {
                 this.#session.steer(request);
                 return true;
-            } catch {
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 // The run may have completed between the snapshot and delivery.
             }
         }
@@ -347,7 +352,8 @@ export class HappySessionClient {
                 await this.#session.changePermissionMode({
                     permissionMode: selection.permissionMode,
                 });
-            } catch {
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 // A stale or unknown mobile mode must not prevent message delivery.
             }
         }
@@ -364,7 +370,8 @@ export class HappySessionClient {
             } else if (selection.effort !== undefined) {
                 this.#session.changeEffort({ effort: selection.effort });
             }
-        } catch {
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             // A stale mobile selection must not prevent delivery of the user's message.
         }
     }
@@ -443,6 +450,7 @@ export class HappySessionClient {
                 }
             }
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             response = { error: error instanceof Error ? error.message : "Abort failed" };
         }
         callback(encodePayload(state, response));

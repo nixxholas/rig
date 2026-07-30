@@ -2,13 +2,12 @@ import { createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import tweetnacl from "tweetnacl";
 
+import { createSessionDatabaseFixture } from "../persistence/database/test/createSessionDatabaseFixture.js";
 import type { InMemorySession } from "../server/InMemorySession.js";
-import { initializeSessionDatabase } from "../server/initializeSessionDatabase.js";
 import { decryptHappyPayload, encryptHappyPayload } from "./happyEncryption.js";
 import { HappySessionClient } from "./HappySessionClient.js";
 import { HappySyncRepository } from "./HappySyncRepository.js";
@@ -679,19 +678,7 @@ async function createRepository() {
     const directory = await mkdtemp(join(tmpdir(), "rig-happy-client-"));
     directories.push(directory);
     const databasePath = join(directory, "sessions.sqlite");
-    const database = new DatabaseSync(databasePath);
-    initializeSessionDatabase(database);
-    database
-        .prepare(
-            `
-            INSERT INTO sessions (
-                id, agent_id, cwd, provider_id, model_id, status, models_json, tools_json,
-                created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            `,
-        )
-        .run("session-1", "agent-1", "/workspace", "codex", "model", "idle", "[]", "[]", 1, 1);
-    database.close();
+    createSessionDatabaseFixture(databasePath);
     return { databasePath, repository: new HappySyncRepository(databasePath) };
 }
 

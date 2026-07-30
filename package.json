@@ -8,7 +8,6 @@
         "check": "pnpm --filter @slopus/rig-providers build && pnpm --filter @slopus/rig-execution build && pnpm --filter @slopus/rig-codemode-codex build && pnpm run check:root && pnpm --recursive --filter './packages/**' run check",
         "check:root": "tsc --noEmit -p tsconfig.json",
         "database:inspect": "tsx scripts/database/inspectRigDatabaseCli.ts",
-        "database:verify-upgrade": "tsx scripts/database/verifyRigDatabaseUpgrade.ts",
         "dev": "pnpm --filter @slopus/rig-dev dev",
         "format": "oxfmt --write .",
         "format:check": "oxfmt --check .",
@@ -33,10 +32,16 @@
     },
     "devDependencies": {
         "@types/node": "^24.0.10",
+        "drizzle-orm": "^0.45.2",
         "oxfmt": "^0.57.0",
         "oxlint": "^1.72.0",
         "tsx": "^4.23.0",
         "typescript": "^5.8.3"
     },
-    "packageManager": "pnpm@10.28.1"
+    "packageManager": "pnpm@10.28.1",
+    "pnpm": {
+        "onlyBuiltDependencies": [
+            "better-sqlite3"
+        ]
+    }
 }

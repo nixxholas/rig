@@ -1130,6 +1130,31 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("accepts UUIDv7 cursors emitted by the default in-memory queue", async () => {
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const { client, close } = await startServer({
+            globalEventQueue: store.globalEventQueue,
+            store,
+        });
+        try {
+            await client.createSession({ cwd: "/tmp/rig-default-global-events" });
+            const queued = await client.getGlobalEvents();
+            const cursor = queued.events[0]?.cursor;
+            if (cursor === undefined) throw new Error("Expected a global event cursor.");
+
+            await expect(client.getGlobalEvents(cursor)).resolves.toEqual({
+                events: queued.events.slice(1),
+            });
+            await expect(client.trimGlobalEvents(cursor)).resolves.toEqual({
+                through: cursor,
+                trimmed: 1,
+            });
+        } finally {
+            await close();
+            store.close();
+        }
+    });
+
     it("streams and trims durable events across every session", async () => {
         const store = new PersistentSessionStore({
             databasePath: ":memory:",
@@ -1187,7 +1212,7 @@ describe("createProtocolHttpServer", () => {
                 through: firstCursor,
             });
             await expect(client.getGlobalEvents("missing.0")).rejects.toThrow(
-                "The global event cursor is not available.",
+                "The event cursor must be a UUIDv7 value.",
             );
             const remaining = await client.getGlobalEvents(firstCursor);
             expect(

@@ -5,7 +5,7 @@ import { createGym, type Gym } from "@slopus/rig-gym";
 const running = new Set<Gym>();
 const COMPLETED_MARKER = "DAEMON_STARTUP_ERROR_STATUS_AND_RELOAD_COMPLETE";
 const STARTUP_ERROR =
-    "The session database uses schema version 5, but this Rig version supports up to 4.";
+    "The session database uses schema version 2, but this Rig version supports up to 1.";
 
 afterEach(async () => {
     await Promise.all([...running].map((gym) => gym.dispose()));
@@ -46,7 +46,7 @@ import { DatabaseSync } from "node:sqlite";
 const databasePath = "/home/rig/.rig/sessions.sqlite";
 mkdirSync("/home/rig/.rig", { recursive: true });
 const database = new DatabaseSync(databasePath);
-database.exec("PRAGMA user_version = 5");
+database.exec("PRAGMA application_id = 1380534066; PRAGMA user_version = 2");
 database.close();
 `;
 

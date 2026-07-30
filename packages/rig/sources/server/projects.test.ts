@@ -2,12 +2,16 @@ import { execFile as execFileCallback } from "node:child_process";
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 
 import sharp from "sharp";
+import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 
+import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import { openSessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import { projects, projectWorkspaces } from "../persistence/database/schema.js";
+import { PersistentGlobalEventQueue } from "./PersistentGlobalEventQueue.js";
 import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { ProjectRepository, type ProjectGitRunner } from "./ProjectRepository.js";
 
@@ -19,6 +23,38 @@ afterEach(async () => {
 });
 
 describe("projects", () => {
+    it("rolls back a project mutation when its durable event cannot be stored", () => {
+        const opened = openSessionDatabase(":memory:");
+        migrateSessionDatabase(opened.database);
+        const queue = new PersistentGlobalEventQueue(opened.database);
+        opened.database.run(
+            sql.raw(`
+            CREATE TRIGGER reject_project_event
+            BEFORE INSERT ON durable_global_events
+            BEGIN
+                SELECT RAISE(ABORT, 'event insert failed');
+            END
+        `),
+        );
+        const repository = new ProjectRepository({
+            database: opened.database,
+            homeDirectory: "/home",
+            onEvent: (event) => {
+                queue.append(event);
+            },
+            stateDirectory: "/state",
+        });
+
+        try {
+            expect(() => repository.resolve("/workspace")).toThrow("event insert failed");
+            expect(opened.database.select().from(projects).all()).toEqual([]);
+        } finally {
+            repository.close();
+            queue.deactivate();
+            opened.client.close();
+        }
+    });
+
     it("assigns canonical directories immediately and distinguishes nested projects", async () => {
         const fixture = await createFixture({ durableGlobalEventQueue: true });
         const projectDirectory = join(fixture.root, "project");
@@ -309,14 +345,18 @@ describe("projects", () => {
         });
         fixture.store.close();
 
-        const database = new DatabaseSync(fixture.databasePath);
-        database
-            .prepare("UPDATE project_workspaces SET status = 'initializing' WHERE id = ?")
-            .run(readyFirst.id);
-        database
-            .prepare("UPDATE project_workspaces SET status = 'archiving' WHERE id = ?")
-            .run(readySecond.id);
-        database.close();
+        const opened = openSessionDatabase(fixture.databasePath);
+        opened.database
+            .update(projectWorkspaces)
+            .set({ status: "initializing" })
+            .where(eq(projectWorkspaces.id, readyFirst.id))
+            .run();
+        opened.database
+            .update(projectWorkspaces)
+            .set({ status: "archiving" })
+            .where(eq(projectWorkspaces.id, readySecond.id))
+            .run();
+        opened.client.close();
 
         const recovered = new PersistentSessionStore({
             databasePath: fixture.databasePath,
@@ -637,12 +677,10 @@ describe("projects", () => {
             (workspace) => workspace.status === "ready",
         );
 
-        const database = new DatabaseSync(fixture.databasePath, {
-            enableForeignKeyConstraints: true,
-        });
+        const opened = openSessionDatabase(fixture.databasePath);
         const events: string[] = [];
         const projects = new ProjectRepository({
-            database,
+            database: opened.database,
             homeDirectory: fixture.home,
             onEvent: (event) => events.push(event.type),
             stateDirectory: fixture.state,
@@ -657,7 +695,7 @@ describe("projects", () => {
             expect(events).toEqual(["workspace_updated"]);
         } finally {
             projects.close();
-            database.close();
+            opened.client.close();
         }
     });
 });

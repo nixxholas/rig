@@ -5,9 +5,9 @@ import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
-import type { DatabaseSync } from "node:sqlite";
 
 import { createId } from "@paralleldrive/cuid2";
+import { and, asc, eq, getTableColumns, isNotNull, lte, notExists } from "drizzle-orm";
 import sharp from "sharp";
 
 import {
@@ -23,17 +23,49 @@ import {
     type ReorderRequest,
 } from "../protocol/index.js";
 import { errorToMessage } from "../errorToMessage.js";
-import { generateKeyBetween } from "../utils/fractionalIndexing.js";
+import { projectAvatarCollectGarbage } from "../persistence/project/projectAvatarCollectGarbage.js";
+import { projectCreate } from "../persistence/project/projectCreate.js";
+import { projectClearAvatar } from "../persistence/project/projectClearAvatar.js";
+import { projectSetAvatar } from "../persistence/project/projectSetAvatar.js";
+import { projectAdoptRemoteName } from "../persistence/project/projectAdoptRemoteName.js";
+import { projectApplyGitFacts } from "../persistence/project/projectApplyGitFacts.js";
+import { projectApplyProbe } from "../persistence/project/projectApplyProbe.js";
+import { projectArchive } from "../persistence/project/projectArchive.js";
+import { projectMarkInitializationFailed } from "../persistence/project/projectMarkInitializationFailed.js";
+import { projectMarkInitializationReady } from "../persistence/project/projectMarkInitializationReady.js";
+import { projectRefresh } from "../persistence/project/projectRefresh.js";
+import { projectRename } from "../persistence/project/projectRename.js";
+import { projectReorder } from "../persistence/project/projectReorder.js";
+import { projectRestore } from "../persistence/project/projectRestore.js";
+import { projectRetryInitialization } from "../persistence/project/projectRetryInitialization.js";
+import { workspaceReserve } from "../persistence/project/workspaceReserve.js";
+import { workspaceApplyGitFacts } from "../persistence/project/workspaceApplyGitFacts.js";
+import { workspaceApplyProbe } from "../persistence/project/workspaceApplyProbe.js";
+import { workspaceBeginArchive } from "../persistence/project/workspaceBeginArchive.js";
+import { workspaceCompleteArchive } from "../persistence/project/workspaceCompleteArchive.js";
+import { workspaceInheritTitle } from "../persistence/project/workspaceInheritTitle.js";
+import { workspaceMarkInitializationFailed } from "../persistence/project/workspaceMarkInitializationFailed.js";
+import { workspaceMarkReady } from "../persistence/project/workspaceMarkReady.js";
+import { workspaceRename } from "../persistence/project/workspaceRename.js";
+import { workspaceReorder } from "../persistence/project/workspaceReorder.js";
+import { inTx } from "../persistence/inTx.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import type { TX } from "../persistence/Transaction.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import { runScanGit } from "./runScanGit.js";
 import { type GitRepositoryProbe, probeGitRepository } from "./probeGitRepository.js";
+import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import {
+    projectAvatarAssets,
+    projects,
+    projectWorkspaces,
+} from "../persistence/database/schema.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import {
     folderProjectName,
     parseHostingRepository,
     projectNameKey,
-    projectStorageKey,
     remoteProjectName,
     validateProjectName,
 } from "./projectIdentity.js";
@@ -70,7 +102,7 @@ export interface ProjectAvatarAsset {
 export type ProjectGitRunner = (cwd: string, args: readonly string[]) => Promise<string>;
 
 export interface ProjectRepositoryOptions {
-    database: DatabaseSync;
+    database: SessionDatabase;
     git?: ProjectGitRunner;
     homeDirectory?: string;
     now?: () => number;
@@ -80,14 +112,14 @@ export interface ProjectRepositoryOptions {
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
     stateDirectory?: string;
     taskDrain?: TaskDrain;
-    transaction?: <T>(body: () => T) => T;
+    transaction?: <T>(body: (tx: TX) => T) => T;
 }
 
 export class ProjectRepository {
     readonly #assetRoot: string;
     readonly #avatarLifecycle = new Map<string, Promise<void>>();
     readonly #createEventId = createEventIdFactory();
-    readonly #database: DatabaseSync;
+    readonly #database: SessionDatabase;
     readonly #gitRunner: ProjectGitRunner;
     readonly #injectedGitRunner: ProjectGitRunner | undefined;
     readonly #homeDirectory: string;
@@ -100,7 +132,7 @@ export class ProjectRepository {
         | undefined;
     readonly #stateDirectory: string;
     readonly #taskDrain: TaskDrain | undefined;
-    readonly #transactionRunner: (<T>(body: () => T) => T) | undefined;
+    readonly #transactionRunner: (<T>(body: (tx: TX) => T) => T) | undefined;
     readonly #workspaceLifecycle = new Map<string, Promise<void>>();
     #activeInitializations = 0;
     #closed = false;
@@ -132,19 +164,9 @@ export class ProjectRepository {
                 project.initializationAttempt < 3 &&
                 existsSync(project.path)
             ) {
-                this.#transaction(() => {
-                    this.#database
-                        .prepare(
-                            `
-                            UPDATE projects
-                            SET initialization_status = 'initializing',
-                                initialization_error = NULL,
-                                version = version + 1, updated_at_ms = ?
-                            WHERE id = ? AND initialization_status = 'failed'
-                            `,
-                        )
-                        .run(this.#now(), project.id);
-                    this.#publishedProject(project.id);
+                this.#mutate((tx) => {
+                    const changed = projectRetryInitialization(tx, project.id, this.#now());
+                    if (changed > 0) this.#publishedProject(project.id);
                 });
                 this.scheduleInitialization(project.id);
             }
@@ -154,8 +176,10 @@ export class ProjectRepository {
     resolve(cwd: string, assertedWorkspaceId?: string): ResolvedProjectOwnership {
         const path = normalizeProjectCwd(cwd);
         const workspaceRow = this.#database
-            .prepare("SELECT * FROM project_workspaces WHERE path = ?")
-            .get(path);
+            .select()
+            .from(projectWorkspaces)
+            .where(eq(projectWorkspaces.path, path))
+            .get();
         if (workspaceRow !== undefined) {
             const workspace = readWorkspace(workspaceRow);
             if (workspace.status !== "ready") {
@@ -174,7 +198,11 @@ export class ProjectRepository {
             throw new Error("The workspace ID does not match the session directory.");
         }
 
-        const existing = this.#database.prepare("SELECT * FROM projects WHERE path = ?").get(path);
+        const existing = this.#database
+            .select()
+            .from(projects)
+            .where(eq(projects.path, path))
+            .get();
         if (existing !== undefined) {
             /*
              * A project is only a folder, so working in it again is what brings it back: starting a
@@ -186,36 +214,10 @@ export class ProjectRepository {
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
         const baseName = kind === "home" ? "Home" : folderProjectName(path);
-        const name = this.#reserveProjectName(baseName);
-        const storageKey = this.#reserveProjectStorageKey(
-            kind === "home" ? "home" : projectStorageKey(folderProjectName(path)),
-        );
         const now = this.#now();
         const id = createId();
-        const project = this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    INSERT INTO projects (
-                        id, path, storage_key, kind, name, name_key, name_source, order_key,
-                        initialization_status, initialization_attempt, version,
-                        created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 1, ?, ?)
-                    `,
-                )
-                .run(
-                    id,
-                    path,
-                    storageKey,
-                    kind,
-                    name,
-                    projectNameKey(name),
-                    "folder",
-                    this.#newFirstProjectOrderKey(),
-                    kind === "home" ? "ready" : "initializing",
-                    now,
-                    now,
-                );
+        const project = this.#mutate((tx) => {
+            projectCreate(tx, { baseName, id, kind, now, path });
             const created = this.getProject(id);
             if (created === undefined) throw new Error("The project could not be created.");
             this.#publishProject("project_created", created);
@@ -231,13 +233,15 @@ export class ProjectRepository {
     }
 
     getProject(projectId: string): Project | undefined {
-        const row = this.#database.prepare("SELECT * FROM projects WHERE id = ?").get(projectId);
+        const row = this.#database.select().from(projects).where(eq(projects.id, projectId)).get();
         return row === undefined ? undefined : this.#readProject(row);
     }
 
     listProjects(): readonly Project[] {
         return this.#database
-            .prepare("SELECT * FROM projects ORDER BY order_key ASC, id ASC")
+            .select()
+            .from(projects)
+            .orderBy(asc(projects.orderKey), asc(projects.id))
             .all()
             .map((row) => this.#readProject(row));
     }
@@ -246,28 +250,35 @@ export class ProjectRepository {
         const rows =
             projectId === undefined
                 ? this.#database
-                      .prepare(
-                          `
-                          SELECT project_workspaces.*
-                          FROM project_workspaces
-                          JOIN projects ON projects.id = project_workspaces.project_id
-                          ORDER BY projects.order_key ASC, project_workspaces.order_key ASC,
-                              project_workspaces.id ASC
-                          `,
+                      .select({ ...getTableColumns(projectWorkspaces) })
+                      .from(projectWorkspaces)
+                      .innerJoin(projects, eq(projects.id, projectWorkspaces.projectId))
+                      .orderBy(
+                          asc(projects.orderKey),
+                          asc(projectWorkspaces.orderKey),
+                          asc(projectWorkspaces.id),
                       )
                       .all()
                 : this.#database
-                      .prepare(
-                          "SELECT * FROM project_workspaces WHERE project_id = ? ORDER BY order_key ASC, id ASC",
-                      )
-                      .all(projectId);
+                      .select()
+                      .from(projectWorkspaces)
+                      .where(eq(projectWorkspaces.projectId, projectId))
+                      .orderBy(asc(projectWorkspaces.orderKey), asc(projectWorkspaces.id))
+                      .all();
         return rows.map(readWorkspace);
     }
 
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
         const row = this.#database
-            .prepare("SELECT * FROM project_workspaces WHERE id = ? AND project_id = ?")
-            .get(workspaceId, projectId);
+            .select()
+            .from(projectWorkspaces)
+            .where(
+                and(
+                    eq(projectWorkspaces.id, workspaceId),
+                    eq(projectWorkspaces.projectId, projectId),
+                ),
+            )
+            .get();
         return row === undefined ? undefined : readWorkspace(row);
     }
 
@@ -333,52 +344,20 @@ export class ProjectRepository {
         target: { projectId: string; workspaceId?: string },
         facts: GitRepositoryFacts,
     ): void {
-        const bindings = [
-            facts.branch ?? null,
-            facts.head ?? null,
-            facts.upstream ?? null,
-            facts.ahead,
-            facts.behind,
-            facts.detached ? 1 : 0,
-        ];
-        this.#transaction(() => {
-            const isWorkspace = target.workspaceId !== undefined;
-            const result = this.#database
-                .prepare(
-                    isWorkspace
-                        ? `
-                        UPDATE project_workspaces
-                        SET git_branch = ?, git_head = ?, git_upstream = ?,
-                            git_ahead = ?, git_behind = ?, git_detached = ?,
-                            version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND (
-                            git_branch IS NOT ? OR git_head IS NOT ? OR git_upstream IS NOT ?
-                            OR git_ahead IS NOT ? OR git_behind IS NOT ? OR git_detached IS NOT ?
-                        )
-                        `
-                        : `
-                        UPDATE projects
-                        SET git_branch = ?, git_head = ?, git_upstream = ?,
-                            git_ahead = ?, git_behind = ?, git_detached = ?,
-                            version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND removed_at_ms IS NULL AND (
-                            git_branch IS NOT ? OR git_head IS NOT ? OR git_upstream IS NOT ?
-                            OR git_ahead IS NOT ? OR git_behind IS NOT ? OR git_detached IS NOT ?
-                        )
-                        `,
-                )
-                .run(
-                    ...bindings,
-                    this.#now(),
-                    isWorkspace ? target.workspaceId! : target.projectId,
-                    ...bindings,
-                );
-            if (result.changes === 0) return;
-            if (isWorkspace) {
-                this.#publishedWorkspace(target.projectId, target.workspaceId!);
-            } else {
-                this.#publishedProject(target.projectId);
-            }
+        this.#mutate((tx) => {
+            const changed =
+                target.workspaceId === undefined
+                    ? projectApplyGitFacts(tx, target.projectId, facts, this.#now())
+                    : workspaceApplyGitFacts(
+                          tx,
+                          target.projectId,
+                          target.workspaceId,
+                          facts,
+                          this.#now(),
+                      );
+            if (changed === 0) return;
+            if (target.workspaceId === undefined) this.#publishedProject(target.projectId);
+            else this.#publishedWorkspace(target.projectId, target.workspaceId);
         });
     }
 
@@ -389,25 +368,14 @@ export class ProjectRepository {
             path: project.path,
         });
         if (this.#closed) return;
-        this.#transaction(() => {
-            const result = this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET presence = ?, worktree_support = ?, worktree_support_reason = ?,
-                        git_branch = ?, git_head = ?, git_upstream = ?,
-                        git_ahead = ?, git_behind = ?, git_detached = ?,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND archived_at_ms IS NULL AND (
-                        presence IS NOT ? OR worktree_support IS NOT ?
-                        OR worktree_support_reason IS NOT ? OR git_branch IS NOT ?
-                        OR git_head IS NOT ? OR git_upstream IS NOT ?
-                        OR git_ahead IS NOT ? OR git_behind IS NOT ? OR git_detached IS NOT ?
-                    )
-                    `,
-                )
-                .run(...gitFactBindings(probe), this.#now(), project.id, ...gitFactBindings(probe));
-            if (result.changes > 0) this.#publishedProject(project.id);
+        this.#mutate((tx) => {
+            const changed = projectApplyProbe(
+                tx,
+                project.id,
+                projectGitFactValues(probe),
+                this.#now(),
+            );
+            if (changed > 0) this.#publishedProject(project.id);
         });
     }
 
@@ -417,30 +385,15 @@ export class ProjectRepository {
             path: workspace.path,
         });
         if (this.#closed) return;
-        this.#transaction(() => {
-            const result = this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET presence = ?, git_branch = ?, git_head = ?, git_upstream = ?,
-                        git_ahead = ?, git_behind = ?, git_detached = ?,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND (
-                        presence IS NOT ? OR git_branch IS NOT ? OR git_head IS NOT ?
-                        OR git_upstream IS NOT ? OR git_ahead IS NOT ?
-                        OR git_behind IS NOT ? OR git_detached IS NOT ?
-                    )
-                    `,
-                )
-                .run(
-                    ...workspaceGitFactBindings(probe),
-                    this.#now(),
-                    workspace.id,
-                    ...workspaceGitFactBindings(probe),
-                );
-            if (result.changes > 0) {
-                this.#publishedWorkspace(workspace.projectId, workspace.id);
-            }
+        this.#mutate((tx) => {
+            const changed = workspaceApplyProbe(
+                tx,
+                workspace.projectId,
+                workspace.id,
+                workspaceGitFactValues(probe),
+                this.#now(),
+            );
+            if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
         });
     }
 
@@ -455,18 +408,15 @@ export class ProjectRepository {
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new Error("The project changed before it could be renamed.");
         }
-        const name = this.#reserveProjectName(validateProjectName(requestedName), projectId);
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET name = ?, name_key = ?, name_source = 'user',
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ?
-                    `,
-                )
-                .run(name, projectNameKey(name), this.#now(), projectId);
+        const name = validateProjectName(requestedName);
+        return this.#mutate((tx) => {
+            const changed = projectRename(tx, projectId, name, this.#now(), expectedVersion);
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The project changed before it could be renamed.");
+                }
+                return this.getProject(projectId);
+            }
             return this.#publishedProject(projectId, mutationId);
         });
     }
@@ -483,16 +433,14 @@ export class ProjectRepository {
         }
         const orderKey = orderKeyAfter(this.listProjects(), projectId, request.afterId);
         if (orderKey === current.orderKey) return current;
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET order_key = ?, version = version + 1, updated_at_ms = ?
-                    WHERE id = ?
-                    `,
-                )
-                .run(orderKey, this.#now(), projectId);
+        return this.#mutate((tx) => {
+            const changed = projectReorder(tx, projectId, orderKey, this.#now(), expectedVersion);
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The project changed before it could be reordered.");
+                }
+                return this.getProject(projectId);
+            }
             return this.#publishedProject(projectId);
         });
     }
@@ -503,19 +451,9 @@ export class ProjectRepository {
         if (project.kind === "home") {
             throw new Error("The Home project does not need initialization.");
         }
-        const updated = this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET initialization_status = 'initializing', initialization_error = NULL,
-                        initialization_attempt = initialization_attempt + 1,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ?
-                    `,
-                )
-                .run(this.#now(), projectId);
-            return this.#publishedProject(projectId);
+        const updated = this.#mutate((tx) => {
+            const changed = projectRefresh(tx, projectId, this.#now());
+            return changed === 0 ? this.getProject(projectId) : this.#publishedProject(projectId);
         });
         this.scheduleInitialization(projectId);
         return updated;
@@ -526,20 +464,14 @@ export class ProjectRepository {
         const project = this.getProject(projectId);
         if (project === undefined) return;
         if (!existsSync(project.path)) {
-            this.#transaction(() => {
-                this.#database
-                    .prepare(
-                        `
-                        UPDATE projects
-                        SET initialization_status = 'failed',
-                            initialization_error = 'Project directory is unavailable.',
-                            initialization_attempt = initialization_attempt + 1,
-                            version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND initialization_status = 'initializing'
-                        `,
-                    )
-                    .run(this.#now(), projectId);
-                this.#publishedProject(projectId);
+            this.#mutate((tx) => {
+                const changed = projectMarkInitializationFailed(
+                    tx,
+                    projectId,
+                    "Project directory is unavailable.",
+                    this.#now(),
+                );
+                if (changed > 0) this.#publishedProject(projectId);
             });
             return;
         }
@@ -568,62 +500,29 @@ export class ProjectRepository {
             if (this.#closed) return project;
             const now = this.#now();
             try {
-                return this.#transaction(() => {
-                    const latest = this.#database
-                        .prepare(
-                            "SELECT version, avatar_hash, avatar_source FROM projects WHERE id = ?",
-                        )
-                        .get(projectId);
-                    if (latest === undefined) return undefined;
-                    if (
-                        expectedVersion !== undefined &&
-                        readNumber(latest, "version") !== expectedVersion
-                    ) {
-                        throw new Error("The project changed before the avatar could be saved.");
-                    }
-                    if (
-                        source !== "user" &&
-                        readOptionalString(latest, "avatar_source") === "user"
-                    ) {
-                        return this.getProject(projectId);
-                    }
-                    const previousHash = readOptionalString(latest, "avatar_hash");
-                    this.#database
-                        .prepare(
-                            `
-                            INSERT INTO project_avatar_assets (
-                                hash, media_type, byte_length, width, height, created_at_ms,
-                                dereferenced_at_ms
-                            ) VALUES (?, 'image/webp', ?, ?, ?, ?, NULL)
-                            ON CONFLICT(hash) DO UPDATE SET dereferenced_at_ms = NULL
-                            `,
-                        )
-                        .run(
-                            normalized.hash,
-                            normalized.bytes.byteLength,
-                            normalized.width,
-                            normalized.height,
-                            now,
-                        );
-                    this.#database
-                        .prepare(
-                            `
-                            UPDATE projects
-                            SET avatar_hash = ?, avatar_source = ?,
-                                version = version + 1, updated_at_ms = ?
-                            WHERE id = ?
-                            `,
-                        )
-                        .run(normalized.hash, source, now, projectId);
-                    if (previousHash !== undefined && previousHash !== normalized.hash) {
-                        this.#dereferenceAvatar(previousHash, now);
-                    }
+                return this.#mutate((tx) => {
+                    const result = projectSetAvatar(tx, {
+                        asset: {
+                            byteLength: normalized.bytes.byteLength,
+                            hash: normalized.hash,
+                            height: normalized.height,
+                            width: normalized.width,
+                        },
+                        ...(expectedVersion === undefined ? {} : { expectedVersion }),
+                        now,
+                        projectId,
+                        source,
+                    });
+                    if (result === "missing") return undefined;
+                    if (result === "preserved") return this.getProject(projectId);
                     return this.#publishedProject(projectId);
                 });
             } catch (error) {
                 const asset = this.#database
-                    .prepare("SELECT 1 FROM project_avatar_assets WHERE hash = ?")
-                    .get(normalized.hash);
+                    .select({ hash: projectAvatarAssets.hash })
+                    .from(projectAvatarAssets)
+                    .where(eq(projectAvatarAssets.hash, normalized.hash))
+                    .get();
                 if (asset === undefined) {
                     await rm(this.#avatarPath(normalized.hash), { force: true });
                 }
@@ -635,30 +534,10 @@ export class ProjectRepository {
     clearAvatar(projectId: string): Project | undefined {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
-        const previousHash = project.avatar?.hash;
         const now = this.#now();
-        const updated = this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET avatar_hash = NULL, avatar_source = NULL,
-                        initialization_status = CASE
-                            WHEN kind = 'regular' THEN 'initializing'
-                            ELSE initialization_status
-                        END,
-                        initialization_error = CASE
-                            WHEN kind = 'regular' THEN NULL
-                            ELSE initialization_error
-                        END,
-                        version = version + 1,
-                        updated_at_ms = ?
-                    WHERE id = ?
-                    `,
-                )
-                .run(now, projectId);
-            if (previousHash !== undefined) this.#dereferenceAvatar(previousHash, now);
-            return this.#publishedProject(projectId);
+        const updated = this.#mutate((tx) => {
+            const changed = projectClearAvatar(tx, projectId, now);
+            return changed === 0 ? this.getProject(projectId) : this.#publishedProject(projectId);
         });
         if (updated?.kind === "regular") this.scheduleInitialization(projectId);
         return updated;
@@ -667,8 +546,10 @@ export class ProjectRepository {
     async avatarAsset(hash: string): Promise<ProjectAvatarAsset | undefined> {
         if (!/^[a-f0-9]{64}$/u.test(hash)) return undefined;
         const row = this.#database
-            .prepare("SELECT media_type FROM project_avatar_assets WHERE hash = ?")
-            .get(hash);
+            .select({ mediaType: projectAvatarAssets.mediaType })
+            .from(projectAvatarAssets)
+            .where(eq(projectAvatarAssets.hash, hash))
+            .get();
         if (row === undefined) return undefined;
         try {
             return {
@@ -702,10 +583,15 @@ export class ProjectRepository {
             throw new Error("The workspace base reference is invalid.");
         }
         const retry = this.#database
-            .prepare(
-                "SELECT * FROM project_workspaces WHERE project_id = ? AND client_request_id = ?",
+            .select()
+            .from(projectWorkspaces)
+            .where(
+                and(
+                    eq(projectWorkspaces.projectId, projectId),
+                    eq(projectWorkspaces.clientRequestId, clientRequestId),
+                ),
             )
-            .get(projectId, clientRequestId);
+            .get();
         if (retry !== undefined) {
             const workspace = readWorkspace(retry);
             if (
@@ -743,74 +629,35 @@ export class ProjectRepository {
             throw new Error("The workspace base reference did not resolve to a commit.");
         }
 
-        const reservation = this.#transaction(() => {
-            const postflightRetry = this.#database
-                .prepare(
-                    "SELECT * FROM project_workspaces WHERE project_id = ? AND client_request_id = ?",
-                )
-                .get(projectId, clientRequestId);
-            if (postflightRetry !== undefined) {
-                const workspace = readWorkspace(postflightRetry);
-                if (
-                    projectNameKey(workspace.name) !== projectNameKey(name) ||
-                    workspace.baseRef !== baseRef
-                ) {
-                    throw new Error(
-                        "The workspace request ID was already used with other settings.",
-                    );
-                }
-                return { created: false, workspace };
-            }
-
-            const visibleName = this.#reserveWorkspaceName(projectId, name);
-            const storageKey = this.#reserveWorkspaceStorageKey(projectId, projectStorageKey(name));
-            const path = join(this.#stateDirectory, "workspaces", project.storageKey, storageKey);
-            const now = this.#now();
-            const workspaceId = createId();
-            this.#database
-                .prepare(
-                    `
-                    INSERT INTO project_workspaces (
-                        id, project_id, path, storage_key, name, name_key, order_key, kind, status,
-                        base_ref, base_commit, git_common_dir, client_request_id, version,
-                        created_at_ms, updated_at_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 'git_worktree', 'initializing', ?, ?, ?, ?, 1, ?, ?)
-                    `,
-                )
-                .run(
-                    workspaceId,
-                    projectId,
-                    path,
-                    storageKey,
-                    visibleName,
-                    projectNameKey(visibleName),
-                    this.#newFirstWorkspaceOrderKey(projectId),
-                    baseRef,
-                    // The ref text can move or disappear later, so the immutable OID it resolved to
-                    // is what anchors this workspace's comparison base.
-                    commit.toLocaleLowerCase(),
-                    gitCommonDir,
-                    clientRequestId,
-                    now,
-                    now,
-                );
-            const workspace = this.getWorkspace(projectId, workspaceId);
+        const reservation = this.#mutate((tx) => {
+            const result = workspaceReserve(tx, {
+                baseCommit: commit.toLocaleLowerCase(),
+                baseRef,
+                clientRequestId,
+                gitCommonDir,
+                id: createId(),
+                name,
+                now: this.#now(),
+                pathForStorageKey: (storageKey) =>
+                    join(this.#stateDirectory, "workspaces", project.storageKey, storageKey),
+                projectId,
+            });
+            const workspace = this.getWorkspace(projectId, result.workspaceId);
             if (workspace === undefined) throw new Error("The workspace could not be reserved.");
-            this.#publishWorkspace("workspace_created", workspace, clientRequestId);
-            return { created: true, workspace };
+            if (result.created) {
+                this.#publishWorkspace("workspace_created", workspace, clientRequestId);
+            }
+            return { created: result.created, workspace };
         });
+        const { workspace } = reservation;
         if (reservation.created) {
             setImmediate(() => {
                 this.#runBackgroundTask(() =>
-                    this.#materializeWorkspace(
-                        reservation.workspace,
-                        project.path,
-                        commit.toLocaleLowerCase(),
-                    ),
+                    this.#materializeWorkspace(workspace, project.path, commit.toLocaleLowerCase()),
                 );
             });
         }
-        return reservation.workspace;
+        return workspace;
     }
 
     renameWorkspace(
@@ -825,21 +672,22 @@ export class ProjectRepository {
         if (expectedVersion !== undefined && expectedVersion !== current.version) {
             throw new Error("The workspace changed before it could be renamed.");
         }
-        const name = this.#reserveWorkspaceName(
-            projectId,
-            validateProjectName(requestedName),
-            workspaceId,
-        );
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET name = ?, name_key = ?, version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND project_id = ?
-                    `,
-                )
-                .run(name, projectNameKey(name), this.#now(), workspaceId, projectId);
+        const name = validateProjectName(requestedName);
+        return this.#mutate((tx) => {
+            const changed = workspaceRename(
+                tx,
+                projectId,
+                workspaceId,
+                name,
+                this.#now(),
+                expectedVersion,
+            );
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The workspace changed before it could be renamed.");
+                }
+                return this.getWorkspace(projectId, workspaceId);
+            }
             return this.#publishedWorkspace(projectId, workspaceId, mutationId);
         });
     }
@@ -851,17 +699,9 @@ export class ProjectRepository {
     ): ProjectWorkspace | undefined {
         const current = this.getWorkspace(projectId, workspaceId);
         if (current === undefined || current.title !== undefined) return current;
-        return this.#transaction(() => {
-            const result = this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET title = ?, version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND project_id = ? AND title IS NULL
-                    `,
-                )
-                .run(title, this.#now(), workspaceId, projectId);
-            return result.changes === 0
+        return this.#mutate((tx) => {
+            const changed = workspaceInheritTitle(tx, projectId, workspaceId, title, this.#now());
+            return changed === 0
                 ? this.getWorkspace(projectId, workspaceId)
                 : this.#publishedWorkspace(projectId, workspaceId);
         });
@@ -884,16 +724,21 @@ export class ProjectRepository {
             request.afterId,
         );
         if (orderKey === current.orderKey) return current;
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET order_key = ?, version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND project_id = ?
-                    `,
-                )
-                .run(orderKey, this.#now(), workspaceId, projectId);
+        return this.#mutate((tx) => {
+            const changed = workspaceReorder(
+                tx,
+                projectId,
+                workspaceId,
+                orderKey,
+                this.#now(),
+                expectedVersion,
+            );
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The workspace changed before it could be reordered.");
+                }
+                return this.getWorkspace(projectId, workspaceId);
+            }
             return this.#publishedWorkspace(projectId, workspaceId);
         });
     }
@@ -906,16 +751,14 @@ export class ProjectRepository {
             throw new Error("The project changed before it could be archived.");
         }
         const now = this.#now();
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET archived_at_ms = ?, version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND archived_at_ms IS NULL
-                    `,
-                )
-                .run(now, now, projectId);
+        return this.#mutate((tx) => {
+            const changed = projectArchive(tx, projectId, now, expectedVersion);
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The project changed before it could be archived.");
+                }
+                return this.getProject(projectId);
+            }
             return this.#publishedProject(projectId);
         });
     }
@@ -923,17 +766,9 @@ export class ProjectRepository {
     unarchiveProject(projectId: string): Project | undefined {
         const project = this.getProject(projectId);
         if (project === undefined || project.archivedAt === undefined) return project;
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE projects
-                    SET archived_at_ms = NULL, version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND archived_at_ms IS NOT NULL
-                    `,
-                )
-                .run(this.#now(), projectId);
-            return this.#publishedProject(projectId);
+        return this.#mutate((tx) => {
+            const changed = projectRestore(tx, projectId, this.#now());
+            return changed === 0 ? this.getProject(projectId) : this.#publishedProject(projectId);
         });
     }
 
@@ -950,17 +785,20 @@ export class ProjectRepository {
         if (expectedVersion !== undefined && expectedVersion !== workspace.version) {
             throw new Error("The workspace changed before it could be archived.");
         }
-        return this.#transaction(() => {
-            this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET status = 'archiving', error = NULL,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND project_id = ? AND status != 'archived'
-                    `,
-                )
-                .run(this.#now(), workspaceId, projectId);
+        return this.#mutate((tx) => {
+            const changed = workspaceBeginArchive(
+                tx,
+                projectId,
+                workspaceId,
+                this.#now(),
+                expectedVersion,
+            );
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The workspace changed before it could be archived.");
+                }
+                return this.getWorkspace(projectId, workspaceId);
+            }
             return this.#publishedWorkspace(projectId, workspaceId);
         });
     }
@@ -982,6 +820,7 @@ export class ProjectRepository {
                 if (this.#closed) return;
                 this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 if (!this.#closed) {
                     this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
                     this.#finishWorkspaceArchive(projectId, workspaceId, "archived");
@@ -989,74 +828,6 @@ export class ProjectRepository {
             }
         });
         return this.getWorkspace(projectId, workspaceId);
-    }
-
-    #reserveProjectName(base: string, excludeId?: string): string {
-        return reserveUnique(base, (key) => {
-            const row =
-                excludeId === undefined
-                    ? this.#database.prepare("SELECT 1 FROM projects WHERE name_key = ?").get(key)
-                    : this.#database
-                          .prepare("SELECT 1 FROM projects WHERE name_key = ? AND id != ?")
-                          .get(key, excludeId);
-            return row !== undefined;
-        });
-    }
-
-    #newFirstProjectOrderKey(): string {
-        const row = this.#database
-            .prepare("SELECT order_key FROM projects ORDER BY order_key ASC LIMIT 1")
-            .get();
-        return generateKeyBetween(null, row === undefined ? null : readString(row, "order_key"));
-    }
-
-    #newFirstWorkspaceOrderKey(projectId: string): string {
-        const row = this.#database
-            .prepare(
-                "SELECT order_key FROM project_workspaces WHERE project_id = ? ORDER BY order_key ASC LIMIT 1",
-            )
-            .get(projectId);
-        return generateKeyBetween(null, row === undefined ? null : readString(row, "order_key"));
-    }
-
-    #reserveProjectStorageKey(base: string): string {
-        return reserveUniqueKey(base, (candidate) => {
-            return (
-                this.#database
-                    .prepare("SELECT 1 FROM projects WHERE storage_key = ? COLLATE NOCASE")
-                    .get(candidate) !== undefined
-            );
-        });
-    }
-
-    #reserveWorkspaceName(projectId: string, base: string, excludeId?: string): string {
-        return reserveUnique(base, (key) => {
-            const row =
-                excludeId === undefined
-                    ? this.#database
-                          .prepare(
-                              "SELECT 1 FROM project_workspaces WHERE project_id = ? AND name_key = ?",
-                          )
-                          .get(projectId, key)
-                    : this.#database
-                          .prepare(
-                              "SELECT 1 FROM project_workspaces WHERE project_id = ? AND name_key = ? AND id != ?",
-                          )
-                          .get(projectId, key, excludeId);
-            return row !== undefined;
-        });
-    }
-
-    #reserveWorkspaceStorageKey(projectId: string, base: string): string {
-        return reserveUniqueKey(base, (candidate) => {
-            return (
-                this.#database
-                    .prepare(
-                        "SELECT 1 FROM project_workspaces WHERE project_id = ? AND storage_key = ? COLLATE NOCASE",
-                    )
-                    .get(projectId, candidate) !== undefined
-            );
-        });
     }
 
     async #initialize(projectId: string): Promise<void> {
@@ -1092,19 +863,14 @@ export class ProjectRepository {
             const current = this.getProject(projectId);
             if (current === undefined) return;
             if (detectedName !== undefined && current.nameSource === "folder") {
-                this.#transaction(() => {
-                    const name = this.#reserveProjectName(detectedName, projectId);
-                    const result = this.#database
-                        .prepare(
-                            `
-                            UPDATE projects
-                            SET name = ?, name_key = ?, name_source = 'git_remote',
-                                version = version + 1, updated_at_ms = ?
-                            WHERE id = ? AND name_source = 'folder'
-                            `,
-                        )
-                        .run(name, projectNameKey(name), this.#now(), projectId);
-                    if (result.changes > 0) this.#publishedProject(projectId);
+                this.#mutate((tx) => {
+                    const changed = projectAdoptRemoteName(
+                        tx,
+                        projectId,
+                        detectedName,
+                        this.#now(),
+                    );
+                    if (changed > 0) this.#publishedProject(projectId);
                 });
             }
 
@@ -1129,39 +895,21 @@ export class ProjectRepository {
             }
             if (this.#closed) return;
 
-            this.#transaction(() => {
-                const result = this.#database
-                    .prepare(
-                        `
-                        UPDATE projects
-                        SET initialization_status = 'ready', initialization_error = NULL,
-                            initialization_attempt = initialization_attempt + 1,
-                            version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND initialization_status = 'initializing'
-                        `,
-                    )
-                    .run(this.#now(), projectId);
-                if (result.changes > 0) this.#publishedProject(projectId);
+            this.#mutate((tx) => {
+                const changed = projectMarkInitializationReady(tx, projectId, this.#now());
+                if (changed > 0) this.#publishedProject(projectId);
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (this.#closed) return;
-            this.#transaction(() => {
-                const result = this.#database
-                    .prepare(
-                        `
-                        UPDATE projects
-                        SET initialization_status = 'failed', initialization_error = ?,
-                            initialization_attempt = initialization_attempt + 1,
-                            version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND initialization_status = 'initializing'
-                        `,
-                    )
-                    .run(
-                        errorToMessage(error).slice(0, PROJECT_ERROR_LENGTH),
-                        this.#now(),
-                        projectId,
-                    );
-                if (result.changes > 0) this.#publishedProject(projectId);
+            this.#mutate((tx) => {
+                const changed = projectMarkInitializationFailed(
+                    tx,
+                    projectId,
+                    errorToMessage(error).slice(0, PROJECT_ERROR_LENGTH),
+                    this.#now(),
+                );
+                if (changed > 0) this.#publishedProject(projectId);
             });
         }
     }
@@ -1180,7 +928,12 @@ export class ProjectRepository {
                     this.#initializing.delete(projectId);
                     this.#drainInitializations();
                 })
-                .catch(() => undefined);
+                .catch((error: unknown) => {
+                    if (!isDatabaseFailure(error)) return;
+                    setImmediate(() => {
+                        throw error;
+                    });
+                });
         }
     }
 
@@ -1366,41 +1119,30 @@ export class ProjectRepository {
         if (this.#closed) return;
         const cutoff = this.#now() - AVATAR_GARBAGE_DELAY_MS;
         const rows = this.#database
-            .prepare(
-                `
-                SELECT hash
-                FROM project_avatar_assets
-                WHERE dereferenced_at_ms IS NOT NULL
-                    AND dereferenced_at_ms <= ?
-                    AND NOT EXISTS (
-                        SELECT 1 FROM projects WHERE projects.avatar_hash = project_avatar_assets.hash
-                    )
-                ORDER BY dereferenced_at_ms ASC, hash ASC
-                LIMIT 100
-                `,
+            .select({ hash: projectAvatarAssets.hash })
+            .from(projectAvatarAssets)
+            .where(
+                and(
+                    isNotNull(projectAvatarAssets.dereferencedAtMs),
+                    lte(projectAvatarAssets.dereferencedAtMs, cutoff),
+                    notExists(
+                        this.#database
+                            .select({ id: projects.id })
+                            .from(projects)
+                            .where(eq(projects.avatarHash, projectAvatarAssets.hash)),
+                    ),
+                ),
             )
-            .all(cutoff);
+            .orderBy(asc(projectAvatarAssets.dereferencedAtMs), asc(projectAvatarAssets.hash))
+            .limit(100)
+            .all();
         for (const row of rows) {
             if (this.#closed) return;
-            const hash = readString(row, "hash");
+            const { hash } = row;
             await this.#withAvatarLifecycleLock(hash, async () => {
                 if (this.#closed) return;
-                const removed = this.#transaction(() =>
-                    this.#database
-                        .prepare(
-                            `
-                            DELETE FROM project_avatar_assets
-                            WHERE hash = ?
-                                AND dereferenced_at_ms IS NOT NULL
-                                AND dereferenced_at_ms <= ?
-                                AND NOT EXISTS (
-                                    SELECT 1 FROM projects WHERE projects.avatar_hash = project_avatar_assets.hash
-                                )
-                            `,
-                        )
-                        .run(hash, cutoff),
-                );
-                if (removed.changes > 0) {
+                const removed = this.#mutate((tx) => projectAvatarCollectGarbage(tx, hash, cutoff));
+                if (removed) {
                     await rm(this.#avatarPath(hash), { force: true });
                 }
             });
@@ -1465,6 +1207,7 @@ export class ProjectRepository {
                 commit.toLocaleLowerCase(),
             );
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (!this.#closed) {
                 this.#markWorkspaceInitializationFailed(workspace, errorToMessage(error));
             }
@@ -1597,95 +1340,39 @@ export class ProjectRepository {
                 await this.#git(workspace.path, ["fetch", "origin"]);
             }
             if (this.#closed) return;
-            this.#transaction(() => {
-                const result = this.#database
-                    .prepare(
-                        `
-                        UPDATE project_workspaces
-                        SET status = 'ready', error = NULL, version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND status = 'initializing'
-                        `,
-                    )
-                    .run(this.#now(), workspace.id);
-                if (result.changes > 0) {
-                    this.#publishedWorkspace(workspace.projectId, workspace.id);
-                }
-            });
+            this.#markWorkspaceReady(workspace);
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (this.#closed) return;
-            this.#transaction(() => {
-                const result = this.#database
-                    .prepare(
-                        `
-                        UPDATE project_workspaces
-                        SET status = 'failed', error = ?, version = version + 1, updated_at_ms = ?
-                        WHERE id = ? AND status = 'initializing'
-                        `,
-                    )
-                    .run(
-                        errorToMessage(error).slice(0, PROJECT_ERROR_LENGTH),
-                        this.#now(),
-                        workspace.id,
-                    );
-                if (result.changes > 0) {
-                    this.#publishedWorkspace(workspace.projectId, workspace.id);
-                }
-            });
+            this.#markWorkspaceInitializationFailed(workspace, errorToMessage(error));
         }
     }
 
     #markWorkspaceReady(workspace: ProjectWorkspace): void {
-        this.#transaction(() => {
-            const result = this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET status = 'ready', error = NULL,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND status = 'initializing'
-                    `,
-                )
-                .run(this.#now(), workspace.id);
-            if (result.changes > 0) {
-                this.#publishedWorkspace(workspace.projectId, workspace.id);
-            }
+        this.#mutate((tx) => {
+            const changed = workspaceMarkReady(tx, workspace.projectId, workspace.id, this.#now());
+            if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
         });
     }
 
     #markWorkspaceInitializationFailed(workspace: ProjectWorkspace, error: string): void {
-        this.#transaction(() => {
-            const result = this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET status = 'failed', error = ?,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND status = 'initializing'
-                    `,
-                )
-                .run(error.slice(0, PROJECT_ERROR_LENGTH), this.#now(), workspace.id);
-            if (result.changes > 0) {
-                this.#publishedWorkspace(workspace.projectId, workspace.id);
-            }
+        this.#mutate((tx) => {
+            const changed = workspaceMarkInitializationFailed(
+                tx,
+                workspace.projectId,
+                workspace.id,
+                error.slice(0, PROJECT_ERROR_LENGTH),
+                this.#now(),
+            );
+            if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);
         });
     }
 
-    #finishWorkspaceArchive(projectId: string, workspaceId: string, status: "archived"): void {
+    #finishWorkspaceArchive(projectId: string, workspaceId: string, _status: "archived"): void {
         const now = this.#now();
-        this.#transaction(() => {
-            const result = this.#database
-                .prepare(
-                    `
-                    UPDATE project_workspaces
-                    SET status = ?, error = ?, archived_at_ms = ?,
-                        version = version + 1, updated_at_ms = ?
-                    WHERE id = ? AND project_id = ? AND status = 'archiving'
-                    `,
-                )
-                .run(status, null, now, now, workspaceId, projectId);
-            if (result.changes > 0) {
-                this.#publishedWorkspace(projectId, workspaceId);
-            }
+        this.#mutate((tx) => {
+            const changed = workspaceCompleteArchive(tx, projectId, workspaceId, now);
+            if (changed > 0) this.#publishedWorkspace(projectId, workspaceId);
         });
     }
 
@@ -1705,26 +1392,22 @@ export class ProjectRepository {
         return result.stdout.trim();
     }
 
-    #transaction<T>(body: () => T): T {
-        if (this.#database.isTransaction) return body();
+    #mutate<T>(body: (tx: TX) => T): T {
         if (this.#transactionRunner !== undefined) {
             return this.#transactionRunner(body);
         }
-        this.#database.exec("BEGIN IMMEDIATE");
-        try {
-            const result = body();
-            this.#database.exec("COMMIT");
-            return result;
-        } catch (error) {
-            this.#database.exec("ROLLBACK");
-            throw error;
-        }
+        return inTx(this.#database, body);
     }
 
     #runBackgroundTask(task: () => Promise<void>): void {
         if (this.#closed) return;
         const promise = this.#taskDrain?.run(task) ?? task();
-        void promise.catch(() => undefined);
+        void promise.catch((error: unknown) => {
+            if (!isDatabaseFailure(error)) return;
+            setImmediate(() => {
+                throw error;
+            });
+        });
     }
 
     async #withAvatarLifecycleLock<T>(hash: string, task: () => Promise<T>): Promise<T> {
@@ -1825,33 +1508,27 @@ export class ProjectRepository {
         return join(this.#assetRoot, hash.slice(0, 2), `${hash}.webp`);
     }
 
-    #dereferenceAvatar(hash: string, now: number): void {
-        const references = this.#database
-            .prepare("SELECT COUNT(*) AS count FROM projects WHERE avatar_hash = ?")
-            .get(hash);
-        if (readNumber(references ?? {}, "count") === 0) {
-            this.#database
-                .prepare("UPDATE project_avatar_assets SET dereferenced_at_ms = ? WHERE hash = ?")
-                .run(now, hash);
-        }
-    }
-
-    #readProject(row: Record<string, unknown>): Project {
+    #readProject(row: ProjectRow): Project {
         const project = readProject(row);
-        const avatarHash = readOptionalString(row, "avatar_hash");
-        const avatarSource = readOptionalString(row, "avatar_source");
+        const avatarHash = row.avatarHash ?? undefined;
+        const avatarSource = row.avatarSource ?? undefined;
         if (avatarHash === undefined || avatarSource === undefined) return project;
         const asset = this.#database
-            .prepare("SELECT width, height FROM project_avatar_assets WHERE hash = ?")
-            .get(avatarHash);
+            .select({
+                height: projectAvatarAssets.height,
+                width: projectAvatarAssets.width,
+            })
+            .from(projectAvatarAssets)
+            .where(eq(projectAvatarAssets.hash, avatarHash))
+            .get();
         if (asset === undefined) return project;
         project.avatar = {
             hash: avatarHash,
-            height: readNumber(asset, "height"),
+            height: asset.height,
             mediaType: "image/webp",
             source: avatarSource as ProjectAvatar["source"],
             url: `/project-assets/${avatarHash}`,
-            width: readNumber(asset, "width"),
+            width: asset.width,
         };
         return project;
     }
@@ -1902,61 +1579,75 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string> {
     return result.stdout.trim();
 }
 
-/**
- * Column bindings for a project probe, in the order used by both the SET clause and the
- * change-detection WHERE clause so an unchanged probe updates no row and publishes no event.
- */
-function gitFactBindings(probe: GitRepositoryProbe): (string | number | null)[] {
-    return [
-        probe.presence,
-        probe.worktreeSupport,
-        probe.worktreeSupportReason ?? null,
-        ...workspaceGitFactBindings(probe).slice(1),
-    ];
+type ProjectRow = typeof projects.$inferSelect;
+type WorkspaceRow = typeof projectWorkspaces.$inferSelect;
+type GitFactValues = Pick<
+    ProjectRow,
+    "gitAhead" | "gitBehind" | "gitBranch" | "gitDetached" | "gitHead" | "gitUpstream"
+>;
+type WorkspaceGitFactValues = GitFactValues & Pick<WorkspaceRow, "presence">;
+type ProjectGitFactValues = WorkspaceGitFactValues &
+    Pick<ProjectRow, "worktreeSupport" | "worktreeSupportReason">;
+
+function gitFactValues(facts: GitRepositoryFacts): GitFactValues {
+    return {
+        gitAhead: facts.ahead,
+        gitBehind: facts.behind,
+        gitBranch: facts.branch ?? null,
+        gitDetached: facts.detached,
+        gitHead: facts.head ?? null,
+        gitUpstream: facts.upstream ?? null,
+    };
 }
 
-function workspaceGitFactBindings(probe: GitRepositoryProbe): (string | number | null)[] {
-    return [
-        probe.presence,
-        probe.facts?.branch ?? null,
-        probe.facts?.head ?? null,
-        probe.facts?.upstream ?? null,
-        probe.facts?.ahead ?? 0,
-        probe.facts?.behind ?? 0,
-        probe.facts?.detached === true ? 1 : 0,
-    ];
+function workspaceGitFactValues(probe: GitRepositoryProbe): WorkspaceGitFactValues {
+    return {
+        ...gitFactValues(
+            probe.facts ?? {
+                ahead: 0,
+                behind: 0,
+                detached: false,
+            },
+        ),
+        presence: probe.presence,
+    };
 }
 
-function readProject(row: Record<string, unknown>): Project {
-    const archivedAt = readOptionalNumber(row, "archived_at_ms");
-    const avatarHash = readOptionalString(row, "avatar_hash");
-    const initializationError = readOptionalString(row, "initialization_error");
-    const worktreeSupportReason = readOptionalString(row, "worktree_support_reason");
+function projectGitFactValues(probe: GitRepositoryProbe): ProjectGitFactValues {
+    return {
+        ...workspaceGitFactValues(probe),
+        worktreeSupport: probe.worktreeSupport,
+        worktreeSupportReason: probe.worktreeSupportReason ?? null,
+    };
+}
+
+function readProject(row: ProjectRow): Project {
     const git = readGitFacts(row);
     const project: Project = {
-        ...(archivedAt === undefined ? {} : { archivedAt }),
-        createdAt: readNumber(row, "created_at_ms"),
+        ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
+        createdAt: row.createdAtMs,
         ...(git === undefined ? {} : { git }),
-        id: readString(row, "id"),
-        initializationAttempt: readNumber(row, "initialization_attempt"),
-        initializationStatus: readString(
-            row,
-            "initialization_status",
-        ) as Project["initializationStatus"],
-        kind: readString(row, "kind") as Project["kind"],
-        name: readString(row, "name"),
-        nameSource: readString(row, "name_source") as Project["nameSource"],
-        orderKey: readString(row, "order_key"),
-        path: readString(row, "path"),
-        presence: readString(row, "presence") as Project["presence"],
-        storageKey: readString(row, "storage_key"),
-        updatedAt: readNumber(row, "updated_at_ms"),
-        version: readNumber(row, "version"),
-        worktreeSupport: readString(row, "worktree_support") as Project["worktreeSupport"],
-        ...(worktreeSupportReason === undefined ? {} : { worktreeSupportReason }),
+        id: row.id,
+        initializationAttempt: row.initializationAttempt,
+        initializationStatus: row.initializationStatus as Project["initializationStatus"],
+        kind: row.kind as Project["kind"],
+        name: row.name,
+        nameSource: row.nameSource as Project["nameSource"],
+        orderKey: row.orderKey,
+        path: row.path,
+        presence: row.presence as Project["presence"],
+        storageKey: row.storageKey,
+        updatedAt: row.updatedAtMs,
+        version: row.version,
+        worktreeSupport: row.worktreeSupport as Project["worktreeSupport"],
+        ...(row.worktreeSupportReason === null
+            ? {}
+            : { worktreeSupportReason: row.worktreeSupportReason }),
     };
-    if (project.kind === "home" && avatarHash === undefined) project.avatarBuiltin = "home";
-    if (initializationError !== undefined) project.initializationError = initializationError;
+    if (project.kind === "home" && row.avatarHash === null) project.avatarBuiltin = "home";
+    if (row.initializationError !== null) {
+        project.initializationError = row.initializationError;
+    }
     return project;
 }
 
@@ -1964,15 +1655,15 @@ function readProject(row: Record<string, unknown>): Project {
  * Git facts are absent until a probe has observed the repository. A row that has never resolved a
  * HEAD and is not on a branch reports no facts at all rather than a misleading detached zero state.
  */
-function readGitFacts(row: Record<string, unknown>): GitRepositoryFacts | undefined {
-    const branch = readOptionalString(row, "git_branch");
-    const head = readOptionalString(row, "git_head");
-    const upstream = readOptionalString(row, "git_upstream");
-    const detached = readNumber(row, "git_detached") !== 0;
+function readGitFacts(row: ProjectRow | WorkspaceRow): GitRepositoryFacts | undefined {
+    const branch = row.gitBranch ?? undefined;
+    const head = row.gitHead ?? undefined;
+    const upstream = row.gitUpstream ?? undefined;
+    const detached = row.gitDetached;
     if (branch === undefined && head === undefined && !detached) return undefined;
     return {
-        ahead: readNumber(row, "git_ahead"),
-        behind: readNumber(row, "git_behind"),
+        ahead: row.gitAhead,
+        behind: row.gitBehind,
         ...(branch === undefined ? {} : { branch }),
         detached,
         ...(head === undefined ? {} : { head }),
@@ -1980,52 +1671,29 @@ function readGitFacts(row: Record<string, unknown>): GitRepositoryFacts | undefi
     };
 }
 
-function readWorkspace(row: Record<string, unknown>): ProjectWorkspace {
-    const archivedAt = readOptionalNumber(row, "archived_at_ms");
-    const baseCommit = readOptionalString(row, "base_commit");
-    const baseRef = readOptionalString(row, "base_ref");
-    const error = readOptionalString(row, "error");
+function readWorkspace(row: WorkspaceRow): ProjectWorkspace {
     const git = readGitFacts(row);
-    const title = readOptionalString(row, "title");
     return {
-        ...(archivedAt === undefined ? {} : { archivedAt }),
-        ...(baseCommit === undefined ? {} : { baseCommit }),
-        ...(baseRef === undefined ? {} : { baseRef }),
-        createdAt: readNumber(row, "created_at_ms"),
-        ...(error === undefined ? {} : { error }),
+        ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
+        ...(row.baseCommit === null ? {} : { baseCommit: row.baseCommit }),
+        ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
+        createdAt: row.createdAtMs,
+        ...(row.error === null ? {} : { error: row.error }),
         ...(git === undefined ? {} : { git }),
-        gitCommonDir: readString(row, "git_common_dir"),
-        id: readString(row, "id"),
-        kind: readString(row, "kind") as ProjectWorkspace["kind"],
-        name: readString(row, "name"),
-        orderKey: readString(row, "order_key"),
-        path: readString(row, "path"),
-        presence: readString(row, "presence") as ProjectWorkspace["presence"],
-        projectId: readString(row, "project_id"),
-        status: readString(row, "status") as ProjectWorkspace["status"],
-        storageKey: readString(row, "storage_key"),
-        ...(title === undefined ? {} : { title }),
-        updatedAt: readNumber(row, "updated_at_ms"),
-        version: readNumber(row, "version"),
+        gitCommonDir: row.gitCommonDir,
+        id: row.id,
+        kind: row.kind as ProjectWorkspace["kind"],
+        name: row.name,
+        orderKey: row.orderKey,
+        path: row.path,
+        presence: row.presence as ProjectWorkspace["presence"],
+        projectId: row.projectId,
+        status: row.status as ProjectWorkspace["status"],
+        storageKey: row.storageKey,
+        ...(row.title === null ? {} : { title: row.title }),
+        updatedAt: row.updatedAtMs,
+        version: row.version,
     };
-}
-
-function reserveUnique(base: string, exists: (key: string) => boolean): string {
-    let suffix = 1;
-    for (;;) {
-        const candidate = suffix === 1 ? base : `${base} (${String(suffix)})`;
-        if (!exists(projectNameKey(candidate))) return candidate;
-        suffix += 1;
-    }
-}
-
-function reserveUniqueKey(base: string, exists: (key: string) => boolean): string {
-    let suffix = 1;
-    for (;;) {
-        const candidate = suffix === 1 ? base : `${base}-${String(suffix)}`;
-        if (!exists(candidate)) return candidate;
-        suffix += 1;
-    }
 }
 
 function avatarCandidateScore(name: string, depth: number): number {
@@ -2092,32 +1760,4 @@ function normalizeFuturePath(path: string): string {
         existingAncestor = parent;
     }
     return resolve(normalizeProjectCwd(existingAncestor), ...missingSegments);
-}
-
-function readString(row: Record<string, unknown>, key: string): string {
-    const value = row[key];
-    if (typeof value !== "string") throw new Error(`Expected text SQLite column '${key}'.`);
-    return value;
-}
-
-function readOptionalString(row: Record<string, unknown>, key: string): string | undefined {
-    const value = row[key];
-    if (value === null || value === undefined) return undefined;
-    if (typeof value !== "string") throw new Error(`Expected text SQLite column '${key}'.`);
-    return value;
-}
-
-function readNumber(row: Record<string, unknown>, key: string): number {
-    const value = row[key];
-    if (typeof value === "number") return value;
-    if (typeof value === "bigint") return Number(value);
-    throw new Error(`Expected numeric SQLite column '${key}'.`);
-}
-
-function readOptionalNumber(row: Record<string, unknown>, key: string): number | undefined {
-    const value = row[key];
-    if (value === null || value === undefined) return undefined;
-    if (typeof value === "number") return value;
-    if (typeof value === "bigint") return Number(value);
-    throw new Error(`Expected numeric SQLite column '${key}'.`);
 }
