@@ -150,7 +150,14 @@ export class CodexSession extends BaseSession {
     async compact(options: SessionCompactionOptions = {}): Promise<SessionCompaction> {
         const { signal } = options;
         if (signal?.aborted) return { status: "cancelled", context: this.context };
-        const model = options.model ?? this.activeModel ?? this.model;
+        const requestedModel = options.model ?? this.activeModel ?? this.model;
+        const model =
+            requestedModel === undefined
+                ? undefined
+                : resolveCodexSessionModelId(
+                      requestedModel,
+                      this.credential.name === "bedrock-bearer-token",
+                  );
         if (model === undefined) throw new Error("A model is required for Codex compaction.");
         this.activeModel = model;
         const effort = resolveCodexReasoningEffort(model, this.activeEffort);

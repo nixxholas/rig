@@ -102,7 +102,8 @@ export class GrokSession extends BaseSession {
             return { status: "cancelled", context };
         }
 
-        const model = options.model ?? this.activeModel ?? this.model;
+        const requestedModel = options.model ?? this.activeModel ?? this.model;
+        const model = requestedModel === undefined ? undefined : resolveGrokModelId(requestedModel);
         if (model === undefined) {
             return {
                 status: "failed",

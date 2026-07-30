@@ -230,6 +230,47 @@ describe("Codex SSE goldens", () => {
         }
     });
 
+    it("normalizes the selected model when compaction is the first session operation", async () => {
+        let captured: Record<string, any> | undefined;
+        const server = createServer(async (request, response) => {
+            captured = JSON.parse(await readBody(request));
+            completeCompactionSse(response);
+        });
+        server.listen(0, "127.0.0.1");
+        await new Promise<void>((resolve, reject) => {
+            server.once("listening", resolve);
+            server.once("error", reject);
+        });
+        const address = server.address();
+        if (typeof address !== "object" || address === null) throw new Error("Missing port.");
+
+        try {
+            const session = await new CodexProvider({
+                credential: {
+                    name: "codex-api-key",
+                    credential: { apiKey: "test" },
+                } as never,
+                endpoint: `http://127.0.0.1:${address.port}/v1`,
+                transport: "sse",
+            }).session("<SESSION_ID>", {
+                instructions: "instructions",
+            });
+
+            const result = await session.compact({
+                context: {
+                    messages: [{ role: "user", content: "Conversation to compact." }],
+                },
+                model: "openai/gpt-5.6-sol",
+            });
+
+            expect(result.status).toBe("completed");
+            expect(captured?.model).toBe("gpt-5.6-sol");
+            session.destroy();
+        } finally {
+            server.close();
+        }
+    });
+
     it("fits huge tool output and retries a server context-window rejection", async () => {
         const captured: Record<string, any>[] = [];
         const server = createServer(async (request, response) => {
