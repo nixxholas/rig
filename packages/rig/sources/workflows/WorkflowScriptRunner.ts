@@ -1,5 +1,6 @@
 import type { AgentContext } from "../agent/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type {
     WorkflowAgentCacheEntry,
     WorkflowCheckpoint,
@@ -173,6 +174,7 @@ export class WorkflowScriptRunner {
                 try {
                     return await this.#runAgent(request.prompt, request, callIndices[index]!);
                 } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     this.#onLog(
                         `${request.label ?? "Workflow agent"} failed: ${errorToMessage(error)}`,
                     );
@@ -211,6 +213,7 @@ export class WorkflowScriptRunner {
                     }
                     return result;
                 } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     this.#onLog(`Pipeline item ${index + 1} failed: ${errorToMessage(error)}`);
                     return null;
                 }

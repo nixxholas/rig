@@ -21,6 +21,7 @@ import { toLocalDate } from "../executor/toLocalDate.js";
 import type { PermissionMode, PermissionReviewAgent } from "../permissions/index.js";
 import { isPermissionReduction } from "../permissions/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
 
 export type AgentStatus = "idle" | "running" | "aborted";
@@ -711,6 +712,7 @@ export class Agent {
                 try {
                     await this.#handleEvent(event, options.eventOptions);
                 } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     this.#console.error?.(
                         `[agent:${this.id}] compaction lifecycle observer failed`,
                         error,

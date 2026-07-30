@@ -64,6 +64,21 @@ describe("WorkflowScriptRunner", () => {
         expect(logs).toContain("Phase: Inspect");
     });
 
+    it("propagates database failures from parallel agents", async () => {
+        const databaseError = createDatabaseError();
+        const runner = new WorkflowScriptRunner({
+            agentContext: createContext(vi.fn(async () => Promise.reject(databaseError))),
+            args: null,
+            onAgentCall: vi.fn(),
+            onLog: vi.fn(),
+            resumeAgentCalls: [],
+            signal: new AbortController().signal,
+            workflowRunId: "parallel_database_failure",
+        });
+
+        await expect(runner.run('parallel(["Inspect the database."])')).rejects.toBe(databaseError);
+    });
+
     it("reuses the unchanged prefix from a previous run", async () => {
         const spawn = vi.fn();
         const cached = {
@@ -211,6 +226,23 @@ describe("WorkflowScriptRunner", () => {
         await expect(resumed.run(script)).resolves.toMatchObject({ output: initial.output });
         expect(resumedSpawn).not.toHaveBeenCalled();
     });
+
+    it("propagates database failures from pipeline agents", async () => {
+        const databaseError = createDatabaseError();
+        const runner = new WorkflowScriptRunner({
+            agentContext: createContext(vi.fn(async () => Promise.reject(databaseError))),
+            args: null,
+            onAgentCall: vi.fn(),
+            onLog: vi.fn(),
+            resumeAgentCalls: [],
+            signal: new AbortController().signal,
+            workflowRunId: "pipeline_database_failure",
+        });
+
+        await expect(
+            runner.run('pipeline(["alpha"], [{"prompt": "Inspect the database."}])'),
+        ).rejects.toBe(databaseError);
+    });
 });
 
 function createContext(spawn: ReturnType<typeof vi.fn>): AgentContext {
@@ -236,4 +268,10 @@ function completedResult(request: SpawnSubagentRequest, output: string) {
         status: "completed" as const,
         taskName: request.taskName ?? "child",
     };
+}
+
+function createDatabaseError(): Error {
+    const error = new Error("The database is full.");
+    error.name = "SqliteError";
+    return error;
 }

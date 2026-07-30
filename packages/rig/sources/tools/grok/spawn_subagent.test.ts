@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
+import { grokKillCommandOrSubagentTool } from "./kill_command_or_subagent.js";
 import { grokSpawnSubagentTool } from "./spawn_subagent.js";
 import { grokFollowupSubagentTool } from "./followup_subagent.js";
 
@@ -102,6 +103,28 @@ describe("grokSpawnSubagentTool", () => {
                 {},
             ),
         ).rejects.toThrow("ran out of tokens before returning a response");
+    });
+
+    it("propagates a database failure while stopping a subagent", async () => {
+        const harness = createJustBashToolHarness();
+        const databaseError = new Error("database write failed") as Error & { code: string };
+        databaseError.code = "SQLITE_IOERR";
+        harness.context.subagents = {
+            canSpawn: true,
+            depth: 0,
+            followUp: vi.fn(),
+            interrupt: vi.fn(() => {
+                throw databaseError;
+            }),
+            list: () => [],
+            maxDepth: 3,
+            spawn: vi.fn(),
+            wait: async () => ({ agents: [], timedOut: false }),
+        };
+
+        await expect(
+            grokKillCommandOrSubagentTool.execute({ task_id: "agent-1" }, harness.context, {}),
+        ).rejects.toBe(databaseError);
     });
 
     it("follows up a retained subagent at the requested effort", () => {

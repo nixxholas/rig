@@ -67,6 +67,7 @@ import type { DebugLog } from "../debug/index.js";
 import type { DurableSkillDefinition } from "../external-skills/types.js";
 import { resolveModelImageProfile } from "./resolveModelImageProfile.js";
 import { toExecutorTool } from "./tools/toExecutorTool.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 
 export interface RunAgentLoopOptions {
     /** Allows a dedicated permission reviewer to use the provider's hidden reviewer model. */
@@ -382,6 +383,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             }
             assistantMessage = outcome;
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (options.signal?.aborted) {
                 await appendSteering(options, transcript, contextTranscript, providerMessages, now);
                 return {
@@ -941,7 +943,8 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
 async function ignoreOptionalFailure(callback: () => void | Promise<void>): Promise<void> {
     try {
         await callback();
-    } catch {
+    } catch (error) {
+        if (isDatabaseFailure(error)) throw error;
         // Optional telemetry and live observers cannot invalidate durable tool execution.
     }
 }
@@ -1448,6 +1451,7 @@ async function prepareToolPermission(
         });
         return { action, kind: "review", review };
     } catch (error) {
+        if (isDatabaseFailure(error)) throw error;
         const message = errorToMessage(error);
         return {
             kind: "error",
@@ -1637,6 +1641,7 @@ async function executeToolCall(
             toolCall.providerToolCallId,
         );
     } catch (error) {
+        if (isDatabaseFailure(error)) throw error;
         await options.onError?.(error);
         if (options.signal?.aborted) {
             return createErrorToolResultBlock(

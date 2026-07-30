@@ -2,6 +2,7 @@
 import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../../agent/types.js";
+import { isDatabaseFailure } from "../../persistence/isDatabaseFailure.js";
 
 export const grokKillCommandOrSubagentTool = defineTool({
     name: "kill_command_or_subagent",
@@ -35,7 +36,8 @@ export const grokKillCommandOrSubagentTool = defineTool({
                 outcome: "killed",
                 message: `Subagent ${stopped.description} was stopped.`,
             };
-        } catch {
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             return { task_id, outcome: "not_found", message: `Task ${task_id} was not found.` };
         }
     },

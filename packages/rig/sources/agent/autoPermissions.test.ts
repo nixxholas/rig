@@ -146,6 +146,34 @@ describe("Auto permissions", () => {
         expect(harness.context.permissions.mode).toBe("auto");
     });
 
+    it("propagates a database failure while recording a permission review", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const observedModes: string[] = [];
+        const tool = permissionProbeTool(observedModes);
+        const provider = autoReviewProvider("allow");
+        const databaseError = new Error("database write failed") as Error & { code: string };
+        databaseError.code = "SQLITE_IOERR";
+        const agent = new Agent({
+            context: harness.context,
+            createPermissionReviewAgent: () => reviewAgentFor(provider),
+            modelId: provider.models[0]?.id ?? "",
+            printToConsole: false,
+            provider,
+            tools: [tool],
+        });
+
+        await expect(
+            agent.send("Run the deployment check.", {
+                onEvent(event) {
+                    if (event.type === "permission_review") throw databaseError;
+                },
+            }),
+        ).rejects.toBe(databaseError);
+
+        expect(observedModes).toEqual([]);
+    });
+
     it("routes the permission decision through a side agent isolated from the agent", async () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");

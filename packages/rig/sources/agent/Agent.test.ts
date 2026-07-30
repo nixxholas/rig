@@ -221,6 +221,204 @@ describe("Agent", () => {
         });
     });
 
+    it("propagates a database failure from a tool lifecycle observer", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const databaseError = new Error("database write failed") as Error & { code: string };
+        databaseError.code = "SQLITE_IOERR";
+        let requestCount = 0;
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                requestCount += 1;
+                return streamFor({
+                    role: "assistant",
+                    content:
+                        requestCount === 1
+                            ? [
+                                  {
+                                      type: "toolCall",
+                                      id: "database-observer-tool",
+                                      name: "side-effect",
+                                      arguments: {},
+                                  },
+                              ]
+                            : [{ type: "text", text: "should not continue" }],
+                    api: "test",
+                    provider: "codex",
+                    model: model.id,
+                    usage: zeroUsage(),
+                    stopReason: requestCount === 1 ? "toolUse" : "stop",
+                    timestamp: requestCount,
+                });
+            },
+        });
+        const execute = vi.fn(() => ({ changed: true }));
+        const tool = defineTool({
+            name: "side-effect",
+            label: "Side effect",
+            description: "Changes observable state.",
+            arguments: Type.Object({}),
+            returnType: Type.Object({ changed: Type.Boolean() }),
+            shouldReviewInAutoMode: () => false,
+            execute,
+            toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+            toUI: () => "State changed.",
+            locks: [],
+        });
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: createJustBashToolHarness().context,
+            tools: [tool],
+            printToConsole: false,
+            onEvent(event) {
+                if (event.type === "tool_execution_end") throw databaseError;
+            },
+        });
+
+        await expect(agent.send("Run the side effect.")).rejects.toBe(databaseError);
+
+        expect(execute).toHaveBeenCalledOnce();
+        expect(requestCount).toBe(1);
+    });
+
+    it("propagates a database failure from a provider stream observer", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const databaseError = new Error("database write failed") as Error & { code: string };
+        databaseError.code = "SQLITE_BUSY";
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamFor(stoppedMessage(model.id));
+            },
+        });
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: createJustBashToolHarness().context,
+            printToConsole: false,
+            onEvent(event) {
+                if (event.type === "start") throw databaseError;
+            },
+        });
+
+        await expect(agent.send("Answer once.")).rejects.toBe(databaseError);
+    });
+
+    it("propagates a database failure from tool execution", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const databaseError = new Error("database write failed") as Error & { code: string };
+        databaseError.code = "SQLITE_FULL";
+        let requestCount = 0;
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                requestCount += 1;
+                return streamFor({
+                    role: "assistant",
+                    content:
+                        requestCount === 1
+                            ? [
+                                  {
+                                      type: "toolCall",
+                                      id: "database-failure-tool",
+                                      name: "persist",
+                                      arguments: {},
+                                  },
+                              ]
+                            : [{ type: "text", text: "should not continue" }],
+                    api: "test",
+                    provider: "codex",
+                    model: model.id,
+                    usage: zeroUsage(),
+                    stopReason: requestCount === 1 ? "toolUse" : "stop",
+                    timestamp: requestCount,
+                });
+            },
+        });
+        const tool = defineTool({
+            name: "persist",
+            label: "Persist",
+            description: "Persists state.",
+            arguments: Type.Object({}),
+            returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
+            execute() {
+                throw databaseError;
+            },
+            toLLM: () => [],
+            toUI: () => "unused",
+            locks: [],
+        });
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: createJustBashToolHarness().context,
+            tools: [tool],
+            printToConsole: false,
+        });
+
+        await expect(agent.send("Persist state.")).rejects.toBe(databaseError);
+
+        expect(requestCount).toBe(1);
+    });
+
+    it("propagates a database failure from a compaction lifecycle observer", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const databaseError = new Error("database write failed") as Error & { code: string };
+        databaseError.code = "SQLITE_FULL";
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            compact: async ({ context }) => completedCompaction(context, "summary"),
+            stream() {
+                return streamFor(stoppedMessage(model.id));
+            },
+        });
+        const consoleError = vi.fn();
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: createJustBashToolHarness().context,
+            console: { error: consoleError, log: vi.fn() },
+            messages: [
+                { role: "user", id: "user-1", blocks: [{ type: "text", text: "work" }] },
+                { role: "agent", id: "agent-1", blocks: [{ type: "text", text: "done" }] },
+            ],
+            printToConsole: false,
+            onEvent(event) {
+                if (event.type === "context_compaction_started") throw databaseError;
+            },
+        });
+
+        await expect(agent.compact()).rejects.toBe(databaseError);
+
+        expect(consoleError).not.toHaveBeenCalled();
+    });
+
     it("stops background shells before reducing permissions in-process", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
