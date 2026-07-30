@@ -31,10 +31,9 @@ export interface ScanGitRepositoryOptions {
 }
 
 /**
- * Produces one Git-status snapshot: what differs from HEAD, in files and in lines.
+ * Produces one branch-change snapshot: what differs from the merge base with origin/main.
  *
- * Staged, unstaged, and untracked work all count toward the same totals. Committed work is reflected
- * by branch divergence instead of remaining in the changed-file list after `git status` is clean.
+ * Committed, staged, unstaged, and untracked work all count toward the same totals.
  */
 export async function scanGitRepository(
     options: ScanGitRepositoryOptions,

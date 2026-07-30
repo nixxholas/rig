@@ -3,6 +3,8 @@ import type { GitTrackedEntity } from "./GitStateTracker.js";
 
 /**
  * Describes a project or workspace to the tracker.
+ *
+ * Projects and workspaces use the same branch comparison contract.
  */
 export function resolveGitTrackedEntity(
     project: Project,

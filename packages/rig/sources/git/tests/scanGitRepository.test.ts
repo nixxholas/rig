@@ -18,7 +18,30 @@ afterEach(async () => {
 });
 
 describe("scanGitRepository", () => {
-    it("counts staged, unstaged, and untracked work in one total", async () => {
+    it("uses origin/main rather than local main as the branch baseline", async () => {
+        const repository = await createRepository();
+        await write(repository, "base.txt", "base\n");
+        await commitAll(repository);
+        const originMain = await git(repository, ["rev-parse", "HEAD"]);
+        await git(repository, ["update-ref", "refs/remotes/origin/main", originMain]);
+        await git(repository, ["checkout", "--quiet", "-b", "feature"]);
+        await write(repository, "feature.txt", "feature\n");
+        await commitAll(repository);
+        const featureHead = await git(repository, ["rev-parse", "HEAD"]);
+
+        await git(repository, ["checkout", "--quiet", "main"]);
+        await write(repository, "local-main-only.txt", "local\n");
+        await commitAll(repository);
+        await git(repository, ["checkout", "--quiet", "feature"]);
+        expect(await git(repository, ["rev-parse", "HEAD"])).toBe(featureHead);
+
+        const snapshot = await scanGitRepository({ path: repository });
+
+        expect(snapshot.base).toBe(originMain);
+        expect(snapshot.files.map((change) => change.path)).toEqual(["feature.txt"]);
+    });
+
+    it("counts committed, staged, unstaged, and untracked work in one total", async () => {
         const repository = await createRepository();
         await write(repository, "base.txt", "1\n");
         await commitAll(repository);
@@ -34,9 +57,13 @@ describe("scanGitRepository", () => {
 
         expect(snapshot.comparison).toBe("ready");
         expect(snapshot.countsExact).toBe(true);
-        expect(snapshot.changedFiles).toBe(3);
-        expect(snapshot.insertions).toBe(1 + 3 + 2);
+        expect(snapshot.changedFiles).toBe(4);
+        expect(snapshot.insertions).toBe(2 + 1 + 3 + 2);
         expect(snapshot.deletions).toBe(0);
+        expect(file(snapshot, "committed.txt")).toMatchObject({
+            staged: false,
+            unstaged: false,
+        });
         expect(file(snapshot, "staged.txt")).toMatchObject({ staged: true });
         expect(file(snapshot, "untracked.txt")).toMatchObject({
             insertions: 2,
@@ -44,7 +71,7 @@ describe("scanGitRepository", () => {
         });
     });
 
-    it("removes committed work from Git status even in a managed workspace", async () => {
+    it("keeps committed work in the totals", async () => {
         const repository = await createRepository();
         await write(repository, "a.txt", "1\n");
         await commitAll(repository);
@@ -55,12 +82,11 @@ describe("scanGitRepository", () => {
         const committed = await scanGitRepository({ path: repository });
 
         expect(dirty.insertions).toBe(2);
-        expect(committed.insertions).toBe(0);
-        expect(committed.changedFiles).toBe(0);
-        expect(committed.files).toEqual([]);
+        expect(committed.insertions).toBe(2);
+        expect(committed.changedFiles).toBe(1);
     });
 
-    it("measures a plain project against HEAD so committing clears the total", async () => {
+    it("keeps committed branch work visible for a plain project", async () => {
         const repository = await createRepository();
         await write(repository, "a.txt", "1\n");
         await commitAll(repository);
@@ -71,8 +97,45 @@ describe("scanGitRepository", () => {
         const clean = await scanGitRepository({ path: repository });
 
         expect(dirty.insertions).toBe(1);
-        expect(clean.changedFiles).toBe(0);
-        expect(clean.insertions).toBe(0);
+        expect(clean.changedFiles).toBe(1);
+        expect(clean.insertions).toBe(1);
+    });
+
+    it("reports an unavailable comparison when origin/main is missing", async () => {
+        const repository = await createRepository();
+        await write(repository, "a.txt", "1\n");
+        await commitAll(repository);
+        await git(repository, ["update-ref", "-d", "refs/remotes/origin/main"]);
+        await write(repository, "a.txt", "1\n2\n");
+
+        const snapshot = await scanGitRepository({ path: repository });
+
+        expect(snapshot.comparison).toBe("unavailable");
+        expect(snapshot.error).toContain("remote main branch is unavailable");
+        expect(snapshot.countsExact).toBe(false);
+        expect(snapshot.changedFiles).toBe(0);
+    });
+
+    it("reports an unavailable comparison when history no longer connects", async () => {
+        const repository = await createRepository();
+        await write(repository, "a.txt", "1\n");
+        await commitAll(repository);
+        const unrelated = await createRepository();
+        await write(unrelated, "b.txt", "2\n");
+        await commitAll(unrelated);
+        const foreign = await git(unrelated, ["rev-parse", "HEAD"]);
+        await git(repository, [
+            "fetch",
+            "--quiet",
+            unrelated,
+            "main:refs/remotes/foreign/main",
+        ]);
+        await git(repository, ["update-ref", "refs/remotes/origin/main", foreign]);
+
+        const snapshot = await scanGitRepository({ path: repository });
+
+        expect(snapshot.comparison).toBe("unavailable");
+        expect(snapshot.error).toContain("no longer shares history with origin/main");
     });
 
     it("treats every file as added in a repository without commits", async () => {
@@ -237,6 +300,12 @@ async function write(repository: string, file: string, contents: string): Promis
 async function commitAll(repository: string): Promise<void> {
     await git(repository, ["add", "--all"]);
     await git(repository, ["commit", "--quiet", "--allow-empty", "--message", "change"]);
+    try {
+        await git(repository, ["rev-parse", "--verify", "--quiet", "origin/main"]);
+    } catch {
+        const head = await git(repository, ["rev-parse", "HEAD"]);
+        await git(repository, ["update-ref", "refs/remotes/origin/main", head]);
+    }
 }
 
 async function git(cwd: string, args: readonly string[]): Promise<string> {
