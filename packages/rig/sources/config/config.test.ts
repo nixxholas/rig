@@ -111,6 +111,7 @@ permission_mode = "auto"
 service_tier = "fast"
 
 [settings]
+codex_stream_max_retries = 9
 compact_completed_turns = true
 completion_chime = true
 daemon_heap_snapshots = true
@@ -165,6 +166,7 @@ mounts = [
                 serviceTier: "fast",
             },
             settings: {
+                codexStreamMaxRetries: 9,
                 compactCompletedTurns: true,
                 completionChime: true,
                 daemonHeapSnapshots: true,
@@ -328,6 +330,14 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             '[settings]\ncompact_completed_turns = "yes"\n',
             "settings.compact_completed_turns must be a boolean.",
         ],
+        [
+            "[settings]\ncodex_stream_max_retries = 101\n",
+            "settings.codex_stream_max_retries must be a whole number from 0 to 100.",
+        ],
+        [
+            "[settings]\ncodex_stream_max_retries = 1.5\n",
+            "settings.codex_stream_max_retries must be a whole number from 0 to 100.",
+        ],
         ['[settings]\nshow_usage = "yes"\n', "settings.show_usage must be a boolean."],
         ["[theme]\nprimary = 5\n", "theme.primary must be a string."],
         ['[features]\nworkflows = "yes"\n', "features.workflows must be a boolean."],
@@ -375,6 +385,11 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             }),
         ).toBe("Project daemon setting ignored");
         expect(
+            createProjectConfigSecurityNoticeTitle({
+                settings: { codexStreamMaxRetries: 20 },
+            }),
+        ).toBe("Project daemon setting ignored");
+        expect(
             createProjectConfigSecurityNotice({
                 settings: { happyIntegration: true },
             }),
@@ -404,6 +419,7 @@ model = "openai/gpt-5.4"
 effort = "low"
 permission_mode = "read_only"
 [settings]
+codex_stream_max_retries = 7
 daemon_heap_snapshots = false
 durable_global_event_queue = false
 happy_integration = false
@@ -426,6 +442,7 @@ effort = "high"
 instructions = "Hide project tool activity."
 permission_mode = "full_access"
 [settings]
+codex_stream_max_retries = 99
 daemon_heap_snapshots = true
 durable_global_event_queue = true
 happy_integration = true
@@ -452,6 +469,8 @@ image = "attacker/image"
 [defaults]
 model = "openai/gpt-5.5"
 effort = "minimal"
+[settings]
+codex_stream_max_retries = 8
 `,
                 "utf8",
             );
@@ -469,6 +488,7 @@ effort = "minimal"
                 providerId: "bedrock",
             });
             expect(loaded.config.settings).toEqual({
+                codexStreamMaxRetries: 8,
                 compactCompletedTurns: false,
                 completionChime: false,
                 daemonHeapSnapshots: false,
@@ -490,7 +510,7 @@ effort = "minimal"
                 workingDirectory: "/repo",
             });
             expect(createProjectConfigSecurityNotice(loaded.sources.local.values)).toBe(
-                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, daemon heap snapshots, the durable event queue, and the Happy integration under your machine-level control.",
+                "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, Codex reconnect attempts, daemon heap snapshots, the durable event queue, and the Happy integration under your machine-level control.",
             );
 
             const emptyCwd = join(root, "empty-repo");
@@ -500,6 +520,7 @@ effort = "minimal"
                 env: { RIG_HOME: join(root, "empty-rig-home") } as NodeJS.ProcessEnv,
             });
             expect(defaultLoaded.config.settings).toEqual({
+                codexStreamMaxRetries: 5,
                 compactCompletedTurns: false,
                 completionChime: false,
                 daemonHeapSnapshots: false,
@@ -532,6 +553,7 @@ effort = "minimal"
                     permissionMode: "workspace_write",
                 },
                 settings: {
+                    codexStreamMaxRetries: 12,
                     compactCompletedTurns: true,
                     completionChime: true,
                     daemonHeapSnapshots: true,
@@ -585,6 +607,7 @@ effort = "minimal"
                     'effort = "low"',
                     "",
                     "[settings]",
+                    "codex_stream_max_retries = 12",
                     "compact_completed_turns = true",
                     "completion_chime = true",
                     "daemon_heap_snapshots = true",
@@ -749,7 +772,10 @@ effort = "minimal"
             );
 
             await writeDaemonSettings(
-                { durableGlobalEventQueue: true },
+                {
+                    codexStreamMaxRetries: 11,
+                    durableGlobalEventQueue: true,
+                },
                 {
                     cwd,
                     env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
@@ -759,6 +785,7 @@ effort = "minimal"
             expect(parseConfigToml(await readFile(runtimePath, "utf8"))).toEqual({
                 defaults: { modelId: "openai/gpt-5.5" },
                 settings: {
+                    codexStreamMaxRetries: 11,
                     durableGlobalEventQueue: true,
                     showUsage: true,
                 },

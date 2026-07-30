@@ -65,6 +65,8 @@ export interface CodexSessionOptions {
     parallelToolCalls?: boolean;
     /** Maximum stream reconnection attempts per transport, matching upstream Codex. */
     streamMaxRetries?: number;
+    /** Resolves the current retry limit before each reconnect decision. */
+    resolveStreamMaxRetries?: () => number;
     streamIdleTimeoutMs?: number;
     tools?: readonly SessionTool[];
     transport?: CodexTransport;
@@ -76,7 +78,6 @@ export class CodexSession extends BaseSession {
     readonly endpoint: string;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
-    readonly streamMaxRetries: number;
     readonly streamIdleTimeoutMs: number;
     readonly tools: readonly SessionTool[];
     readonly transport: CodexTransport;
@@ -90,6 +91,7 @@ export class CodexSession extends BaseSession {
     private forceSse = false;
     private readonly installationId: string;
     private readonly modelConfigurations = new Map<string, SessionModelConfiguration>();
+    readonly #resolveStreamMaxRetries: () => number;
     private turnId = randomUUID();
     private turnKey: string | undefined;
     private readonly turnState = new CodexTurnState();
@@ -105,7 +107,12 @@ export class CodexSession extends BaseSession {
         this.model = options.model;
         this.parallelToolCalls = options.parallelToolCalls;
         this.activeModel = options.model;
-        this.streamMaxRetries = resolveCodexStreamMaxRetries(options.streamMaxRetries);
+        const configuredStreamMaxRetries =
+            options.resolveStreamMaxRetries ??
+            (() => resolveCodexStreamMaxRetries(options.streamMaxRetries));
+        this.#resolveStreamMaxRetries = () =>
+            resolveCodexStreamMaxRetries(configuredStreamMaxRetries());
+        this.#resolveStreamMaxRetries();
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.tools = options.tools ?? [];
         this.transport = options.transport ?? "auto";
@@ -140,6 +147,10 @@ export class CodexSession extends BaseSession {
             idleTimeoutMs: this.streamIdleTimeoutMs,
             turnState: this.turnState,
         });
+    }
+
+    get streamMaxRetries(): number {
+        return this.#resolveStreamMaxRetries();
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -462,9 +473,7 @@ export class CodexSession extends BaseSession {
         const newMessages = appended ?? rebuilt;
         const messages: SessionMessage[] = [
             ...history,
-            ...(modelChanged
-                ? [createCodexModelSwitchMessage(configuration.instructions)]
-                : []),
+            ...(modelChanged ? [createCodexModelSwitchMessage(configuration.instructions)] : []),
             ...newMessages,
         ];
         this.context = {

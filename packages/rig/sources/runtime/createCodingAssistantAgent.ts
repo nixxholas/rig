@@ -65,6 +65,7 @@ export interface CreateCodingAssistantAgentOptions {
     processManager?: NativeProcessManager;
     permissionMode?: PermissionMode;
     providers?: ConfigProviders;
+    resolveCodexStreamMaxRetries?: () => number;
     serviceTier?: ServiceTier;
     startDate?: string;
     secrets?: SessionSecretContext;
@@ -161,6 +162,11 @@ export function createCodingAssistantAgent(
                 env,
                 ...(options.identity === undefined ? {} : { identity: options.identity }),
                 providers: options.providers ?? DEFAULT_RIG_CONFIG.providers,
+                ...(options.resolveCodexStreamMaxRetries === undefined
+                    ? {}
+                    : {
+                          resolveCodexStreamMaxRetries: options.resolveCodexStreamMaxRetries,
+                      }),
                 sessionId: agentId,
             });
             const executor = result.executor;

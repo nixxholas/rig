@@ -993,7 +993,12 @@ describe("createProtocolHttpServer", () => {
         const { client, close } = await startServer();
         try {
             await expect(client.getDaemonConfig()).resolves.toEqual({
-                config: { settings: { durableGlobalEventQueue: false } },
+                config: {
+                    settings: {
+                        codexStreamMaxRetries: 5,
+                        durableGlobalEventQueue: false,
+                    },
+                },
             });
             await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
             await expect(client.health()).resolves.toMatchObject({
@@ -1033,16 +1038,37 @@ describe("createProtocolHttpServer", () => {
     it("enables and disables the durable queue through daemon configuration", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         const { client, close } = await startServer({
-            onDurableGlobalEventQueueChange: (enabled) => store.setDurableGlobalEventQueue(enabled),
+            onDaemonSettingsChange: (settings) => ({
+                codexStreamMaxRetries: settings.codexStreamMaxRetries,
+                globalEventQueue: store.setDurableGlobalEventQueue(
+                    settings.durableGlobalEventQueue,
+                ),
+            }),
             store,
         });
         try {
             await expect(
                 client.updateDaemonConfig({
-                    settings: { durableGlobalEventQueue: true },
+                    settings: {
+                        codexStreamMaxRetries: 101,
+                        durableGlobalEventQueue: false,
+                    },
+                }),
+            ).rejects.toThrow("Codex reconnect attempts must be a whole number from 0 to 100.");
+            await expect(
+                client.updateDaemonConfig({
+                    settings: {
+                        codexStreamMaxRetries: 7,
+                        durableGlobalEventQueue: true,
+                    },
                 }),
             ).resolves.toEqual({
-                config: { settings: { durableGlobalEventQueue: true } },
+                config: {
+                    settings: {
+                        codexStreamMaxRetries: 7,
+                        durableGlobalEventQueue: true,
+                    },
+                },
             });
             let resolveObserved: (() => void) | undefined;
             const observed = new Promise<void>((resolve) => {
@@ -1076,15 +1102,26 @@ describe("createProtocolHttpServer", () => {
             controller.abort();
             await watching;
             await client.updateDaemonConfig({
-                settings: { durableGlobalEventQueue: false },
+                settings: {
+                    codexStreamMaxRetries: 7,
+                    durableGlobalEventQueue: false,
+                },
             });
             await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
             await expect(client.getDaemonConfig()).resolves.toEqual({
-                config: { settings: { durableGlobalEventQueue: false } },
+                config: {
+                    settings: {
+                        codexStreamMaxRetries: 7,
+                        durableGlobalEventQueue: false,
+                    },
+                },
             });
 
             await client.updateDaemonConfig({
-                settings: { durableGlobalEventQueue: true },
+                settings: {
+                    codexStreamMaxRetries: 7,
+                    durableGlobalEventQueue: true,
+                },
             });
             await expect(client.getGlobalEvents()).resolves.toEqual({ events: [] });
         } finally {
@@ -2408,9 +2445,15 @@ async function startServer(
         fileSearchService?: FileSearchServiceContract;
         globalEventQueue?: GlobalEventQueue;
         getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
-        onDurableGlobalEventQueueChange?: (
-            enabled: boolean,
-        ) => GlobalEventQueue | undefined | Promise<GlobalEventQueue | undefined>;
+        onDaemonSettingsChange?: (settings: {
+            codexStreamMaxRetries: number;
+            durableGlobalEventQueue: boolean;
+        }) =>
+            | { codexStreamMaxRetries: number; globalEventQueue: GlobalEventQueue }
+            | undefined
+            | Promise<
+                  { codexStreamMaxRetries: number; globalEventQueue: GlobalEventQueue } | undefined
+              >;
         onShutdown?: () => void;
         onReloadHappy?: () => boolean | Promise<boolean>;
         onStartInspector?: () => Promise<{ inspectorUrl: string }>;
@@ -2442,10 +2485,10 @@ async function startServer(
         ...(options.onStartInspector !== undefined
             ? { onStartInspector: options.onStartInspector }
             : {}),
-        ...(options.onDurableGlobalEventQueueChange === undefined
+        ...(options.onDaemonSettingsChange === undefined
             ? {}
             : {
-                  onDurableGlobalEventQueueChange: options.onDurableGlobalEventQueueChange,
+                  onDaemonSettingsChange: options.onDaemonSettingsChange,
               }),
         store,
         ...(options.taskDrain === undefined ? {} : { taskDrain: options.taskDrain }),

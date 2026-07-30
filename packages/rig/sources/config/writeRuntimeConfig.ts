@@ -21,6 +21,7 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
         };
         theme?: Record<string, string>;
         settings?: {
+            codex_stream_max_retries?: number;
             compact_completed_turns?: boolean;
             completion_chime?: boolean;
             daemon_heap_snapshots?: boolean;
@@ -56,6 +57,9 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
 
     if (settings !== undefined) {
         document.settings = {};
+        if (settings.codexStreamMaxRetries !== undefined) {
+            document.settings.codex_stream_max_retries = settings.codexStreamMaxRetries;
+        }
         if (settings.compactCompletedTurns !== undefined) {
             document.settings.compact_completed_turns = settings.compactCompletedTurns;
         }

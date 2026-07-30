@@ -8433,6 +8433,7 @@ describe("CodingAssistantApp", () => {
             printToConsole: false,
         });
         const settingsChanges: Array<{
+            codexStreamMaxRetries: number;
             compactCompletedTurns: boolean;
             completionChime: boolean;
             durableGlobalEventQueue: boolean;
@@ -8463,12 +8464,14 @@ describe("CodingAssistantApp", () => {
         expect(menu).toContain("Show token status");
         expect(menu).toContain("Enable completion chime");
         expect(menu).toContain("Enable durable event queue");
+        expect(menu).toContain("Codex retries · 5");
 
         app.handleInput("\r");
 
         const rendered = stripAnsi(app.render(100).join("\n"));
         expect(settingsChanges).toEqual([
             {
+                codexStreamMaxRetries: 5,
                 compactCompletedTurns: false,
                 completionChime: false,
                 durableGlobalEventQueue: false,
@@ -8486,6 +8489,7 @@ describe("CodingAssistantApp", () => {
         app.handleInput("\r");
 
         expect(settingsChanges.at(-1)).toEqual({
+            codexStreamMaxRetries: 5,
             compactCompletedTurns: false,
             completionChime: true,
             durableGlobalEventQueue: false,
@@ -8501,6 +8505,7 @@ describe("CodingAssistantApp", () => {
         app.handleInput("\r");
 
         expect(settingsChanges.at(-1)).toEqual({
+            codexStreamMaxRetries: 5,
             compactCompletedTurns: false,
             completionChime: true,
             durableGlobalEventQueue: true,
@@ -8508,6 +8513,28 @@ describe("CodingAssistantApp", () => {
             showUsage: false,
         });
         expect(stripAnsi(app.render(100).join("\n"))).toContain("Durable event queue enabled.");
+
+        submit(app, "/configure");
+        for (let index = 0; index < 5; index += 1) app.handleInput("\x1b[B");
+        app.handleInput("\r");
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Enter a whole number from 0 to 100.",
+        );
+        app.handleInput("8");
+        app.handleInput("\r");
+        await Promise.resolve();
+
+        expect(settingsChanges.at(-1)).toEqual({
+            codexStreamMaxRetries: 8,
+            compactCompletedTurns: false,
+            completionChime: true,
+            durableGlobalEventQueue: true,
+            showReasoning: true,
+            showUsage: false,
+        });
+        expect(stripAnsi(app.render(100).join("\n"))).toContain(
+            "Codex reconnect attempts set to 8.",
+        );
     });
 
     it("changes the session permission mode from the permissions menu", async () => {

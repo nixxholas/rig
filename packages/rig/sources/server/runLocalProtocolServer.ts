@@ -223,6 +223,9 @@ export async function runLocalProtocolServer(
     async function initializeDaemon(): Promise<void> {
         const loadedConfig = await loadConfig({ cwd: process.cwd() });
         if (stopping) return;
+        const runtimeSettings = {
+            codexStreamMaxRetries: loadedConfig.config.settings.codexStreamMaxRetries,
+        };
 
         const providerQuotaService = createProviderQuotaService({
             cwd: process.cwd(),
@@ -295,6 +298,7 @@ export async function runLocalProtocolServer(
                 createCodingAssistantAgent({
                     ...options,
                     providers: availableProviders,
+                    resolveCodexStreamMaxRetries: () => runtimeSettings.codexStreamMaxRetries,
                 }),
             databasePath: paths.databasePath,
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
@@ -379,6 +383,7 @@ export async function runLocalProtocolServer(
 
         createProtocolHttpServer(
             {
+                codexStreamMaxRetries: runtimeSettings.codexStreamMaxRetries,
                 ...(loadedConfig.config.docker === undefined
                     ? {}
                     : { defaultDocker: loadedConfig.config.docker }),
@@ -388,9 +393,17 @@ export async function runLocalProtocolServer(
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
-                onDurableGlobalEventQueueChange: async (enabled) => {
-                    await writeDaemonSettings({ durableGlobalEventQueue: enabled });
-                    return store?.setDurableGlobalEventQueue(enabled);
+                onDaemonSettingsChange: async (settings) => {
+                    await writeDaemonSettings(settings);
+                    const globalEventQueue = store?.setDurableGlobalEventQueue(
+                        settings.durableGlobalEventQueue,
+                    );
+                    if (globalEventQueue === undefined) return undefined;
+                    runtimeSettings.codexStreamMaxRetries = settings.codexStreamMaxRetries;
+                    return {
+                        codexStreamMaxRetries: runtimeSettings.codexStreamMaxRetries,
+                        globalEventQueue,
+                    };
                 },
                 ...(happyModule === undefined
                     ? {}

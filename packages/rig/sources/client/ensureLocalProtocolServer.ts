@@ -51,8 +51,8 @@ export async function ensureLocalProtocolServer(
         const identityMatches =
             health !== undefined && daemonIdentitiesMatch(currentIdentity, health.identity);
         if (identityMatches) {
-            const readyHealth = await resolveReadyHealth(client, health);
-            await reconcileDaemonSettings(client, readyHealth);
+            await resolveReadyHealth(client, health);
+            await reconcileDaemonSettings(client);
             return { client, paths, token: existingToken };
         }
         if (health !== undefined) {
@@ -90,8 +90,8 @@ export async function ensureLocalProtocolServer(
         await spawnLocalServer(paths);
     }
     const client = new ProtocolHttpClient({ socketPath: paths.socketPath, token });
-    const health = await waitForReady(client);
-    await reconcileDaemonSettings(client, health);
+    await waitForReady(client);
+    await reconcileDaemonSettings(client);
     return { client, paths, token };
 }
 
@@ -185,19 +185,24 @@ async function resolveReadyHealth(
     return waitForReady(client);
 }
 
-async function reconcileDaemonSettings(
-    client: ProtocolHttpClient,
-    health: ReadyHealthResponse,
-): Promise<void> {
+async function reconcileDaemonSettings(client: ProtocolHttpClient): Promise<void> {
     const daemonSettings = await loadDaemonSettings();
-    if (health.durableGlobalEventQueue === daemonSettings.durableGlobalEventQueue) return;
+    const current = await client.getDaemonConfig();
+    if (
+        current.config.settings.codexStreamMaxRetries === daemonSettings.codexStreamMaxRetries &&
+        current.config.settings.durableGlobalEventQueue === daemonSettings.durableGlobalEventQueue
+    ) {
+        return;
+    }
 
     const updated = await client.updateDaemonConfig({
         settings: {
+            codexStreamMaxRetries: daemonSettings.codexStreamMaxRetries,
             durableGlobalEventQueue: daemonSettings.durableGlobalEventQueue,
         },
     });
     if (
+        updated.config.settings.codexStreamMaxRetries !== daemonSettings.codexStreamMaxRetries ||
         updated.config.settings.durableGlobalEventQueue !== daemonSettings.durableGlobalEventQueue
     ) {
         throw new Error("The local daemon did not apply the requested configuration.");

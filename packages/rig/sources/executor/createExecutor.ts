@@ -17,6 +17,7 @@ export interface CreateExecutorOptions {
     env: NodeJS.ProcessEnv;
     identity?: Identity;
     providers: ConfigProviders;
+    resolveCodexStreamMaxRetries?: () => number;
     sessionId?: string;
 }
 
@@ -76,6 +77,11 @@ function configuredExecutor(
               config,
               env: options.env,
               id,
+              ...(options.resolveCodexStreamMaxRetries === undefined
+                  ? {}
+                  : {
+                        resolveStreamMaxRetries: options.resolveCodexStreamMaxRetries,
+                    }),
               ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
           })
         : config.type === "claude"

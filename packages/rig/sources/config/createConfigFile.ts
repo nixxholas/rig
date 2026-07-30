@@ -30,6 +30,7 @@ export async function createConfigFile(
                     : {}),
             },
             settings: {
+                codex_stream_max_retries: config.settings.codexStreamMaxRetries,
                 compact_completed_turns: config.settings.compactCompletedTurns,
                 completion_chime: config.settings.completionChime,
                 daemon_heap_snapshots: config.settings.daemonHeapSnapshots,

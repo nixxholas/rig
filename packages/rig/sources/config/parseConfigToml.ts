@@ -1,4 +1,5 @@
 import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
+import { MAX_CODEX_STREAM_MAX_RETRIES } from "./codexStreamRetrySettings.js";
 
 import type {
     PartialConfigProvider,
@@ -104,6 +105,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     const settingsTable = readTable(table.settings, "settings");
     if (settingsTable !== undefined) {
         assertKnownKeys(settingsTable, "settings", [
+            "codex_stream_max_retries",
             "compact_completed_turns",
             "completion_chime",
             "daemon_heap_snapshots",
@@ -112,6 +114,16 @@ export function parseConfigToml(source: string): PartialRigConfig {
             "show_reasoning",
             "show_usage",
         ]);
+        const codexStreamMaxRetries = readIntegerInRange(
+            settingsTable,
+            "codex_stream_max_retries",
+            "settings.codex_stream_max_retries",
+            0,
+            MAX_CODEX_STREAM_MAX_RETRIES,
+        );
+        if (codexStreamMaxRetries !== undefined) {
+            settings.codexStreamMaxRetries = codexStreamMaxRetries;
+        }
         const compactCompletedTurns = readBoolean(
             settingsTable,
             "compact_completed_turns",
@@ -743,5 +755,26 @@ function readBoolean(table: TomlTable, key: string, path = key): boolean | undef
     const value = table[key];
     if (value === undefined) return undefined;
     if (typeof value !== "boolean") throw new Error(`${path} must be a boolean.`);
+    return value;
+}
+
+function readIntegerInRange(
+    table: TomlTable,
+    key: string,
+    path: string,
+    minimum: number,
+    maximum: number,
+): number | undefined {
+    const value = table[key];
+    if (value === undefined) return undefined;
+    if (
+        typeof value !== "number" ||
+        !Number.isFinite(value) ||
+        !Number.isInteger(value) ||
+        value < minimum ||
+        value > maximum
+    ) {
+        throw new Error(`${path} must be a whole number from ${minimum} to ${maximum}.`);
+    }
     return value;
 }

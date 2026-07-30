@@ -32,6 +32,10 @@ import { errorToMessage } from "../errorToMessage.js";
 import type { NativeProcessManager } from "../processes/index.js";
 import { humanizeMcpName } from "../mcp/humanizeMcpName.js";
 import type { ServiceTier, Usage } from "@slopus/rig-execution";
+import {
+    DEFAULT_CODEX_STREAM_MAX_RETRIES,
+    MAX_CODEX_STREAM_MAX_RETRIES,
+} from "../config/codexStreamRetrySettings.js";
 import type {
     FileSearchResult,
     EventId,
@@ -63,6 +67,7 @@ import {
     type BackgroundTerminalViewer,
 } from "./createBackgroundTerminalViewer.js";
 import { createSelectionPanel } from "./createSelectionPanel.js";
+import { createSecretInputPanel } from "./createSecretInputPanel.js";
 import { createSubagentMonitor, type SubagentMonitor } from "./createSubagentMonitor.js";
 import { createWorkflowMonitor } from "./createWorkflowMonitor.js";
 import { containsMarkdownTable } from "./containsMarkdownTable.js";
@@ -213,6 +218,7 @@ export interface CodingAssistantAppOptions {
         options?: ReadClipboardImageOptions,
     ) => Promise<ClipboardImage | undefined>;
     searchFiles?: (query: string) => Promise<readonly FileSearchResult[]>;
+    codexStreamMaxRetries?: number;
     compactCompletedTurns?: boolean;
     completionChime?: boolean;
     registerSecret?: (registration: SecretRegistration) => SecretSummary | Promise<SecretSummary>;
@@ -278,6 +284,7 @@ export interface DefaultModelPreference {
 }
 
 export interface AppSettings {
+    codexStreamMaxRetries: number;
     compactCompletedTurns: boolean;
     completionChime: boolean;
     durableGlobalEventQueue: boolean;
@@ -436,6 +443,7 @@ export class CodingAssistantApp implements Component, Focusable {
     #backgroundProcesses: readonly BashSessionActivity[] = [];
     #observedShellProcesses: readonly BashSessionActivity[] = [];
     #yieldedBackgroundTerminals = new Map<number, string>();
+    #codexStreamMaxRetries: number;
     #compactCompletedTurns: boolean;
     #directShellCommandsBySessionId = new Map<number, { command: string; commandId: string }>();
     #backgroundedShellCommandIds = new Set<string>();
@@ -516,6 +524,8 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#processManager = options.processManager;
         this.#readClipboardImage = options.readClipboardImage ?? readClipboardImage;
         this.#sessionBacked = options.sessionBacked ?? false;
+        this.#codexStreamMaxRetries =
+            options.codexStreamMaxRetries ?? DEFAULT_CODEX_STREAM_MAX_RETRIES;
         this.#compactCompletedTurns = options.compactCompletedTurns ?? false;
         this.#completionChime = options.completionChime ?? false;
         this.#durableGlobalEventQueue = options.durableGlobalEventQueue ?? false;
@@ -4716,8 +4726,17 @@ export class CodingAssistantApp implements Component, Focusable {
                         : "Compact completed turns",
                     description: "Keep turn stats and the final response after completion.",
                 },
+                {
+                    value: "codex-retries",
+                    label: `Codex retries · ${this.#codexStreamMaxRetries}`,
+                    description: "Maximum reconnect attempts for each Codex stream transport.",
+                },
             ],
             onSelect: (item) => {
+                if (item.value === "codex-retries") {
+                    this.#openCodexReconnectAttemptsInput();
+                    return;
+                }
                 if (item.value === "compact-turns") {
                     this.#compactCompletedTurns = !this.#compactCompletedTurns;
                 }
@@ -4755,6 +4774,44 @@ export class CodingAssistantApp implements Component, Focusable {
             },
         });
         this.#showSelectionPanel(panel);
+    }
+
+    #openCodexReconnectAttemptsInput(error?: string): void {
+        this.#showSelectionPanel(
+            createSecretInputPanel({
+                label: "Attempts",
+                masked: false,
+                onCancel: () => this.#openConfigureMenu(),
+                onSubmit: (value) => {
+                    const normalized = value.trim();
+                    const attempts = Number(normalized);
+                    if (
+                        !/^\d+$/u.test(normalized) ||
+                        !Number.isInteger(attempts) ||
+                        attempts > MAX_CODEX_STREAM_MAX_RETRIES
+                    ) {
+                        this.#openCodexReconnectAttemptsInput(
+                            `Enter a whole number from 0 to ${MAX_CODEX_STREAM_MAX_RETRIES}.`,
+                        );
+                        return;
+                    }
+                    this.#codexStreamMaxRetries = attempts;
+                    this.#closeSelectionPanel();
+                    this.#persistSettings(() => {
+                        this.#appendEntry({
+                            role: "event",
+                            title: "Settings",
+                            text: `Codex reconnect attempts set to ${attempts}.`,
+                        });
+                        this.#requestRender();
+                    });
+                },
+                subtitle:
+                    error ?? `Enter a whole number from 0 to ${MAX_CODEX_STREAM_MAX_RETRIES}.`,
+                theme: this.#theme,
+                title: "Codex reconnect attempts",
+            }),
+        );
     }
 
     #openPermissionsMenu(): void {
@@ -5938,30 +5995,34 @@ export class CodingAssistantApp implements Component, Focusable {
         });
     }
 
-    #persistSettings(): void {
+    #persistSettings(onPersisted?: () => void): void {
         if (this.#onSettingsChange === undefined) {
+            onPersisted?.();
             return;
         }
 
         void Promise.resolve(
             this.#onSettingsChange({
+                codexStreamMaxRetries: this.#codexStreamMaxRetries,
                 compactCompletedTurns: this.#compactCompletedTurns,
                 completionChime: this.#completionChime,
                 durableGlobalEventQueue: this.#durableGlobalEventQueue,
                 showReasoning: this.#showReasoning,
                 showUsage: this.#showUsage,
             }),
-        ).catch(() => {
-            if (this.#stopped || this.#exiting) {
-                return;
-            }
-            this.#appendEntry({
-                role: "event",
-                title: "Configuration",
-                text: "Could not update the config file.",
+        )
+            .then(() => onPersisted?.())
+            .catch(() => {
+                if (this.#stopped || this.#exiting) {
+                    return;
+                }
+                this.#appendEntry({
+                    role: "event",
+                    title: "Configuration",
+                    text: "Could not update the config file.",
+                });
+                this.#requestRender();
             });
-            this.#requestRender();
-        });
     }
 
     #modelChoices(): readonly CodingAssistantModelChoice[] {

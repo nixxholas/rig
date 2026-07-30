@@ -9,8 +9,8 @@
 
 import { readCodexErrorHeader } from "@/vendors/codex/errors/codexErrors.js";
 
-const DEFAULT_CODEX_STREAM_MAX_RETRIES = 5;
-const MAX_CODEX_STREAM_MAX_RETRIES = 100;
+export const DEFAULT_CODEX_STREAM_MAX_RETRIES = 5;
+export const MAX_CODEX_STREAM_MAX_RETRIES = 100;
 
 export function resolveCodexStreamMaxRetries(value?: number): number {
     if (value === undefined) return DEFAULT_CODEX_STREAM_MAX_RETRIES;

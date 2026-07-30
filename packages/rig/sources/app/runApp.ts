@@ -112,6 +112,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     if (options.permissionMode !== undefined) agentOptions.permissionMode = options.permissionMode;
     let compactCompletedTurns =
         options.compactCompletedTurns ?? loadedConfig.config.settings.compactCompletedTurns;
+    let codexStreamMaxRetries = loadedConfig.config.settings.codexStreamMaxRetries;
     let completionChime = loadedConfig.config.settings.completionChime;
     const daemonHeapSnapshots = loadedConfig.config.settings.daemonHeapSnapshots;
     let durableGlobalEventQueue = loadedConfig.config.settings.durableGlobalEventQueue;
@@ -331,6 +332,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                             serviceTier: preference.serviceTier,
                         },
                         settings: {
+                            codexStreamMaxRetries,
                             compactCompletedTurns,
                             completionChime,
                             daemonHeapSnapshots,
@@ -342,6 +344,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                     }),
                 ),
             onSettingsChange: async (settings) => {
+                codexStreamMaxRetries = settings.codexStreamMaxRetries;
                 compactCompletedTurns = settings.compactCompletedTurns;
                 completionChime = settings.completionChime;
                 durableGlobalEventQueue = settings.durableGlobalEventQueue;
@@ -361,7 +364,10 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                     }),
                 );
                 await localServer.client.updateDaemonConfig({
-                    settings: { durableGlobalEventQueue },
+                    settings: {
+                        codexStreamMaxRetries,
+                        durableGlobalEventQueue,
+                    },
                 });
             },
             onTerminalFocusChange: (focused) => {
@@ -386,6 +392,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                     .searchFiles(session.session.id, query)
                     .then((response) => response.files),
             sessionBacked: true,
+            codexStreamMaxRetries,
             compactCompletedTurns,
             completionChime,
             durableGlobalEventQueue,

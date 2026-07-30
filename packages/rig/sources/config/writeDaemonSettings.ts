@@ -3,7 +3,7 @@ import type { DaemonSettings, LoadConfigOptions, PartialRigConfig } from "./type
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 
 export async function writeDaemonSettings(
-    settings: Pick<DaemonSettings, "durableGlobalEventQueue">,
+    settings: Pick<DaemonSettings, "codexStreamMaxRetries" | "durableGlobalEventQueue">,
     options: LoadConfigOptions = {},
 ): Promise<void> {
     const loaded = await loadConfig(options);
@@ -17,6 +17,7 @@ export async function writeDaemonSettings(
         ...(runtime.theme === undefined ? {} : { theme: runtime.theme }),
         settings: {
             ...runtime.settings,
+            codexStreamMaxRetries: settings.codexStreamMaxRetries,
             durableGlobalEventQueue: settings.durableGlobalEventQueue,
         },
     };

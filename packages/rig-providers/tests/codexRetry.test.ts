@@ -260,6 +260,21 @@ describe("Codex stream retries", () => {
         expect(resolveCodexStreamMaxRetries(101)).toBe(100);
     });
 
+    it("resolves the retry limit again for a long-lived provider", () => {
+        let streamMaxRetries = 1;
+        const provider = new CodexProvider({
+            credential: {
+                name: "codex-api-key",
+                credential: { apiKey: "test" },
+            },
+            resolveStreamMaxRetries: () => streamMaxRetries,
+        });
+
+        expect(provider.streamMaxRetries).toBe(1);
+        streamMaxRetries = 3;
+        expect(provider.streamMaxRetries).toBe(3);
+    });
+
     it("uses one persisted installation identity across sessions", async () => {
         const first = await resolveCodexInstallationId();
         const second = await resolveCodexInstallationId();

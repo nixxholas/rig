@@ -343,6 +343,9 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     }
                     await options.onEvent?.(event);
                     if (event.type === "retrying") {
+                        // A retry means a real inference attempt failed. Keep that attempt durable
+                        // by design so every backend and UI sees it and the model receives it when
+                        // the rebuilt context is replayed, even though the provider keeps running.
                         await appendError({
                             attempt: event.attempt,
                             contextTranscript,
@@ -1191,6 +1194,9 @@ export function toProviderMessages(
 }
 
 function toProviderErrorMessage(message: ErrorMessage, now: () => number): ProviderMessage {
+    // Durable inference failures are model-visible by design, including attempts whose provider
+    // recovered internally. The next model-facing inference after recovery should retain why Rig
+    // had to reconnect or replay.
     const attempt = message.attempt === undefined ? "" : ` attempt ${String(message.attempt)}`;
     const heading =
         message.outcome === "retried"

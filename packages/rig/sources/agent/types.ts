@@ -164,7 +164,9 @@ export interface CompactionMessage {
  * A run failure preserved in both visible history and model context.
  *
  * Retried attempts and terminal failures are the same durable message kind. The
- * outcome tells readers whether Rig continued after this failure or stopped.
+ * outcome tells readers whether Rig continued after this failure or stopped. This
+ * is deliberately not ephemeral retry telemetry: persistence fans it out to every
+ * backend and UI, and replay puts the failed attempt back into model context.
  */
 export interface ErrorMessage {
     role: "error";

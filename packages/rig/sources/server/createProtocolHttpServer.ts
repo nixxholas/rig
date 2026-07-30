@@ -14,6 +14,7 @@ import type {
     CompactSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
+    DaemonConfig,
     DaemonIdentity,
     DisconnectSessionTerminalResponse,
     ForkSessionResponse,
@@ -107,6 +108,10 @@ import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permission
 import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { configureSessionRequest } from "./configureSessionRequest.js";
+import {
+    DEFAULT_CODEX_STREAM_MAX_RETRIES,
+    MAX_CODEX_STREAM_MAX_RETRIES,
+} from "../config/codexStreamRetrySettings.js";
 import { SessionConfigurationError } from "./SessionConfigurationError.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
@@ -134,6 +139,7 @@ const createTerminalSnapshotEventId = createEventIdFactory();
 const createSessionSnapshotEventId = createEventIdFactory();
 
 export interface ProtocolHttpServerOptions {
+    codexStreamMaxRetries?: number;
     defaultDocker?: DockerExecutionConfig;
     gitStateTracker?: GitStateTracker;
     identity?: DaemonIdentity;
@@ -141,9 +147,9 @@ export interface ProtocolHttpServerOptions {
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
-    onDurableGlobalEventQueueChange?: (
-        enabled: boolean,
-    ) => GlobalEventQueue | undefined | Promise<GlobalEventQueue | undefined>;
+    onDaemonSettingsChange?: (
+        settings: DaemonConfig["settings"],
+    ) => AppliedDaemonSettings | undefined | Promise<AppliedDaemonSettings | undefined>;
     onShutdown?: () => void;
     onReloadHappy?: () => boolean | Promise<boolean>;
     onStartInspector?: () => StartInspectorResponse | Promise<StartInspectorResponse>;
@@ -167,9 +173,10 @@ export function createProtocolHttpServer(
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
+        codexStreamMaxRetries: options.codexStreamMaxRetries ?? DEFAULT_CODEX_STREAM_MAX_RETRIES,
         gitStateTracker: options.gitStateTracker,
         globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
-        onDurableGlobalEventQueueChange: options.onDurableGlobalEventQueueChange,
+        onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
     };
@@ -235,15 +242,17 @@ export function createProtocolHttpServer(
 }
 
 interface ProtocolServerRuntimeConfig {
+    codexStreamMaxRetries: number;
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
-    onDurableGlobalEventQueueChange:
-        | ((
-              enabled: boolean,
-          ) => GlobalEventQueue | undefined | Promise<GlobalEventQueue | undefined>)
-        | undefined;
+    onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
+}
+
+interface AppliedDaemonSettings {
+    codexStreamMaxRetries: number;
+    globalEventQueue: GlobalEventQueue;
 }
 
 async function handleRequest(
@@ -902,6 +911,7 @@ async function handleRequest(
         sendJson<GetDaemonConfigResponse>(response, 200, {
             config: {
                 settings: {
+                    codexStreamMaxRetries: runtimeConfig.codexStreamMaxRetries,
                     durableGlobalEventQueue: runtimeConfig.globalEventQueue.durable,
                 },
             },
@@ -911,26 +921,51 @@ async function handleRequest(
 
     if (request.method === "PATCH" && route.name === "config") {
         const body = await readJson<UpdateDaemonConfigRequest>(request);
+        const codexStreamMaxRetries = body.settings?.codexStreamMaxRetries;
         const enabled = body.settings?.durableGlobalEventQueue;
+        if (
+            typeof codexStreamMaxRetries !== "number" ||
+            !Number.isInteger(codexStreamMaxRetries) ||
+            codexStreamMaxRetries < 0 ||
+            codexStreamMaxRetries > MAX_CODEX_STREAM_MAX_RETRIES
+        ) {
+            sendJson(response, 400, {
+                error: `Codex reconnect attempts must be a whole number from 0 to ${MAX_CODEX_STREAM_MAX_RETRIES}.`,
+            });
+            return;
+        }
         if (typeof enabled !== "boolean") {
             sendJson(response, 400, {
                 error: "Durable global event queue must be enabled or disabled.",
             });
             return;
         }
-        if (runtimeConfig.onDurableGlobalEventQueueChange === undefined) {
+        if (runtimeConfig.onDaemonSettingsChange === undefined) {
             sendJson(response, 409, {
-                error: "This daemon cannot change the durable global event queue at runtime.",
+                error: "This daemon cannot change its settings at runtime.",
             });
             return;
         }
-        const queue = await runtimeConfig.onDurableGlobalEventQueueChange(enabled);
-        if (queue === undefined || queue.durable !== enabled) {
-            throw new Error("The daemon could not apply the durable global event queue setting.");
+        const applied = await runtimeConfig.onDaemonSettingsChange({
+            codexStreamMaxRetries,
+            durableGlobalEventQueue: enabled,
+        });
+        if (
+            applied === undefined ||
+            applied.codexStreamMaxRetries !== codexStreamMaxRetries ||
+            applied.globalEventQueue.durable !== enabled
+        ) {
+            throw new Error("The daemon could not apply the requested settings.");
         }
-        runtimeConfig.globalEventQueue = queue;
+        runtimeConfig.codexStreamMaxRetries = applied.codexStreamMaxRetries;
+        runtimeConfig.globalEventQueue = applied.globalEventQueue;
         sendJson<UpdateDaemonConfigResponse>(response, 200, {
-            config: { settings: { durableGlobalEventQueue: enabled } },
+            config: {
+                settings: {
+                    codexStreamMaxRetries,
+                    durableGlobalEventQueue: enabled,
+                },
+            },
         });
         return;
     }

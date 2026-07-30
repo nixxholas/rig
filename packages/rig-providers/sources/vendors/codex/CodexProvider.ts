@@ -30,6 +30,8 @@ export interface CodexProviderOptions {
     region?: string;
     /** Maximum stream reconnection attempts per transport, matching upstream Codex. */
     streamMaxRetries?: number;
+    /** Resolves the current retry limit so a long-lived session can follow runtime config. */
+    resolveStreamMaxRetries?: () => number;
     /** Maximum time a connected stream may remain idle, matching upstream Codex. */
     streamIdleTimeoutMs?: number;
     transport?: CodexTransport;
@@ -46,10 +48,10 @@ export class CodexProvider extends ResponsesProvider {
     readonly endpoint: string;
     readonly model: string | undefined;
     readonly parallelToolCalls: boolean | undefined;
-    readonly streamMaxRetries: number;
     readonly streamIdleTimeoutMs: number;
     readonly transport: CodexTransport;
     readonly userAgent: string | undefined;
+    readonly #resolveStreamMaxRetries: () => number;
 
     constructor(options: CodexProviderOptions) {
         super();
@@ -73,10 +75,19 @@ export class CodexProvider extends ResponsesProvider {
                 ? undefined
                 : resolveCodexSessionModelId(options.model, isBedrock);
         this.parallelToolCalls = options.parallelToolCalls;
-        this.streamMaxRetries = resolveCodexStreamMaxRetries(options.streamMaxRetries);
+        const configuredStreamMaxRetries =
+            options.resolveStreamMaxRetries ??
+            (() => resolveCodexStreamMaxRetries(options.streamMaxRetries));
+        this.#resolveStreamMaxRetries = () =>
+            resolveCodexStreamMaxRetries(configuredStreamMaxRetries());
+        this.#resolveStreamMaxRetries();
         this.streamIdleTimeoutMs = resolveCodexStreamIdleTimeout(options.streamIdleTimeoutMs);
         this.transport = isBedrock ? "sse" : (options.transport ?? "auto");
         this.userAgent = options.userAgent;
+    }
+
+    get streamMaxRetries(): number {
+        return this.#resolveStreamMaxRetries();
     }
 
     override async session(id: string, options: SessionOptions): Promise<CodexSession> {
@@ -91,7 +102,7 @@ export class CodexProvider extends ResponsesProvider {
             ...(this.parallelToolCalls === undefined
                 ? {}
                 : { parallelToolCalls: this.parallelToolCalls }),
-            streamMaxRetries: this.streamMaxRetries,
+            resolveStreamMaxRetries: () => this.streamMaxRetries,
             streamIdleTimeoutMs: this.streamIdleTimeoutMs,
             transport: this.transport,
             userAgent,

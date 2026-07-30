@@ -192,6 +192,7 @@ export interface ListModelsResponse {
 
 export interface DaemonConfig {
     settings: {
+        codexStreamMaxRetries: number;
         durableGlobalEventQueue: boolean;
     };
 }
@@ -202,6 +203,7 @@ export interface GetDaemonConfigResponse {
 
 export interface UpdateDaemonConfigRequest {
     settings: {
+        codexStreamMaxRetries: number;
         durableGlobalEventQueue: boolean;
     };
 }
