@@ -585,6 +585,10 @@ export interface GitChangeSnapshot {
     facts?: GitRepositoryFacts;
 }
 
+export interface GitWatchResponse {
+    snapshots: readonly GlobalEvent[];
+}
+
 export interface GitRepositoryFacts {
     ahead: number;
     behind: number;

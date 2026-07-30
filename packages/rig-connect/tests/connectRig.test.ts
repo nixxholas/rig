@@ -235,6 +235,104 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("declares session Git interest and applies the current snapshot", async () => {
+        const stream = streamResponse();
+        let watchBody: unknown;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname.endsWith("/state")) {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    watchBody = JSON.parse(String(init?.body)) as unknown;
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                snapshots: [
+                                    {
+                                        createdAt: 2,
+                                        data: {
+                                            git: {
+                                                changedFiles: 1,
+                                                comparison: "ready",
+                                                conflicted: false,
+                                                countsExact: true,
+                                                deletions: 0,
+                                                facts: {
+                                                    ahead: 0,
+                                                    behind: 0,
+                                                    branch: "main",
+                                                    detached: false,
+                                                },
+                                                files: [],
+                                                filesTruncated: false,
+                                                generation: "generation-1",
+                                                insertions: 2,
+                                                scannedAt: 2,
+                                                version: 1,
+                                            },
+                                        },
+                                        id: "01900000-0000-7000-8000-000000000003",
+                                        projectId: "project-1",
+                                        type: "project_git_changed",
+                                    },
+                                ],
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                return Promise.resolve(new Response("{}", { status: 200 }));
+            },
+            token: "secret",
+        });
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: "session-1",
+        });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            expect(watchBody).toEqual({ entities: [{ projectId: "project-1" }] });
+            expect(connection.session().git).toMatchObject({
+                branch: "main",
+                changedFiles: 1,
+                insertions: 2,
+            });
+
+            stream.write(
+                globalEvent(
+                    "project_git_changed",
+                    {
+                        git: {
+                            ...connection.session().git,
+                            changedFiles: 2,
+                            insertions: 4,
+                            version: 2,
+                        },
+                    },
+                    { projectId: "project-1" },
+                    "01900000-0000-7000-8000-000000000004",
+                ),
+            );
+            await settle();
+            expect(connection.session().git).toMatchObject({
+                changedFiles: 2,
+                insertions: 4,
+                version: 2,
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("uses client-selected identities for retry-safe create and fork", async () => {
         const stream = streamResponse();
         const calls: { init?: RequestInit; url: URL }[] = [];
@@ -352,6 +450,7 @@ describe("connectRig mutations", () => {
                     .filter(
                         (call) =>
                             call.url.pathname !== "/events/live" &&
+                            call.url.pathname !== "/git/watch" &&
                             !call.url.pathname.endsWith("/state"),
                     )
                     .map((call) => `${call.init?.method} ${call.url.pathname}`),
@@ -514,6 +613,11 @@ describe("connectRig mutations", () => {
                 if (url.pathname.endsWith("/state")) {
                     return Promise.resolve(
                         new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
                     );
                 }
                 bodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
@@ -734,6 +838,11 @@ describe("connectRig mutations", () => {
                         new Response(JSON.stringify(sessionState()), { status: 200 }),
                     );
                 }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
                 mutations += 1;
                 return mutations === 1
                     ? Promise.resolve(
@@ -791,6 +900,11 @@ describe("connectRig mutations", () => {
                 if (url.pathname.endsWith("/state")) {
                     return Promise.resolve(
                         new Response(JSON.stringify(sessionState(stateModel)), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
                     );
                 }
                 mutationCalls += 1;
@@ -1061,6 +1175,11 @@ describe("connectRig mutations", () => {
                 if (url.pathname.endsWith("/state")) {
                     return Promise.resolve(
                         new Response(JSON.stringify(sessionState()), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
                     );
                 }
                 mutationCalls += 1;

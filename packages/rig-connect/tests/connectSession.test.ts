@@ -32,6 +32,11 @@ function controllableStream() {
             if (url.pathname.endsWith("/state")) {
                 return Promise.resolve(new Response(JSON.stringify(state), { status: 200 }));
             }
+            if (url.pathname === "/git/watch") {
+                return Promise.resolve(
+                    new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                );
+            }
             return Promise.resolve(new Response(body, { status: 200 }));
         },
         write(frame: string) {
@@ -191,6 +196,7 @@ describe("connectSession", () => {
             expect(stream.requests.map((url) => url.pathname)).toEqual([
                 "/events/live",
                 "/sessions/session-1/state",
+                "/git/watch",
             ]);
         } finally {
             connection.close();

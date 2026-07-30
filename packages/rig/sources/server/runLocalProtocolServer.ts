@@ -14,6 +14,7 @@ import { getEnvironmentLocalServerPaths } from "./getEnvironmentLocalServerPaths
 import { installDaemonProcessFailureLogging } from "./installDaemonProcessFailureLogging.js";
 import { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyIntegration.js";
 import { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
+import { publishGitLiveEvent } from "./publishGitLiveEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
 import { PersistentSessionStore } from "./PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
@@ -248,7 +249,8 @@ export async function runLocalProtocolServer(
             // durable log; branch and HEAD changes travel as ordinary project/workspace updates.
             // No store means nobody received it, which is a delivery failure rather than a
             // silent success.
-            onLiveEvent: (event) => store?.globalEventQueue.publishLive(event) ?? false,
+            onLiveEvent: (event) =>
+                store === undefined ? false : publishGitLiveEvent(store, event),
             onObserverError: (error, entity) => {
                 daemonLog.record(
                     "error",

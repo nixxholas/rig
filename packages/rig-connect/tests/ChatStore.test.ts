@@ -1287,9 +1287,7 @@ describe("ChatStore", () => {
     it("marks a standalone manual compaction as its own completed turn", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());
-        const started = store.apply(
-            event("run_started", { kind: "compaction", runId: "run-1" }),
-        );
+        const started = store.apply(event("run_started", { kind: "compaction", runId: "run-1" }));
 
         expect(store.session().activeTurn).toEqual({
             kind: "compaction",
@@ -1731,6 +1729,37 @@ describe("ChatStore", () => {
             tokens: { lastContextTokens: 42_000, totalTokens: 90_000 },
         });
         expect(store.session().git).toMatchObject({ branch: "main", changedFiles: 3 });
+    });
+
+    it("does not let a late Git watch response replace a newer live snapshot", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const snapshot = {
+            changedFiles: 2,
+            comparison: "ready" as const,
+            conflicted: false,
+            countsExact: true,
+            deletions: 0,
+            files: [],
+            filesTruncated: false,
+            generation: "generation-1",
+            insertions: 2,
+            scannedAt: 2,
+            version: 2,
+        };
+        store.applyGitSnapshot(snapshot);
+        const current = store.session();
+
+        const deltas = store.applyGitSnapshot({
+            ...snapshot,
+            changedFiles: 1,
+            scannedAt: 1,
+            version: 1,
+        });
+
+        expect(deltas).toEqual([]);
+        expect(store.session()).toBe(current);
+        expect(store.session().git?.changedFiles).toBe(2);
     });
 
     it("reconciles non-replayable session facts from a resumed hello", () => {

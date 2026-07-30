@@ -204,6 +204,7 @@ client repeats that work:
 ```ts
 for (const group of groups.projects()) {
     group.name; // application-shaped project fields, not a wire object
+    group.branch; // current branch, available from the opening catalog
     group.usage.totalTokens; // aggregate usage across the project's sessions
     group.git?.changedFiles; // live Git state, when the daemon is watching it
     group.sessions; // sessions in the project root

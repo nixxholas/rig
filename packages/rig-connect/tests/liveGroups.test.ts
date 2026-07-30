@@ -1,9 +1,16 @@
+import { execFile as execFileCallback } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { GitStateTracker } from "../../rig/sources/server/GitStateTracker.js";
 import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionStore.js";
 import { PersistentSessionStore } from "../../rig/sources/server/PersistentSessionStore.js";
+import { publishGitLiveEvent } from "../../rig/sources/server/publishGitLiveEvent.js";
 import type { SessionStore } from "../../rig/sources/server/SessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
 import {
@@ -22,6 +29,7 @@ import type { GlobalStreamHello } from "@/protocol.js";
  */
 
 const started: { close: () => Promise<void> }[] = [];
+const execFile = promisify(execFileCallback);
 
 afterEach(async () => {
     for (const server of started.splice(0)) await server.close();
@@ -35,21 +43,31 @@ async function startDaemon() {
 async function startServer<TStore extends SessionStore>(
     store: TStore,
     closeStore?: () => void,
+    gitStateTracker?: GitStateTracker,
 ): Promise<{ endpoint: string; store: TStore }> {
-    const server = createProtocolHttpServer({ store, token: "secret" });
+    const server = createProtocolHttpServer({
+        ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
+        store,
+        token: "secret",
+    });
     await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
     const { port } = server.address() as AddressInfo;
     started.push({
         close: async () => {
             await new Promise<void>((resolve) => server.close(() => resolve()));
+            gitStateTracker?.dispose();
             closeStore?.();
         },
     });
     return { endpoint: `http://127.0.0.1:${port}`, store };
 }
 
-async function waitFor(predicate: () => boolean, description: string): Promise<void> {
-    const deadline = Date.now() + 5_000;
+async function waitFor(
+    predicate: () => boolean,
+    description: string,
+    timeoutMs = 5_000,
+): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         if (predicate()) return;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -82,6 +100,69 @@ describe("rig-connect groups against a live daemon", () => {
             session.id,
         );
     });
+
+    it("starts Git tracking and follows changed files", async () => {
+        const repository = await createRepository();
+        const store = new InMemorySessionStore();
+        const tracker = new GitStateTracker({
+            onLiveEvent: (event) => publishGitLiveEvent(store, event),
+            onSnapshot: (entity, snapshot) => {
+                const target = {
+                    projectId: entity.projectId,
+                    ...(entity.workspaceId === undefined
+                        ? {}
+                        : { workspaceId: entity.workspaceId }),
+                };
+                if (snapshot.comparison === "ready") {
+                    store.applyGitFacts(target, snapshot.facts);
+                }
+            },
+            tuning: { debounceMs: 10, maximumDebounceMs: 20, reconcileIntervalMs: 50 },
+        });
+        const { endpoint } = await startServer(store, undefined, tracker);
+        const session = store.create({ cwd: repository });
+
+        connection = connectGroups({
+            endpoint,
+            onChange: () => undefined,
+            token: "secret",
+        });
+        await waitFor(
+            () =>
+                connection
+                    ?.projects()
+                    .find((project) => project.id === session.snapshot().projectId)?.git
+                    ?.changedFiles === 0,
+            "the initial Git state",
+            15_000,
+        );
+
+        await writeFile(join(repository, "changed.txt"), "one\ntwo\n");
+
+        await waitFor(
+            () =>
+                connection
+                    ?.projects()
+                    .find((project) => project.id === session.snapshot().projectId)
+                    ?.git?.files?.some((file) => file.path === "changed.txt") === true,
+            "the changed file to arrive",
+            15_000,
+        );
+        expect(
+            connection.projects().find((project) => project.id === session.snapshot().projectId)
+                ?.git,
+        ).toMatchObject({
+            branch: "main",
+            changedFiles: 1,
+            files: [
+                {
+                    insertions: 2,
+                    path: "changed.txt",
+                    status: "untracked",
+                },
+            ],
+        });
+    }, 30_000);
 
     it("keeps open terminal tabs in the live group stream", async () => {
         const { endpoint, store } = await startDaemon();
@@ -390,4 +471,20 @@ async function readGlobalHello(endpoint: string): Promise<GlobalStreamHello> {
         controller.abort();
         await reader.cancel().catch(() => undefined);
     }
+}
+
+async function createRepository(): Promise<string> {
+    const root = await mkdtemp(join(tmpdir(), "rig-connect-git-"));
+    started.push({ close: async () => rm(root, { force: true, recursive: true }) });
+    await git(root, ["init", "--quiet", "--initial-branch=main"]);
+    await git(root, ["config", "user.email", "test@example.com"]);
+    await git(root, ["config", "user.name", "Test"]);
+    await writeFile(join(root, "seed.txt"), "seed\n");
+    await git(root, ["add", "--all"]);
+    await git(root, ["commit", "--quiet", "--message", "seed"]);
+    return root;
+}
+
+async function git(cwd: string, args: readonly string[]): Promise<void> {
+    await execFile("git", args, { cwd });
 }

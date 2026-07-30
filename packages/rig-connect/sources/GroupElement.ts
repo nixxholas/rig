@@ -46,6 +46,7 @@ export interface ProjectGroup {
     readonly id: string;
     readonly kind: "regular" | "home";
     readonly name: string;
+    readonly branch?: string;
     readonly orderKey: string;
     readonly path: string;
     readonly presence: "present" | "missing";
@@ -68,6 +69,7 @@ export interface ProjectGroup {
 export interface WorkspaceGroup {
     readonly id: string;
     readonly name: string;
+    readonly branch?: string;
     readonly orderKey: string;
     readonly path: string;
     readonly presence: "present" | "missing";

@@ -499,6 +499,26 @@ describe("GroupStore", () => {
         expect(store.projects()[0]?.git).toMatchObject({ changedFiles: 3 });
     });
 
+    it("shows cached branch facts while the first change snapshot loads", () => {
+        const store = new GroupStore();
+        const opening = hello();
+        store.applyHello({
+            ...opening,
+            projects: opening.projects.map((project) => ({
+                ...project,
+                git: {
+                    ahead: 0,
+                    behind: 0,
+                    branch: "feature/live-git",
+                    detached: false,
+                },
+            })),
+        });
+
+        expect(store.projects()[0]?.branch).toBe("feature/live-git");
+        expect(store.projects()[0]?.git).toBeUndefined();
+    });
+
     it("does not let a stale Git snapshot overwrite a newer one", () => {
         const store = new GroupStore();
         store.applyHello(hello());

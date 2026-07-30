@@ -653,6 +653,13 @@ export class ChatStore {
         ];
     }
 
+    applyGitSnapshot(git: GitChangeSnapshot): readonly ChatDelta[] {
+        const revisionBefore = this.#revision;
+        const sessionBefore = this.#session;
+        this.#setGit(git);
+        return this.#finish([], revisionBefore, sessionBefore);
+    }
+
     /** Applies one session event. Unrecognised events are ignored, not an error. */
     apply(event: SessionEvent): readonly ChatDelta[] {
         if (this.#appliedEventIds.has(event.id)) return [];
@@ -691,10 +698,7 @@ export class ChatStore {
                 this.#setActivity((event.data as { activity: SessionActivity }).activity, deltas);
                 break;
             case "session_git_changed":
-                this.#session = {
-                    ...this.#session,
-                    git: applicationGit((event.data as { git: GitChangeSnapshot }).git),
-                };
+                this.#setGit((event.data as { git: GitChangeSnapshot }).git);
                 break;
             case "session_context_changed":
                 {
@@ -1670,12 +1674,7 @@ export class ChatStore {
         }
     }
 
-    #startTurn(
-        runId: string,
-        at: number,
-        deltas: ChatDelta[],
-        kind?: "compaction",
-    ): void {
+    #startTurn(runId: string, at: number, deltas: ChatDelta[], kind?: "compaction"): void {
         const startedAt = this.#turnStartedAt.get(runId) ?? at;
         this.#rememberTurn(runId, startedAt, kind);
         this.#activateTurn(runId, startedAt, deltas, kind);
@@ -2921,6 +2920,20 @@ export class ChatStore {
 
     #elementIdentity(runId: string): { groupId: string; runId: string } {
         return { groupId: this.#groupId ?? `run:${runId}`, runId };
+    }
+
+    #setGit(git: GitChangeSnapshot): void {
+        const current = this.#session.git;
+        if (
+            current !== undefined &&
+            current.generation === git.generation &&
+            current.version >= git.version
+        ) {
+            return;
+        }
+        const next = applicationGit(git);
+        if (current?.revision === next.revision) return;
+        this.#session = { ...this.#session, git: next };
     }
 }
 

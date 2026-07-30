@@ -214,6 +214,7 @@ describe("reconnecting while the catalog is in flight", () => {
     it("reloads the catalog on a gap, and not on a clean resume", async () => {
         const stream = streamResponse();
         let catalogRequests = 0;
+        let gitWatchRequests = 0;
         const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: async (input) => {
@@ -224,6 +225,10 @@ describe("reconnecting while the catalog is in flight", () => {
                     return new Response(JSON.stringify(catalog([session(OLD_VERSION, "Before")])), {
                         status: 200,
                     });
+                }
+                if (url.pathname === "/git/watch") {
+                    gitWatchRequests += 1;
+                    return new Response(JSON.stringify({ snapshots: [] }), { status: 200 });
                 }
                 throw new Error(`Unexpected request to ${url.pathname}`);
             },
@@ -237,17 +242,20 @@ describe("reconnecting while the catalog is in flight", () => {
             stream.write(liveHello(OLD_VERSION, false, false));
             await settle();
             expect(catalogRequests).toBe(1);
+            expect(gitWatchRequests).toBe(1);
 
             // A clean resume already replayed every missed event, so the entities
             // it holds are current and re-fetching them is pure waste.
             stream.write(liveHello(OLD_VERSION, false, true));
             await settle();
             expect(catalogRequests).toBe(1);
+            expect(gitWatchRequests).toBe(1);
 
             // A gap means events were lost, so what it holds may be stale.
             stream.write(liveHello(NEW_VERSION, true, false));
             await settle();
             expect(catalogRequests).toBe(2);
+            expect(gitWatchRequests).toBe(2);
         } finally {
             connection.close();
             rig.close();

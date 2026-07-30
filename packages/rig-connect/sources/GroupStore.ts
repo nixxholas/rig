@@ -725,6 +725,7 @@ export class GroupStore {
             const workspaces = (workspacesByProject.get(project.id) ?? [])
                 .sort(byOrderKey)
                 .map((workspace) => this.#workspaceGroup(workspace, sessionsByWorkspace));
+            const branch = this.#projectGit.get(project.id)?.branch ?? project.git?.branch;
             const group: ProjectGroup = {
                 ...(project.avatar === undefined
                     ? {}
@@ -738,6 +739,7 @@ export class GroupStore {
                 id: project.id,
                 kind: project.kind,
                 name: project.name,
+                ...(branch === undefined ? {} : { branch }),
                 orderKey: project.orderKey,
                 path: project.path,
                 presence: project.presence,
@@ -766,6 +768,7 @@ export class GroupStore {
         const cached = this.#workspaceGroups.get(workspace.id);
         const sessions = (sessionsByWorkspace.get(workspace.id) ?? []).sort(byOrderKey);
         const terminals = this.#workspaceTerminals.get(workspace.id) ?? [];
+        const branch = this.#workspaceGit.get(workspace.id)?.branch ?? workspace.git?.branch;
         if (
             cached !== undefined &&
             this.#workspaceGroupSources.get(workspace.id) === workspace &&
@@ -777,6 +780,7 @@ export class GroupStore {
         const group: WorkspaceGroup = {
             id: workspace.id,
             name: workspace.name,
+            ...(branch === undefined ? {} : { branch }),
             orderKey: workspace.orderKey,
             path: workspace.path,
             presence: workspace.presence,

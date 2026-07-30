@@ -20,6 +20,8 @@ import type {
     ContentBlock,
     BackgroundProcessSnapshot,
     ExternalToolCallResolution,
+    GitChangeSnapshot,
+    GitWatchResponse,
     GlobalEvent,
     MutationId,
     Project,
@@ -37,6 +39,8 @@ const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
 const MAXIMUM_PENDING_PER_ENTITY = 256;
 const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
+const GIT_WATCH_RENEWAL_MS = 4 * 60 * 1_000;
+const GIT_WATCH_RETRY_MS = 5_000;
 
 export interface ConnectRigOptions {
     endpoint: string;
@@ -295,6 +299,11 @@ interface GroupCapture {
     state: GroupsState;
 }
 
+interface GitWatchEntity {
+    projectId: string;
+    workspaceId?: string;
+}
+
 /** Creates the one client a UI shares across its group and session views. */
 export function connectRig(options: ConnectRigOptions): RigConnection {
     const request = options.fetch ?? globalThis.fetch;
@@ -313,6 +322,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     let liveStreamStarted = false;
     let liveStreamOpen = false;
     let compatibility = CHECKING_SERVER_COMPATIBILITY;
+    let gitWatchInFlight = false;
+    let gitWatchPending = false;
+    let gitWatchSignature = "";
+    let gitWatchTimer: ReturnType<typeof setTimeout> | undefined;
     let closed = false;
 
     const publishSession = (entry: SessionEntry, deltas: readonly ChatDelta[]): void => {
@@ -942,6 +955,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 ],
             ]),
         }));
+        queueGitWatchSync();
     };
 
     const startSessionEntry = (entry: SessionEntry): void => {
@@ -1028,6 +1042,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 ],
             }),
         );
+        queueGitWatchSync();
     };
 
     const startGroupEntry = (entry: GroupEntry): void => {
@@ -1088,6 +1103,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     }
                     return true;
                 }
+                gitWatchSignature = "";
+                if (gitWatchTimer !== undefined) clearTimeout(gitWatchTimer);
+                gitWatchTimer = undefined;
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
                     void loadCatalog(groups).catch((error: unknown) => {
@@ -1110,6 +1128,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             onEvent: (event, cursor) => {
                 rememberGlobalIdentity(event);
+                if (
+                    event.type === "project_git_changed" ||
+                    event.type === "workspace_git_changed"
+                ) {
+                    applyGitSnapshot(event);
+                    return;
+                }
                 if ("sessionId" in event && typeof event.sessionId === "string") {
                     // Held only while that session is bootstrapping; the snapshot
                     // replays these itself once it lands.
@@ -1152,6 +1177,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                               }),
                     }),
                 );
+                if (
+                    event.type === "project_created" ||
+                    event.type === "project_updated" ||
+                    event.type === "workspace_created" ||
+                    event.type === "workspace_updated"
+                ) {
+                    queueGitWatchSync();
+                }
             },
             onDisconnected: () => {
                 liveStreamOpen = false;
@@ -1219,6 +1252,120 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 rememberSessionCursor(session.id, session.lastEventId);
             }
         }
+    };
+
+    const applyGitSnapshot = (event: GlobalEvent): void => {
+        if (event.type !== "project_git_changed" && event.type !== "workspace_git_changed") return;
+        const scope = event as {
+            data: { git: GitChangeSnapshot };
+            projectId: string;
+            workspaceId?: string;
+        };
+        const affected = [...sessionEntries.entries()].filter(([, entry]) => {
+            const session = entry.store.session();
+            return (
+                session.projectId === scope.projectId && session.workspaceId === scope.workspaceId
+            );
+        });
+        reconcile(
+            [globalEventKey(event)],
+            undefined,
+            affected.map(([sessionId]) => sessionId),
+            groupsEntry !== undefined,
+            () => ({
+                ...(groupsEntry === undefined
+                    ? {}
+                    : { groupDeltas: groupsEntry.store.apply(event) }),
+                ...(affected.length === 0
+                    ? {}
+                    : {
+                          sessionDeltas: new Map(
+                              affected.map(([sessionId, entry]) => [
+                                  sessionId,
+                                  entry.store.applyGitSnapshot(scope.data.git),
+                              ]),
+                          ),
+                      }),
+            }),
+        );
+    };
+
+    const gitWatchEntities = (): readonly GitWatchEntity[] => {
+        const entities = new Map<string, GitWatchEntity>();
+        const add = (entity: GitWatchEntity): void => {
+            const key =
+                entity.workspaceId === undefined
+                    ? `project:${entity.projectId}`
+                    : `workspace:${entity.workspaceId}`;
+            entities.set(key, entity);
+        };
+        for (const project of groupsEntry?.store.projects() ?? []) {
+            add({ projectId: project.id });
+            for (const workspace of project.workspaces) {
+                add({ projectId: project.id, workspaceId: workspace.id });
+            }
+        }
+        for (const entry of sessionEntries.values()) {
+            const session = entry.store.session();
+            if (session.projectId.length === 0) continue;
+            add({
+                projectId: session.projectId,
+                ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
+            });
+        }
+        return [...entities]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([, value]) => value);
+    };
+
+    const scheduleGitWatchSync = (delay: number): void => {
+        if (gitWatchTimer !== undefined) clearTimeout(gitWatchTimer);
+        gitWatchTimer = setTimeout(() => {
+            gitWatchTimer = undefined;
+            queueGitWatchSync(true);
+        }, delay);
+    };
+
+    const queueGitWatchSync = (force = false): void => {
+        if (closed) return;
+        const entities = gitWatchEntities();
+        const signature = JSON.stringify(entities);
+        if (!force && signature === gitWatchSignature) return;
+        if (gitWatchInFlight) {
+            gitWatchPending = true;
+            return;
+        }
+        if (entities.length === 0) {
+            gitWatchSignature = "";
+            if (gitWatchTimer !== undefined) clearTimeout(gitWatchTimer);
+            gitWatchTimer = undefined;
+            return;
+        }
+        gitWatchInFlight = true;
+        gitWatchSignature = signature;
+        void fetchGitWatch(
+            options.endpoint,
+            options.token,
+            entities,
+            request,
+            rootController.signal,
+        )
+            .then((snapshots) => {
+                if (closed) return;
+                for (const snapshot of snapshots) applyGitSnapshot(snapshot);
+                scheduleGitWatchSync(GIT_WATCH_RENEWAL_MS);
+            })
+            .catch(() => {
+                if (closed || rootController.signal.aborted) return;
+                if (gitWatchSignature === signature) gitWatchSignature = "";
+                scheduleGitWatchSync(GIT_WATCH_RETRY_MS);
+            })
+            .finally(() => {
+                gitWatchInFlight = false;
+                if (!gitWatchPending || closed) return;
+                gitWatchPending = false;
+                queueGitWatchSync();
+            });
     };
 
     const releaseUnusedEntries = (): void => {
@@ -2192,6 +2339,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             if (closed) return;
             for (const closePresence of [...presenceClosers]) closePresence();
             closed = true;
+            if (gitWatchTimer !== undefined) clearTimeout(gitWatchTimer);
+            gitWatchTimer = undefined;
             rootController.abort();
             for (const mutation of [...pendingOverlays].reverse()) mutation.undo();
             pendingOverlays.length = 0;
@@ -2429,6 +2578,28 @@ async function fetchCatalog(
     });
     if (!response.ok) throw new Error(`Rig answered with ${String(response.status)}.`);
     return (await response.json()) as GlobalStreamHello;
+}
+
+async function fetchGitWatch(
+    endpoint: string,
+    token: string,
+    entities: readonly GitWatchEntity[],
+    request: typeof globalThis.fetch,
+    signal: AbortSignal,
+): Promise<readonly GlobalEvent[]> {
+    const response = await request(endpointUrl(endpoint, "git/watch"), {
+        body: JSON.stringify({ entities }),
+        headers: {
+            accept: "application/json",
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+        },
+        method: "POST",
+        signal,
+    });
+    if (response.status === 404 || response.status === 503) return [];
+    if (!response.ok) throw new Error(`Rig answered with ${String(response.status)}.`);
+    return ((await response.json()) as GitWatchResponse).snapshots;
 }
 
 /**
