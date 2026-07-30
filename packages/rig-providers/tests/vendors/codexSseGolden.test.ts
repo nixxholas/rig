@@ -308,30 +308,30 @@ describe("Codex SSE goldens", () => {
             });
             const initialMessages = [
                 {
-                            role: "assistant" as const,
-                            content: "",
-                            toolCalls: [
-                                {
-                                    callId: "huge-call",
-                                    name: "exec",
-                                    arguments: "{}",
-                                    vendor: {
-                                        provider: "codex",
-                                        type: "function_call",
-                                    },
-                                },
-                            ],
-                        },
+                    role: "assistant" as const,
+                    content: "",
+                    toolCalls: [
                         {
-                            role: "tool" as const,
                             callId: "huge-call",
-                            content: "x".repeat(1_200_000),
+                            name: "exec",
+                            arguments: "{}",
                             vendor: {
                                 provider: "codex",
                                 type: "function_call",
                             },
                         },
-                        { role: "user" as const, content: "retain this request" },
+                    ],
+                },
+                {
+                    role: "tool" as const,
+                    callId: "huge-call",
+                    content: "x".repeat(1_200_000),
+                    vendor: {
+                        provider: "codex",
+                        type: "function_call",
+                    },
+                },
+                { role: "user" as const, content: "retain this request" },
             ];
             const compacted = await session.compact({ context: { messages: initialMessages } });
 

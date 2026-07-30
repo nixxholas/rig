@@ -1,8 +1,9 @@
-import { asc, gt, max } from "drizzle-orm";
 import { createEventIdFactory, eventIdsShareScope, isLiveGlobalEvent } from "../protocol/index.js";
 import { globalEventAppend } from "../persistence/global-event/globalEventAppend.js";
 import { globalEventReset } from "../persistence/global-event/globalEventReset.js";
 import { globalEventTrim } from "../persistence/global-event/globalEventTrim.js";
+import { queryGlobalEvents } from "../persistence/global-event/queryGlobalEvents.js";
+import { queryGlobalEventStartup } from "../persistence/global-event/queryGlobalEventStartup.js";
 import type { TX } from "../persistence/Transaction.js";
 
 import type {
@@ -19,7 +20,6 @@ import type {
     ListGlobalEventQueueOptions,
 } from "./GlobalEventQueue.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
-import { durableGlobalEvents, durableGlobalEventState } from "../persistence/database/schema.js";
 import { shouldPersistGlobalEventType } from "./shouldPersistGlobalEventType.js";
 
 export class PersistentGlobalEventQueue implements GlobalEventQueue {
@@ -34,15 +34,8 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     constructor(database: SessionDatabase, options: { resetStream?: boolean } = {}) {
         this.#database = database;
         if (options.resetStream === true) globalEventReset(this.#database);
-        const latestCursor = this.#database
-            .select({ cursor: max(durableGlobalEvents.cursor) })
-            .from(durableGlobalEvents)
-            .get()?.cursor;
-        this.#trimmedThrough = this.#database
-            .select({ cursor: durableGlobalEventState.trimmedThroughCursor })
-            .from(durableGlobalEventState)
-            .limit(1)
-            .get()?.cursor;
+        const { latestCursor, trimmedThrough } = queryGlobalEventStartup(this.#database);
+        this.#trimmedThrough = trimmedThrough;
         const seed =
             latestCursor === null || latestCursor === undefined
                 ? this.#trimmedThrough
@@ -115,22 +108,7 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
         ) {
             return undefined;
         }
-        const query = this.#database
-            .select({
-                cursor: durableGlobalEvents.cursor,
-                dataJson: durableGlobalEvents.dataJson,
-            })
-            .from(durableGlobalEvents)
-            .orderBy(asc(durableGlobalEvents.cursor))
-            .limit(options.limit ?? -1);
-        const rows =
-            after === undefined
-                ? query.all()
-                : query.where(gt(durableGlobalEvents.cursor, after)).all();
-        return rows.map((row) => ({
-            cursor: row.cursor,
-            event: JSON.parse(row.dataJson) as GlobalEvent,
-        }));
+        return queryGlobalEvents(this.#database, after, options.limit ?? -1);
     }
 
     subscribe(listener: GlobalEventQueueListener, onClose?: () => void): () => void {

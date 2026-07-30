@@ -621,16 +621,15 @@ function sessionMessageToExecutionMessage(
             toolCallId: message.callId,
             providerToolCallId: message.callId,
             toolName: "",
-            content:
-                message.input?.map((part) =>
-                    part.type === "text"
-                        ? { type: "text" as const, text: part.text }
-                        : {
-                              type: "image" as const,
-                              data: part.data,
-                              mimeType: part.mimeType,
-                          },
-                ) ?? [{ type: "text", text: message.content }],
+            content: message.input?.map((part) =>
+                part.type === "text"
+                    ? { type: "text" as const, text: part.text }
+                    : {
+                          type: "image" as const,
+                          data: part.data,
+                          mimeType: part.mimeType,
+                      },
+            ) ?? [{ type: "text", text: message.content }],
             isError: message.isError === true,
             ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
             sessionMessage: message,
@@ -663,9 +662,7 @@ function sessionMessageToExecutionMessage(
         api: "compaction",
         provider: "compaction",
         model: "compaction",
-        ...(message.responseItems === undefined
-            ? {}
-            : { responseItems: message.responseItems }),
+        ...(message.responseItems === undefined ? {} : { responseItems: message.responseItems }),
         usage: {
             input: 0,
             output: 0,

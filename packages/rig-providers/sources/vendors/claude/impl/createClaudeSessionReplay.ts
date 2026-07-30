@@ -204,10 +204,7 @@ function toSessionStoreEntries(
             ...base,
             message: {
                 role: "user",
-                content: toSdkContent(
-                    content,
-                    message.role === "user" ? message.input : undefined,
-                ),
+                content: toSdkContent(content, message.role === "user" ? message.input : undefined),
             },
             type: "user",
         });

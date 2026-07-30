@@ -253,10 +253,7 @@ describe("AnthropicBedrockProvider", () => {
 
         for await (const _event of session.run({
             context: {
-                messages: [
-                    result.compaction,
-                    { role: "user", content: "retained turn" },
-                ],
+                messages: [result.compaction, { role: "user", content: "retained turn" }],
             },
         })) {
             // Consume the continuation so its wire request is captured.
@@ -288,10 +285,7 @@ describe("AnthropicBedrockProvider", () => {
 
         await session.compact({
             context: {
-                messages: [
-                    result.compaction,
-                    { role: "user", content: "retained turn" },
-                ],
+                messages: [result.compaction, { role: "user", content: "retained turn" }],
             },
             inputTokens: 60_000,
         });

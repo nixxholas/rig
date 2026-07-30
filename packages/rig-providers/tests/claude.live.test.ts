@@ -142,7 +142,8 @@ describe.skipIf(!live)("Claude live session", () => {
             });
             if (credential === null) throw new Error("Missing ANTHROPIC_AUTH_TOKEN.");
             const session = new ClaudeSession("rig-providers-claude-live", {
-                instructions: "You are testing Rig's Claude provider. Follow exact reply instructions.",
+                instructions:
+                    "You are testing Rig's Claude provider. Follow exact reply instructions.",
                 credential,
                 model: "opus[1m]",
             });
@@ -230,7 +231,10 @@ describe.skipIf(!live)("Claude live session", () => {
             const compacted = await session.compact({
                 context: {
                     messages: [
-                        { role: "user", content: "Remember the exact marker PLAIN_COMPACT_MARKER." },
+                        {
+                            role: "user",
+                            content: "Remember the exact marker PLAIN_COMPACT_MARKER.",
+                        },
                         { role: "assistant", content: "I will remember PLAIN_COMPACT_MARKER." },
                         { role: "user", content: "The current task is native compaction testing." },
                         { role: "assistant", content: "Understood." },

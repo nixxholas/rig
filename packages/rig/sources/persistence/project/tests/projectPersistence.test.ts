@@ -1,12 +1,12 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
-import { migrateSessionDatabase } from "../database/migrateSessionDatabase.js";
-import { openSessionDatabase } from "../database/openSessionDatabase.js";
-import { projectAvatarAssets, projects, projectWorkspaces } from "../database/schema.js";
-import { inTx } from "../inTx.js";
-import { projectSetAvatar } from "./projectSetAvatar.js";
-import { workspaceReserve } from "./workspaceReserve.js";
+import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
+import { openSessionDatabase } from "../../database/openSessionDatabase.js";
+import { projectAvatarAssets, projects, projectWorkspaces } from "../../database/schema.js";
+import { inTx } from "../../inTx.js";
+import { projectSetAvatar } from "../projectSetAvatar.js";
+import { workspaceReserve } from "../workspaceReserve.js";
 
 describe("project persistence", () => {
     it("rolls back the avatar asset and project reference together", () => {

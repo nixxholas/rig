@@ -84,9 +84,7 @@ describe("durable inference errors", () => {
         );
         expect(resumed.text).toContain(RESUME_MARKER);
 
-        const persisted = JSON.parse(
-            await gym.readFile("inference-errors-persistence.json"),
-        ) as {
+        const persisted = JSON.parse(await gym.readFile("inference-errors-persistence.json")) as {
             contextErrors: number;
             durableErrorEvents: number;
             obsoleteRetryEvents: number;

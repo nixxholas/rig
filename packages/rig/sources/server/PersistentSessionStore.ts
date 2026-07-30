@@ -1,7 +1,6 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 
-import { sql, type SQL } from "drizzle-orm";
 import { createEventIdFactory, isLiveGlobalEvent } from "../protocol/index.js";
 import type {
     ChangeEffortRequest,
@@ -24,15 +23,9 @@ import type {
     SessionInterruption,
     SessionSummary,
     SessionTranscriptWindow,
-    SessionTokenCount,
-    SessionUnreadReason,
     SubagentSummary,
-    SessionTitleStatus,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
-import type { Model, ServiceTier, Usage } from "@slopus/rig-execution";
-import type { SessionGoal } from "../goals/index.js";
-import { parsePermissionMode } from "../permissions/index.js";
 import {
     InMemorySession,
     type InMemorySessionOptions,
@@ -40,7 +33,6 @@ import {
     type PersistedQueuedRun,
     type PersistedSessionMessage,
     type PersistedSessionState,
-    type PersistedWorkflowRun,
 } from "./InMemorySession.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { createModelCatalog } from "./createModelCatalog.js";
@@ -48,15 +40,11 @@ import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { PersistentGlobalEventQueue } from "./PersistentGlobalEventQueue.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
-import type { DockerExecutionConfig } from "../execution/index.js";
-import { summarizeDockerExecution } from "../execution/index.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
-import type { SessionUsageSummary } from "./sessionUsage/index.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import type { ExternalToolCall, ExternalToolDefinition } from "../external-tools/index.js";
-import type { DurableSkillDefinition } from "../external-skills/index.js";
+import type { ExternalToolCall } from "../external-tools/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
 import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "./LiveGlobalEventQueue.js";
@@ -103,6 +91,27 @@ import { sessionRewind } from "../persistence/session/sessionRewind.js";
 import { sessionSave } from "../persistence/session/sessionSave.js";
 import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js";
 import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRun.js";
+import { queryExternalToolCalls } from "../persistence/session/queryExternalToolCalls.js";
+import { queryFirstRootSessionIdForWorkspace } from "../persistence/session/queryFirstRootSessionIdForWorkspace.js";
+import { queryInterruptedSessionCandidates } from "../persistence/session/queryInterruptedSessionCandidates.js";
+import { queryLatestSessionDocker } from "../persistence/session/queryLatestSessionDocker.js";
+import { queryProjectSecretIds } from "../persistence/session/queryProjectSecretIds.js";
+import { queryRootSessionIdsForProject } from "../persistence/session/queryRootSessionIdsForProject.js";
+import { querySecretRegistrations } from "../persistence/session/querySecretRegistrations.js";
+import { querySessionEvents } from "../persistence/session/querySessionEvents.js";
+import { querySessionHasEarlierTranscriptMessage } from "../persistence/session/querySessionHasEarlierTranscriptMessage.js";
+import { querySessionHasLaterTranscriptMessage } from "../persistence/session/querySessionHasLaterTranscriptMessage.js";
+import { querySessionIdByAgentId } from "../persistence/session/querySessionIdByAgentId.js";
+import { querySessionIdsForWorkspace } from "../persistence/session/querySessionIdsForWorkspace.js";
+import { querySessionOrderItems } from "../persistence/session/querySessionOrderItems.js";
+import { querySessionRestore } from "../persistence/session/querySessionRestore.js";
+import { querySessionSummaries } from "../persistence/session/querySessionSummaries.js";
+import { querySessionTranscriptEvents } from "../persistence/session/querySessionTranscriptEvents.js";
+import { querySessionTranscriptPage } from "../persistence/session/querySessionTranscriptPage.js";
+import { querySessionTranscriptSince } from "../persistence/session/querySessionTranscriptSince.js";
+import { querySubagentSessionIdsByRoot } from "../persistence/session/querySubagentSessionIdsByRoot.js";
+import { querySubagentSummaries } from "../persistence/session/querySubagentSummaries.js";
+import { queryTerminalRunEvent } from "../persistence/session/queryTerminalRunEvent.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
@@ -523,11 +532,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     findByAgentId(agentId: string): InMemorySession | undefined {
-        const rows = this.#database.all<Record<string, unknown>>(sql`
-            SELECT id FROM sessions WHERE agent_id = ${agentId} LIMIT 2
-        `);
-        if (rows.length !== 1) return undefined;
-        return this.get(readString(rows[0] as Record<string, unknown>, "id"));
+        const sessionId = querySessionIdByAgentId(this.#tx(), agentId);
+        return sessionId === undefined ? undefined : this.get(sessionId);
     }
 
     get globalEventQueue(): GlobalEventQueue {
@@ -556,124 +562,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #listSessions(activeOnly: boolean, options: { limit?: number }): readonly SessionSummary[] {
-        const rows = this.#database.all<Record<string, unknown>>(sql`
-                SELECT listed_sessions.*
-                FROM (
-                    SELECT
-                        id,
-                        project_id,
-                        workspace_id,
-                        order_key,
-                        archived,
-                        track_unread,
-                        unread_reason,
-                        unread_since_ms,
-                        cwd,
-                        draft,
-                        draft_updated_at_ms,
-                        docker_json,
-                        secret_ids_json,
-                        provider_id,
-                        model_id,
-                        permission_mode,
-                        effort,
-                        service_tier,
-                        status,
-                        title,
-                        title_status,
-                        title_error,
-                        recap,
-                        session_token_count_json,
-                        metadata_updated_at_ms,
-                        metadata_run_id,
-                        interruption_json,
-                        created_at_ms,
-                        updated_at_ms,
-                        last_message_at_ms,
-                        last_event_id
-                    FROM sessions
-                    WHERE parent_session_id IS NULL
-                        ${activeOnly ? sql`AND archived = 0` : sql``}
-                ) AS listed_sessions
-                JOIN projects ON projects.id = listed_sessions.project_id
-                LEFT JOIN project_workspaces
-                    ON project_workspaces.id = listed_sessions.workspace_id
-                ORDER BY
-                    projects.order_key ASC,
-                    listed_sessions.workspace_id IS NOT NULL ASC,
-                    project_workspaces.order_key ASC,
-                    listed_sessions.order_key ASC,
-                    listed_sessions.id ASC
-                LIMIT ${options.limit ?? (activeOnly ? -1 : 500)}
-        `);
-
-        return rows.map((row) => {
-            const effort = readOptionalString(row, "effort");
-            const serviceTier = readOptionalString(row, "service_tier");
-            const title = readOptionalString(row, "title");
-            const titleError = readOptionalString(row, "title_error");
-            const recap = readOptionalString(row, "recap");
-            const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
-            const metadataUpdatedAt = readOptionalNumber(row, "metadata_updated_at_ms");
-            const metadataRunId = readOptionalString(row, "metadata_run_id");
-            const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
-            const lastEventId = readOptionalString(row, "last_event_id");
-            const interruptionJson = readOptionalString(row, "interruption_json");
-            const draft = readOptionalString(row, "draft");
-            const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
-            const dockerJson = readOptionalString(row, "docker_json");
-            const unreadReason = readOptionalString(row, "unread_reason");
-            const unreadSince = readOptionalNumber(row, "unread_since_ms");
-            const workspaceId = readOptionalString(row, "workspace_id");
-            return {
-                id: readString(row, "id"),
-                archived: readNumber(row, "archived") !== 0,
-                projectId: readString(row, "project_id"),
-                orderKey: readString(row, "order_key"),
-                ...(workspaceId === undefined ? {} : { workspaceId }),
-                trackUnread: readNumber(row, "track_unread") !== 0,
-                ...(unreadReason !== undefined && unreadSince !== undefined
-                    ? {
-                          unread: {
-                              reason: unreadReason as SessionUnreadReason,
-                              since: unreadSince,
-                          },
-                      }
-                    : {}),
-                cwd: readString(row, "cwd"),
-                ...(draft === undefined ? {} : { draft }),
-                ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
-                providerId: readString(row, "provider_id"),
-                modelId: readString(row, "model_id"),
-                permissionMode: parsePermissionMode(readString(row, "permission_mode")),
-                environment: summarizeDockerExecution(
-                    dockerJson === undefined
-                        ? undefined
-                        : (JSON.parse(dockerJson) as DockerExecutionConfig),
-                ),
-                ...(effort !== undefined ? { effort } : {}),
-                ...(serviceTier === "fast" ? { serviceTier } : {}),
-                status: readString(row, "status") as SessionSummary["status"],
-                titleStatus: readString(row, "title_status") as SessionTitleStatus,
-                createdAt: readNumber(row, "created_at_ms"),
-                updatedAt: readNumber(row, "updated_at_ms"),
-                ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
-                ...(lastEventId !== undefined ? { lastEventId } : {}),
-                ...(title !== undefined ? { title } : {}),
-                ...(titleError !== undefined ? { titleError } : {}),
-                ...(recap !== undefined ? { recap } : {}),
-                ...(sessionTokenCountJson !== undefined
-                    ? {
-                          sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount,
-                      }
-                    : {}),
-                ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
-                ...(metadataRunId !== undefined ? { metadataRunId } : {}),
-                ...(interruptionJson !== undefined
-                    ? { interruption: JSON.parse(interruptionJson) as SessionInterruption }
-                    : {}),
-            };
-        });
+        return querySessionSummaries(this.#tx(), activeOnly, options);
     }
 
     loadedSessions(): readonly InMemorySession[] {
@@ -683,89 +572,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     listExternalToolCalls(
         options: { limit?: number; status?: ExternalToolCall["status"] } = {},
     ): readonly ExternalToolCall[] {
-        const rows =
-            options.status === undefined
-                ? this.#database.all<Record<string, unknown>>(sql`
-                      SELECT *
-                      FROM external_tool_calls
-                      ORDER BY created_at_ms ASC, tool_call_index ASC
-                      LIMIT ${options.limit ?? 100}
-                  `)
-                : this.#database.all<Record<string, unknown>>(sql`
-                      SELECT *
-                      FROM external_tool_calls
-                      WHERE status = ${options.status}
-                      ORDER BY created_at_ms ASC, tool_call_index ASC
-                      LIMIT ${options.limit ?? 100}
-                  `);
-        return rows.map(readExternalToolCallRow);
+        return queryExternalToolCalls(this.#tx(), options);
     }
 
     listSubagents(parentSessionId: string): readonly SubagentSummary[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                WITH RECURSIVE descendants(id) AS (
-                    SELECT id
-                    FROM sessions
-                    WHERE parent_session_id = ${parentSessionId}
-                    UNION ALL
-                    SELECT sessions.id
-                    FROM sessions
-                    JOIN descendants ON sessions.parent_session_id = descendants.id
-                )
-                SELECT
-                    id,
-                    agent_id,
-                    model_id,
-                    status,
-                    active_since_ms,
-                    elapsed_ms,
-                    total_tokens,
-                    session_token_count_json,
-                    usage_json,
-                    parent_session_id,
-                    parent_tool_call_id,
-                    task_name,
-                    depth,
-                    description,
-                    created_at_ms,
-                    updated_at_ms
-                FROM sessions
-                WHERE id IN descendants
-                ORDER BY created_at_ms ASC
-            `)
-            .map((row) => {
-                const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
-                const taskName = readOptionalString(row, "task_name");
-                const activeSince = readOptionalNumber(row, "active_since_ms");
-                const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
-                const usageJson = readOptionalString(row, "usage_json");
-                const persistedUsage = parsePersistedUsage(usageJson);
-                return {
-                    ...(activeSince === undefined ? {} : { activeSince }),
-                    agentId: readString(row, "agent_id"),
-                    createdAt: readNumber(row, "created_at_ms"),
-                    depth: readNumber(row, "depth"),
-                    description: readOptionalString(row, "description") ?? "Delegated task",
-                    elapsedMs: readNumber(row, "elapsed_ms"),
-                    id: readString(row, "id"),
-                    modelId: readString(row, "model_id"),
-                    parentSessionId: readString(row, "parent_session_id"),
-                    ...(parentToolCallId !== undefined ? { parentToolCallId } : {}),
-                    status: readString(row, "status") as SubagentSummary["status"],
-                    ...(taskName !== undefined ? { taskName } : {}),
-                    totalTokens: readNumber(row, "total_tokens"),
-                    ...(sessionTokenCountJson === undefined
-                        ? {}
-                        : {
-                              sessionTokenCount: JSON.parse(
-                                  sessionTokenCountJson,
-                              ) as SessionTokenCount,
-                          }),
-                    updatedAt: readNumber(row, "updated_at_ms"),
-                    ...(persistedUsage === undefined ? {} : { usage: persistedUsage.committed }),
-                };
-            });
+        return querySubagentSummaries(this.#tx(), parentSessionId);
     }
 
     listSecrets(): readonly SecretSummary[] {
@@ -911,15 +722,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#transaction(() => {
             project = this.#projects.archiveProject(projectId, expectedVersion);
             if (project === undefined) return;
-            const rootSessionIds = this.#database
-                .all<Record<string, unknown>>(sql`
-                    SELECT id
-                    FROM sessions
-                    WHERE project_id = ${projectId}
-                        AND workspace_id IS NULL
-                        AND parent_session_id IS NULL
-                `)
-                .map((row) => readString(row, "id"));
+            const rootSessionIds = queryRootSessionIdsForProject(this.#tx(), projectId);
             for (const sessionId of rootSessionIds) this.get(sessionId)?.setArchived(true);
             workspaces = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
                 if (workspace.status === "archived" || workspace.status === "archiving") {
@@ -929,12 +732,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 if (archiving === undefined || archiving.status === "archived") return [];
                 return [
                     {
-                        cleanup: this.#database
-                            .all<Record<string, unknown>>(sql`
-                                SELECT id FROM sessions WHERE workspace_id = ${workspace.id}
-                            `)
-                            .map((row) =>
-                                this.get(readString(row, "id"))?.archiveForWorkspace(workspace.id),
+                        cleanup: querySessionIdsForWorkspace(this.#tx(), workspace.id)
+                            .map((sessionId) =>
+                                this.get(sessionId)?.archiveForWorkspace(workspace.id),
                             )
                             .filter((task): task is Promise<void> => task !== undefined),
                         workspaceId: workspace.id,
@@ -977,11 +777,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 expectedVersion,
             );
             if (workspace === undefined || workspace.status === "archived") return;
-            cleanup = this.#database
-                .all<Record<string, unknown>>(sql`
-                    SELECT id FROM sessions WHERE workspace_id = ${workspaceId}
-                `)
-                .map((row) => this.get(readString(row, "id"))?.archiveForWorkspace(workspaceId))
+            cleanup = querySessionIdsForWorkspace(this.#tx(), workspaceId)
+                .map((sessionId) => this.get(sessionId)?.archiveForWorkspace(workspaceId))
                 .filter((task): task is Promise<void> => task !== undefined);
         });
         if (workspace === undefined || workspace.status === "archived") {
@@ -1047,30 +844,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #listSubagentSessionsByRoot(rootSessionId: string): readonly InMemorySession[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT id
-                FROM sessions
-                WHERE root_session_id = ${rootSessionId} AND session_kind = 'subagent'
-                ORDER BY created_at_ms ASC
-            `)
-            .map((row) => this.get(readString(row, "id")))
+        return querySubagentSessionIdsByRoot(this.#tx(), rootSessionId)
+            .map((sessionId) => this.get(sessionId))
             .filter((session): session is InMemorySession => session !== undefined);
     }
 
     repairInterruptedSessions(reason: SessionInterruption["reason"]): void {
-        const rows = this.#database.all<Record<string, unknown>>(sql`
-                SELECT DISTINCT sessions.id, sessions.active_run_id
-                FROM sessions
-                LEFT JOIN queued_runs ON queued_runs.session_id = sessions.id
-                WHERE sessions.status IN ('queued', 'running')
-                    OR sessions.active_run_id IS NOT NULL
-                    OR queued_runs.run_id IS NOT NULL
-        `);
-
-        for (const row of rows) {
-            const sessionId = readString(row, "id");
-            const activeRunId = readOptionalString(row, "active_run_id");
+        for (const { activeRunId, sessionId } of queryInterruptedSessionCandidates(this.#tx())) {
             if (
                 activeRunId !== undefined &&
                 this.#reconcileTerminalRunState(sessionId, activeRunId)
@@ -1116,39 +896,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #reconcileTerminalRunState(sessionId: string, runId: string): boolean {
-        const row = this.#database.get<Record<string, unknown>>(sql`
-                SELECT
-                    type,
-                    data_json,
-                    (
-                        SELECT event_id
-                        FROM session_events AS latest
-                        WHERE latest.session_id = ${sessionId}
-                        ORDER BY seq DESC
-                        LIMIT 1
-                    ) AS last_event_id
-                FROM session_events
-                WHERE session_id = ${sessionId}
-                    AND type IN ('run_finished', 'run_error')
-                    AND json_extract(data_json, '$.runId') = ${runId}
-                ORDER BY seq DESC
-                LIMIT 1
-        `);
-        if (row === undefined) return false;
-
-        const type = readString(row, "type");
-        const data = JSON.parse(readString(row, "data_json")) as { stopReason?: string };
-        const status =
-            type === "run_error"
-                ? "error"
-                : data.stopReason === "aborted"
-                  ? "aborted"
-                  : "completed";
+        const event = queryTerminalRunEvent(this.#tx(), sessionId, runId);
+        if (event === undefined) return false;
         sessionReconcileTerminalRun(this.#tx(), {
-            lastEventId: readOptionalString(row, "last_event_id") ?? null,
+            lastEventId: event.lastEventId,
             runId,
             sessionId,
-            status,
+            status: event.status,
             updatedAt: this.#now(),
         });
         return true;
@@ -1218,20 +972,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         before?: string,
     ): SessionTranscriptWindow | undefined {
-        const messages = this.#loadTranscriptMessagesPage(sessionId, turnLimit, before);
+        const messages = querySessionTranscriptPage(this.#tx(), sessionId, turnLimit, before);
         if (messages === undefined) return undefined;
         const firstPosition = messages[0]?.position;
         const hasEarlier =
             firstPosition !== undefined &&
-            this.#database.get(sql`
-                    SELECT 1
-                    FROM session_messages
-                    WHERE session_id = ${sessionId}
-                      AND position < ${firstPosition}
-                      AND is_partial = 0
-                      AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
-                    LIMIT 1
-            `) !== undefined;
+            querySessionHasEarlierTranscriptMessage(this.#tx(), sessionId, firstPosition);
         return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasEarlier);
     }
 
@@ -1240,20 +986,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         after: EventId,
     ): SessionTranscriptWindow | undefined {
-        const messages = this.#loadTranscriptMessagesSince(sessionId, turnLimit, after);
+        const messages = querySessionTranscriptSince(this.#tx(), sessionId, turnLimit, after);
         if (messages === undefined) return undefined;
         const lastPosition = messages.at(-1)?.position;
         const hasLater =
             lastPosition !== undefined &&
-            this.#database.get(sql`
-                    SELECT 1
-                    FROM session_messages
-                    WHERE session_id = ${sessionId}
-                      AND position > ${lastPosition}
-                      AND is_partial = 0
-                      AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
-                    LIMIT 1
-            `) !== undefined;
+            querySessionHasLaterTranscriptMessage(this.#tx(), sessionId, lastPosition);
         return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasLater);
     }
 
@@ -1368,173 +1106,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #loadSecretRegistrations(): void {
-        const rows = this.#database.all<Record<string, unknown>>(
-            sql`SELECT id, description, environment_json FROM secret_registrations`,
-        );
-        for (const row of rows) {
-            this.#secrets.register({
-                description: readString(row, "description"),
-                environment: JSON.parse(readString(row, "environment_json")) as Readonly<
-                    Record<string, string>
-                >,
-                id: readString(row, "id"),
-            });
+        const loaded = querySecretRegistrations(this.#tx());
+        for (const registration of loaded.registrations) this.#secrets.register(registration);
+        for (const variable of loaded.environmentVariables) {
+            this.#secrets.rememberEnvironmentVariables(variable.secretId, [variable.name]);
         }
-        const environmentRows = this.#database.all<Record<string, unknown>>(
-            sql`SELECT secret_id, name FROM secret_environment_variables`,
-        );
-        for (const row of environmentRows) {
-            this.#secrets.rememberEnvironmentVariables(readString(row, "secret_id"), [
-                readString(row, "name"),
-            ]);
-        }
-    }
-
-    #loadEvents(sessionId: string, bounded = true): SessionEvent[] {
-        const rows = this.#database.all<Record<string, unknown>>(
-            bounded
-                ? sql`
-                SELECT event_id, type, created_at_ms, data_json
-                FROM (
-                    SELECT seq, event_id, type, created_at_ms, data_json
-                    FROM session_events
-                    WHERE session_id = ${sessionId}
-                    ORDER BY seq DESC
-                    LIMIT ${RESTORED_SESSION_EVENT_LIMIT}
-                )
-                ORDER BY seq ASC
-                `
-                : sql`
-                SELECT event_id, type, created_at_ms, data_json
-                FROM session_events
-                WHERE session_id = ${sessionId}
-                ORDER BY seq ASC
-                `,
-        );
-        const events: SessionEvent[] = [];
-        for (const row of rows) {
-            const event = {
-                createdAt: readNumber(row, "created_at_ms"),
-                data: JSON.parse(readString(row, "data_json")) as SessionEvent["data"],
-                id: readString(row, "event_id"),
-                sessionId,
-                type: readString(row, "type") as SessionEvent["type"],
-            } as SessionEvent;
-            events.push(event);
-        }
-        return events;
-    }
-
-    #loadContextMessages(sessionId: string): Message[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT message_json
-                FROM session_context_messages
-                WHERE session_id = ${sessionId}
-                ORDER BY position
-            `)
-            .map((row) => JSON.parse(readString(row, "message_json")) as Message);
-    }
-
-    #loadQueuedRuns(sessionId: string): PersistedQueuedRun[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT run_id, debug, debug_directory, display_text, kind, text, user_message_json,
-                    integration_config_json
-                FROM queued_runs
-                WHERE session_id = ${sessionId}
-                ORDER BY created_at_ms ASC
-            `)
-            .map((row) => {
-                const debugDirectory = readOptionalString(row, "debug_directory");
-                const integrationConfigJson = readOptionalString(row, "integration_config_json");
-                const integrationConfig =
-                    integrationConfigJson === undefined
-                        ? {}
-                        : (JSON.parse(integrationConfigJson) as {
-                              effort?: string;
-                              externalTools?: readonly ExternalToolDefinition[];
-                              modelId?: string;
-                              providerId?: string;
-                              serviceTier?: ServiceTier | null;
-                              skills?: readonly DurableSkillDefinition[];
-                              systemPrompt?: string | null;
-                          });
-                return {
-                    ...(readNumber(row, "debug") === 0 ? {} : { debug: true }),
-                    ...(debugDirectory === undefined ? {} : { debugDirectory }),
-                    displayText: readString(row, "display_text"),
-                    kind: readString(row, "kind") as PersistedQueuedRun["kind"],
-                    runId: readString(row, "run_id"),
-                    text: readString(row, "text"),
-                    userMessage: JSON.parse(readString(row, "user_message_json")),
-                    ...integrationConfig,
-                };
-            }) as PersistedQueuedRun[];
-    }
-
-    #loadExternalToolCalls(sessionId: string): ExternalToolCall[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT *
-                FROM external_tool_calls
-                WHERE session_id = ${sessionId}
-                ORDER BY created_at_ms ASC, tool_call_index ASC
-            `)
-            .map(readExternalToolCallRow);
-    }
-
-    #loadDurableUserInputs(sessionId: string): DurableUserInputCall[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT *
-                FROM durable_user_inputs
-                WHERE session_id = ${sessionId}
-                ORDER BY created_at_ms ASC, tool_call_index ASC
-            `)
-            .map((row) => {
-                const permissionJson = readOptionalString(row, "permission_json");
-                const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
-                const responseJson = readOptionalString(row, "response_json");
-                const resultJson = readOptionalString(row, "result_json");
-                const resolvedAt = readOptionalNumber(row, "resolved_at_ms");
-                return {
-                    batchId: readString(row, "batch_id"),
-                    consumed: readNumber(row, "consumed") !== 0,
-                    createdAt: readNumber(row, "created_at_ms"),
-                    kind: readString(row, "kind") as DurableUserInputCall["kind"],
-                    ...(permissionJson === undefined
-                        ? {}
-                        : { permission: JSON.parse(permissionJson) }),
-                    ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
-                    request: JSON.parse(readString(row, "request_json")),
-                    ...(responseJson === undefined ? {} : { response: JSON.parse(responseJson) }),
-                    ...(resolvedAt === undefined ? {} : { resolvedAt }),
-                    ...(resultJson === undefined ? {} : { result: JSON.parse(resultJson) }),
-                    runId: readString(row, "run_id"),
-                    sessionId: readString(row, "session_id"),
-                    status: readString(row, "status") as DurableUserInputCall["status"],
-                    toolArguments: JSON.parse(readString(row, "tool_arguments_json")),
-                    toolCallId: readString(row, "tool_call_id"),
-                    toolCallIndex: readNumber(row, "tool_call_index"),
-                    toolName: readString(row, "tool_name"),
-                };
-            });
     }
 
     #inheritWorkspaceTitle(
         metadata: Parameters<NonNullable<InMemorySessionOptions["onInitialTitle"]>>[0],
     ): void {
-        const first = this.#database.get<Record<string, unknown>>(sql`
-                SELECT id
-                FROM sessions
-                WHERE project_id = ${metadata.projectId}
-                    AND workspace_id = ${metadata.workspaceId}
-                    AND parent_session_id IS NULL
-                ORDER BY created_at_ms ASC, id ASC
-                LIMIT 1
-        `);
-        if (first === undefined || readString(first, "id") !== metadata.sessionId) return;
+        const firstSessionId = queryFirstRootSessionIdForWorkspace(
+            this.#tx(),
+            metadata.projectId,
+            metadata.workspaceId,
+        );
+        if (firstSessionId !== metadata.sessionId) return;
         this.#projects.inheritWorkspaceTitle(
             metadata.projectId,
             metadata.workspaceId,
@@ -1543,206 +1130,30 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #loadSession(sessionId: string): InMemorySession | undefined {
-        const row = this.#database.get<Record<string, unknown>>(sql`
-                SELECT *
-                FROM sessions
-                WHERE id = ${sessionId}
-        `);
-        if (row === undefined) {
-            return undefined;
-        }
-
-        const effort = readOptionalString(row, "effort");
-        const archived = readNumber(row, "archived") !== 0;
-        const trackUnread = readNumber(row, "track_unread") !== 0;
-        const unreadReason = readOptionalString(row, "unread_reason");
-        const unreadSince = readOptionalNumber(row, "unread_since_ms");
-        const serviceTier = readOptionalString(row, "service_tier");
-        const draft = readOptionalString(row, "draft");
-        const draftUpdatedAt = readOptionalNumber(row, "draft_updated_at_ms");
-        const dockerJson = readOptionalString(row, "docker_json");
-        const secretIdsJson = readOptionalString(row, "secret_ids_json");
-        const instructions = readOptionalString(row, "instructions");
-        const appendSystemPrompt = readOptionalString(row, "append_system_prompt");
-        const systemPrompt = readOptionalString(row, "system_prompt");
-        const interruptionJson = readOptionalString(row, "interruption_json");
-        const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
-        const usageJson = readOptionalString(row, "usage_json");
-        const persistedUsage = parsePersistedUsage(usageJson);
-        const transcriptMessages = this.#loadTranscriptMessagesPage(sessionId, 80) ?? [];
-        const messages = [...transcriptMessages, ...this.#loadPartialMessages(sessionId)].sort(
-            (left, right) => left.position - right.position,
-        );
-        const earliestTranscriptPosition = transcriptMessages[0]?.position;
-        const hasEarlierTranscript =
-            this.#database.get(
-                earliestTranscriptPosition === undefined
-                    ? sql`
-                          SELECT 1
-                          FROM session_messages
-                          WHERE session_id = ${sessionId} AND is_partial = 0
-                          LIMIT 1
-                          `
-                    : sql`
-                          SELECT 1
-                          FROM session_messages
-                          WHERE session_id = ${sessionId}
-                            AND is_partial = 0
-                            AND position < ${earliestTranscriptPosition}
-                          LIMIT 1
-                          `,
-            ) !== undefined;
-        const lastMessageAt = readOptionalNumber(row, "last_message_at_ms");
-        const modelId = readString(row, "model_id");
-        const title = readOptionalString(row, "title");
-        const titleError = readOptionalString(row, "title_error");
-        const recap = readOptionalString(row, "recap");
-        const metadataUpdatedAt = readOptionalNumber(row, "metadata_updated_at_ms");
-        const metadataRunId = readOptionalString(row, "metadata_run_id");
-        const activeRunId = readOptionalString(row, "active_run_id");
-        const activeSince = readOptionalNumber(row, "active_since_ms");
-        const contextMessages = this.#loadContextMessages(sessionId);
-        const permissionMode = parsePermissionMode(readString(row, "permission_mode"));
-        const parentSessionId = readOptionalString(row, "parent_session_id");
-        const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
-        const taskName = readOptionalString(row, "task_name");
-        const description = readOptionalString(row, "description");
-        const goalJson = readOptionalString(row, "goal_json");
-        const lastEventId = readOptionalString(row, "last_event_id");
-        const id = readString(row, "id");
-        const projectId = readString(row, "project_id");
-        const workspaceId = readOptionalString(row, "workspace_id");
-        const orderKey = readString(row, "order_key");
-        const agent: SessionAgentMetadata = {
-            depth: readNumber(row, "depth"),
-            rootSessionId: readOptionalString(row, "root_session_id") ?? id,
-            type: readString(row, "session_kind") as SessionAgentMetadata["type"],
-            ...(description !== undefined ? { description } : {}),
-            ...(parentSessionId !== undefined ? { parentSessionId } : {}),
-            ...(parentToolCallId !== undefined ? { parentToolCallId } : {}),
-            ...(taskName !== undefined ? { taskName } : {}),
-        };
-        const restore: PersistedSessionState = {
-            ...(activeSince !== undefined ? { activeSince } : {}),
-            agent,
-            agentId: readString(row, "agent_id"),
-            archived,
-            trackUnread,
-            ...(unreadReason !== undefined && unreadSince !== undefined
-                ? {
-                      unread: {
-                          reason: unreadReason as SessionUnreadReason,
-                          since: unreadSince,
-                      },
-                  }
-                : {}),
-            ...(appendSystemPrompt !== undefined ? { appendSystemPrompt } : {}),
-            ...(systemPrompt !== undefined ? { systemPrompt } : {}),
-            createdAt: readNumber(row, "created_at_ms"),
-            cwd: readString(row, "cwd"),
-            ...(draft === undefined ? {} : { draft }),
-            ...(draftUpdatedAt === undefined ? {} : { draftUpdatedAt }),
-            elapsedMs: readNumber(row, "elapsed_ms"),
-            ...(dockerJson !== undefined
-                ? { docker: JSON.parse(dockerJson) as DockerExecutionConfig }
-                : {}),
-            contextMessages,
-            ...(effort !== undefined ? { effort } : {}),
-            ...(serviceTier === "fast" ? { serviceTier } : {}),
-            id,
-            ...(instructions !== undefined ? { instructions } : {}),
-            ...(goalJson !== undefined ? { goal: JSON.parse(goalJson) as SessionGoal } : {}),
-            ...(interruptionJson !== undefined
-                ? { interruption: JSON.parse(interruptionJson) as SessionInterruption }
-                : {}),
-            ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
-            messages,
-            durableUserInputs: this.#loadDurableUserInputs(sessionId),
-            externalToolCalls: this.#loadExternalToolCalls(sessionId),
-            externalTools: JSON.parse(
-                readString(row, "external_tools_json"),
-            ) as ExternalToolDefinition[],
-            skills: JSON.parse(readString(row, "durable_skills_json")) as DurableSkillDefinition[],
-            modelId,
-            models: JSON.parse(readString(row, "models_json")) as Model[],
-            orderKey,
-            providerId: readString(row, "provider_id"),
-            permissionMode,
-            projectId,
-            ...(workspaceId === undefined ? {} : { workspaceId }),
-            secretIds: secretIdsJson === undefined ? [] : (JSON.parse(secretIdsJson) as string[]),
-            queuedRuns: this.#loadQueuedRuns(sessionId),
-            status: readString(row, "status") as PersistedSessionState["status"],
-            tasks: JSON.parse(readString(row, "tasks_json")) as PersistedSessionState["tasks"],
-            workflows: JSON.parse(readString(row, "workflows_json")) as PersistedWorkflowRun[],
-            workflowsEnabled: readNumber(row, "workflows_enabled") !== 0,
-            nextTaskId: readNumber(row, "next_task_id"),
-            ...(title !== undefined ? { title } : {}),
-            ...(titleError !== undefined ? { titleError } : {}),
-            ...(recap !== undefined ? { recap } : {}),
-            ...(metadataUpdatedAt !== undefined ? { metadataUpdatedAt } : {}),
-            ...(metadataRunId !== undefined ? { metadataRunId } : {}),
-            titleStatus: readString(row, "title_status") as SessionTitleStatus,
-            transcriptHasEarlier: hasEarlierTranscript,
-            totalTokens: readNumber(row, "total_tokens"),
-            ...(sessionTokenCountJson === undefined
-                ? {}
-                : {
-                      sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount,
-                  }),
-            ...(persistedUsage === undefined ? {} : { usage: persistedUsage.committed }),
-            ...(persistedUsage?.summary === undefined
-                ? {}
-                : { usageSummary: persistedUsage.summary }),
-            ...(persistedUsage?.throughEventId === undefined
-                ? {}
-                : { usageSummaryEventId: persistedUsage.throughEventId }),
-            ...(persistedUsage?.permissionReviews === undefined
-                ? {}
-                : { permissionReviews: persistedUsage.permissionReviews }),
-            tools: JSON.parse(readString(row, "tools_json")) as string[],
-        };
-        if (activeRunId !== undefined) {
-            restore.activeRunId = activeRunId;
-        }
-
-        const request: CreateSessionRequest = {
-            ...(restore.appendSystemPrompt !== undefined
-                ? { appendSystemPrompt: restore.appendSystemPrompt }
-                : {}),
-            trackUnread: restore.trackUnread === true,
-            cwd: restore.cwd,
-            ...(restore.docker === undefined ? {} : { docker: restore.docker }),
-            ...(restore.effort !== undefined ? { effort: restore.effort } : {}),
-            ...(restore.serviceTier !== undefined ? { serviceTier: restore.serviceTier } : {}),
-            ...(restore.instructions !== undefined ? { instructions: restore.instructions } : {}),
-            modelId,
-            providerId: restore.providerId,
-            secretIds: restore.secretIds ?? [],
-            workflowsEnabled: restore.workflowsEnabled !== false,
-        };
+        const loaded = querySessionRestore(this.#tx(), sessionId);
+        if (loaded === undefined) return undefined;
         return new InMemorySession({
             agentManager: this.#agentManager,
             createEventId: createEventIdFactory(
-                lastEventId === undefined ? {} : { after: lastEventId },
+                loaded.lastEventId === undefined ? {} : { after: loaded.lastEventId },
             ),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),
             deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
-            events: this.#loadEvents(sessionId),
-            ...(lastEventId !== undefined ? { lastEventId } : {}),
+            events: querySessionEvents(this.#tx(), sessionId, RESTORED_SESSION_EVENT_LIMIT),
+            ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
             modelCatalog: this.#modelCatalog,
             onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
-            ...(this.#mcpToolProvider !== undefined
-                ? { mcpToolProvider: this.#mcpToolProvider }
-                : {}),
+            ...(this.#mcpToolProvider === undefined
+                ? {}
+                : { mcpToolProvider: this.#mcpToolProvider }),
             onAppendEvent: (event) => this.#appendEvent(event),
             persistence: this,
-            projectSecretIds: this.#projectSecrets(projectId),
-            projectId,
-            request,
+            projectSecretIds: queryProjectSecretIds(this.#tx(), loaded.projectId),
+            projectId: loaded.projectId,
+            request: loaded.request,
             secretRegistry: this.#secrets,
-            restore,
-            ...(workspaceId === undefined ? {} : { workspaceId }),
+            restore: loaded.restore,
+            ...(loaded.workspaceId === undefined ? {} : { workspaceId: loaded.workspaceId }),
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });
     }
@@ -1778,128 +1189,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         projectId: string,
         workspaceId: string | undefined,
     ): { id: string; orderKey: string }[] {
-        const rows =
-            workspaceId === undefined
-                ? this.#database.all<Record<string, unknown>>(sql`
-                          SELECT id, order_key
-                          FROM sessions
-                          WHERE parent_session_id IS NULL
-                              AND project_id = ${projectId}
-                              AND workspace_id IS NULL
-                          ORDER BY order_key ASC, id ASC
-                `)
-                : this.#database.all<Record<string, unknown>>(sql`
-                          SELECT id, order_key
-                          FROM sessions
-                          WHERE parent_session_id IS NULL
-                              AND project_id = ${projectId}
-                              AND workspace_id = ${workspaceId}
-                          ORDER BY order_key ASC, id ASC
-                `);
-        return rows.map((row) => ({
-            id: readString(row, "id"),
-            orderKey: readString(row, "order_key"),
-        }));
-    }
-
-    #loadTranscriptMessagesPage(
-        sessionId: string,
-        turnLimit: number,
-        before?: string,
-    ): PersistedSessionMessage[] | undefined {
-        const runRows = this.#database.all<Record<string, unknown>>(sql`
-                WITH ordered_runs AS (
-                    SELECT run_id, first_position
-                    FROM session_turns
-                    WHERE session_id = ${sessionId}
-                ),
-                anchor AS (
-                    SELECT first_position FROM ordered_runs WHERE run_id = ${before ?? null}
-                )
-                SELECT run_id
-                FROM ordered_runs
-                WHERE ${before ?? null} IS NULL
-                    OR first_position < (SELECT first_position FROM anchor)
-                ORDER BY first_position DESC
-                LIMIT ${turnLimit}
-        `);
-        if (before !== undefined && runRows.length === 0) {
-            const known = this.#database.get(sql`
-                SELECT 1
-                FROM session_messages
-                WHERE session_id = ${sessionId} AND run_id = ${before}
-                LIMIT 1
-            `);
-            if (known === undefined) return undefined;
-        }
-        const runIds = runRows.map((row) => readString(row, "run_id")).reverse();
-        if (runIds.length === 0) return [];
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT position, is_partial, run_id, message_json
-                FROM session_messages
-                WHERE session_id = ${sessionId}
-                    AND is_partial = 0
-                    AND run_id IN (${sql.join(
-                        runIds.map((runId) => sql`${runId}`),
-                        sql`, `,
-                    )})
-                ORDER BY position ASC
-            `)
-            .map((row) => ({
-                isPartial: readNumber(row, "is_partial") !== 0,
-                message: JSON.parse(readString(row, "message_json")) as Message,
-                position: readNumber(row, "position"),
-                runId: readString(row, "run_id"),
-            }));
-    }
-
-    #loadTranscriptMessagesSince(
-        sessionId: string,
-        turnLimit: number,
-        after: EventId,
-    ): PersistedSessionMessage[] | undefined {
-        const runRows = this.#database.all<Record<string, unknown>>(sql`
-                WITH anchor_run AS (
-                    SELECT turns.first_position
-                    FROM session_events AS events
-                    JOIN session_messages AS messages
-                      ON messages.session_id = events.session_id
-                     AND messages.message_id = events.message_id
-                     AND messages.is_partial = 0
-                    JOIN session_turns AS turns
-                      ON turns.session_id = messages.session_id
-                     AND turns.run_id = messages.run_id
-                    WHERE events.session_id = ${sessionId} AND events.event_id = ${after}
-                    LIMIT 1
-                )
-                SELECT turns.run_id
-                FROM session_turns AS turns
-                WHERE turns.session_id = ${sessionId}
-                  AND turns.first_position >= (SELECT first_position FROM anchor_run)
-                ORDER BY turns.first_position ASC
-                LIMIT ${turnLimit}
-        `);
-        if (runRows.length === 0) return undefined;
-        const runIds = runRows.map((row) => readString(row, "run_id"));
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT position, is_partial, run_id, message_json
-                FROM session_messages
-                WHERE session_id = ${sessionId}
-                    AND is_partial = 0
-                    AND run_id IN (${sql.join(
-                        runIds.map((runId) => sql`${runId}`),
-                        sql`, `,
-                    )})
-                ORDER BY position ASC
-            `)
-            .map((row) => ({
-                isPartial: readNumber(row, "is_partial") !== 0,
-                message: JSON.parse(readString(row, "message_json")) as Message,
-                position: readNumber(row, "position"),
-                runId: readString(row, "run_id"),
-            }));
+        return querySessionOrderItems(this.#tx(), projectId, workspaceId);
     }
 
     #transcriptWindowForMessages(
@@ -1908,7 +1198,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         complete: boolean,
     ): SessionTranscriptWindow | undefined {
-        const events = this.#loadTranscriptEvents(sessionId, messages);
+        const events = querySessionTranscriptEvents(this.#tx(), sessionId, messages);
         const eventLog = new SessionEventLog({
             events,
             retentionLimit: Number.MAX_SAFE_INTEGER,
@@ -1947,78 +1237,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         };
     }
 
-    #loadPartialMessages(sessionId: string): PersistedSessionMessage[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT position, is_partial, run_id, message_json
-                FROM session_messages
-                WHERE session_id = ${sessionId} AND is_partial = 1
-                ORDER BY position ASC
-            `)
-            .map((row) => {
-                const runId = readOptionalString(row, "run_id");
-                return {
-                    isPartial: true,
-                    message: JSON.parse(readString(row, "message_json")) as Message,
-                    position: readNumber(row, "position"),
-                    ...(runId === undefined ? {} : { runId }),
-                };
-            });
-    }
-
-    #loadTranscriptEvents(
-        sessionId: string,
-        messages: readonly PersistedSessionMessage[],
-    ): SessionEvent[] {
-        const runIds = [...new Set(messages.flatMap((entry) => entry.runId ?? []))];
-        const messageIds = messages.map((entry) => entry.message.id);
-        const toolCallIds = messages.flatMap((entry) =>
-            entry.message.blocks.flatMap((block) => (block.type === "tool_call" ? [block.id] : [])),
-        );
-        const clauses: SQL[] = [];
-        if (runIds.length > 0) {
-            clauses.push(
-                sql`run_id IN (${sql.join(
-                    runIds.map((runId) => sql`${runId}`),
-                    sql`, `,
-                )})`,
-            );
-        }
-        if (messageIds.length > 0) {
-            clauses.push(
-                sql`message_id IN (${sql.join(
-                    messageIds.map((messageId) => sql`${messageId}`),
-                    sql`, `,
-                )})`,
-            );
-        }
-        if (toolCallIds.length > 0) {
-            clauses.push(
-                sql`tool_call_id IN (${sql.join(
-                    toolCallIds.map((toolCallId) => sql`${toolCallId}`),
-                    sql`, `,
-                )})`,
-            );
-        }
-        if (clauses.length === 0) return [];
-        const rows = this.#database.all<Record<string, unknown>>(sql`
-                SELECT event_id, type, created_at_ms, data_json
-                FROM session_events
-                WHERE session_id = ${sessionId} AND (${sql.join(clauses, sql` OR `)})
-                ORDER BY seq ASC
-        `);
-        return rows.map(
-            (row) =>
-                ({
-                    createdAt: readNumber(row, "created_at_ms"),
-                    data: JSON.parse(readString(row, "data_json")) as SessionEvent["data"],
-                    id: readString(row, "event_id"),
-                    sessionId,
-                    type: readString(row, "type") as SessionEvent["type"],
-                }) as SessionEvent,
-        );
-    }
-
     #remoteTerminalContext(scope: RemoteTerminalScope): ProjectRemoteTerminalContext {
         const project = this.#projects.getProject(scope.projectId);
         if (project === undefined) throw new Error("Project not found.");
@@ -2035,44 +1253,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (workspace !== undefined && workspace.status !== "ready") {
             throw new Error("Only ready workspaces can open terminals.");
         }
-        const row =
-            scope.workspaceId === undefined
-                ? this.#database.get<Record<string, unknown>>(sql`
-                          SELECT docker_json
-                          FROM sessions
-                          WHERE project_id = ${scope.projectId}
-                              AND workspace_id IS NULL
-                              AND parent_session_id IS NULL
-                          ORDER BY updated_at_ms DESC, id DESC
-                          LIMIT 1
-                `)
-                : this.#database.get<Record<string, unknown>>(sql`
-                          SELECT docker_json
-                          FROM sessions
-                          WHERE project_id = ${scope.projectId}
-                              AND workspace_id = ${scope.workspaceId}
-                              AND parent_session_id IS NULL
-                          ORDER BY updated_at_ms DESC, id DESC
-                          LIMIT 1
-                `);
-        const dockerJson = row === undefined ? undefined : readOptionalString(row, "docker_json");
+        const docker = queryLatestSessionDocker(this.#tx(), scope.projectId, scope.workspaceId);
         return {
             cwd: workspace?.path ?? project.path,
-            ...(dockerJson === undefined
-                ? {}
-                : { docker: JSON.parse(dockerJson) as DockerExecutionConfig }),
+            ...(docker === undefined ? {} : { docker }),
         };
     }
 
     #projectSecrets(projectId: string): readonly string[] {
-        return this.#database
-            .all<Record<string, unknown>>(sql`
-                SELECT secret_id
-                FROM project_secret_attachments
-                WHERE project_id = ${projectId}
-                ORDER BY secret_id
-            `)
-            .map((row) => readString(row, "secret_id"));
+        return queryProjectSecretIds(this.#tx(), projectId);
     }
 
     async #recoverProjectWorkspaces(): Promise<void> {
@@ -2133,44 +1322,6 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 }
 
-function readNumber(row: Record<string, unknown>, key: string): number {
-    const value = row[key];
-    if (typeof value === "number") {
-        return value;
-    }
-    if (typeof value === "bigint") {
-        return Number(value);
-    }
-
-    throw new Error(`Expected numeric SQLite column '${key}'.`);
-}
-
-function readOptionalString(row: Record<string, unknown>, key: string): string | undefined {
-    const value = row[key];
-    if (value === null || value === undefined) {
-        return undefined;
-    }
-    if (typeof value !== "string") {
-        throw new Error(`Expected text SQLite column '${key}'.`);
-    }
-    return value;
-}
-
-function readOptionalNumber(row: Record<string, unknown>, key: string): number | undefined {
-    const value = row[key];
-    if (value === null || value === undefined) {
-        return undefined;
-    }
-    return readNumber(row, key);
-}
-
-interface PersistedUsageEnvelope {
-    committed: Usage;
-    permissionReviews?: PersistedSessionState["permissionReviews"];
-    summary?: SessionUsageSummary;
-    throughEventId?: EventId;
-}
-
 function sessionEventFacts(event: SessionEvent): {
     messageId?: string;
     runId?: string;
@@ -2189,45 +1340,5 @@ function sessionEventFacts(event: SessionEvent): {
         ...(typeof message?.id === "string" ? { messageId: message.id } : {}),
         ...(typeof data.runId === "string" ? { runId: data.runId } : {}),
         ...(typeof inner?.toolCallId === "string" ? { toolCallId: inner.toolCallId } : {}),
-    };
-}
-
-function parsePersistedUsage(value: string | undefined): PersistedUsageEnvelope | undefined {
-    if (value === undefined) return undefined;
-    const parsed = JSON.parse(value) as Usage | PersistedUsageEnvelope;
-    return "committed" in parsed ? parsed : { committed: parsed };
-}
-
-function readString(row: Record<string, unknown>, key: string): string {
-    const value = readOptionalString(row, key);
-    if (value === undefined) {
-        throw new Error(`Expected text SQLite column '${key}'.`);
-    }
-    return value;
-}
-
-function readExternalToolCallRow(row: Record<string, unknown>): ExternalToolCall {
-    const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
-    const resolutionJson = readOptionalString(row, "resolution_json");
-    const skillJson = readOptionalString(row, "skill_json");
-    const resolvedAt = readOptionalNumber(row, "resolved_at_ms");
-    return {
-        arguments: JSON.parse(readString(row, "arguments_json")),
-        batchId: readString(row, "batch_id"),
-        consumed: readNumber(row, "consumed") !== 0,
-        createdAt: readNumber(row, "created_at_ms"),
-        definition: JSON.parse(readString(row, "definition_json")) as ExternalToolDefinition,
-        ...(skillJson === undefined
-            ? {}
-            : { skill: JSON.parse(skillJson) as DurableSkillDefinition }),
-        id: readString(row, "id"),
-        runId: readString(row, "run_id"),
-        sessionId: readString(row, "session_id"),
-        status: readString(row, "status") as ExternalToolCall["status"],
-        ...(providerToolCallId === undefined ? {} : { providerToolCallId }),
-        toolCallId: readString(row, "tool_call_id"),
-        toolCallIndex: readNumber(row, "tool_call_index"),
-        ...(resolutionJson === undefined ? {} : { resolution: JSON.parse(resolutionJson) }),
-        ...(resolvedAt === undefined ? {} : { resolvedAt }),
     };
 }

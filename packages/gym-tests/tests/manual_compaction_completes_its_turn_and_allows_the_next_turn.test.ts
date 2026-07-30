@@ -57,10 +57,7 @@ describe("manual conversation compaction", () => {
         expect(compacted.text).toContain("Ask Rig to do anything");
 
         submit(gym, "Continue after the manual compaction.");
-        const continued = await gym.terminal.waitForText(
-            "TURN_AFTER_MANUAL_COMPACTION",
-            30_000,
-        );
+        const continued = await gym.terminal.waitForText("TURN_AFTER_MANUAL_COMPACTION", 30_000);
         expect(continued.text).toContain("Context compacted");
         expect(continued.text).toContain("Ask Rig to do anything");
     }, 120_000);

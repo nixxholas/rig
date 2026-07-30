@@ -27,7 +27,8 @@ describeLive("CodexProvider live", () => {
                 transport,
             });
             const session = await provider.session(`codex-parallel-${transport}-${Date.now()}`, {
-                instructions: "Call every explicitly requested independent tool in the same response.",
+                instructions:
+                    "Call every explicitly requested independent tool in the same response.",
                 tools: [
                     {
                         type: "local",

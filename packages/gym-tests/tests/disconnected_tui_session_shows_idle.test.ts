@@ -40,8 +40,7 @@ describe("session terminal presence", () => {
         gym.terminal.press("ctrlD");
         const afterDisconnect = await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes("TERMINAL_DISCONNECTED") &&
-                /^Idle\s+/m.test(snapshot.text),
+                snapshot.text.includes("TERMINAL_DISCONNECTED") && /^Idle\s+/m.test(snapshot.text),
             "the disconnected TUI session to appear idle",
             30_000,
         );

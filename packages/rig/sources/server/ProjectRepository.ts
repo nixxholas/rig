@@ -7,7 +7,6 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
-import { and, asc, eq, getTableColumns, isNotNull, lte, notExists } from "drizzle-orm";
 import sharp from "sharp";
 
 import {
@@ -15,7 +14,6 @@ import {
     type CreateProjectWorkspaceRequest,
     type GitRepositoryFacts,
     type Project,
-    type ProjectAvatar,
     type ProjectAvatarSource,
     type ProjectEvent,
     type ProjectWorkspace,
@@ -38,6 +36,15 @@ import { projectRename } from "../persistence/project/projectRename.js";
 import { projectReorder } from "../persistence/project/projectReorder.js";
 import { projectRestore } from "../persistence/project/projectRestore.js";
 import { projectRetryInitialization } from "../persistence/project/projectRetryInitialization.js";
+import { queryProject } from "../persistence/project/queryProject.js";
+import { queryProjectAvatarAsset } from "../persistence/project/queryProjectAvatarAsset.js";
+import { queryProjectAvatarGarbageCandidates } from "../persistence/project/queryProjectAvatarGarbageCandidates.js";
+import { queryProjectByPath } from "../persistence/project/queryProjectByPath.js";
+import { queryProjects } from "../persistence/project/queryProjects.js";
+import { queryWorkspace } from "../persistence/project/queryWorkspace.js";
+import { queryWorkspaceByPath } from "../persistence/project/queryWorkspaceByPath.js";
+import { queryWorkspaceByRequest } from "../persistence/project/queryWorkspaceByRequest.js";
+import { queryWorkspaces } from "../persistence/project/queryWorkspaces.js";
 import { workspaceReserve } from "../persistence/project/workspaceReserve.js";
 import { workspaceApplyGitFacts } from "../persistence/project/workspaceApplyGitFacts.js";
 import { workspaceApplyProbe } from "../persistence/project/workspaceApplyProbe.js";
@@ -56,11 +63,6 @@ import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
 import { runScanGit } from "./runScanGit.js";
 import { type GitRepositoryProbe, probeGitRepository } from "./probeGitRepository.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
-import {
-    projectAvatarAssets,
-    projects,
-    projectWorkspaces,
-} from "../persistence/database/schema.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import {
     folderProjectName,
@@ -175,13 +177,8 @@ export class ProjectRepository {
 
     resolve(cwd: string, assertedWorkspaceId?: string): ResolvedProjectOwnership {
         const path = normalizeProjectCwd(cwd);
-        const workspaceRow = this.#database
-            .select()
-            .from(projectWorkspaces)
-            .where(eq(projectWorkspaces.path, path))
-            .get();
-        if (workspaceRow !== undefined) {
-            const workspace = readWorkspace(workspaceRow);
+        const workspace = queryWorkspaceByPath(this.#database, path);
+        if (workspace !== undefined) {
             if (workspace.status !== "ready") {
                 throw new Error(
                     `Workspace '${workspace.name}' is ${workspace.status.replaceAll("_", " ")}.`,
@@ -198,18 +195,13 @@ export class ProjectRepository {
             throw new Error("The workspace ID does not match the session directory.");
         }
 
-        const existing = this.#database
-            .select()
-            .from(projects)
-            .where(eq(projects.path, path))
-            .get();
+        const existing = queryProjectByPath(this.#database, path);
         if (existing !== undefined) {
             /*
              * A project is only a folder, so working in it again is what brings it back: starting a
              * session restores an archived project instead of asking the user to unarchive it.
              */
-            const project = readProject(existing);
-            return { project: this.unarchiveProject(project.id) ?? project };
+            return { project: this.unarchiveProject(existing.id) ?? existing };
         }
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
@@ -233,53 +225,19 @@ export class ProjectRepository {
     }
 
     getProject(projectId: string): Project | undefined {
-        const row = this.#database.select().from(projects).where(eq(projects.id, projectId)).get();
-        return row === undefined ? undefined : this.#readProject(row);
+        return queryProject(this.#database, projectId);
     }
 
     listProjects(): readonly Project[] {
-        return this.#database
-            .select()
-            .from(projects)
-            .orderBy(asc(projects.orderKey), asc(projects.id))
-            .all()
-            .map((row) => this.#readProject(row));
+        return queryProjects(this.#database);
     }
 
     listWorkspaces(projectId?: string): readonly ProjectWorkspace[] {
-        const rows =
-            projectId === undefined
-                ? this.#database
-                      .select({ ...getTableColumns(projectWorkspaces) })
-                      .from(projectWorkspaces)
-                      .innerJoin(projects, eq(projects.id, projectWorkspaces.projectId))
-                      .orderBy(
-                          asc(projects.orderKey),
-                          asc(projectWorkspaces.orderKey),
-                          asc(projectWorkspaces.id),
-                      )
-                      .all()
-                : this.#database
-                      .select()
-                      .from(projectWorkspaces)
-                      .where(eq(projectWorkspaces.projectId, projectId))
-                      .orderBy(asc(projectWorkspaces.orderKey), asc(projectWorkspaces.id))
-                      .all();
-        return rows.map(readWorkspace);
+        return queryWorkspaces(this.#database, projectId);
     }
 
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
-        const row = this.#database
-            .select()
-            .from(projectWorkspaces)
-            .where(
-                and(
-                    eq(projectWorkspaces.id, workspaceId),
-                    eq(projectWorkspaces.projectId, projectId),
-                ),
-            )
-            .get();
-        return row === undefined ? undefined : readWorkspace(row);
+        return queryWorkspace(this.#database, projectId, workspaceId);
     }
 
     async reconcileInitializingWorkspaces(): Promise<void> {
@@ -518,11 +476,7 @@ export class ProjectRepository {
                     return this.#publishedProject(projectId);
                 });
             } catch (error) {
-                const asset = this.#database
-                    .select({ hash: projectAvatarAssets.hash })
-                    .from(projectAvatarAssets)
-                    .where(eq(projectAvatarAssets.hash, normalized.hash))
-                    .get();
+                const asset = queryProjectAvatarAsset(this.#database, normalized.hash);
                 if (asset === undefined) {
                     await rm(this.#avatarPath(normalized.hash), { force: true });
                 }
@@ -545,12 +499,8 @@ export class ProjectRepository {
 
     async avatarAsset(hash: string): Promise<ProjectAvatarAsset | undefined> {
         if (!/^[a-f0-9]{64}$/u.test(hash)) return undefined;
-        const row = this.#database
-            .select({ mediaType: projectAvatarAssets.mediaType })
-            .from(projectAvatarAssets)
-            .where(eq(projectAvatarAssets.hash, hash))
-            .get();
-        if (row === undefined) return undefined;
+        const asset = queryProjectAvatarAsset(this.#database, hash);
+        if (asset === undefined) return undefined;
         try {
             return {
                 bytes: await readFile(this.#avatarPath(hash)),
@@ -582,25 +532,12 @@ export class ProjectRepository {
         ) {
             throw new Error("The workspace base reference is invalid.");
         }
-        const retry = this.#database
-            .select()
-            .from(projectWorkspaces)
-            .where(
-                and(
-                    eq(projectWorkspaces.projectId, projectId),
-                    eq(projectWorkspaces.clientRequestId, clientRequestId),
-                ),
-            )
-            .get();
+        const retry = queryWorkspaceByRequest(this.#database, projectId, clientRequestId);
         if (retry !== undefined) {
-            const workspace = readWorkspace(retry);
-            if (
-                projectNameKey(workspace.name) !== projectNameKey(name) ||
-                workspace.baseRef !== baseRef
-            ) {
+            if (projectNameKey(retry.name) !== projectNameKey(name) || retry.baseRef !== baseRef) {
                 throw new Error("The workspace request ID was already used with other settings.");
             }
-            return workspace;
+            return retry;
         }
 
         const gitTopLevel = normalizeProjectCwd(
@@ -1118,27 +1055,9 @@ export class ProjectRepository {
     async #collectAvatarGarbage(): Promise<void> {
         if (this.#closed) return;
         const cutoff = this.#now() - AVATAR_GARBAGE_DELAY_MS;
-        const rows = this.#database
-            .select({ hash: projectAvatarAssets.hash })
-            .from(projectAvatarAssets)
-            .where(
-                and(
-                    isNotNull(projectAvatarAssets.dereferencedAtMs),
-                    lte(projectAvatarAssets.dereferencedAtMs, cutoff),
-                    notExists(
-                        this.#database
-                            .select({ id: projects.id })
-                            .from(projects)
-                            .where(eq(projects.avatarHash, projectAvatarAssets.hash)),
-                    ),
-                ),
-            )
-            .orderBy(asc(projectAvatarAssets.dereferencedAtMs), asc(projectAvatarAssets.hash))
-            .limit(100)
-            .all();
-        for (const row of rows) {
+        const hashes = queryProjectAvatarGarbageCandidates(this.#database, cutoff, 100);
+        for (const hash of hashes) {
             if (this.#closed) return;
-            const { hash } = row;
             await this.#withAvatarLifecycleLock(hash, async () => {
                 if (this.#closed) return;
                 const removed = this.#mutate((tx) => projectAvatarCollectGarbage(tx, hash, cutoff));
@@ -1507,31 +1426,6 @@ export class ProjectRepository {
     #avatarPath(hash: string): string {
         return join(this.#assetRoot, hash.slice(0, 2), `${hash}.webp`);
     }
-
-    #readProject(row: ProjectRow): Project {
-        const project = readProject(row);
-        const avatarHash = row.avatarHash ?? undefined;
-        const avatarSource = row.avatarSource ?? undefined;
-        if (avatarHash === undefined || avatarSource === undefined) return project;
-        const asset = this.#database
-            .select({
-                height: projectAvatarAssets.height,
-                width: projectAvatarAssets.width,
-            })
-            .from(projectAvatarAssets)
-            .where(eq(projectAvatarAssets.hash, avatarHash))
-            .get();
-        if (asset === undefined) return project;
-        project.avatar = {
-            hash: avatarHash,
-            height: asset.height,
-            mediaType: "image/webp",
-            source: avatarSource as ProjectAvatar["source"],
-            url: `/project-assets/${avatarHash}`,
-            width: asset.width,
-        };
-        return project;
-    }
 }
 
 async function readBoundedResponseBytes(
@@ -1579,15 +1473,23 @@ async function runGit(cwd: string, args: readonly string[]): Promise<string> {
     return result.stdout.trim();
 }
 
-type ProjectRow = typeof projects.$inferSelect;
-type WorkspaceRow = typeof projectWorkspaces.$inferSelect;
-type GitFactValues = Pick<
-    ProjectRow,
-    "gitAhead" | "gitBehind" | "gitBranch" | "gitDetached" | "gitHead" | "gitUpstream"
->;
-type WorkspaceGitFactValues = GitFactValues & Pick<WorkspaceRow, "presence">;
-type ProjectGitFactValues = WorkspaceGitFactValues &
-    Pick<ProjectRow, "worktreeSupport" | "worktreeSupportReason">;
+interface GitFactValues {
+    gitAhead: number;
+    gitBehind: number;
+    gitBranch: string | null;
+    gitDetached: boolean;
+    gitHead: string | null;
+    gitUpstream: string | null;
+}
+
+interface WorkspaceGitFactValues extends GitFactValues {
+    presence: string;
+}
+
+interface ProjectGitFactValues extends WorkspaceGitFactValues {
+    worktreeSupport: string;
+    worktreeSupportReason: string | null;
+}
 
 function gitFactValues(facts: GitRepositoryFacts): GitFactValues {
     return {
@@ -1618,81 +1520,6 @@ function projectGitFactValues(probe: GitRepositoryProbe): ProjectGitFactValues {
         ...workspaceGitFactValues(probe),
         worktreeSupport: probe.worktreeSupport,
         worktreeSupportReason: probe.worktreeSupportReason ?? null,
-    };
-}
-
-function readProject(row: ProjectRow): Project {
-    const git = readGitFacts(row);
-    const project: Project = {
-        ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
-        createdAt: row.createdAtMs,
-        ...(git === undefined ? {} : { git }),
-        id: row.id,
-        initializationAttempt: row.initializationAttempt,
-        initializationStatus: row.initializationStatus as Project["initializationStatus"],
-        kind: row.kind as Project["kind"],
-        name: row.name,
-        nameSource: row.nameSource as Project["nameSource"],
-        orderKey: row.orderKey,
-        path: row.path,
-        presence: row.presence as Project["presence"],
-        storageKey: row.storageKey,
-        updatedAt: row.updatedAtMs,
-        version: row.version,
-        worktreeSupport: row.worktreeSupport as Project["worktreeSupport"],
-        ...(row.worktreeSupportReason === null
-            ? {}
-            : { worktreeSupportReason: row.worktreeSupportReason }),
-    };
-    if (project.kind === "home" && row.avatarHash === null) project.avatarBuiltin = "home";
-    if (row.initializationError !== null) {
-        project.initializationError = row.initializationError;
-    }
-    return project;
-}
-
-/**
- * Git facts are absent until a probe has observed the repository. A row that has never resolved a
- * HEAD and is not on a branch reports no facts at all rather than a misleading detached zero state.
- */
-function readGitFacts(row: ProjectRow | WorkspaceRow): GitRepositoryFacts | undefined {
-    const branch = row.gitBranch ?? undefined;
-    const head = row.gitHead ?? undefined;
-    const upstream = row.gitUpstream ?? undefined;
-    const detached = row.gitDetached;
-    if (branch === undefined && head === undefined && !detached) return undefined;
-    return {
-        ahead: row.gitAhead,
-        behind: row.gitBehind,
-        ...(branch === undefined ? {} : { branch }),
-        detached,
-        ...(head === undefined ? {} : { head }),
-        ...(upstream === undefined ? {} : { upstream }),
-    };
-}
-
-function readWorkspace(row: WorkspaceRow): ProjectWorkspace {
-    const git = readGitFacts(row);
-    return {
-        ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
-        ...(row.baseCommit === null ? {} : { baseCommit: row.baseCommit }),
-        ...(row.baseRef === null ? {} : { baseRef: row.baseRef }),
-        createdAt: row.createdAtMs,
-        ...(row.error === null ? {} : { error: row.error }),
-        ...(git === undefined ? {} : { git }),
-        gitCommonDir: row.gitCommonDir,
-        id: row.id,
-        kind: row.kind as ProjectWorkspace["kind"],
-        name: row.name,
-        orderKey: row.orderKey,
-        path: row.path,
-        presence: row.presence as ProjectWorkspace["presence"],
-        projectId: row.projectId,
-        status: row.status as ProjectWorkspace["status"],
-        storageKey: row.storageKey,
-        ...(row.title === null ? {} : { title: row.title }),
-        updatedAt: row.updatedAtMs,
-        version: row.version,
     };
 }
 

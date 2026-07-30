@@ -1586,7 +1586,10 @@ describe("Codex CLI mode WebSocket goldens", () => {
             session.run({
                 context: {
                     messages: [
-                        ...sol.systemMessages.map((content) => ({ role: "system" as const, content })),
+                        ...sol.systemMessages.map((content) => ({
+                            role: "system" as const,
+                            content,
+                        })),
                         { role: "user", content: "first" },
                     ],
                 },

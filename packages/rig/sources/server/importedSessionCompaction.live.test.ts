@@ -8,8 +8,7 @@ import { PersistentSessionStore } from "./PersistentSessionStore.js";
 const LIVE = process.env.RIG_LIVE_TEST === "1";
 const databasePath = process.env.RIG_IMPORTED_STATE_DB;
 const sessionId = process.env.RIG_IMPORTED_SESSION_ID;
-const hasBedrockCredential =
-    (process.env.AWS_BEARER_TOKEN_BEDROCK?.trim().length ?? 0) > 0;
+const hasBedrockCredential = (process.env.AWS_BEARER_TOKEN_BEDROCK?.trim().length ?? 0) > 0;
 const hasFixture =
     databasePath !== undefined &&
     sessionId !== undefined &&

@@ -1,10 +1,10 @@
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vitest";
 
-import { migrateSessionDatabase } from "../database/migrateSessionDatabase.js";
-import { openSessionDatabase } from "../database/openSessionDatabase.js";
-import { externalToolCalls, projects, sessions } from "../database/schema.js";
-import { durablePermissionHandoff } from "./durablePermissionHandoff.js";
+import { migrateSessionDatabase } from "../../database/migrateSessionDatabase.js";
+import { openSessionDatabase } from "../../database/openSessionDatabase.js";
+import { externalToolCalls, projects, sessions } from "../../database/schema.js";
+import { durablePermissionHandoff } from "../durablePermissionHandoff.js";
 
 describe("durablePermissionHandoff", () => {
     it("rolls back the external call when the permission input cannot be saved", () => {
