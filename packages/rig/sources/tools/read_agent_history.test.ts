@@ -56,6 +56,11 @@ describe("read_agent_history", () => {
         expect(readAgentHistoryTool.arguments.properties.limit.description).toContain(
             "may return fewer",
         );
+        expect(
+            readAgentHistoryTool.arguments.properties.from.anyOf.map(
+                (option: { const: string }) => option.const,
+            ),
+        ).toEqual(["start", "begin", "beginning", "end", "last"]);
 
         const result = readAgentHistoryTool.execute(
             {
@@ -98,6 +103,15 @@ describe("read_agent_history", () => {
 
         readAgentHistoryTool.execute({}, context, {});
         expect(read).toHaveBeenLastCalledWith({ limit: 100 });
+
+        readAgentHistoryTool.execute({ from: "beginning" } as never, context, {});
+        expect(read).toHaveBeenLastCalledWith({ from: "start", limit: 100 });
+
+        readAgentHistoryTool.execute({ from: "begin" } as never, context, {});
+        expect(read).toHaveBeenLastCalledWith({ from: "start", limit: 100 });
+
+        readAgentHistoryTool.execute({ from: "last" } as never, context, {});
+        expect(read).toHaveBeenLastCalledWith({ from: "end", limit: 100 });
     });
 });
 

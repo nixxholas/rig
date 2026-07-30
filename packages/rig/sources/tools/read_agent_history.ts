@@ -28,10 +28,19 @@ export const readAgentHistoryTool = defineTool({
             }),
         ),
         from: Type.Optional(
-            Type.Union([Type.Literal("start"), Type.Literal("end")], {
-                description:
-                    "Read the first or last matching page. Results are always chronological. Cannot be combined with cursor.",
-            }),
+            Type.Union(
+                [
+                    Type.Literal("start"),
+                    Type.Literal("begin"),
+                    Type.Literal("beginning"),
+                    Type.Literal("end"),
+                    Type.Literal("last"),
+                ],
+                {
+                    description:
+                        "Read the first matching page with start, begin, or beginning; read the last matching page with end or last. Results are always chronological. Cannot be combined with cursor.",
+                },
+            ),
         ),
         include_tools: Type.Optional(
             Type.Boolean({
@@ -127,16 +136,18 @@ export const readAgentHistoryTool = defineTool({
         if (cursor !== undefined && from !== undefined) {
             throw new Error("Use either cursor or from, not both.");
         }
+        const normalizedFrom =
+            from === "begin" || from === "beginning" ? "start" : from === "last" ? "end" : from;
         const page = context.chatHistory.read({
             ...(cursor === undefined ? {} : { cursor }),
-            ...(from === undefined ? {} : { from }),
+            ...(normalizedFrom === undefined ? {} : { from: normalizedFrom }),
             limit,
             ...(query === undefined ? {} : { query }),
             ...(roles === undefined ? {} : { roles }),
             ...(target === undefined ? {} : { target }),
         });
         const formatted = formatChatHistoryPage(page, {
-            fromEnd: from === "end",
+            fromEnd: normalizedFrom === "end",
             includeTools,
         });
         const returnedCursor = page.messages[formatted.startIndex]?.position ?? page.cursor;
