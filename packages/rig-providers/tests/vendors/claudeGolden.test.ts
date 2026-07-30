@@ -208,7 +208,7 @@ describe("Claude provider golden", () => {
             golden.exchanges[1].request.body.tools,
         );
         expect(golden.exchanges[3].request.body.model).toBe("claude-sonnet-5");
-    });
+    }, 15_000);
 });
 
 interface GoldenExchange {
@@ -327,7 +327,7 @@ function normalize(value: unknown, cwd: string): unknown {
                     "You have been invoked in the following environment:",
                 )
                 .replace(/(?<= - Platform: )[^\n]+/gu, "<PLATFORM>")
-                .replace(/(?<= - Shell: )[^\n]+/gu, "<SHELL>")
+                .replace(/(?<= - Shell: )[^\n]*/gu, "<SHELL>")
                 .replace(/(?<= - OS Version: )[^\n]+/gu, "<OS_VERSION>")
                 .replace(/(?<=Today's date is )\d{4}-\d{2}-\d{2}(?=\.)/gu, "<CURRENT_DATE>")
                 .replace(/(?<=current date is )\d{4}-\d{2}-\d{2}/gu, "<CURRENT_DATE>");

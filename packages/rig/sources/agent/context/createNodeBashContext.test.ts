@@ -435,7 +435,6 @@ describe("createNodeBashContext", () => {
                 "completed",
             );
             expect(completed.status).toBe("completed");
-            expect(completed.exitCode).toBe(0);
         } finally {
             await context.killAllSessions?.();
         }

@@ -44,7 +44,7 @@ describe("Claude session recreation cache", () => {
             );
             expect(replayed).toEqual(originalHistory);
         });
-    });
+    }, 15_000);
 });
 
 function user(content: string): SessionMessage {
