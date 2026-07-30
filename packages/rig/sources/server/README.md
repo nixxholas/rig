@@ -11,6 +11,8 @@ Domain behavior does not live here:
 - `../project/` owns projects and workspaces.
 - `../git/` owns Git repository state and worktrees.
 - `../global-event/` owns global-event queues and cursors.
+- `../model-catalog/` owns the curated model catalog.
+- `../file-search/` owns workspace file indexing and search.
 - `../persistence/` owns every SQLite operation.
 
 ```text
@@ -24,6 +26,7 @@ runLocalProtocolServer
  |    +-- HTTP routes and WebSocket terminals
  |    +-- session and global-event streaming
  +-- session / project / git / global-event domain modules
+ +-- model-catalog / file-search services
  +-- Happy and MCP lifecycle services
 ```
 

@@ -72,7 +72,7 @@ import { runSandboxedGitCommand } from "../git/runSandboxedGitCommand.js";
 import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
 import type { GitCommandRunner } from "../git/types.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
-import type { TaskDrain } from "../server/TrackedTaskDrain.js";
+import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { folderProjectName, projectNameKey, validateProjectName } from "./projectIdentity.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;

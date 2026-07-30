@@ -8,7 +8,7 @@ import {
     createDaemonStartupRequestListener,
     type DaemonStartupState,
 } from "./createDaemonStartupRequestListener.js";
-import { createModelCatalog } from "./createModelCatalog.js";
+import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import { GitStateTracker } from "../git/GitStateTracker.js";
 import { getEnvironmentLocalServerPaths } from "./getEnvironmentLocalServerPaths.js";
 import { installDaemonProcessFailureLogging } from "./installDaemonProcessFailureLogging.js";
@@ -17,7 +17,7 @@ import { markGitStateFromSessionEvent } from "../git/markGitStateFromSessionEven
 import { publishGitLiveEvent } from "../git/publishGitLiveEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
 import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
-import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
+import { TrackedTaskDrain } from "../utils/TrackedTaskDrain.js";
 import { readLocalServerToken } from "./readLocalServerToken.js";
 import { removeStaleSocket } from "./removeStaleSocket.js";
 import { resolveHappyIntegrationMode } from "./resolveHappyIntegrationMode.js";

@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { describe, expect, it } from "vitest";
 
-import { waitForProcessExit } from "./waitForProcessExit.js";
+import { waitForProcessExit } from "../waitForProcessExit.js";
 
 describe("waitForProcessExit", () => {
     it("resolves after the selected process exits", async () => {

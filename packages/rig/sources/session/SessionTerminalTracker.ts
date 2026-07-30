@@ -1,5 +1,5 @@
 import type { SessionTerminalHeartbeatRequest } from "../protocol/index.js";
-import { isTargetProcessAlive } from "../server/isTargetProcessAlive.js";
+import { isTargetProcessAlive } from "../processes/isTargetProcessAlive.js";
 
 const DEFAULT_SWEEP_INTERVAL_MS = 5_000;
 const DEFAULT_TERMINAL_TIMEOUT_MS = 20_000;

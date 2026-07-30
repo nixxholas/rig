@@ -29,7 +29,8 @@ describe("attached command secrets", () => {
             },
             files: {
                 "secret-server.mjs": `
-import { createModelCatalog, createProtocolHttpServer } from "/app/packages/rig/dist/server/index.js";
+import { createProtocolHttpServer } from "/app/packages/rig/dist/server/index.js";
+import { createModelCatalog } from "/app/packages/rig/dist/model-catalog/index.js";
 import { InMemorySessionStore } from "/app/packages/rig/dist/session/index.js";
 
 const modelCatalog = createModelCatalog();

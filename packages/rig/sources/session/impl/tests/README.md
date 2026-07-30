@@ -10,6 +10,7 @@ formatShellCommandContext.test.ts           shell result formatting and limits
 isTransientInferenceSessionEvent.test.ts    which events are transient
 latestObservedProviderQuotas.test.ts        newest quota wins per provider
 resolveSteeringContinuationMessageIds.test.ts  which messages a steer resumes
+resolveSharedAgentPath.test.ts                  shared local or container path
 sessionUnreadStateAfterEvent.test.ts        unread mark transitions
 ```
 

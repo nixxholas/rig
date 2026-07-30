@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import type { SessionEvent } from "../protocol/index.js";
-import { HappyMessageMapper } from "./mapSessionEventToHappyMessages.js";
+import type { SessionEvent } from "../../protocol/index.js";
+import { HappyMessageMapper } from "../mapSessionEventToHappyMessages.js";
 
 describe("HappyMessageMapper", () => {
     it("keeps transient provider blocks out of the durable Happy outbox", () => {

@@ -136,8 +136,8 @@ import { generateSessionMetadata } from "./generateSessionMetadata.js";
 import { createAbortRequestKey } from "./impl/createAbortRequestKey.js";
 import { createGoalTitle } from "./impl/createGoalTitle.js";
 import { formatShellCommandContext } from "./impl/formatShellCommandContext.js";
-import { getProviderIdForModel } from "../server/getProviderIdForModel.js";
-import { getProviderIdsForModel } from "../server/getProviderIdsForModel.js";
+import { getProviderIdForModel } from "../model-catalog/getProviderIdForModel.js";
+import { getProviderIdsForModel } from "../model-catalog/getProviderIdsForModel.js";
 import { resolveInitialModelSelection } from "./impl/resolveInitialModelSelection.js";
 import { resolveSteeringContinuationMessageIds } from "./impl/resolveSteeringContinuationMessageIds.js";
 import { SessionEventLog } from "./SessionEventLog.js";
@@ -146,7 +146,7 @@ import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { summarizeDockerExecution } from "../execution/index.js";
-import type { TaskDrain } from "../server/TrackedTaskDrain.js";
+import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import {
     addUsage,
     aggregateSessionUsage,

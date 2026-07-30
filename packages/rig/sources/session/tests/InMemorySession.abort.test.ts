@@ -20,7 +20,7 @@ import {
 } from "@slopus/rig-execution";
 import { InMemorySession } from "../InMemorySession.js";
 import type { AgentSessionManager } from "../AgentSessionManager.js";
-import { TrackedTaskDrain } from "../../server/TrackedTaskDrain.js";
+import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 describe("InMemorySession abort", () => {
     it("clears a restored durable-run identity when its workspace is archived", async () => {

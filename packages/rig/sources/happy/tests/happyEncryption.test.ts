@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decryptHappyPayload, encryptHappyPayload } from "./happyEncryption.js";
+import { decryptHappyPayload, encryptHappyPayload } from "../happyEncryption.js";
 
 describe("Happy payload encryption", () => {
     it("matches Happy's versioned AES-256-GCM data-key layout", () => {

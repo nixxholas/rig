@@ -19,7 +19,7 @@ import type {
     PersistedSessionState,
 } from "../InMemorySession.js";
 import { PersistentSessionStore } from "../PersistentSessionStore.js";
-import { TrackedTaskDrain } from "../../server/TrackedTaskDrain.js";
+import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 describe("PersistentSessionStore", () => {
     it("does not swallow database failures from post-commit observers", () => {

@@ -19,8 +19,8 @@ import type { Message } from "../agent/types.js";
 import type { PermissionMode } from "../permissions/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
-import type { TaskDrain } from "../server/TrackedTaskDrain.js";
-import { resolveSharedAgentPath } from "../server/resolveSharedAgentPath.js";
+import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
+import { resolveSharedAgentPath } from "./impl/resolveSharedAgentPath.js";
 import type { InMemorySession } from "./InMemorySession.js";
 
 export const DEFAULT_MAX_SUBAGENT_DEPTH = 3;

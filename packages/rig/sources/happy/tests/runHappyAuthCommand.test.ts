@@ -5,7 +5,7 @@ import { join } from "node:path";
 import tweetnacl from "tweetnacl";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { runHappyAuthCommand } from "./runHappyAuthCommand.js";
+import { runHappyAuthCommand } from "../runHappyAuthCommand.js";
 
 const directories: string[] = [];
 

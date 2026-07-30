@@ -35,12 +35,12 @@ import {
     type PersistedSessionState,
 } from "./InMemorySession.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
-import { createModelCatalog } from "../server/createModelCatalog.js";
+import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import { PersistentGlobalEventQueue } from "../global-event/PersistentGlobalEventQueue.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
-import type { TaskDrain } from "../server/TrackedTaskDrain.js";
+import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";

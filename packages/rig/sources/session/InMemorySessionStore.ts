@@ -19,7 +19,7 @@ import type {
 } from "../protocol/index.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
-import { createModelCatalog } from "../server/createModelCatalog.js";
+import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";

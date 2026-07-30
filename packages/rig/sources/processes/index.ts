@@ -1,4 +1,5 @@
 export { killProcessTree } from "./killProcessTree.js";
+export { isTargetProcessAlive } from "./isTargetProcessAlive.js";
 export { ManagedProcess, NativeProcessManager } from "./NativeProcessManager.js";
 export { resolveSystemShell } from "./resolveSystemShell.js";
 export { waitForProcessExit } from "./waitForProcessExit.js";

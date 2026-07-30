@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, expect, it } from "vitest";
 
-import { loadOrCreateHappyMachineId } from "./loadOrCreateHappyMachineId.js";
+import { loadOrCreateHappyMachineId } from "../loadOrCreateHappyMachineId.js";
 
 const directories: string[] = [];
 

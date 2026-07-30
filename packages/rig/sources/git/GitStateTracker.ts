@@ -10,7 +10,7 @@ import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import { runScanGit } from "./runScanGit.js";
 import { scanGitRepository } from "./scanGitRepository.js";
-import type { TaskDrain } from "../server/TrackedTaskDrain.js";
+import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { watchGitRepositoryChanges } from "./watchGitRepositoryChanges.js";
 
 type GitLiveEvent = Extract<

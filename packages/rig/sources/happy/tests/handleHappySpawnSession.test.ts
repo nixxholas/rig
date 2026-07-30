@@ -4,8 +4,8 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { ModelCatalog } from "../protocol/index.js";
-import { handleHappySpawnSession } from "./handleHappySpawnSession.js";
+import type { ModelCatalog } from "../../protocol/index.js";
+import { handleHappySpawnSession } from "../handleHappySpawnSession.js";
 
 const directories: string[] = [];
 const catalog: ModelCatalog = {

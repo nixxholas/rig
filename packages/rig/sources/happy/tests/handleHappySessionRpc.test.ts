@@ -4,10 +4,10 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createNodeAgentContext } from "../agent/context/createNodeAgentContext.js";
-import { NativeProcessManager } from "../processes/index.js";
-import { handleHappySessionRpc } from "./handleHappySessionRpc.js";
-import { resolveHappyRipgrepExecutable } from "./resolveHappyRipgrepExecutable.js";
+import { createNodeAgentContext } from "../../agent/context/createNodeAgentContext.js";
+import { NativeProcessManager } from "../../processes/index.js";
+import { handleHappySessionRpc } from "../handleHappySessionRpc.js";
+import { resolveHappyRipgrepExecutable } from "../resolveHappyRipgrepExecutable.js";
 
 const directories: string[] = [];
 

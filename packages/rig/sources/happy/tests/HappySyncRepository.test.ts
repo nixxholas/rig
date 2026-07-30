@@ -5,9 +5,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { sql } from "drizzle-orm";
 
-import { openSessionDatabase } from "../persistence/database/openSessionDatabase.js";
-import { createSessionDatabaseFixture } from "../persistence/database/tests/createSessionDatabaseFixture.js";
-import { HappySyncRepository } from "./HappySyncRepository.js";
+import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
+import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
+import { HappySyncRepository } from "../HappySyncRepository.js";
 
 const directories: string[] = [];
 

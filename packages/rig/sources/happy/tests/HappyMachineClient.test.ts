@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ModelCatalog } from "../protocol/index.js";
-import { decryptHappyPayload, encryptHappyPayload } from "./happyEncryption.js";
-import { HappyMachineClient } from "./HappyMachineClient.js";
-import type { HappyConnectionConfiguration } from "./types.js";
+import type { ModelCatalog } from "../../protocol/index.js";
+import { decryptHappyPayload, encryptHappyPayload } from "../happyEncryption.js";
+import { HappyMachineClient } from "../HappyMachineClient.js";
+import type { HappyConnectionConfiguration } from "../types.js";
 
 const modelCatalog: ModelCatalog = {
     defaultModelId: "gpt-test",

@@ -11,6 +11,7 @@ InMemorySession ----> createAbortRequestKey          identity for a pending abor
                  |--> clampSessionDraftTimestamp     keeps draft clocks sane
                  |--> formatShellCommandContext      shell result as agent context
                  |--> resolveInitialModelSelection   model plus provider at create
+                 |--> resolveSharedAgentPath         path another session can use
                  |--> resolveSteeringContinuationMessageIds  what a steer resumes
                  |--> sessionUnreadStateAfterEvent   unread mark after an event
                  |--> isTransientInferenceSessionEvent

@@ -22,10 +22,10 @@ import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import type { SessionStore } from "../../session/SessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
-import type { FileSearchServiceContract } from "../FileSearchService.js";
+import type { FileSearchServiceContract } from "../../file-search/FileSearchService.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import type { GlobalEventQueue } from "../../global-event/GlobalEventQueue.js";
-import { TrackedTaskDrain } from "../TrackedTaskDrain.js";
+import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 
 const execFile = promisify(execFileCallback);

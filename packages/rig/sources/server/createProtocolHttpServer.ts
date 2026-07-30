@@ -85,8 +85,11 @@ import { errorToMessage } from "../errorToMessage.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import type { SessionUsageSummary } from "../session/usage/index.js";
-import { createModelCatalog } from "./createModelCatalog.js";
-import { FileSearchService, type FileSearchServiceContract } from "./FileSearchService.js";
+import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
+import {
+    FileSearchService,
+    type FileSearchServiceContract,
+} from "../file-search/FileSearchService.js";
 import type { SessionEventLog } from "../session/SessionEventLog.js";
 import { isLiveOnlySessionEvent } from "../session/isLiveOnlySessionEvent.js";
 import { isSubmitMessageRequest } from "./isSubmitMessageRequest.js";
@@ -113,7 +116,7 @@ import {
     MAX_CODEX_STREAM_MAX_RETRIES,
 } from "../config/codexStreamRetrySettings.js";
 import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
-import type { TaskDrain } from "./TrackedTaskDrain.js";
+import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 import type { SecretRegistration } from "../secrets/index.js";
 import type {

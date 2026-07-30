@@ -8,14 +8,11 @@ export type {
     SecretReference,
     SecretRegistration,
 } from "../secrets/index.js";
-export { TrackedTaskDrain, type TaskDrain } from "./TrackedTaskDrain.js";
 export { getDefaultSessionDatabasePath } from "./getDefaultSessionDatabasePath.js";
-export { createModelCatalog, type CreateModelCatalogOptions } from "./createModelCatalog.js";
 export {
     createProtocolHttpServer,
     type ProtocolHttpServerOptions,
 } from "./createProtocolHttpServer.js";
-export { getProviderIdForModel } from "./getProviderIdForModel.js";
 export { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
 export { prepareDaemonDiagnostics } from "./prepareDaemonDiagnostics.js";
 export { readLocalServerToken } from "./readLocalServerToken.js";

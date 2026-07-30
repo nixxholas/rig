@@ -16,7 +16,7 @@ import {
     type StreamOptions,
 } from "@slopus/rig-execution";
 import { InMemorySession } from "../InMemorySession.js";
-import { TrackedTaskDrain } from "../../server/TrackedTaskDrain.js";
+import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 afterEach(() => {
     vi.useRealTimers();

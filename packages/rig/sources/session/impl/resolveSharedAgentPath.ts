@@ -1,7 +1,7 @@
 import { relative, resolve, sep } from "node:path";
 import { posix } from "node:path";
 
-import type { DockerExecutionConfig, DockerMountConfig } from "../execution/index.js";
+import type { DockerExecutionConfig, DockerMountConfig } from "../../execution/index.js";
 
 export function resolveSharedAgentPath(
     sender: { cwd: string; docker?: DockerExecutionConfig; sessionId: string },

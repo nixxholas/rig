@@ -18,6 +18,8 @@ small deterministic utility
 `normalizeProjectCwd` canonicalizes an existing path while preserving a useful
 absolute path for a future or missing directory. `parseJsonFromModelOutput`
 extracts structured JSON from model text, and `raceWithAbort` applies an abort
-boundary to asynchronous work.
+boundary to asynchronous work. `TrackedTaskDrain` tracks accepted asynchronous
+work, rejects new work during shutdown, and waits for the accepted work to
+settle.
 
 Tests for these public utilities live in `tests/`.

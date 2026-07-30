@@ -6,12 +6,12 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import tweetnacl from "tweetnacl";
 
-import { createSessionDatabaseFixture } from "../persistence/database/tests/createSessionDatabaseFixture.js";
-import type { InMemorySession } from "../session/InMemorySession.js";
-import { decryptHappyPayload, encryptHappyPayload } from "./happyEncryption.js";
-import { HappySessionClient } from "./HappySessionClient.js";
-import { HappySyncRepository } from "./HappySyncRepository.js";
-import type { HappyConnectionConfiguration, HappyRemoteMessage } from "./types.js";
+import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
+import type { InMemorySession } from "../../session/InMemorySession.js";
+import { decryptHappyPayload, encryptHappyPayload } from "../happyEncryption.js";
+import { HappySessionClient } from "../HappySessionClient.js";
+import { HappySyncRepository } from "../HappySyncRepository.js";
+import type { HappyConnectionConfiguration, HappyRemoteMessage } from "../types.js";
 
 const directories: string[] = [];
 
