@@ -15,9 +15,11 @@ import {
 } from "@slopus/rig-execution";
 import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
-import { connectRig } from "@/connectRig.js";
-import { connectSession } from "@/connectSession.js";
-import type { SessionConnection } from "@/connectSession.js";
+import {
+    connectRig,
+    type RigSessionConnection,
+    type RigSessionSubscriptionOptions,
+} from "@/connectRig.js";
 
 /**
  * These run against the real daemon rather than a scripted stream, because the
@@ -58,46 +60,59 @@ async function waitFor(predicate: () => boolean, description: string): Promise<v
     throw new Error(`Timed out waiting for ${description}.`);
 }
 
+async function withSessionConnection(
+    endpoint: string,
+    options: RigSessionSubscriptionOptions,
+    test: (connection: RigSessionConnection) => Promise<void>,
+): Promise<void> {
+    const rig = connectRig({ endpoint, token: "secret" });
+    const connection = rig.connectSession(options);
+    try {
+        await test(connection);
+    } finally {
+        connection.close();
+        rig.close();
+    }
+}
+
 describe("rig-connect against a live daemon", () => {
-    let connection: SessionConnection | undefined;
-
-    afterEach(() => {
-        connection?.close();
-        connection = undefined;
-    });
-
     it("receives the whole session on the opening frame", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-connect-test" });
 
         let changes = 0;
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => {
-                changes += 1;
+            {
+                onChange: () => {
+                    changes += 1;
+                },
+                sessionId: session.id,
             },
-            sessionId: session.id,
-            token: "secret",
-        });
-
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
-        expect(changes).toBeGreaterThan(0);
-        expect(connection.session()).toMatchObject({
-            archived: false,
-            backgroundProcesses: [],
-            cwd: "/tmp/rig-connect-test",
-            modelLocked: false,
-            models: expect.any(Array),
-            orderKey: session.snapshot().orderKey,
-            pendingSteeringMessages: [],
-            pendingUserInputs: [],
-            permissionMode: session.snapshot().permissionMode,
-            projectId: session.snapshot().projectId,
-            sessionId: session.id,
-            shellCommands: [],
-            subagents: [],
-            tasks: [],
-        });
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
+                expect(changes).toBeGreaterThan(0);
+                expect(connection.session()).toMatchObject({
+                    archived: false,
+                    backgroundProcesses: [],
+                    cwd: "/tmp/rig-connect-test",
+                    modelLocked: false,
+                    models: expect.any(Array),
+                    orderKey: session.snapshot().orderKey,
+                    pendingSteeringMessages: [],
+                    pendingUserInputs: [],
+                    permissionMode: session.snapshot().permissionMode,
+                    projectId: session.snapshot().projectId,
+                    sessionId: session.id,
+                    shellCommands: [],
+                    subagents: [],
+                    tasks: [],
+                });
+            },
+        );
     });
 
     it("delivers expanded optimistic actions through the real mutation protocol", async () => {
@@ -114,10 +129,7 @@ describe("rig-connect against a live daemon", () => {
             onMutationRejected: (delta) => mutationFailures.push(delta.message),
             token: "secret",
         });
-        const session = rig.connectSession({
-            onChange: () => undefined,
-            sessionId: source.id,
-        });
+        const session = rig.connectSession({ onChange: () => undefined, sessionId: source.id });
         try {
             await waitFor(() => session.session().connection === "live", "the stream to open");
 
@@ -157,47 +169,53 @@ describe("rig-connect against a live daemon", () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-connect-test" });
 
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
-            token: "secret",
-        });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+            { onChange: () => undefined, sessionId: session.id },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
 
-        await session.changePermissionMode({ permissionMode: "read_only" });
-        await waitFor(
-            () => connection?.session().activity !== undefined,
-            "the session activity to arrive",
+                await session.changePermissionMode({ permissionMode: "read_only" });
+                await waitFor(
+                    () => connection.session().activity !== undefined,
+                    "the session activity to arrive",
+                );
+
+                expect(connection.session().activity.kind).toBe("idle");
+                expect(connection.session().activity.label).toBe("Idle");
+            },
         );
-
-        expect(connection.session().activity.kind).toBe("idle");
-        expect(connection.session().activity.label).toBe("Idle");
     });
 
     it("reports the session title as the daemon learns it", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-connect-test" });
 
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
-            token: "secret",
-        });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+            { onChange: () => undefined, sessionId: session.id },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
 
-        session.events.append({
-            createdAt: Date.now(),
-            data: { status: "ready", title: "Ship rig-connect" },
-            id: session.events.lastEventId() ?? "",
-            sessionId: session.id,
-            type: "session_title_changed",
-        } as never);
+                session.events.append({
+                    createdAt: Date.now(),
+                    data: { status: "ready", title: "Ship rig-connect" },
+                    id: session.events.lastEventId() ?? "",
+                    sessionId: session.id,
+                    type: "session_title_changed",
+                } as never);
 
-        await waitFor(
-            () => connection?.session().title === "Ship rig-connect",
-            "the title to arrive",
+                await waitFor(
+                    () => connection.session().title === "Ship rig-connect",
+                    "the title to arrive",
+                );
+            },
         );
     });
 
@@ -212,39 +230,42 @@ describe("rig-connect against a live daemon", () => {
         const second = session.submit({ text: "Second ask." });
         await session.waitForRun(second.runId);
 
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
-            token: "secret",
-        });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+            { onChange: () => undefined, sessionId: session.id },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
 
-        const elements = connection.elements();
-        const ends = elements.filter((element) => element.kind === "group_end");
-        expect(ends).toHaveLength(2);
-        expect(ends.every((element) => element.runId.startsWith("history:"))).toBe(false);
-        const events = session.events.since(undefined) ?? [];
-        const firstInference = events.find(
-            (event) =>
-                event.type === "agent_event" &&
-                event.data.runId === first.runId &&
-                event.data.event.type === "inference_iteration_start",
+                const elements = connection.elements();
+                const ends = elements.filter((element) => element.kind === "group_end");
+                expect(ends).toHaveLength(2);
+                expect(ends.every((element) => element.runId.startsWith("history:"))).toBe(false);
+                const events = session.events.since(undefined) ?? [];
+                const firstInference = events.find(
+                    (event) =>
+                        event.type === "agent_event" &&
+                        event.data.runId === first.runId &&
+                        event.data.event.type === "inference_iteration_start",
+                );
+                const firstFinished = events.find(
+                    (event) => event.type === "run_finished" && event.data.runId === first.runId,
+                );
+                expect(ends[0]).toMatchObject({
+                    endedAt: firstFinished?.createdAt,
+                    startedAt: firstInference?.createdAt,
+                });
+                expect(connection.session().usage).toMatchObject({
+                    currentProviderId: "test",
+                    totalCost: 0.2,
+                    totalTokens: 24,
+                });
+                expect(elements.at(-1)?.kind).toBe("group_end");
+                expect(connection.session().transcriptComplete).toBe(true);
+            },
         );
-        const firstFinished = events.find(
-            (event) => event.type === "run_finished" && event.data.runId === first.runId,
-        );
-        expect(ends[0]).toMatchObject({
-            endedAt: firstFinished?.createdAt,
-            startedAt: firstInference?.createdAt,
-        });
-        expect(connection.session().usage).toMatchObject({
-            currentProviderId: "test",
-            totalCost: 0.2,
-            totalTokens: 24,
-        });
-        expect(elements.at(-1)?.kind).toBe("group_end");
-        expect(connection.session().transcriptComplete).toBe(true);
     });
 
     it("exposes one authoritative active clock from submission through completion", async () => {
@@ -257,58 +278,66 @@ describe("rig-connect against a live daemon", () => {
             withModel: true,
         });
         const session = store.create({ cwd: "/tmp/rig-connect-test" });
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
-            token: "secret",
-        });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+            { onChange: () => undefined, sessionId: session.id },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
 
-        const submitted = session.submit({ text: "Keep this clock." });
-        const submission = (session.events.since(undefined) ?? []).find(
-            (event) => event.type === "message_submitted" && event.data.runId === submitted.runId,
-        );
-        await waitFor(
-            () => connection?.session().activeTurn?.runId === submitted.runId,
-            "the active turn timing to arrive",
-        );
-        expect(connection.session().activeTurn).toEqual({
-            runId: submitted.runId,
-            startedAt: submission?.createdAt,
-        });
+                const submitted = session.submit({ text: "Keep this clock." });
+                const submission = (session.events.since(undefined) ?? []).find(
+                    (event) =>
+                        event.type === "message_submitted" && event.data.runId === submitted.runId,
+                );
+                await waitFor(
+                    () => connection.session().activeTurn?.runId === submitted.runId,
+                    "the active turn timing to arrive",
+                );
+                expect(connection.session().activeTurn).toEqual({
+                    runId: submitted.runId,
+                    startedAt: submission?.createdAt,
+                });
 
-        releaseInference();
-        await session.waitForRun(submitted.runId);
-        await waitFor(
-            () =>
-                connection
-                    ?.elements()
-                    .some(
+                releaseInference();
+                await session.waitForRun(submitted.runId);
+                await waitFor(
+                    () =>
+                        connection
+                            .elements()
+                            .some(
+                                (element) =>
+                                    element.kind === "group_end" &&
+                                    element.runId === submitted.runId,
+                            ) === true,
+                    "the completed turn timing to arrive",
+                );
+                const end = connection
+                    .elements()
+                    .find(
                         (element) =>
                             element.kind === "group_end" && element.runId === submitted.runId,
-                    ) === true,
-            "the completed turn timing to arrive",
+                    );
+                const inferenceStarted = (session.events.since(undefined) ?? []).find(
+                    (event) =>
+                        event.type === "agent_event" &&
+                        event.data.runId === submitted.runId &&
+                        event.data.event.type === "inference_iteration_start",
+                );
+                expect(connection.session().activeTurn).toBeUndefined();
+                expect(end).toMatchObject({
+                    elapsedMs: expect.any(Number),
+                    endedAt: expect.any(Number),
+                    startedAt: inferenceStarted?.createdAt,
+                });
+                expect(connection.session().usage).toMatchObject({
+                    totalCost: 0.1,
+                    totalTokens: 12,
+                });
+            },
         );
-        const end = connection
-            .elements()
-            .find((element) => element.kind === "group_end" && element.runId === submitted.runId);
-        const inferenceStarted = (session.events.since(undefined) ?? []).find(
-            (event) =>
-                event.type === "agent_event" &&
-                event.data.runId === submitted.runId &&
-                event.data.event.type === "inference_iteration_start",
-        );
-        expect(connection.session().activeTurn).toBeUndefined();
-        expect(end).toMatchObject({
-            elapsedMs: expect.any(Number),
-            endedAt: expect.any(Number),
-            startedAt: inferenceStarted?.createdAt,
-        });
-        expect(connection.session().usage).toMatchObject({
-            totalCost: 0.1,
-            totalTokens: 12,
-        });
     });
 
     it("says so when the conversation began before the window it was given", async () => {
@@ -319,20 +348,23 @@ describe("rig-connect against a live daemon", () => {
             await session.waitForRun(submitted.runId);
         }
 
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
-            token: "secret",
-        });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
+            { onChange: () => undefined, sessionId: session.id },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
 
-        // A client must be able to tell that earlier turns exist rather than
-        // presenting a truncated window as the whole conversation.
-        expect(connection.session().transcriptComplete).toBe(false);
-        expect(
-            connection.elements().filter((element) => element.kind === "group_end"),
-        ).toHaveLength(20);
+                // A client must be able to tell that earlier turns exist rather than
+                // presenting a truncated window as the whole conversation.
+                expect(connection.session().transcriptComplete).toBe(false);
+                expect(
+                    connection.elements().filter((element) => element.kind === "group_end"),
+                ).toHaveLength(20);
+            },
+        );
     });
 });
 
@@ -415,13 +447,6 @@ function assistantMessage(model: string): AssistantMessage {
 }
 
 describe("loading earlier turns through the connection", () => {
-    let connection: SessionConnection | undefined;
-
-    afterEach(() => {
-        connection?.close();
-        connection = undefined;
-    });
-
     it("pages back to the beginning of a real conversation", async () => {
         const { endpoint, store } = await startDaemon({ withModel: true });
         const session = store.create({ cwd: "/tmp/rig-load-earlier" });
@@ -432,49 +457,49 @@ describe("loading earlier turns through the connection", () => {
 
         // One turn at a time, so the opening frame is deliberately short of the
         // conversation and a reader has something to scroll back into.
-        connection = connectSession({
+        await withSessionConnection(
             endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
-            token: "secret",
-            transcriptTurnLimit: 1,
-        });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
-        expect(connection.session().transcriptComplete).toBe(false);
-        const newest = connection.elements().map((element) => element.id);
+            { onChange: () => undefined, sessionId: session.id, transcriptTurnLimit: 1 },
+            async (connection) => {
+                await waitFor(
+                    () => connection.session().connection === "live",
+                    "the stream to open",
+                );
+                expect(connection.session().transcriptComplete).toBe(false);
+                const newest = connection.elements().map((element) => element.id);
 
-        const loadOnePage = async (): Promise<void> => {
-            const token = connection?.session().loadMoreToken;
-            if (connection === undefined || token === undefined) {
-                throw new Error("Expected a load-more token.");
-            }
-            connection.loadMore(token);
-            await waitFor(
-                () =>
-                    connection?.session().loadingMore === false &&
-                    (connection.session().loadMoreToken !== token ||
-                        connection.session().transcriptComplete),
-                "the earlier transcript page to load",
-            );
-        };
+                const loadOnePage = async (): Promise<void> => {
+                    const token = connection.session().loadMoreToken;
+                    if (token === undefined) throw new Error("Expected a load-more token.");
+                    connection.loadMore(token);
+                    await waitFor(
+                        () =>
+                            connection.session().loadingMore === false &&
+                            (connection.session().loadMoreToken !== token ||
+                                connection.session().transcriptComplete),
+                        "the earlier transcript page to load",
+                    );
+                };
 
-        if (!connection.session().transcriptComplete) await loadOnePage();
+                if (!connection.session().transcriptComplete) await loadOnePage();
 
-        const afterOnePage = connection.elements().map((element) => element.id);
-        // History is added in front, so what a reader is looking at keeps both
-        // its position relative to the end and its identity.
-        expect(afterOnePage.slice(-newest.length)).toEqual(newest);
-        expect(afterOnePage.length).toBeGreaterThan(newest.length);
+                const afterOnePage = connection.elements().map((element) => element.id);
+                // History is added in front, so what a reader is looking at keeps both
+                // its position relative to the end and its identity.
+                expect(afterOnePage.slice(-newest.length)).toEqual(newest);
+                expect(afterOnePage.length).toBeGreaterThan(newest.length);
 
-        if (!connection.session().transcriptComplete) await loadOnePage();
+                if (!connection.session().transcriptComplete) await loadOnePage();
 
-        expect(connection.session().transcriptComplete).toBe(true);
-        expect(connection.session().loadMoreError).toBeUndefined();
-        // Nothing older remains, so further requests are refused rather than
-        // repeating the first page forever.
-        const settled = connection.elements().map((element) => element.id);
-        connection.loadMore("stale-message-token");
-        expect(connection.elements().map((element) => element.id)).toEqual(settled);
+                expect(connection.session().transcriptComplete).toBe(true);
+                expect(connection.session().loadMoreError).toBeUndefined();
+                // Nothing older remains, so further requests are refused rather than
+                // repeating the first page forever.
+                const settled = connection.elements().map((element) => element.id);
+                connection.loadMore("stale-message-token");
+                expect(connection.elements().map((element) => element.id)).toEqual(settled);
+            },
+        );
     });
 });
 

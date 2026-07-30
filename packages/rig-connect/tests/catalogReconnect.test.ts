@@ -60,7 +60,14 @@ function session(lastEventId: string, title: string): SessionSummary {
 
 function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): GlobalStreamHello {
     return {
+        catalog: {
+            defaultModelId: "model",
+            defaultProviderId: "test",
+            models: [],
+            providers: [],
+        },
         cursor,
+        identity: { version: "test" },
         protocolVersion: 1,
         projects: [
             {
@@ -82,7 +89,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
         sessionsComplete: true,
         terminalGroups: [],
         workspaces: [],
-    } as unknown as GlobalStreamHello;
+    };
 }
 
 function liveHello(cursor: string, gap: boolean, resumed: boolean): string {

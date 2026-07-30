@@ -108,8 +108,8 @@ function requestJson(method, path, body, headers = {}) {
     });
 }
 
-const initialState = await requestJson("GET", "/state");
-const project = initialState.projects.find((candidate) => candidate.path === "/workspace");
+const initialCatalog = await requestJson("GET", "/catalog");
+const project = initialCatalog.projects.find((candidate) => candidate.path === "/workspace");
 if (project === undefined) throw new Error("The workspace project is missing.");
 
 const created = await requestJson(
@@ -152,8 +152,8 @@ const archived = await requestJson(
     undefined,
     { "if-match": '"' + workspace.version + '"' },
 );
-const finalState = await requestJson("GET", "/state");
-const session = finalState.sessions.find((candidate) => candidate.id === attached.session.id);
+const sessions = await requestJson("GET", "/sessions?archived=all");
+const session = sessions.sessions.find((candidate) => candidate.id === attached.session.id);
 if (session === undefined) throw new Error("The attached session is missing.");
 let directoryRemoved = false;
 try {

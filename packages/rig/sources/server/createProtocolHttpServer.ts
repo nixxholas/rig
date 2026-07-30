@@ -28,7 +28,6 @@ import type {
     HealthResponse,
     GitStateResponse,
     GitWatchResponse,
-    GlobalStateResponse,
     GoalSessionResponse,
     ListModelsResponse,
     ListProjectsResponse,
@@ -79,7 +78,7 @@ import type {
     WriteSessionFileRequest,
     WriteSessionFileResponse,
 } from "../protocol/index.js";
-import { createEventIdFactory, RIG_PROTOCOL_VERSION } from "../protocol/index.js";
+import { RIG_PROTOCOL_VERSION } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -135,9 +134,6 @@ import {
     SessionFileTooLargeError,
     writeSessionFile,
 } from "./sessionFileApi.js";
-
-const createTerminalSnapshotEventId = createEventIdFactory();
-const createSessionSnapshotEventId = createEventIdFactory();
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
@@ -325,21 +321,6 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "models") {
         sendJson<ListModelsResponse>(response, 200, { catalog: modelCatalog });
-        return;
-    }
-
-    if (request.method === "GET" && route.name === "state") {
-        const sessions = store.list({ limit: 501 });
-        sendJson<GlobalStateResponse>(response, 200, {
-            cursor: runtimeConfig.globalEventQueue.cursor(),
-            gitSnapshots: runtimeConfig.gitStateTracker?.liveSnapshots() ?? [],
-            hasMoreSessions: sessions.length > 500,
-            projects: store.listProjects(),
-            sessions: sessions
-                .slice(0, 500)
-                .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals)),
-            workspaces: store.listWorkspaces(),
-        });
         return;
     }
 
@@ -1030,65 +1011,11 @@ async function handleRequest(
         }
 
         if (request.method === "GET" && route.name === "global-events-stream") {
-            streamGlobalEvents(
+            await streamGlobalEvents(
                 request,
                 response,
                 globalEventQueue,
                 url.searchParams.get("after"),
-                () => {
-                    const projects = store
-                        .listProjects()
-                        .filter((project) => project.archivedAt === undefined);
-                    const projectIds = new Set(projects.map((project) => project.id));
-                    const workspaces = store
-                        .listWorkspaces()
-                        .filter(
-                            (workspace) =>
-                                projectIds.has(workspace.projectId) &&
-                                workspace.archivedAt === undefined &&
-                                workspace.status !== "archived",
-                        );
-                    const workspaceIds = new Set(workspaces.map((workspace) => workspace.id));
-                    const sessions = store.listActive().filter((session) => !session.archived);
-                    return [
-                        ...(runtimeConfig.gitStateTracker?.liveSnapshots() ?? []).filter(
-                            (event) =>
-                                projectIds.has(event.projectId) &&
-                                (!("workspaceId" in event) ||
-                                    event.workspaceId === undefined ||
-                                    workspaceIds.has(event.workspaceId)),
-                        ),
-                        ...store.remoteTerminals.groups().flatMap((group) =>
-                            !projectIds.has(group.scope.projectId) ||
-                            (group.scope.workspaceId !== undefined &&
-                                !workspaceIds.has(group.scope.workspaceId))
-                                ? []
-                                : [
-                                      {
-                                          createdAt: Date.now(),
-                                          data: { terminals: group.terminals },
-                                          id: createTerminalSnapshotEventId(),
-                                          projectId: group.scope.projectId,
-                                          type: "remote_terminals_changed" as const,
-                                          ...(group.scope.workspaceId === undefined
-                                              ? {}
-                                              : { workspaceId: group.scope.workspaceId }),
-                                      },
-                                  ],
-                        ),
-                        ...sessions.map((session) => ({
-                            createdAt: Date.now(),
-                            data: { session },
-                            // The stream frame has its own fresh cursor; the
-                            // authoritative session version remains in
-                            // session.lastEventId for mutation preconditions.
-                            id: createSessionSnapshotEventId(),
-                            sessionId: session.id,
-                            type: "session_current" as const,
-                        })),
-                    ];
-                },
-                () => buildGroupCatalog(store, modelCatalog, identity, sessionTerminals),
             );
             return;
         }
@@ -2276,7 +2203,6 @@ function matchRoute(pathname: string):
               | "projects"
               | "secret-registrations"
               | "sessions"
-              | "state"
               | "shutdown";
           sessionId?: undefined;
       }
@@ -2379,7 +2305,6 @@ function matchRoute(pathname: string):
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
-    if (pathname === "/state") return { name: "state" };
     if (pathname === "/shutdown") return { name: "shutdown" };
 
     const globalParts = pathname.split("/").filter(Boolean);
@@ -3029,8 +2954,9 @@ function sessionStreamHello(
  * The request-response bootstrap has a dedicated transcript field, so its
  * current-state snapshot carries no second copy of conversation history.
  *
- * The legacy session stream keeps its original complete hello for the terminal;
- * this projection is only for rig-connect's `/state` endpoint.
+ * The session-scoped stream the terminal subscribes to keeps the complete hello,
+ * which still carries its transcript; this projection is only for the
+ * `GET /sessions/{sessionId}/state` bootstrap.
  */
 function sessionStateHello(
     session: SessionEventSource,

@@ -18,7 +18,6 @@ export type {
     GlobalEventQueueEntry,
     GlobalLiveEvent,
     GlobalLiveEventDelivery,
-    GlobalStateResponse,
     GlobalStreamHello,
     ListGlobalEventsResponse,
     ListProjectsResponse,

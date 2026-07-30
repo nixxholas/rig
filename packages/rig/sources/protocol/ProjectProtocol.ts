@@ -188,17 +188,6 @@ export interface GitWatchResponse {
     snapshots: readonly GlobalLiveEvent[];
 }
 
-export interface GlobalStateResponse {
-    cursor: string;
-    /** Live Git snapshots for watched entities; absent entries simply are not watched yet. */
-    gitSnapshots: readonly GlobalLiveEvent[];
-    hasMoreSessions: boolean;
-    projects: readonly Project[];
-    sessions: readonly SessionSummary[];
-    sessionsNextCursor?: string;
-    workspaces: readonly ProjectWorkspace[];
-}
-
 export interface BaseProjectEvent<TType extends string, TData> {
     createdAt: number;
     data: TData;
@@ -307,22 +296,22 @@ export interface ListGlobalEventsResponse {
 }
 
 /**
- * The first frame of the global event stream.
+ * The catalog snapshot a client loads from `GET /catalog`.
  *
  * It carries the group state a client needs to render immediately — the
- * projects, the workspaces inside them, and the sessions they contain — so
- * attaching is one request rather than a snapshot call followed by a stream.
+ * projects, the workspaces inside them, and the sessions they contain — taken
+ * at one point in the event stream, so a client can open the live stream first
+ * and rebase this snapshot onto whatever arrived while it was loading.
  *
- * Git snapshots are deliberately absent. They are live-only and the stream
- * already replays the current one for every watched entity right after
- * subscribing, so repeating them here would double the attach payload without
- * telling a client anything new.
+ * Git snapshots are deliberately absent. They are live-only, and a client
+ * declares the entities it cares about with `POST /git/watch`, which answers
+ * with their current snapshots.
  */
 export interface GlobalStreamHello {
-    /** The queue position this frame reflects; events after it follow on the stream. */
+    /** The queue position this snapshot reflects; events after it follow on the stream. */
     cursor: string;
-    catalog?: ModelCatalog;
-    identity?: DaemonIdentity;
+    catalog: ModelCatalog;
+    identity: DaemonIdentity;
     protocolVersion: number;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];

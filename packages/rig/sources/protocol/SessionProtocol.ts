@@ -535,7 +535,6 @@ export interface CreateSessionRequest {
     workspaceId?: string;
     /** Client-selected UUID used to make optimistic creation retry-safe. */
     clientSessionId?: string;
-    mutationId?: string;
 }
 
 export interface UpdateSessionRequest {

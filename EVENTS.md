@@ -27,9 +27,13 @@ updates are live-only: completed messages and run outcomes remain durable.
 
 When the durable global event queue is enabled, non-streaming events are also
 assigned a monotonic UUIDv7 global cursor and exposed through `GET /events` and
-`GET /events/stream`. The global queue does not persist or publish
-`agent_event`; completed messages and terminal run outcomes are delivered by
-`agent_message`, `run_finished`, and `run_error` instead.
+`GET /events/stream`. A stream without a cursor replays the retained log in
+bounded pages before following newly published stored and live events; a stream
+with a cursor resumes after it. Current entity snapshots are loaded through the
+catalog and entity endpoints instead of being replayed by the event stream. The
+global queue does not persist or publish `agent_event`; completed messages and
+terminal run outcomes are delivered by `agent_message`, `run_finished`, and
+`run_error` instead.
 
 ## Session events
 

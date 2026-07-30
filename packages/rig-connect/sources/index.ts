@@ -1,7 +1,3 @@
-export { connectSession } from "./connectSession.js";
-export type { ConnectSessionOptions, SessionConnection } from "./connectSession.js";
-export { connectGroups } from "./connectGroups.js";
-export type { ConnectGroupsOptions, GroupsConnection } from "./connectGroups.js";
 export { connectRig } from "./connectRig.js";
 export type {
     ConnectRigOptions,

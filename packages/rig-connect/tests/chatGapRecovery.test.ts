@@ -4,9 +4,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
+import { connectRig, type RigSessionConnection } from "@/connectRig.js";
 import type { SessionStateResponse } from "@/protocol.js";
-import { connectSession } from "@/connectSession.js";
-import type { SessionConnection } from "@/connectSession.js";
 
 /**
  * What happens to a conversation when the stream drops and the daemon can no
@@ -49,51 +48,51 @@ async function waitFor(predicate: () => boolean, description: string): Promise<v
     throw new Error(`Timed out waiting for ${description}.`);
 }
 
-function userMessages(connection: SessionConnection | undefined): string[] {
+function userMessages(connection: RigSessionConnection | undefined): string[] {
     return (connection?.elements() ?? [])
         .filter((element) => element.kind === "user_message")
         .map((element) => JSON.stringify(element));
 }
 
 describe("a chat that loses its place", () => {
-    let connection: SessionConnection | undefined;
-
-    afterEach(() => {
-        connection?.close();
-        connection = undefined;
-    });
-
     it("recovers messages sent while the client was disconnected", async () => {
         const first = await startDaemon();
         const session = first.store.create({ cwd: "/tmp/rig-chat-gap" });
         session.submit({ text: "Before the drop." });
-
-        connection = connectSession({
+        const rig = connectRig({
             endpoint: first.endpoint,
-            onChange: () => undefined,
-            sessionId: session.id,
             token: "secret",
         });
-        await waitFor(() => connection?.session().connection === "live", "the stream to open");
-        await waitFor(() => userMessages(connection).length === 1, "the first message");
+        const connection = rig.connectSession({
+            onChange: () => undefined,
+            sessionId: session.id,
+        });
 
-        // The daemon goes away, and a message is submitted while nobody is
-        // listening. This is the case the client cannot have observed live.
-        await first.stop();
-        await waitFor(
-            () => connection?.session().connection === "reconnecting",
-            "the drop to be noticed",
-        );
-        session.submit({ text: "During the drop." });
+        try {
+            await waitFor(() => connection.session().connection === "live", "the stream to open");
+            await waitFor(() => userMessages(connection).length === 1, "the first message");
 
-        // The same store comes back on the same port, so the session and its log
-        // survive: the client's cursor is still serveable and the stream resumes.
-        await serve(first.store, first.port);
-        await waitFor(() => connection?.session().connection === "live", "the stream to reopen");
-        await waitFor(
-            () => userMessages(connection).length === 2,
-            "the message sent during the outage to arrive",
-        );
+            // The daemon goes away, and a message is submitted while nobody is
+            // listening. This is the case the client cannot have observed live.
+            await first.stop();
+            await waitFor(
+                () => connection.session().connection === "reconnecting",
+                "the drop to be noticed",
+            );
+            session.submit({ text: "During the drop." });
+
+            // The same store comes back on the same port, so the session and its log
+            // survive: the client's cursor is still serveable and the stream resumes.
+            await serve(first.store, first.port);
+            await waitFor(() => connection.session().connection === "live", "the stream to reopen");
+            await waitFor(
+                () => userMessages(connection).length === 2,
+                "the message sent during the outage to arrive",
+            );
+        } finally {
+            connection.close();
+            rig.close();
+        }
     });
 
     it("catches up from the message the client holds instead of resending the chat", async () => {

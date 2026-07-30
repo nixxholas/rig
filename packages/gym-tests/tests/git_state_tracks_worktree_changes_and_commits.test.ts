@@ -169,6 +169,12 @@ function requestJson(method, path, body) {
 /** Collects raw SSE frames so the wire format itself can be asserted, not just parsed events. */
 function openStream() {
     const frames = [];
+    let resolveConnected;
+    let rejectConnected;
+    const connected = new Promise((resolve, reject) => {
+        resolveConnected = resolve;
+        rejectConnected = reject;
+    });
     const call = request({
         socketPath,
         path: "/events/stream",
@@ -177,6 +183,7 @@ function openStream() {
     });
     let buffer = "";
     call.on("response", (response) => {
+        resolveConnected();
         response.on("data", (chunk) => {
             buffer += String(chunk);
             for (;;) {
@@ -187,8 +194,10 @@ function openStream() {
             }
         });
     });
+    call.on("error", rejectConnected);
     call.end();
     return {
+        connected,
         frames,
         close: () => call.destroy(),
         waitFor: async (predicate, timeoutMs) => {
@@ -203,8 +212,8 @@ function openStream() {
     };
 }
 
-const state = await requestJson("GET", "/state");
-const project = state.projects.find((candidate) => candidate.path === "/workspace");
+const catalog = await requestJson("GET", "/catalog");
+const project = catalog.projects.find((candidate) => candidate.path === "/workspace");
 if (project === undefined) throw new Error("The workspace project is missing.");
 
 const created = await requestJson(
@@ -241,7 +250,7 @@ const gitPath =
 git(["checkout", "-b", "gym-work"], workspace.path);
 
 const stream = openStream();
-await new Promise((resolve) => setTimeout(resolve, 250));
+await stream.connected;
 
 // Replacing a line proves deletions are counted rather than assumed zero: 2 insertions and
 // 1 deletion against the base, plus 3 insertions from a file Git never reports in a diff.

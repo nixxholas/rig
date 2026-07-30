@@ -106,6 +106,13 @@ function sessionStateWithTranscript(
 
 function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
     return {
+        catalog: {
+            defaultModelId: "sonnet-5",
+            defaultProviderId: "claude",
+            models: [],
+            providers: [],
+        },
+        identity: { version: "test" },
         protocolVersion: 1,
         projects: [
             {
@@ -370,7 +377,6 @@ describe("connectRig mutations", () => {
             expect(JSON.parse(String(createCall?.init?.body))).toMatchObject({
                 clientSessionId: createdId,
                 cwd: "/new-work",
-                mutationId: createdId,
             });
             const forkCall = calls.find((call) => call.url.pathname.endsWith("/fork"));
             expect(forkCall?.init?.headers).toMatchObject({

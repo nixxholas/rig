@@ -1,21 +1,29 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 
-import type { GlobalLiveEvent, GlobalStreamHello } from "../protocol/index.js";
+import type {
+    GlobalEventDelivery,
+    GlobalEventQueueEntry,
+    GlobalLiveEvent,
+} from "../protocol/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
 import { parseGlobalEventCursor } from "./parseGlobalEventCursor.js";
 import { sendJson } from "./sendJson.js";
 import { writeGlobalSseEvent } from "./writeGlobalSseEvent.js";
 
-export function streamGlobalEvents(
+/**
+ * The durable event log, streamed to the external service that mirrors it.
+ *
+ * A fresh mirror receives the retained stored log; a known mirror resumes from
+ * its cursor. Live events published while it is attached follow too, but current
+ * live snapshots are not replayed. Projects, workspaces, sessions, the model
+ * catalog and the daemon identity are entities loaded through request-response.
+ */
+export async function streamGlobalEvents(
     request: IncomingMessage,
     response: ServerResponse,
     queue: GlobalEventQueue,
     afterValue: string | null,
-    /** Current live snapshots, replayed on subscribe because live events are never stored. */
-    liveSnapshots?: () => readonly GlobalLiveEvent[],
-    /** Current group state, sent to a client attaching without a cursor. */
-    groupState?: () => Omit<GlobalStreamHello, "cursor">,
-): void {
+): Promise<void> {
     const lastEventId = request.headers["last-event-id"];
     const cursorValue = Array.isArray(lastEventId) ? lastEventId.at(-1) : lastEventId;
     const selectedValue = cursorValue ?? afterValue;
@@ -25,71 +33,16 @@ export function streamGlobalEvents(
         return;
     }
 
-    // A client attaching without a cursor is brought up to date by the hello
-    // frame instead, so the log is replayed only from the position that frame
-    // reflects. Replaying it from the beginning would send the same state twice.
-    //
-    // The cursor is read before the state, never after: an event landing in
-    // between is then replayed on top of state that already contains it, which
-    // is harmless because these events carry whole objects. Reading the state
-    // first would let that event fall into the gap and be lost.
-    const hello =
-        after === undefined && groupState !== undefined
-            ? { cursor: queue.cursor(), ...groupState() }
-            : undefined;
-    const resumeFrom = after ?? hello?.cursor;
-
-    const catchupLimit = 1_000;
-    let catchup = queue.list({
-        ...(resumeFrom === undefined ? {} : { after: resumeFrom }),
-        limit: catchupLimit,
-    });
-    if (catchup === undefined) {
-        sendJson(response, 409, { error: "The global event cursor is not available." });
-        return;
-    }
-
-    response.writeHead(200, {
-        "cache-control": "no-cache, no-transform",
-        connection: "keep-alive",
-        "content-type": "text/event-stream; charset=utf-8",
-        "x-accel-buffering": "no",
-    });
-    response.write(": connected\n\n");
-    if (hello !== undefined) {
-        response.write("event: hello\n");
-        response.write(`data: ${JSON.stringify(hello)}\n\n`);
-    }
-
-    let overwhelmed = false;
-    for (;;) {
-        for (const entry of catchup) writeGlobalSseEvent(response, entry);
-        // Replaying an untrimmed durable log to a slow reader would buffer the whole thing into
-        // this response in one synchronous pass, which is exactly what the subscriber limit exists
-        // to prevent. The client re-bootstraps from /state, the documented recovery path.
-        if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) {
-            overwhelmed = true;
-            break;
-        }
-        if (catchup.length < catchupLimit) break;
-        const nextCursor: string | undefined = catchup.at(-1)?.cursor;
-        if (nextCursor === undefined) break;
-        catchup = queue.list({ after: nextCursor, limit: catchupLimit }) ?? [];
-    }
-    if (overwhelmed) {
-        response.end();
-        return;
-    }
-
-    const heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
-    heartbeat.unref?.();
     let closed = false;
     let unsubscribe = () => {};
+    let heartbeat: ReturnType<typeof setInterval> | undefined;
 
-    // One live snapshot per entity is retained while the socket is backed up, and a later snapshot
-    // replaces the pending one. Stored events are never coalesced or dropped; only live snapshots
-    // are, and they are safe to drop because each one supersedes the last.
+    // Live state is coalesced by entity whenever replay or socket backpressure delays delivery.
+    // Stored events are never coalesced; the bounded pending list instead disconnects a mirror
+    // whose live tail grows faster than its historical catch-up can advance.
     const pendingLive = new Map<string, GlobalLiveEvent>();
+    const pendingStored: GlobalEventQueueEntry[] = [];
+    let replaying = true;
     let backedUp = false;
     const flushLive = () => {
         // Without this guard a drain arriving after close would write to an ended response, which
@@ -108,15 +61,15 @@ export function streamGlobalEvents(
     const close = () => {
         if (closed) return;
         closed = true;
-        clearInterval(heartbeat);
+        if (heartbeat !== undefined) clearInterval(heartbeat);
         unsubscribe();
         response.off("drain", flushLive);
         pendingLive.clear();
+        pendingStored.length = 0;
         response.end();
     };
-    response.on("drain", flushLive);
 
-    unsubscribe = queue.subscribe((delivery) => {
+    const deliver = (delivery: GlobalEventDelivery) => {
         if (closed) return;
         if ("live" in delivery) {
             const key = liveEventKey(delivery.event);
@@ -129,24 +82,89 @@ export function streamGlobalEvents(
             return;
         }
         // Stored events are never coalesced or dropped, so a subscriber that cannot keep up with
-        // them is disconnected and reloads from /state instead of growing the buffer without bound.
+        // them is disconnected and resumes from its own cursor instead of growing the buffer
+        // without bound.
         if (!writeGlobalSseEvent(response, delivery)) backedUp = true;
         if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) close();
+    };
+
+    // Subscribe before reading the first page. Once replay yields between pages, new stored events
+    // can arrive; buffering them here and discarding cursors replay already covered closes that gap.
+    unsubscribe = queue.subscribe((delivery) => {
+        if (!replaying) {
+            deliver(delivery);
+            return;
+        }
+        if ("live" in delivery) {
+            pendingLive.set(liveEventKey(delivery.event), delivery.event);
+            return;
+        }
+        if (pendingStored.length >= CATCHUP_PENDING_LIMIT) {
+            close();
+            return;
+        }
+        pendingStored.push(delivery);
     }, close);
 
-    // Subscribing before capturing the current snapshots is what makes this gapless: capturing
-    // first would drop any snapshot published in between.
-    for (const event of liveSnapshots?.() ?? []) {
-        if (backedUp) {
-            // Held rather than written, so a slow reconnecting subscriber cannot be handed every
-            // snapshot at once and buffer past the limit the streaming path already respects.
-            pendingLive.set(liveEventKey(event), event);
-            continue;
-        }
-        backedUp = !writeGlobalSseEvent(response, { event, live: true });
-    }
-    if (response.writableLength > SUBSCRIBER_BUFFER_LIMIT) close();
     request.on("close", close);
+    let catchup = queue.list({
+        ...(after === undefined ? {} : { after }),
+        limit: CATCHUP_PAGE_LIMIT,
+    });
+    if (catchup === undefined) {
+        closed = true;
+        unsubscribe();
+        request.off("close", close);
+        sendJson(response, 409, { error: "The global event cursor is not available." });
+        return;
+    }
+    if (closed) return;
+
+    response.writeHead(200, {
+        "cache-control": "no-cache, no-transform",
+        connection: "keep-alive",
+        "content-type": "text/event-stream; charset=utf-8",
+        "x-accel-buffering": "no",
+    });
+    response.write(": connected\n\n");
+    response.on("drain", flushLive);
+    heartbeat = setInterval(() => response.write(": keepalive\n\n"), 15_000);
+    heartbeat.unref?.();
+
+    let lastReplayedCursor = after;
+    for (;;) {
+        for (const entry of catchup) {
+            writeGlobalSseEvent(response, entry);
+            lastReplayedCursor = entry.cursor;
+        }
+        if (closed || response.writableLength > SUBSCRIBER_BUFFER_LIMIT) {
+            close();
+            return;
+        }
+        if (catchup.length < CATCHUP_PAGE_LIMIT) break;
+        const nextCursor = catchup.at(-1)?.cursor;
+        if (nextCursor === undefined) break;
+
+        // SQLite and SSE writes are synchronous. Yielding once per page keeps a large retained log
+        // from monopolizing the daemon while preserving the ordered cursor walk.
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (closed) return;
+        const next = queue.list({ after: nextCursor, limit: CATCHUP_PAGE_LIMIT });
+        if (next === undefined) {
+            close();
+            return;
+        }
+        catchup = next;
+    }
+
+    // No await occurs while switching from replay to live delivery. Anything the paged database
+    // walk already saw is discarded; the rest is delivered in subscription order.
+    for (const entry of pendingStored) {
+        if (lastReplayedCursor === undefined || entry.cursor > lastReplayedCursor) deliver(entry);
+    }
+    pendingStored.length = 0;
+    replaying = false;
+    if (!backedUp) flushLive();
 }
 
 /**
@@ -155,6 +173,8 @@ export function streamGlobalEvents(
  * sensible entity cap, while the socket buffer is what actually grows.
  */
 const SUBSCRIBER_BUFFER_LIMIT = 1024 * 1024;
+const CATCHUP_PAGE_LIMIT = 1_000;
+const CATCHUP_PENDING_LIMIT = 1_000;
 
 function liveEventKey(event: GlobalLiveEvent): string {
     if ("sessionId" in event) return `${event.type}:session:${event.sessionId}`;

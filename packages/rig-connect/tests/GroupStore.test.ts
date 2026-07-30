@@ -70,7 +70,14 @@ function session(id: string, projectId: string, workspaceId?: string): SessionSu
 
 function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
     return {
+        catalog: {
+            defaultModelId: "sonnet-5",
+            defaultProviderId: "claude",
+            models: [],
+            providers: [],
+        },
         cursor: "c1",
+        identity: { version: "test" },
         protocolVersion: 1,
         projects: [project("p1")],
         sessions: [session("s1", "p1")],

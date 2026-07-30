@@ -40,7 +40,10 @@ describe("project archiving", () => {
 
         const result = JSON.parse(await gym.readFile("project-archive-result.json")) as {
             archivedAt: number;
+            attachedSessionArchived: boolean;
             attachedSessionStatus: string;
+            catalogHidesArchivedSessions: boolean;
+            catalogHidesArchivedWorkspace: boolean;
             directoryRemoved: boolean;
             restoredArchivedAt: number | null;
             restoredProjectId: string;
@@ -48,7 +51,10 @@ describe("project archiving", () => {
             workspaceStatus: string;
         };
         expect(result).toMatchObject({
+            attachedSessionArchived: true,
             attachedSessionStatus: "archived",
+            catalogHidesArchivedSessions: true,
+            catalogHidesArchivedWorkspace: true,
             directoryRemoved: true,
             restoredArchivedAt: null,
             rootChatArchived: true,
@@ -114,8 +120,8 @@ function requestJson(method, path, body, headers = {}) {
     });
 }
 
-const initialState = await requestJson("GET", "/state");
-const project = initialState.projects.find((candidate) => candidate.path === "/workspace");
+const initialCatalog = await requestJson("GET", "/catalog");
+const project = initialCatalog.projects.find((candidate) => candidate.path === "/workspace");
 if (project === undefined) throw new Error("The workspace project is missing.");
 
 const created = await requestJson(
@@ -158,10 +164,15 @@ const archived = await requestJson(
     { "if-match": '"' + current.project.version + '"' },
 );
 
-const archivedState = await requestJson("GET", "/state");
-const archivedRootChat = archivedState.sessions.find((candidate) => candidate.id === rootChat.session.id);
-const archivedAttached = archivedState.sessions.find((candidate) => candidate.id === attached.session.id);
-const archivedWorkspace = archivedState.workspaces.find((candidate) => candidate.id === workspace.id);
+const activeCatalog = await requestJson("GET", "/catalog");
+const allSessions = await requestJson("GET", "/sessions?archived=all");
+const workspaces = await requestJson(
+    "GET",
+    "/projects/" + encodeURIComponent(project.id) + "/workspaces",
+);
+const archivedRootChat = allSessions.sessions.find((candidate) => candidate.id === rootChat.session.id);
+const archivedAttached = allSessions.sessions.find((candidate) => candidate.id === attached.session.id);
+const archivedWorkspace = workspaces.workspaces.find((candidate) => candidate.id === workspace.id);
 if (archivedRootChat === undefined || archivedAttached === undefined) {
     throw new Error("A session of the archived project is missing.");
 }
@@ -179,7 +190,16 @@ await writeFile(
     "/workspace/project-archive-result.json",
     JSON.stringify({
         archivedAt: archived.project.archivedAt ?? 0,
+        attachedSessionArchived: archivedAttached.archived === true,
         attachedSessionStatus: archivedAttached.status,
+        catalogHidesArchivedSessions:
+            !activeCatalog.sessions.some(
+                (candidate) =>
+                    candidate.id === rootChat.session.id || candidate.id === attached.session.id,
+            ),
+        catalogHidesArchivedWorkspace: !activeCatalog.workspaces.some(
+            (candidate) => candidate.id === workspace.id,
+        ),
         directoryRemoved,
         restoredArchivedAt: restoredProject.project.archivedAt ?? null,
         restoredProjectId: restored.session.projectId,

@@ -17,8 +17,11 @@ import {
     createEventIdFactory,
     type ProjectWorkspace as DaemonProjectWorkspace,
 } from "../../rig/sources/protocol/index.js";
-import { connectGroups } from "@/connectGroups.js";
-import type { GroupsConnection } from "@/connectGroups.js";
+import {
+    connectRig,
+    type RigGroupsConnection,
+    type RigGroupsSubscriptionOptions,
+} from "@/connectRig.js";
 import type { GlobalStreamHello } from "@/protocol.js";
 
 /**
@@ -75,30 +78,35 @@ async function waitFor(
     throw new Error(`Timed out waiting for ${description}.`);
 }
 
+async function withGroupsConnection(
+    endpoint: string,
+    options: RigGroupsSubscriptionOptions,
+    test: (connection: RigGroupsConnection) => Promise<void>,
+): Promise<void> {
+    const rig = connectRig({ endpoint, token: "secret" });
+    const connection = rig.connectGroups(options);
+    try {
+        await test(connection);
+    } finally {
+        connection.close();
+        rig.close();
+    }
+}
+
 describe("rig-connect groups against a live daemon", () => {
-    let connection: GroupsConnection | undefined;
-
-    afterEach(() => {
-        connection?.close();
-        connection = undefined;
-    });
-
     it("receives the groups that already exist on the opening frame", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-groups-a" });
 
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
-        });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
 
-        const projects = connection.projects();
-        expect(projects.length).toBeGreaterThan(0);
-        expect(projects.flatMap((group) => group.sessions.map((item) => item.id))).toContain(
-            session.id,
-        );
+            const projects = connection.projects();
+            expect(projects.length).toBeGreaterThan(0);
+            expect(projects.flatMap((group) => group.sessions.map((item) => item.id))).toContain(
+                session.id,
+            );
+        });
     });
 
     it("starts Git tracking and follows changed files", async () => {
@@ -122,60 +130,56 @@ describe("rig-connect groups against a live daemon", () => {
         const { endpoint } = await startServer(store, undefined, tracker);
         const session = store.create({ cwd: repository });
 
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
-        });
-        await waitFor(
-            () =>
-                connection
-                    ?.projects()
-                    .find((project) => project.id === session.snapshot().projectId)?.git
-                    ?.changedFiles === 0,
-            "the initial Git state",
-            15_000,
-        );
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(
+                () =>
+                    connection
+                        .projects()
+                        .find((project) => project.id === session.snapshot().projectId)?.git
+                        ?.changedFiles === 0,
+                "the initial Git state",
+                15_000,
+            );
 
-        await writeFile(join(repository, "changed.txt"), "one\ntwo\n");
+            await writeFile(join(repository, "changed.txt"), "one\ntwo\n");
 
-        await waitFor(
-            () =>
-                connection
-                    ?.projects()
-                    .find((project) => project.id === session.snapshot().projectId)
-                    ?.git?.files?.some((file) => file.path === "changed.txt") === true,
-            "the changed file to arrive",
-            15_000,
-        );
-        expect(
-            connection.projects().find((project) => project.id === session.snapshot().projectId)
-                ?.git,
-        ).toMatchObject({
-            branch: "main",
-            changedFiles: 1,
-            files: [
-                {
-                    insertions: 2,
-                    path: "changed.txt",
-                    status: "untracked",
+            await waitFor(
+                () =>
+                    connection
+                        .projects()
+                        .find((project) => project.id === session.snapshot().projectId)
+                        ?.git?.files?.some((file) => file.path === "changed.txt") === true,
+                "the changed file to arrive",
+                15_000,
+            );
+            expect(
+                connection.projects().find((project) => project.id === session.snapshot().projectId)
+                    ?.git,
+            ).toMatchObject({
+                branch: "main",
+                changedFiles: 1,
+                files: [
+                    {
+                        insertions: 2,
+                        path: "changed.txt",
+                        status: "untracked",
+                    },
+                ],
+            });
+            await git(repository, ["add", "--all"]);
+            await git(repository, ["commit", "--quiet", "--message", "commit changed file"]);
+
+            await waitFor(
+                () => {
+                    const snapshot = connection
+                        .projects()
+                        .find((project) => project.id === session.snapshot().projectId)?.git;
+                    return snapshot?.changedFiles === 0 && snapshot.files?.length === 0;
                 },
-            ],
+                "the committed file to leave the changed-file list",
+                15_000,
+            );
         });
-
-        await git(repository, ["add", "--all"]);
-        await git(repository, ["commit", "--quiet", "--message", "commit changed file"]);
-
-        await waitFor(
-            () => {
-                const snapshot = connection
-                    ?.projects()
-                    .find((project) => project.id === session.snapshot().projectId)?.git;
-                return snapshot?.changedFiles === 0 && snapshot.files?.length === 0;
-            },
-            "the committed file to leave the changed-file list",
-            15_000,
-        );
     }, 30_000);
 
     it("keeps open terminal tabs in the live group stream", async () => {
@@ -183,81 +187,77 @@ describe("rig-connect groups against a live daemon", () => {
         const session = store.create({ cwd: "/tmp/rig-terminal-groups" });
         const { projectId } = session.projectIdentity();
 
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
-        });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
 
-        const response = await fetch(`${endpoint}/projects/${projectId}/terminals`, {
-            body: JSON.stringify({ shell: "/bin/sh" }),
-            headers: {
-                authorization: "Bearer secret",
-                "content-type": "application/json",
-            },
-            method: "POST",
+            const response = await fetch(`${endpoint}/projects/${projectId}/terminals`, {
+                body: JSON.stringify({ shell: "/bin/sh" }),
+                headers: {
+                    authorization: "Bearer secret",
+                    "content-type": "application/json",
+                },
+                method: "POST",
+            });
+            expect(response.status).toBe(201);
+            const created = (await response.json()) as { terminal: { id: string } };
+            await waitFor(
+                () =>
+                    connection
+                        .remoteTerminals()
+                        .some(
+                            (group) =>
+                                group.projectId === projectId &&
+                                group.terminals.some(
+                                    (terminal) => terminal.id === created.terminal.id,
+                                ),
+                        ) === true,
+                "the terminal tab to appear",
+            );
         });
-        expect(response.status).toBe(201);
-        const created = (await response.json()) as { terminal: { id: string } };
-        await waitFor(
-            () =>
-                connection
-                    ?.remoteTerminals()
-                    .some(
-                        (group) =>
-                            group.projectId === projectId &&
-                            group.terminals.some((terminal) => terminal.id === created.terminal.id),
-                    ) === true,
-            "the terminal tab to appear",
-        );
     });
 
     it("adds a session created after the client attached", async () => {
         const { endpoint, store } = await startDaemon();
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
+
+            const created = store.create({ cwd: "/tmp/rig-groups-late" });
+
+            // Everything needed to place this session in the tree has to arrive on
+            // the stream; the library must not go asking for it.
+            await waitFor(
+                () =>
+                    connection
+                        .projects()
+                        .some((group) =>
+                            [
+                                ...group.sessions,
+                                ...group.workspaces.flatMap((w) => w.sessions),
+                            ].some((item) => item.id === created.id),
+                        ),
+                "the new session to appear in the tree",
+            );
         });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
-
-        const created = store.create({ cwd: "/tmp/rig-groups-late" });
-
-        // Everything needed to place this session in the tree has to arrive on
-        // the stream; the library must not go asking for it.
-        await waitFor(
-            () =>
-                (connection?.projects() ?? []).some((group) =>
-                    [...group.sessions, ...group.workspaces.flatMap((w) => w.sessions)].some(
-                        (item) => item.id === created.id,
-                    ),
-                ),
-            "the new session to appear in the tree",
-        );
     });
 
     it("never lists one session in two places", async () => {
         const { endpoint, store } = await startDaemon();
         const first = store.create({ cwd: "/tmp/rig-groups-a" });
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
+
+            const second = store.create({ cwd: "/tmp/rig-groups-a" });
+            await waitFor(
+                () => listedSessionIds(connection).includes(second.id),
+                "the second session to arrive",
+            );
+
+            // The opening frame and the live events describe the same sessions, so a
+            // store that merged them badly would show duplicates.
+            const ids = listedSessionIds(connection);
+            expect(new Set(ids).size).toBe(ids.length);
+            expect(ids).toContain(first.id);
         });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
-
-        const second = store.create({ cwd: "/tmp/rig-groups-a" });
-        await waitFor(
-            () => listedSessionIds(connection).includes(second.id),
-            "the second session to arrive",
-        );
-
-        // The opening frame and the live events describe the same sessions, so a
-        // store that merged them badly would show duplicates.
-        const ids = listedSessionIds(connection);
-        expect(new Set(ids).size).toBe(ids.length);
-        expect(ids).toContain(first.id);
     });
 
     // This one drives a real run and waits for the daemon's status to reach the
@@ -270,26 +270,30 @@ describe("rig-connect groups against a live daemon", () => {
         async () => {
             const { endpoint, store } = await startDaemon();
             const session = store.create({ cwd: "/tmp/rig-groups-status" });
-            connection = connectGroups({
+            await withGroupsConnection(
                 endpoint,
-                onChange: () => undefined,
-                token: "secret",
-            });
-            await waitFor(() => connection?.state().connection === "live", "the stream to open");
-            await waitFor(
-                () => listedSessionIds(connection).includes(session.id),
-                "the session to be listed",
-            );
+                { onChange: () => undefined },
+                async (connection) => {
+                    await waitFor(
+                        () => connection.state().connection === "live",
+                        "the stream to open",
+                    );
+                    await waitFor(
+                        () => listedSessionIds(connection).includes(session.id),
+                        "the session to be listed",
+                    );
 
-            const submitted = session.submit({ text: "Say hello." });
-            await waitFor(
-                () =>
-                    session.snapshot().status === "running" &&
-                    listedStatus(connection, session.id) === session.snapshot().status,
-                "the listed status to match the daemon while the run is active",
+                    const submitted = session.submit({ text: "Say hello." });
+                    await waitFor(
+                        () =>
+                            session.snapshot().status === "running" &&
+                            listedStatus(connection, session.id) === session.snapshot().status,
+                        "the listed status to match the daemon while the run is active",
+                    );
+                    await session.abort();
+                    await session.waitForRun(submitted.runId);
+                },
             );
-            await session.abort();
-            await session.waitForRun(submitted.runId);
         },
     );
 
@@ -297,39 +301,36 @@ describe("rig-connect groups against a live daemon", () => {
         const persistent = new PersistentSessionStore({ databasePath: ":memory:" });
         const { endpoint, store } = await startServer(persistent, () => persistent.close());
         const session = store.create({ cwd: "/tmp/rig-live-group-facts" });
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
-        });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
 
-        session.setDraft({ draft: "Live draft", updatedAt: 2 });
-        const lastEventId = session.events.lastEventId();
-        session.events.append({
-            createdAt: 3,
-            data: { sessionTokenCount: { lastContextTokens: 10, totalTokens: 40 } },
-            id: createEventIdFactory(lastEventId === undefined ? {} : { after: lastEventId })(),
-            sessionId: session.id,
-            type: "session_context_changed",
-        });
+            session.setDraft({ draft: "Live draft", updatedAt: 2 });
+            const lastEventId = session.events.lastEventId();
+            session.events.append({
+                createdAt: 3,
+                data: { sessionTokenCount: { lastContextTokens: 10, totalTokens: 40 } },
+                id: createEventIdFactory(lastEventId === undefined ? {} : { after: lastEventId })(),
+                sessionId: session.id,
+                type: "session_context_changed",
+            });
 
-        await waitFor(
-            () =>
-                connection
-                    ?.projects()
-                    .flatMap((project) => project.sessions)
-                    .find((candidate) => candidate.id === session.id)?.draft === "Live draft",
-            "the draft to update",
-        );
-        await waitFor(
-            () =>
-                connection
-                    ?.projects()
-                    .find((project) => project.id === session.snapshot().projectId)?.usage
-                    .totalTokens === 40,
-            "the usage to update",
-        );
+            await waitFor(
+                () =>
+                    connection
+                        .projects()
+                        .flatMap((project) => project.sessions)
+                        .find((candidate) => candidate.id === session.id)?.draft === "Live draft",
+                "the draft to update",
+            );
+            await waitFor(
+                () =>
+                    connection
+                        .projects()
+                        .find((project) => project.id === session.snapshot().projectId)?.usage
+                        .totalTokens === 40,
+                "the usage to update",
+            );
+        });
     });
 
     it("opens with every unarchived session, project, and workspace", async () => {
@@ -386,51 +387,45 @@ describe("rig-connect groups against a live daemon", () => {
             archivedWorkspace.id,
         );
         expect(hello.sessionsComplete).toBe(true);
-        expect(hello.catalog?.providers).toEqual(expect.any(Array));
-        expect(hello.identity?.version).toEqual(expect.any(String));
+        expect(hello.catalog.providers).toEqual(expect.any(Array));
+        expect(hello.identity.version).toEqual(expect.any(String));
 
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
+            expect(connection.state().catalog?.providers).toEqual(expect.any(Array));
+            expect(connection.state().identity?.version).toEqual(expect.any(String));
+            expect(listedSessionIds(connection)).toEqual(
+                expect.arrayContaining(active.map((session) => session.id)),
+            );
+            expect(listedSessionIds(connection)).toHaveLength(active.length);
         });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
-        expect(connection.state().catalog?.providers).toEqual(expect.any(Array));
-        expect(connection.state().identity?.version).toEqual(expect.any(String));
-        expect(listedSessionIds(connection)).toEqual(
-            expect.arrayContaining(active.map((session) => session.id)),
-        );
-        expect(listedSessionIds(connection)).toHaveLength(active.length);
     });
 
     it("keeps a session listed when it is unarchived rather than dropping it", async () => {
         const { endpoint, store } = await startDaemon();
         const session = store.create({ cwd: "/tmp/rig-groups-a" });
-        connection = connectGroups({
-            endpoint,
-            onChange: () => undefined,
-            token: "secret",
+        await withGroupsConnection(endpoint, { onChange: () => undefined }, async (connection) => {
+            await waitFor(() => connection.state().connection === "live", "the stream to open");
+
+            session.setArchived(true);
+            await waitFor(
+                () => !listedSessionIds(connection).includes(session.id),
+                "the archived session to leave the tree",
+            );
+
+            session.setArchived(false);
+
+            // Unarchiving reports the same event type as archiving, so a store that
+            // ignores the flag would leave the session hidden for good.
+            await waitFor(
+                () => listedSessionIds(connection).includes(session.id),
+                "the restored session to return to the tree",
+            );
         });
-        await waitFor(() => connection?.state().connection === "live", "the stream to open");
-
-        session.setArchived(true);
-        await waitFor(
-            () => !listedSessionIds(connection).includes(session.id),
-            "the archived session to leave the tree",
-        );
-
-        session.setArchived(false);
-
-        // Unarchiving reports the same event type as archiving, so a store that
-        // ignores the flag would leave the session hidden for good.
-        await waitFor(
-            () => listedSessionIds(connection).includes(session.id),
-            "the restored session to return to the tree",
-        );
     });
 });
 
-function listedSessionIds(connection: GroupsConnection | undefined): string[] {
+function listedSessionIds(connection: RigGroupsConnection | undefined): string[] {
     return (connection?.projects() ?? []).flatMap((group) => [
         ...group.sessions.map((item) => item.id),
         ...group.workspaces.flatMap((workspace) => workspace.sessions.map((item) => item.id)),
@@ -438,7 +433,7 @@ function listedSessionIds(connection: GroupsConnection | undefined): string[] {
 }
 
 function listedStatus(
-    connection: GroupsConnection | undefined,
+    connection: RigGroupsConnection | undefined,
     sessionId: string,
 ): string | undefined {
     return (connection?.projects() ?? [])
@@ -450,41 +445,12 @@ function listedStatus(
 }
 
 async function readGlobalHello(endpoint: string): Promise<GlobalStreamHello> {
-    const controller = new AbortController();
-    const response = await fetch(`${endpoint}/events/stream`, {
-        headers: { accept: "text/event-stream", authorization: "Bearer secret" },
-        signal: controller.signal,
+    const response = await fetch(`${endpoint}/catalog`, {
+        headers: { authorization: "Bearer secret" },
     });
-    if (response.body === null) throw new Error("The group stream carried no body.");
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let text = "";
-    try {
-        for (;;) {
-            const boundary = text.indexOf("\n\n");
-            if (boundary !== -1) {
-                const frame = text.slice(0, boundary);
-                text = text.slice(boundary + 2);
-                if (frame.includes("event: hello")) {
-                    const data = frame
-                        .split("\n")
-                        .find((line) => line.startsWith("data: "))
-                        ?.slice("data: ".length);
-                    if (data === undefined) {
-                        throw new Error("The group stream opening frame carried no data.");
-                    }
-                    return JSON.parse(data) as GlobalStreamHello;
-                }
-                continue;
-            }
-            const next = await reader.read();
-            if (next.done) throw new Error("The group stream carried no opening frame.");
-            text += decoder.decode(next.value, { stream: true });
-        }
-    } finally {
-        controller.abort();
-        await reader.cancel().catch(() => undefined);
-    }
+    if (!response.ok)
+        throw new Error(`The catalog request failed with ${String(response.status)}.`);
+    return (await response.json()) as GlobalStreamHello;
 }
 
 async function createRepository(): Promise<string> {

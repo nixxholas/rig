@@ -155,24 +155,24 @@ if (process.argv[2] === "enable") {
     const first = queued.events[0];
     const trim = await requestJson("POST", "/events/trim", { through: first.cursor });
     const remaining = await requestJson("GET", "/events?after=" + first.cursor + "&limit=100");
-    const state = await requestJson("GET", "/state");
+    const catalog = await requestJson("GET", "/catalog");
     const created = queued.events.find((entry) => entry.event.type === "session_created");
     const sessionId = created?.event.sessionId;
     if (typeof sessionId !== "string") throw new Error("The session creation event is missing.");
     const history = await requestJson("GET", "/sessions/" + encodeURIComponent(sessionId) + "/events");
-    const session = state.sessions.find((candidate) => candidate.id === sessionId);
+    const session = catalog.sessions.find((candidate) => candidate.id === sessionId);
     if (session === undefined) throw new Error("The session snapshot is missing.");
-    const sharedSessions = state.sessions.filter(
+    const sharedSessions = catalog.sessions.filter(
         (candidate) => candidate.cwd === "/workspace/second-project",
     );
-    const home = state.projects.find((candidate) => candidate.kind === "home");
+    const home = catalog.projects.find((candidate) => candidate.kind === "home");
     if (home === undefined) throw new Error("The Home project is missing.");
 
     await writeFile(
         "global-event-sync-result.json",
         JSON.stringify({
             queuedTypes: queued.events.map((entry) => entry.event.type),
-            projectCount: state.projects.length,
+            projectCount: catalog.projects.length,
             remainingCursors: remaining.events.map((entry) => entry.cursor),
             sessionProjectId: session.projectId,
             sharedProjectIds: sharedSessions.map((candidate) => candidate.projectId),

@@ -4,10 +4,10 @@
 Rig endpoint, follows a stream, keeps the state in memory, and hands it to the caller as ordered
 values plus a stream of deltas.
 
-`connectRig` creates one shared connection. From it, `connectSession` answers what is happening
-inside one conversation and `connectGroups` answers what projects, worktrees, and sessions exist.
-The subscriptions are independent, share transport and mutation delivery, and release their state
-when the last interested view closes.
+`connectRig` creates one shared connection. Its session subscription answers what is happening
+inside one conversation and its group subscription answers what projects, worktrees, and sessions
+exist. The subscriptions are independent, share transport and mutation delivery, and release their
+state when the last interested view closes.
 
 It is the only place in the product where sync is reasoned about. A UI embeds it and renders; it
 never asks the daemon a follow-up question to understand what it was just told. The single
@@ -184,18 +184,24 @@ and process output remain the only operations with a loading state.
 ## The groups
 
 A session does not live alone. Above it is a project, and inside a project are worktrees; both hold
-sessions. `connectGroups` keeps that whole tree current from one stream.
+sessions. `rig.connectGroups` keeps that whole tree current from one stream.
 
 ```ts
-import { connectGroups } from "@slopus/rig-connect";
+import { connectRig } from "@slopus/rig-connect";
 
-const groups = connectGroups({
+const rig = connectRig({
     endpoint: "http://127.0.0.1:4517",
     token: process.env.RIG_TOKEN!,
+});
+const groups = rig.connectGroups({
     onChange(projects, state) {
         render(projects, state);
     },
 });
+
+// Later, when the view goes away.
+groups.close();
+rig.close();
 ```
 
 Each entry is a project with its worktrees and its sessions already joined and ordered, so no
@@ -212,9 +218,9 @@ for (const group of groups.projects()) {
 }
 ```
 
-The opening frame contains every unarchived session, project, and worktree. Catalog sessions are
-not paged; only transcript history is. Archived session history is filtered by the storage query
-before the opening snapshot is projected.
+The `GET /catalog` snapshot contains every unarchived session, project, and worktree. Catalog
+sessions are not paged; only transcript history is. Archived session history is filtered by the
+storage query before the catalog is projected.
 
 The tree is referentially stable in the same way the element list is: a project whose subtree did
 not change comes back as the same object, so a React consumer re-renders only the branch that
@@ -290,8 +296,7 @@ type-check rather than a runtime surprise. Run it with `pnpm check`.
 ## Layers
 
 `connectRig` and its session/group subscriptions and actions are the public surface, and most
-callers need nothing else. `connectSession` and `connectGroups` remain convenience wrappers for a
-view that needs only one subscription.
+callers need nothing else.
 The pieces beneath them are exported for consumers that want to supply their own transport or drive
 the state directly:
 

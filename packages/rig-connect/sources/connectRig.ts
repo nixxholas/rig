@@ -1550,7 +1550,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             entityKey: sessionKey(id),
             id,
             prepare: () => ({
-                body: { ...input, clientSessionId: id, mutationId: id },
+                body: { ...input, clientSessionId: id },
                 headers: { "x-rig-mutation-id": id },
                 method: "POST",
                 url: endpointUrl(options.endpoint, "sessions"),

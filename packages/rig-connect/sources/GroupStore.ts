@@ -392,8 +392,8 @@ export class GroupStore {
         // is already showing.
 
         const deltas: GroupDelta[] = [];
-        const catalog = hello.catalog ?? this.#state.catalog;
-        const identity = hello.identity ?? this.#state.identity;
+        const catalog = hello.catalog;
+        const identity = hello.identity;
         if (
             this.#state.sessionsComplete !== hello.sessionsComplete ||
             !sameProtocolValue(this.#state.catalog, catalog) ||
@@ -402,8 +402,8 @@ export class GroupStore {
             this.#state = {
                 ...this.#state,
                 sessionsComplete: hello.sessionsComplete,
-                ...(catalog === undefined ? {} : { catalog }),
-                ...(identity === undefined ? {} : { identity }),
+                catalog,
+                identity,
             };
             deltas.push({ state: this.#state, type: "groups_state_changed" });
         }

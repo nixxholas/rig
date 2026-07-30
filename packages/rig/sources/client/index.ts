@@ -13,7 +13,6 @@ export {
     type ProtocolHttpClientOptions,
     type ProxyHttpRequestOptions,
     type ProxyHttpResponse,
-    type WatchGlobalEventsOptions,
     type WatchSessionEventsOptions,
 } from "./ProtocolHttpClient.js";
 export { RemoteTerminalAttachment } from "./RemoteTerminalAttachment.js";

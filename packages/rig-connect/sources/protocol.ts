@@ -1090,10 +1090,11 @@ export interface RemoteTerminalGroupState {
     terminals: readonly RemoteTerminalSummary[];
 }
 
+/** The catalog snapshot returned by `GET /catalog`. */
 export interface GlobalStreamHello {
-    catalog?: ModelCatalog;
+    catalog: ModelCatalog;
     cursor: string;
-    identity?: DaemonIdentity;
+    identity: DaemonIdentity;
     protocolVersion: number;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];

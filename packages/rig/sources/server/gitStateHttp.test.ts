@@ -78,18 +78,20 @@ describe("Git state over HTTP", () => {
         await waitUntil(() => fixture.tracker.liveSnapshots().length === 1);
     });
 
-    it("includes watched snapshots in the state bootstrap", async () => {
+    it("answers a watch request with the current snapshots", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
         await fixture.get(`/projects/${projectId}/git`);
 
-        const state = await fixture.get("/state");
+        const watched = await fixture.post("/git/watch", { entities: [{ projectId }] });
 
-        // Without this a client that restarts has no counts at all until it asks per entity.
-        expect(state.body.gitSnapshots).toHaveLength(1);
-        expect(state.body.gitSnapshots[0].type).toBe("project_git_changed");
+        // Declaring interest is the bootstrap: without the snapshots coming back
+        // here, a client that restarts has no counts at all until it asks per
+        // entity.
+        expect(watched.body.snapshots).toHaveLength(1);
+        expect(watched.body.snapshots[0].type).toBe("project_git_changed");
     });
 
     it("streams live snapshots without an event id and without moving the cursor", async () => {
@@ -97,7 +99,6 @@ describe("Git state over HTTP", () => {
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
-        await fixture.get(`/projects/${projectId}/git`);
         // Background project initialization publishes durable events of its own, so the cursor is
         // only stable once it has settled; capturing before that races it.
         await waitUntil(
@@ -106,7 +107,14 @@ describe("Git state over HTTP", () => {
         const cursorBefore = fixture.store.globalEventQueue.cursor();
 
         const stream = await fixture.openStream("/events/stream");
-        await stream.waitForFrames(1);
+        // The snapshot has to be published while the stream is open: live events
+        // are never stored, so nothing replays them to a client that attaches
+        // afterwards. Asking for the project's Git state is the demand signal
+        // that starts watching it and publishes the first snapshot.
+        await fixture.get(`/projects/${projectId}/git`);
+        // The stored log is replayed to a client attaching without a cursor, so
+        // waiting for a frame count would settle on those instead.
+        await stream.waitForText("project_git_changed");
 
         const frame = stream.frames.find((text) => text.includes("project_git_changed"));
         expect(frame).toBeDefined();
@@ -117,19 +125,20 @@ describe("Git state over HTTP", () => {
         stream.close();
     });
 
-    it("replays current snapshots to a subscriber that connects later", async () => {
+    it("does not replay a snapshot to a subscriber that connects later", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
         await writeFile(join(repository, "a.txt"), "1\n");
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
         await fixture.get(`/projects/${projectId}/git`);
+        await waitUntil(() => fixture.tracker.liveSnapshots().length === 1);
 
-        // Live events are never stored, so a subscriber arriving afterwards depends entirely on
-        // the prelude to avoid showing stale counts.
         const stream = await fixture.openStream("/events/stream");
-        await stream.waitForFrames(1);
+        await stream.settle();
 
-        expect(stream.frames.join("")).toContain("project_git_changed");
+        // Current Git counts are live snapshots, so a later subscriber does not
+        // receive them until it declares interest with `POST /git/watch`.
+        expect(stream.frames.join("")).not.toContain("project_git_changed");
         stream.close();
     });
 });
@@ -149,7 +158,9 @@ async function startServer(): Promise<{
     openStream: (path: string) => Promise<{
         close: () => void;
         frames: string[];
+        settle: () => Promise<void>;
         waitForFrames: (count: number) => Promise<void>;
+        waitForText: (text: string) => Promise<void>;
     }>;
     root: string;
     store: InMemorySessionStore;
@@ -226,6 +237,9 @@ async function startServer(): Promise<{
         return {
             close: () => call.destroy(),
             frames,
+            // Lets anything the server would have sent arrive before asserting
+            // that it did not.
+            settle: () => new Promise<void>((resolve) => setTimeout(resolve, 100)),
             waitForFrames: async (count: number) => {
                 const deadline = Date.now() + 5_000;
                 while (Date.now() < deadline) {
@@ -233,6 +247,14 @@ async function startServer(): Promise<{
                     await new Promise((resolve) => setTimeout(resolve, 10));
                 }
                 throw new Error(`Timed out waiting for ${String(count)} SSE frames.`);
+            },
+            waitForText: async (text: string) => {
+                const deadline = Date.now() + 5_000;
+                while (Date.now() < deadline) {
+                    if (frames.join("").includes(text)) return;
+                    await new Promise((resolve) => setTimeout(resolve, 10));
+                }
+                throw new Error(`Timed out waiting for a frame mentioning ${text}.`);
             },
         };
     };

@@ -286,9 +286,8 @@ describe("createProtocolHttpServer", () => {
                     .map((session) => session.id),
             ).toEqual([laterChat.session.id, first.session.id]);
 
-            await expect(client.globalState()).resolves.toMatchObject({
+            await expect(client.catalog()).resolves.toMatchObject({
                 cursor: expect.any(String),
-                hasMoreSessions: false,
                 projects: expect.arrayContaining([
                     expect.objectContaining({ id: first.session.projectId }),
                     expect.objectContaining({ id: second.session.projectId }),
@@ -299,6 +298,7 @@ describe("createProtocolHttpServer", () => {
                         projectId: first.session.projectId,
                     }),
                 ]),
+                sessionsComplete: true,
             });
 
             const png = await sharp({
@@ -1070,37 +1070,29 @@ describe("createProtocolHttpServer", () => {
                     },
                 },
             });
-            let resolveObserved: (() => void) | undefined;
-            const observed = new Promise<void>((resolve) => {
-                resolveObserved = resolve;
-            });
-            const controller = new AbortController();
-            const watching = client.watchGlobalEvents({
-                onEvent: () => resolveObserved?.(),
-                signal: controller.signal,
-            });
             const created = await client.createSession({ cwd: "/tmp/rig-socket-config" });
-            await observed;
-            const queued = await client.getGlobalEvents();
-            expect(queued.events).toEqual(
-                expect.arrayContaining([
-                    expect.objectContaining({
-                        event: expect.objectContaining({
-                            projectId: created.session.projectId,
-                            type: "project_created",
+            // Project initialization lands its events in the background, so the
+            // durable log is read until it reflects the finished creation.
+            await vi.waitFor(async () => {
+                const queued = await client.getGlobalEvents();
+                expect(queued.events).toEqual(
+                    expect.arrayContaining([
+                        expect.objectContaining({
+                            event: expect.objectContaining({
+                                projectId: created.session.projectId,
+                                type: "project_created",
+                            }),
                         }),
-                    }),
-                    expect.objectContaining({
-                        event: expect.objectContaining({
-                            sessionId: created.session.id,
-                            type: "session_created",
+                        expect.objectContaining({
+                            event: expect.objectContaining({
+                                sessionId: created.session.id,
+                                type: "session_created",
+                            }),
                         }),
-                    }),
-                ]),
-            );
+                    ]),
+                );
+            });
 
-            controller.abort();
-            await watching;
             await client.updateDaemonConfig({
                 settings: {
                     codexStreamMaxRetries: 7,
@@ -1162,7 +1154,7 @@ describe("createProtocolHttpServer", () => {
         });
         const globalEventQueue = store.globalEventQueue;
         if (globalEventQueue === undefined) throw new Error("Expected the global event queue.");
-        const { client, close } = await startServer({
+        const { client, close, socketPath } = await startServer({
             globalEventQueue,
             store,
         });
@@ -1184,25 +1176,16 @@ describe("createProtocolHttpServer", () => {
                 throw new Error("Expected global event cursors.");
             }
 
-            const controller = new AbortController();
-            const streamed = new Promise<SessionEvent>((resolve) => {
-                void client.watchGlobalEvents({
-                    after: secondCursor,
-                    onEvent: (entry) => {
-                        if (
-                            !("sessionId" in entry.event) ||
-                            entry.event.type !== "session_configuration_changed"
-                        ) {
-                            return;
-                        }
-                        controller.abort();
-                        resolve(entry.event);
-                    },
-                    signal: controller.signal,
-                });
-            });
+            const stream = openDurableEventStream(
+                socketPath,
+                `/events/stream?after=${encodeURIComponent(secondCursor)}`,
+            );
             await client.changeEffort(first.session.id, { effort: "high" });
-            await expect(streamed).resolves.toMatchObject({
+            const streamed = await stream.waitForEvent(
+                (event) => "sessionId" in event && event.type === "session_configuration_changed",
+            );
+            stream.close();
+            expect(streamed).toMatchObject({
                 sessionId: first.session.id,
                 type: "session_configuration_changed",
             });
@@ -2581,6 +2564,54 @@ async function readStreamHello(
         });
         request.end();
     });
+}
+
+/**
+ * Reads the durable event log the way the external mirror does: server-sent
+ * events over the daemon socket, resumed from a cursor.
+ */
+function openDurableEventStream(
+    socketPath: string,
+    path: string,
+): {
+    close: () => void;
+    waitForEvent: (predicate: (event: SessionEvent) => boolean) => Promise<SessionEvent>;
+} {
+    const events: SessionEvent[] = [];
+    const call = httpRequest({
+        headers: { accept: "text/event-stream", authorization: "Bearer secret" },
+        path,
+        socketPath,
+    });
+    let buffer = "";
+    call.on("response", (response) => {
+        response.on("data", (chunk: Buffer) => {
+            buffer += String(chunk);
+            for (;;) {
+                const boundary = buffer.indexOf("\n\n");
+                if (boundary < 0) break;
+                const frame = buffer.slice(0, boundary);
+                buffer = buffer.slice(boundary + 2);
+                const data = frame.split("\n").find((line) => line.startsWith("data:"));
+                if (data === undefined) continue;
+                events.push(JSON.parse(data.slice("data:".length)) as SessionEvent);
+            }
+        });
+    });
+    call.end();
+
+    return {
+        close: () => call.destroy(),
+        waitForEvent: async (predicate) => {
+            const deadline = Date.now() + 5_000;
+            while (Date.now() < deadline) {
+                const found = events.find((event) => predicate(event));
+                if (found !== undefined) return found;
+                await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            throw new Error("Timed out waiting for a durable event.");
+        },
+    };
 }
 
 async function requestRawJson(

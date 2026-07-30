@@ -28,8 +28,7 @@ import type {
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
     GetSessionUsageResponse,
-    GlobalEventDelivery,
-    GlobalStateResponse,
+    GlobalStreamHello,
     HealthResponse,
     GoalSessionResponse,
     ListGlobalEventsResponse,
@@ -83,7 +82,6 @@ import type {
     WriteSessionFileResponse,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
-import { parseGlobalSseEvent } from "./parseGlobalSseEvent.js";
 import { EventStreamHttpError } from "./EventStreamHttpError.js";
 import { ProtocolHttpError } from "./ProtocolHttpError.js";
 import type {
@@ -113,13 +111,6 @@ export interface WatchSessionEventsOptions {
     onEvent: (event: SessionEvent) => void | Promise<void>;
     /** Receives the opening frame of every connection, including reconnects. */
     onHello?: (hello: SessionStreamHello) => void | Promise<void>;
-}
-
-export interface WatchGlobalEventsOptions {
-    after?: string;
-    signal?: AbortSignal;
-    /** Receives stored entries and live deliveries; only stored ones carry a cursor. */
-    onEvent: (delivery: GlobalEventDelivery) => void | Promise<void>;
 }
 
 export interface AttachRemoteTerminalOptions {
@@ -497,6 +488,15 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/models");
     }
 
+    /**
+     * The entity bootstrap: every active project, workspace and session, taken at
+     * one point in the event stream so a client can rebase it onto whatever the
+     * stream delivered while it was loading.
+     */
+    catalog(): Promise<GlobalStreamHello> {
+        return this.#requestJson("GET", "/catalog");
+    }
+
     listSessions(options?: number | ListSessionsOptions): Promise<ListSessionsResponse> {
         const normalized = typeof options === "number" ? { limit: options } : (options ?? {});
         const parameters = new URLSearchParams();
@@ -508,10 +508,6 @@ export class ProtocolHttpClient {
         }
         const suffix = parameters.size === 0 ? "" : `?${parameters.toString()}`;
         return this.#requestJson("GET", `/sessions${suffix}`);
-    }
-
-    globalState(): Promise<GlobalStateResponse> {
-        return this.#requestJson("GET", "/state");
     }
 
     listProjects(): Promise<ListProjectsResponse> {
@@ -932,32 +928,6 @@ export class ProtocolHttpClient {
         return this.#requestJson("PATCH", "/config", request);
     }
 
-    async watchGlobalEvents(options: WatchGlobalEventsOptions): Promise<void> {
-        let after = options.after;
-        while (options.signal?.aborted !== true) {
-            try {
-                after = await this.#watchGlobalEventsOnce(after, {
-                    ...options,
-                    onEvent: async (delivery) => {
-                        await options.onEvent(delivery);
-                        // Resumption follows stored events only; a live delivery has no position.
-                        if (!("live" in delivery)) after = delivery.cursor;
-                    },
-                });
-            } catch (error) {
-                if (options.signal?.aborted) return;
-                if (
-                    error instanceof EventStreamHttpError &&
-                    error.statusCode >= 400 &&
-                    error.statusCode < 500
-                ) {
-                    throw error;
-                }
-                await delay(50, options.signal);
-            }
-        }
-    }
-
     async watchSessionEvents(options: WatchSessionEventsOptions): Promise<void> {
         let after = options.after;
         while (options.signal?.aborted !== true) {
@@ -1186,81 +1156,6 @@ export class ProtocolHttpClient {
 
     #remoteTerminalPath(scope: RemoteTerminalScope, terminalId: string): string {
         return `${this.#remoteTerminalCollectionPath(scope)}/${encodeURIComponent(terminalId)}`;
-    }
-
-    #watchGlobalEventsOnce(
-        after: string | undefined,
-        options: WatchGlobalEventsOptions,
-    ): Promise<string | undefined> {
-        return new Promise<string | undefined>((resolve, reject) => {
-            let application = Promise.resolve();
-            let cursor = after;
-            let terminalScheduled = false;
-            const settle = (error?: unknown) => {
-                if (terminalScheduled) return;
-                terminalScheduled = true;
-                void application.then(
-                    () => (error === undefined ? resolve(cursor) : reject(error)),
-                    reject,
-                );
-            };
-            const requestPath =
-                after === undefined
-                    ? "/events/stream"
-                    : `/events/stream?after=${encodeURIComponent(after)}`;
-            const request = httpRequest(
-                {
-                    headers: {
-                        accept: "text/event-stream",
-                        authorization: `Bearer ${this.token}`,
-                    },
-                    method: "GET",
-                    path: requestPath,
-                    socketPath: this.socketPath,
-                },
-                (response) => {
-                    if ((response.statusCode ?? 500) >= 400) {
-                        reject(new EventStreamHttpError(response.statusCode ?? 500));
-                        response.resume();
-                        return;
-                    }
-
-                    let buffer = "";
-                    response.setEncoding("utf8");
-                    response.on("data", (chunk: string) => {
-                        if (terminalScheduled) return;
-                        buffer += chunk;
-                        for (;;) {
-                            const boundary = buffer.indexOf("\n\n");
-                            if (boundary < 0) break;
-                            const rawEvent = buffer.slice(0, boundary);
-                            buffer = buffer.slice(boundary + 2);
-                            const delivery = parseGlobalSseEvent(rawEvent);
-                            if (delivery === undefined) continue;
-                            application = application.then(async () => {
-                                await options.onEvent(delivery);
-                                // A live delivery has no cursor, so resumption stays anchored to
-                                // the last stored event.
-                                if (!("live" in delivery)) cursor = delivery.cursor;
-                            });
-                            void application.catch((error: unknown) => {
-                                response.destroy();
-                                settle(error);
-                            });
-                        }
-                    });
-                    response.on("end", () => settle());
-                    response.on("error", settle);
-                },
-            );
-            const abort = () => {
-                settle();
-                request.destroy();
-            };
-            options.signal?.addEventListener("abort", abort, { once: true });
-            request.on("error", settle);
-            request.end();
-        });
     }
 }
 

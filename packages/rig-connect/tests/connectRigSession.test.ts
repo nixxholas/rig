@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { connectSession } from "@/connectSession.js";
 import type { ChatDelta, ChatElement, SessionState } from "@/ChatElement.js";
+import { connectRig } from "@/connectRig.js";
 import type {
     Message,
     SessionEvent,
@@ -133,12 +133,14 @@ describe("connectSession", () => {
     it("renders a conversation from one global stream plus one bootstrap", async () => {
         const stream = controllableStream();
         const renders: { elements: readonly ChatElement[]; session: SessionState }[] = [];
-        const connection = connectSession({
+        const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: stream.fetch,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
             onChange: (elements, session) => renders.push({ elements, session }),
             sessionId: "session-1",
-            token: "secret",
         });
 
         try {
@@ -200,6 +202,7 @@ describe("connectSession", () => {
             ]);
         } finally {
             connection.close();
+            rig.close();
         }
     });
 
@@ -207,16 +210,18 @@ describe("connectSession", () => {
         const stream = controllableStream();
         const order: string[] = [];
         const deltas: ChatDelta[] = [];
-        const connection = connectSession({
+        const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: stream.fetch,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
             onChange: () => order.push("change"),
             onDelta: (delta) => {
                 order.push(`delta:${delta.type}`);
                 deltas.push(delta);
             },
             sessionId: "session-1",
-            token: "secret",
         });
 
         try {
@@ -228,18 +233,21 @@ describe("connectSession", () => {
             expect(deltas.map((delta) => delta.type)).toContain("turn_started");
         } finally {
             connection.close();
+            rig.close();
         }
     });
 
     it("reports the connection state to the subscriber", async () => {
         const stream = controllableStream();
         const states: string[] = [];
-        const connection = connectSession({
+        const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: stream.fetch,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
             onChange: (_elements, session) => states.push(session.connection),
             sessionId: "session-1",
-            token: "secret",
         });
 
         try {
@@ -248,31 +256,39 @@ describe("connectSession", () => {
             expect(states.at(-1)).toBe("live");
         } finally {
             connection.close();
+            rig.close();
         }
     });
 
     it("releases everything on close and stops reporting", async () => {
         const stream = controllableStream();
         let renders = 0;
-        const connection = connectSession({
+        const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: stream.fetch,
+            token: "secret",
+        });
+        const connection = rig.connectSession({
             onChange: () => {
                 renders += 1;
             },
             sessionId: "session-1",
-            token: "secret",
         });
 
-        stream.write(liveHello());
-        await settle();
-        const before = renders;
+        try {
+            stream.write(liveHello());
+            await settle();
+            const before = renders;
 
-        connection.close();
-        stream.write(frame({ data: { runId: "run-1" }, id: "e1", type: "run_started" }));
-        await settle();
+            connection.close();
+            stream.write(frame({ data: { runId: "run-1" }, id: "e1", type: "run_started" }));
+            await settle();
 
-        expect(renders).toBe(before);
+            expect(renders).toBe(before);
+        } finally {
+            connection.close();
+            rig.close();
+        }
     });
 
     it.each(["session_reset", "session_rewound"] as const)(
@@ -283,15 +299,17 @@ describe("connectSession", () => {
             const page = new Promise<Response>((resolve) => {
                 resolvePage = resolve;
             });
-            const connection = connectSession({
+            const rig = connectRig({
                 endpoint: "http://daemon.test",
                 fetch: (input) =>
                     new URL(String(input)).pathname.endsWith("/transcript")
                         ? page
                         : stream.fetch(input),
+                token: "secret",
+            });
+            const connection = rig.connectSession({
                 onChange: () => undefined,
                 sessionId: "session-1",
-                token: "secret",
             });
 
             try {
@@ -331,6 +349,7 @@ describe("connectSession", () => {
                 });
             } finally {
                 connection.close();
+                rig.close();
             }
         },
     );
