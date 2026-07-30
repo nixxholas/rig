@@ -20,6 +20,7 @@ export interface GymInferenceResponse {
     compactionSummary?: string;
     completionDelayMs?: number;
     content: readonly AssistantContent[];
+    contextTokens?: number;
     delayMs?: number;
     disconnectAfterTextDeltas?: number;
     errorAfterContentStart?: boolean;

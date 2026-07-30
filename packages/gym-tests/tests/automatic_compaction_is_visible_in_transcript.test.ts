@@ -19,6 +19,74 @@ afterEach(async () => {
 });
 
 describe("automatic conversation compaction", () => {
+    it("compacts before a new turn when the last provider context crossed the threshold", async () => {
+        const requests: GymInferenceRequest[] = [];
+        const secondRequestStarted = deferred<GymInferenceRequest>();
+        const gym = await createGym({
+            cols: 92,
+            contextWindow: 40_000,
+            inference(request, callIndex) {
+                requests.push(request);
+                if (callIndex === 0) {
+                    return {
+                        content: [{ text: "First turn complete.", type: "text" }],
+                        contextTokens: 8_000,
+                        usage: usage(100, 20),
+                    };
+                }
+                if (callIndex === 1) {
+                    secondRequestStarted.resolve(request);
+                    if (request.options.intent === "compaction") {
+                        return {
+                            compactionContext: {
+                                ...request.context,
+                                messages: [
+                                    {
+                                        role: "user",
+                                        content: "The first turn was summarized.",
+                                        timestamp: 1,
+                                    },
+                                ],
+                            },
+                            content: [],
+                        };
+                    }
+                    return {
+                        content: [{ text: "Inference ran before compaction.", type: "text" }],
+                    };
+                }
+                expect(callIndex).toBe(2);
+                expect(request.options.intent).not.toBe("compaction");
+                return {
+                    content: [{ text: "Second turn used compacted context.", type: "text" }],
+                    usage: usage(200, 30),
+                };
+            },
+            rows: 26,
+        });
+        running.add(gym);
+
+        submit(gym, "Finish a turn near the context limit.");
+        await gym.terminal.waitUntil(
+            (snapshot) =>
+                snapshot.text.includes("First turn complete.") &&
+                !snapshot.text.includes("esc to interrupt"),
+            "the first turn to settle",
+            30_000,
+        );
+
+        submit(gym, "Continue after the context crossed the compaction threshold.");
+        const secondRequest = await secondRequestStarted.promise;
+        expect(secondRequest.options.intent).toBe("compaction");
+
+        await gym.terminal.waitForText("Second turn used compacted context.", 30_000);
+        expect(requests.map((request) => request.options.intent ?? "inference")).toEqual([
+            "inference",
+            "compaction",
+            "inference",
+        ]);
+    }, 120_000);
+
     it("shows a durable transcript row when a small context window triggers compaction", async () => {
         const firstResponseStarted = deferred<void>();
         const releaseFirstResponse = deferred<void>();
@@ -70,6 +138,7 @@ describe("automatic conversation compaction", () => {
                 expect(request.options.intent).not.toBe("compaction");
                 return {
                     content: [{ text: "Continued with compacted context.", type: "text" }],
+                    contextTokens: 130,
                     usage: usage(100, 30),
                 };
             },

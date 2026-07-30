@@ -171,6 +171,9 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                     model: model.id,
                     provider: providerId,
                     role: "assistant",
+                    ...(reply.contextTokens === undefined
+                        ? {}
+                        : { contextTokens: reply.contextTokens }),
                     ...(reply.responseModel === undefined
                         ? {}
                         : { responseModel: reply.responseModel }),

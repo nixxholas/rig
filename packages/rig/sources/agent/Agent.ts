@@ -4,6 +4,7 @@ import {
     compactConversation,
     type CompactConversationResult,
 } from "./compaction/compactConversation.js";
+import { resolvePreInferenceContextTokens } from "./compaction/resolvePreInferenceContextTokens.js";
 import { runCompactionWithEvents } from "./compaction/runCompactionWithEvents.js";
 import type { AgentContext } from "./context/AgentContext.js";
 import { runAgentLoop, type AgentLoopEvent, type AgentLoopResult } from "./loop.js";
@@ -611,12 +612,15 @@ export class Agent {
         signal?: AbortSignal;
     }): Promise<AgentCompactionResult> {
         const resetVersion = this.#resetVersion;
+        const messages = this.#contextMessages ?? this.#messages;
+        const reportedTokens = resolvePreInferenceContextTokens(messages);
         const result = await this.#compactMessages({
-            messages: this.#contextMessages ?? this.#messages,
+            messages,
             eventOptions: options.eventOptions,
             force: options.force,
             reason: options.reason,
             ...(options.provider === undefined ? {} : { provider: options.provider }),
+            ...(reportedTokens === undefined ? {} : { reportedTokens }),
             ...(options.signal !== undefined ? { signal: options.signal } : {}),
         });
         if (result.compacted && this.#resetVersion === resetVersion) {
