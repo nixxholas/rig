@@ -7,6 +7,7 @@ import type {
     SubagentSummary,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { InMemorySession } from "../session/InMemorySession.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
 import { HappySessionClient, type HappySessionClientOptions } from "./HappySessionClient.js";
@@ -218,10 +219,6 @@ export class HappySyncService {
         timer.unref();
         this.#backfillTimers.set(session.id, timer);
     }
-}
-
-function rethrowDatabaseFailure(error: unknown): void {
-    if (isDatabaseFailure(error)) throw error;
 }
 
 function backfillMessages(session: InMemorySession): {

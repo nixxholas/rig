@@ -26,6 +26,7 @@ import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import { inTx } from "../persistence/inTx.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
 import { InMemoryGlobalEventQueue } from "../server/InMemoryGlobalEventQueue.js";
@@ -614,7 +615,12 @@ export class InMemorySessionStore implements SessionStore {
             .map((session) => session.archiveForWorkspace(workspaceId));
         cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
         void this.#completeWorkspaceArchive(projectId, workspaceId, cleanup).catch(
-            (error: unknown) => this.#onWorkspaceCleanupError?.(error, projectId, workspaceId),
+            (error: unknown) => {
+                // Residue left behind is worth a warning because a later attempt can still clear
+                // it. A database that cannot answer is neither reportable nor retryable.
+                if (isDatabaseFailure(error)) throw error;
+                this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
+            },
         );
         return Promise.resolve(workspace);
     }
@@ -627,6 +633,7 @@ export class InMemorySessionStore implements SessionStore {
         const results = await Promise.allSettled(cleanup);
         for (const result of results) {
             if (result.status === "rejected") {
+                if (isDatabaseFailure(result.reason)) throw result.reason;
                 this.#onWorkspaceCleanupError?.(result.reason, projectId, workspaceId);
             }
         }
@@ -745,7 +752,8 @@ export class InMemorySessionStore implements SessionStore {
             for (const callback of callbacks) {
                 try {
                     callback();
-                } catch {
+                } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     // The project transaction already committed; observers are best effort.
                 }
             }
@@ -755,6 +763,14 @@ export class InMemorySessionStore implements SessionStore {
             this.#transactionCommitCallbacks = undefined;
             throw error;
         }
+    }
+
+    close(): void {
+        void this.remoteTerminals.close();
+        this.#projects.close();
+        this.liveEvents.close();
+        this.globalEventQueue.deactivate();
+        this.#client.close();
     }
 
     #afterTransactionCommit(callback: () => void): void {

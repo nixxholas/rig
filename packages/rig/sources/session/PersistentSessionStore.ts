@@ -236,6 +236,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const recover = () => this.#recoverProjectWorkspaces();
         const recovery = this.#taskDrain?.run(recover) ?? recover();
         void recovery.catch((error: unknown) => {
+            // Recovery outlives a store that is closed while it runs. A connection this store
+            // closed itself is shutdown rather than a database that could not answer.
+            if (!this.#client.open) return;
             if (isDatabaseFailure(error)) throw error;
         });
     }
@@ -784,9 +787,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
         const finish = () => this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
         const background = this.#taskDrain?.run(finish) ?? finish();
-        void background.catch((error: unknown) =>
-            this.#onWorkspaceCleanupError?.(error, projectId, workspaceId),
-        );
+        void background.catch((error: unknown) => {
+            // Residue left behind is worth a warning because a later attempt can still clear it.
+            // A database that cannot answer is neither reportable nor retryable.
+            if (isDatabaseFailure(error)) throw error;
+            this.#onWorkspaceCleanupError?.(error, projectId, workspaceId);
+        });
         // Logical archival is already durable. Physical cleanup must never hold
         // the request open or make the workspace visible again.
         return Promise.resolve(workspace);
@@ -800,6 +806,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const results = await Promise.allSettled(cleanup);
         for (const result of results) {
             if (result.status === "rejected") {
+                if (isDatabaseFailure(result.reason)) throw result.reason;
                 this.#onWorkspaceCleanupError?.(result.reason, projectId, workspaceId);
             }
         }
@@ -1262,11 +1269,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     async #recoverProjectWorkspaces(): Promise<void> {
+        // Each step resumes after an await, by which point the store may have been closed. Asking a
+        // connection that is already gone would fail for a reason that is not a database fault.
+        if (!this.#client.open) return;
         await this.#projects.reconcileInitializingWorkspaces();
         for (const workspace of this.#projects.listWorkspaces()) {
             if (workspace.status !== "archiving") continue;
+            if (!this.#client.open) return;
             await this.#archiveWorkspace(workspace.projectId, workspace.id);
         }
+        if (!this.#client.open) return;
         // Presence and Git facts are enrichment, so they run only after archival recovery, which is
         // user-visible correctness.
         await this.#projects.reconcileGitFacts();
@@ -1277,11 +1289,24 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #tx(): TX {
+        this.#assertOpen();
         return this.#activeTransaction ?? this.#database;
+    }
+
+    /**
+     * Background work outlives the store that started it, so a session can still try to save after
+     * shutdown closed the connection. Asking a closed connection reports that it is not open, which
+     * is indistinguishable from a real fault once it escapes. Refusing here keeps a deliberate
+     * shutdown from being mistaken for a database that could not answer.
+     */
+    #assertOpen(): void {
+        if (this.#client.open) return;
+        throw new Error("The session database is closed.");
     }
 
     #transaction<T>(body: (tx: TX) => T): T {
         if (this.#activeTransaction !== undefined) return body(this.#activeTransaction);
+        this.#assertOpen();
         this.#transactionCommitCallbacks = [];
         try {
             const value = inTx(this.#database, (tx) => {

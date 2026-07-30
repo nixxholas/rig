@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import Database from "better-sqlite3";
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
 import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
@@ -86,6 +87,44 @@ describe("InMemorySession metadata settlement", () => {
         await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
 
         expect(inheritedTitles).toEqual(["Delayed session metadata"]);
+    });
+
+    it("lets a database failure from initial workspace title inheritance escape the settlement", async () => {
+        const databaseError = captureDriverError();
+        let harness: ReturnType<typeof createHarness> | undefined;
+
+        const escaped = await captureUnhandledRejection(async () => {
+            harness = createHarness({
+                onInitialTitle: () => {
+                    throw databaseError;
+                },
+                workspaceId: "workspace-1",
+            });
+
+            const first = harness.session.submit({ text: "Name this workspace from the chat." });
+            await harness.session.waitForRun(first.runId);
+            await vi.waitFor(() => expect(harness?.metadataContexts).toHaveLength(2));
+        });
+
+        expect(escaped).toBe(databaseError);
+        expect(harness?.session.snapshot().titleStatus).not.toBe("error");
+    });
+
+    it("keeps ordinary initial workspace title inheritance failures optional", async () => {
+        const inherited = vi.fn(() => {
+            throw new Error("Workspace title inheritance is unavailable.");
+        });
+        const harness = createHarness({
+            onInitialTitle: inherited,
+            workspaceId: "workspace-1",
+        });
+
+        const first = harness.session.submit({ text: "Name this workspace from the chat." });
+        await harness.session.waitForRun(first.runId);
+        await vi.waitFor(() => expect(harness.metadataContexts).toHaveLength(2));
+
+        expect(inherited).toHaveBeenCalledOnce();
+        await vi.waitFor(() => expect(harness.session.snapshot().titleStatus).toBe("ready"));
     });
 
     it("serializes refinement behind an in-flight initial title", async () => {
@@ -192,6 +231,12 @@ function createHarness(
         staleMetadata?: Promise<void>;
         taskDrain?: TrackedTaskDrain;
         inheritedTitles?: string[];
+        onInitialTitle?: (metadata: {
+            projectId: string;
+            sessionId: string;
+            title: string;
+            workspaceId: string;
+        }) => void;
         workspaceId?: string;
     } = {},
 ) {
@@ -272,12 +317,14 @@ function createHarness(
             return createRuntime(runtimeOptions, provider);
         },
         modelCatalog: catalog,
-        ...(options.inheritedTitles === undefined
+        ...(options.onInitialTitle === undefined && options.inheritedTitles === undefined
             ? {}
             : {
-                  onInitialTitle: ({ title }) => {
-                      options.inheritedTitles?.push(title);
-                  },
+                  onInitialTitle:
+                      options.onInitialTitle ??
+                      (({ title }) => {
+                          options.inheritedTitles?.push(title);
+                      }),
               }),
         projectId: "project-1",
         request: { cwd: "/tmp/rig-metadata-test", modelId: model.id, providerId: provider.id },
@@ -332,4 +379,36 @@ function assistantMessage(text: string): AssistantMessage {
             totalTokens: 0,
         },
     };
+}
+
+function captureDriverError(): unknown {
+    const database = new Database(":memory:");
+    try {
+        database.prepare("select * from missing_table").all();
+        throw new Error("Expected the driver to fail.");
+    } catch (error) {
+        return error;
+    } finally {
+        database.close();
+    }
+}
+
+async function captureUnhandledRejection(run: () => Promise<void>): Promise<unknown> {
+    const installed = process.listeners("unhandledRejection");
+    for (const listener of installed) process.off("unhandledRejection", listener);
+    let captured: unknown;
+    const observe = (reason: unknown): void => {
+        captured ??= reason;
+    };
+    process.on("unhandledRejection", observe);
+    try {
+        await run();
+        for (let attempt = 0; attempt < 200 && captured === undefined; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return captured;
+    } finally {
+        process.off("unhandledRejection", observe);
+        for (const listener of installed) process.on("unhandledRejection", listener);
+    }
 }

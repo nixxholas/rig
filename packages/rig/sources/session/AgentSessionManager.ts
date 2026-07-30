@@ -17,6 +17,8 @@ import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2Colla
 import type { CreateSessionRequest, SessionAgentMetadata } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import type { PermissionMode } from "../permissions/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { TaskDrain } from "../server/TrackedTaskDrain.js";
 import { resolveSharedAgentPath } from "../server/resolveSharedAgentPath.js";
 import type { InMemorySession } from "./InMemorySession.js";
@@ -243,7 +245,7 @@ export class AgentSessionManager {
         const previous = this.#managedSubagent(child);
         void this.stopDescendants(child.id);
         if (child.subagentSummary().status === "suspended") child.clearSuspension();
-        void Promise.resolve(child.abort({ stopDescendants: false })).catch(() => undefined);
+        void Promise.resolve(child.abort({ stopDescendants: false })).catch(rethrowDatabaseFailure);
         this.recordChanged(child);
         return previous;
     }
@@ -560,12 +562,12 @@ export class AgentSessionManager {
             };
         }
 
-        const abortChild = () => void Promise.resolve(child.abort()).catch(() => undefined);
+        const abortChild = () => void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
         signal?.addEventListener("abort", abortChild, { once: true });
 
         try {
             if (signal?.aborted) {
-                void Promise.resolve(child.abort()).catch(() => undefined);
+                void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
             }
             const completion = await child.waitForRun(submitted.runId);
             this.recordChanged(child);
@@ -577,7 +579,7 @@ export class AgentSessionManager {
                 taskName,
             };
         } catch (error) {
-            void Promise.resolve(child.abort()).catch(() => undefined);
+            void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
             throw error;
         } finally {
             signal?.removeEventListener("abort", abortChild);
@@ -822,7 +824,10 @@ export class AgentSessionManager {
                     "</subagent-notification>",
                 ].join("\n"),
             });
-        } catch {
+        } catch (error) {
+            // Delivering the notification is best effort, but the database it writes through is
+            // not: a subtree that cannot be recorded has nothing left to fall back on.
+            if (isDatabaseFailure(error)) throw error;
             this.recordChanged(child);
         } finally {
             this.#pendingBackgroundRuns.delete(monitorId);
@@ -861,7 +866,7 @@ export class AgentSessionManager {
     ): void {
         const monitor = () => this.#monitorBackground(parent, child, runId);
         const task = this.#taskDrain?.run(monitor) ?? monitor();
-        void task.catch(() => undefined);
+        void task.catch(rethrowDatabaseFailure);
     }
 
     #parentFor(child: InMemorySession): InMemorySession | undefined {

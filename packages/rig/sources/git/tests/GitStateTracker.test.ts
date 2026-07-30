@@ -1,3 +1,4 @@
+import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { GitChangeState } from "../../protocol/index.js";
@@ -349,6 +350,29 @@ describe("GitStateTracker", () => {
         expect(scan.calls).toBeGreaterThanOrEqual(2);
     });
 
+    it("stops instead of reporting when the observer fails on the database", async () => {
+        const databaseError = captureDriverError();
+        let failing = false;
+        const reported: unknown[] = [];
+        const scan = countingScan(() => ({ insertions: failing ? 7 : 1 }));
+        const tracker = createTracker({
+            onObserverError: (error) => reported.push(error),
+            onSnapshot: () => {
+                if (failing) throw databaseError;
+            },
+            scan,
+        });
+
+        tracker.watch(entity());
+        await waitFor(() => scan.calls === 1);
+        failing = true;
+
+        // Enrichment the next scan repeats is worth reporting and retrying; a broken database is
+        // not, so it leaves the tracker rather than becoming an observer warning.
+        await expect(tracker.refresh(entity())).rejects.toBe(databaseError);
+        expect(reported).toEqual([]);
+    });
+
     it("follows the repository back when it returns to the last delivered state", async () => {
         let insertions = 1;
         let deliver = true;
@@ -582,4 +606,17 @@ async function waitFor(predicate: () => boolean, timeoutMs = 2_000): Promise<voi
 
 async function settle(): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 60));
+}
+
+/** Uses a real driver fault so the test cannot drift from what SQLite actually throws. */
+function captureDriverError(): unknown {
+    const database = new Database(":memory:");
+    try {
+        database.prepare("select * from missing_table").all();
+        throw new Error("Expected the driver to fail.");
+    } catch (error) {
+        return error;
+    } finally {
+        database.close();
+    }
 }

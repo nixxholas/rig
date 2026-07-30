@@ -102,6 +102,7 @@ export async function runLocalProtocolServer(
                 try {
                     await store.prepareForShutdown("shutdown");
                 } catch (error) {
+                    if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
                     daemonLog.record(
                         "error",
                         "daemon_shutdown_drain_failed",
@@ -135,6 +136,7 @@ export async function runLocalProtocolServer(
         });
     };
     let initialization = Promise.resolve();
+    let fatalDatabaseFailure: unknown;
     const reportStartupError = (error: unknown) => {
         if (stopping) return;
         const message = errorToMessage(error);
@@ -142,6 +144,17 @@ export async function runLocalProtocolServer(
         daemonLog.record("error", "daemon_startup_failed", "Rig daemon could not start.", {
             error: message,
         });
+    };
+    const reportInitializationFailure = (error: unknown) => {
+        if (isDatabaseFailure(error)) {
+            fatalDatabaseFailure ??= error;
+            daemonLog.record("error", "daemon_startup_failed", "Rig daemon could not start.", {
+                error: errorToMessage(error),
+            });
+            stopServer("Database failure during daemon initialization.");
+            return;
+        }
+        reportStartupError(error);
     };
     const stopForSigint = () => stopServer("Received SIGINT.");
     const stopForSigterm = () => stopServer("Received SIGTERM.");
@@ -177,7 +190,7 @@ export async function runLocalProtocolServer(
             return;
         }
 
-        initialization = initializeDaemon().catch(reportStartupError);
+        initialization = initializeDaemon().catch(reportInitializationFailure);
 
         await stopped;
         await initialization;
@@ -191,7 +204,7 @@ export async function runLocalProtocolServer(
             try {
                 await mcpToolProvider.close();
             } catch (error) {
-                if (isDatabaseFailure(error)) throw error;
+                if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
                 daemonLog.record(
                     "error",
                     "daemon_mcp_shutdown_failed",
@@ -213,7 +226,7 @@ export async function runLocalProtocolServer(
                 "Rig daemon could not close Happy sync.",
                 { error: errorToMessage(error) },
             );
-            if (isDatabaseFailure(error)) throw error;
+            if (isDatabaseFailure(error)) fatalDatabaseFailure ??= error;
         }
         try {
             store?.close();
@@ -222,6 +235,7 @@ export async function runLocalProtocolServer(
             uninstallProcessFailureLogging();
         }
     }
+    if (fatalDatabaseFailure !== undefined) throw fatalDatabaseFailure;
 
     async function initializeDaemon(): Promise<void> {
         const loadedConfig = await loadConfig({ cwd: process.cwd() });

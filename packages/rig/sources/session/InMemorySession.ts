@@ -7,6 +7,8 @@ import { areProviderModelsCompatible } from "@slopus/rig-providers";
 
 import { errorToMessage } from "../errorToMessage.js";
 import { toLocalDate } from "../executor/toLocalDate.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import { assistantMessageToAgentMessage } from "../agent/assistantMessageToAgentMessage.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import { isInternalMessage } from "../agent/isInternalMessage.js";
@@ -1023,6 +1025,7 @@ export class InMemorySession {
                 maxOutputBytes: 512_000,
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             const result: RunShellCommandResult = {
                 command,
                 commandId: request.commandId,
@@ -1045,6 +1048,7 @@ export class InMemorySession {
         const watching = this.#taskDrain?.run(watch) ?? watch();
         const completion = watching
             .catch((error: unknown) => {
+                if (isDatabaseFailure(error)) throw error;
                 this.#recordShellCommandResult(
                     {
                         command,
@@ -2216,6 +2220,7 @@ export class InMemorySession {
                     });
                 })
                 .catch((error: unknown) => {
+                    if (isDatabaseFailure(error)) throw error;
                     if (this.#workflowRuns.get(runId) !== internal) return;
                     if (state.status !== "stopped") {
                         state.error = errorToMessage(error);
@@ -2260,7 +2265,7 @@ export class InMemorySession {
                     });
                 });
         const execution = this.#taskDrain?.run(execute) ?? execute();
-        void execution.catch(() => undefined);
+        void execution.catch(rethrowDatabaseFailure);
         return cloneWorkflowRun(state);
     }
 
@@ -2455,7 +2460,7 @@ export class InMemorySession {
         await this.abort({ stopDescendants: false });
         await Promise.allSettled(this.#shellCommandCompletions.values());
         if (activeRunId !== undefined) await this.waitForRun(activeRunId);
-        await this.#draining?.catch(() => undefined);
+        await this.#draining?.catch(rethrowDatabaseFailure);
         const workflowRuns = [...this.#workflowRuns.values()];
         for (const run of workflowRuns) {
             if (run.state.status === "running") this.stopWorkflow(run.state.runId);
@@ -2582,6 +2587,7 @@ export class InMemorySession {
             });
             return result;
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (compactSignal.aborted) {
                 this.#append("run_finished", {
                     modelLocked: this.#modelLocked(),
@@ -3604,7 +3610,7 @@ export class InMemorySession {
         this.#resumingDurableToolRun = true;
         this.#resumeDurableToolRunAgain = false;
         void this.#resumeDurableToolRun()
-            .catch(() => undefined)
+            .catch(rethrowDatabaseFailure)
             .finally(() => {
                 this.#resumingDurableToolRun = false;
                 if (this.#resumeDurableToolRunAgain) this.resumeDurableToolRun();
@@ -4007,6 +4013,7 @@ export class InMemorySession {
             if (this.#activeRun?.runId !== runId) return;
             this.#appendRunFinished(runId, result);
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (this.#activeRun?.runId !== runId) return;
             const errorMessage = errorToMessage(error);
             this.#appendDurableError(runId, errorMessage, runtime);
@@ -4789,7 +4796,8 @@ export class InMemorySession {
             this.#append("session_quota_contribution_changed", {
                 observedQuota: this.#quotaContributionTracker.snapshot(),
             });
-        } catch {
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             // Quota observation must never fail or replay an otherwise completed agent run.
         }
     }
@@ -5197,7 +5205,7 @@ export class InMemorySession {
         const revision = this.#metadataRevision;
         const settle = () => this.#settleMetadata(revision, target);
         const settlement = this.#taskDrain?.run(settle) ?? settle();
-        void settlement.catch(() => undefined);
+        void settlement.catch(rethrowDatabaseFailure);
     }
 
     #metadataGenerationTarget(): MetadataGenerationTarget | undefined {
@@ -5292,12 +5300,14 @@ export class InMemorySession {
                         title: metadata.title,
                         workspaceId: this.#workspaceId,
                     });
-                } catch {
+                } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     // Workspace title inheritance is optional enrichment and cannot fail the chat.
                 }
             }
             completed = true;
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (controller.signal.aborted || revision !== this.#metadataRevision) return;
             this.#titleStatus = "error";
             this.#titleError = errorToMessage(error);
@@ -5429,6 +5439,7 @@ export class InMemorySession {
                 break;
             }
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             if (this.#activeRun?.runId !== queued.runId) {
                 return;
             }
@@ -5516,7 +5527,7 @@ export class InMemorySession {
         this.#draining = draining.finally(() => {
             this.#draining = undefined;
         });
-        void this.#draining.catch(() => undefined);
+        void this.#draining.catch(rethrowDatabaseFailure);
     }
 
     #assertAcceptingWork(): void {

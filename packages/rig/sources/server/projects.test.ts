@@ -285,6 +285,45 @@ describe("projects", () => {
         await expect(access(ready.path)).resolves.toBeUndefined();
     });
 
+    it("stops instead of reporting cleanup when workspace archival hits the database", async () => {
+        const databaseError = captureDriverError();
+        let failRemoval = false;
+        const cleanupErrors: unknown[] = [];
+        const fixture = await createFixture({
+            onWorkspaceCleanupError: (error) => cleanupErrors.push(error),
+            projectGit: async (cwd, args) => {
+                if (failRemoval && args[0] === "worktree" && args[1] === "remove") {
+                    throw databaseError;
+                }
+                return git(cwd, args);
+            },
+        });
+        const repository = await createRepository(fixture.root, "database-failure-source");
+        const source = fixture.store.create({ cwd: repository });
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            clientRequestId: "database-failure",
+            name: "Database Failure",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            created.projectId,
+            created.id,
+            (value) => value.status === "ready",
+        );
+
+        failRemoval = true;
+        const escaped = await captureUnhandledRejection(async () => {
+            await fixture.store.archiveWorkspace(ready.projectId, ready.id, ready.version);
+        });
+
+        // Residue left on disk is worth a warning because the next attempt can still remove it.
+        // A database that cannot answer is neither reportable nor retryable.
+        expect(escaped).toBe(databaseError);
+        expect(cleanupErrors).toEqual([]);
+    });
+
     it("reconciles interrupted workspace creation and archival after restart", async () => {
         const fixture = await createFixture();
         const repository = join(fixture.root, "source");
@@ -747,6 +786,44 @@ async function createFixture(
         return next;
     };
     return { databasePath, home, restart, root, state, store: stores[0]! };
+}
+
+/** Uses a real driver fault so the test cannot drift from what SQLite actually throws. */
+function captureDriverError(): unknown {
+    const opened = openSessionDatabase(":memory:");
+    try {
+        opened.database.run(sql.raw("select * from missing_table"));
+        throw new Error("Expected the driver to fail.");
+    } catch (error) {
+        return error;
+    } finally {
+        opened.client.close();
+    }
+}
+
+/**
+ * Observes the process-level hard failure a database fault is supposed to become, and answers
+ * `undefined` when nothing escaped. Rig's own listeners are lifted for the duration so the
+ * deliberate rejection is not also reported as a failure of the surrounding suite.
+ */
+async function captureUnhandledRejection(run: () => Promise<void>): Promise<unknown> {
+    const installed = process.listeners("unhandledRejection");
+    for (const listener of installed) process.off("unhandledRejection", listener);
+    let captured: unknown;
+    const observe = (reason: unknown): void => {
+        captured ??= reason;
+    };
+    process.on("unhandledRejection", observe);
+    try {
+        await run();
+        for (let attempt = 0; attempt < 200 && captured === undefined; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return captured;
+    } finally {
+        process.off("unhandledRejection", observe);
+        for (const listener of installed) process.on("unhandledRejection", listener);
+    }
 }
 
 async function createRepository(root: string, name: string): Promise<string> {

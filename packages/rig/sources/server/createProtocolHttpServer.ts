@@ -83,6 +83,7 @@ import { createEventIdFactory, RIG_PROTOCOL_VERSION } from "../protocol/index.js
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import type { SessionUsageSummary } from "../session/usage/index.js";
 import { createModelCatalog } from "./createModelCatalog.js";
@@ -216,6 +217,8 @@ export function createProtocolHttpServer(
         const handling =
             mutating && options.taskDrain !== undefined ? options.taskDrain.run(handle) : handle();
         void handling.catch((error: unknown) => {
+            // A database failure must reach the process-level rejection handler.
+            if (isDatabaseFailure(error)) throw error;
             const invalidJson = error instanceof InvalidJsonBodyError;
             const bodyTooLarge = error instanceof RequestBodyTooLargeError;
             const status = bodyTooLarge
@@ -385,6 +388,7 @@ async function handleRequest(
                         terminal: terminal.summary(),
                     });
                 } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
                     sendJson(response, 400, { error: errorToMessage(error) });
                 }
                 return;
@@ -408,6 +412,7 @@ async function handleRequest(
                     terminal: await terminal.resize(body.cols, body.rows),
                 });
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 400, { error: errorToMessage(error) });
             }
             return;
@@ -485,6 +490,7 @@ async function handleRequest(
                     )!,
                 });
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
                     project: store.getProject(project.id),
@@ -574,6 +580,7 @@ async function handleRequest(
             }
             sendJson<ProjectResponse>(response, 202, { project });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -600,6 +607,7 @@ async function handleRequest(
             }
             sendJson<ProjectResponse>(response, 200, { project });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -619,6 +627,7 @@ async function handleRequest(
             }
             sendJson<ProjectResponse>(response, 202, { project });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -656,6 +665,7 @@ async function handleRequest(
                 }
                 sendJson<ProjectResponse>(response, 200, { project });
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 const message = errorToMessage(error);
                 sendJson(
                     response,
@@ -714,6 +724,7 @@ async function handleRequest(
                 }
                 sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 const message = errorToMessage(error);
                 sendJson(response, message.includes("already used") ? 409 : 400, {
                     error: message,
@@ -778,6 +789,7 @@ async function handleRequest(
                     workspace: renamed,
                 });
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 409, {
                     error: errorToMessage(error),
                     workspace: store.getWorkspace(route.projectId, route.workspaceId),
@@ -805,6 +817,7 @@ async function handleRequest(
             }
             sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -836,6 +849,7 @@ async function handleRequest(
             }
             sendJson<ProjectWorkspaceResponse>(response, 200, { workspace });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -1138,6 +1152,7 @@ async function handleRequest(
                 secret: store.registerSecret(body as RegisterSecretRequest),
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 400, {
                 error: error instanceof Error ? error.message : "The secret could not be saved.",
             });
@@ -1203,6 +1218,7 @@ async function handleRequest(
                     : store.createWithId(body.clientSessionId, sessionRequest);
             sendJson<CreateSessionResponse>(response, 201, { session: session.snapshot() });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, error instanceof SessionConfigurationError ? 400 : 409, {
                 error: error instanceof Error ? error.message : "The session could not be created.",
             });
@@ -1271,6 +1287,7 @@ async function handleRequest(
                 }
                 sendJson<SessionTerminalHeartbeatResponse>(response, 200, { connected: true });
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 400, { error: errorToMessage(error) });
             }
             return;
@@ -1317,6 +1334,7 @@ async function handleRequest(
                 session: store.reorderSession(sessionId, body)!.snapshot(),
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -1577,6 +1595,7 @@ async function handleRequest(
                 ),
             );
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             const status =
                 error instanceof SessionFileConflictError
                     ? 409
@@ -1619,6 +1638,7 @@ async function handleRequest(
             }
             sendJson<ForkSessionResponse>(response, 201, { session: forked.snapshot() });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The session could not be forked.",
             });
@@ -1686,6 +1706,7 @@ async function handleRequest(
             }
             sendJson<ResolveExternalToolCallResponse>(response, 200, result);
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, { error: errorToMessage(error) });
         }
         return;
@@ -1706,6 +1727,7 @@ async function handleRequest(
         try {
             sendJson<SteerMessageResponse>(response, 202, session.steer(body));
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The active run cannot be steered.",
             });
@@ -1748,6 +1770,7 @@ async function handleRequest(
                 }),
             );
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The run could not be aborted.",
             });
@@ -1846,6 +1869,7 @@ async function handleRequest(
                 session: session.snapshot(),
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The session could not be rewound.",
             });
@@ -1929,6 +1953,7 @@ async function handleRequest(
                 }),
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: errorToMessage(error),
                 session: session.snapshot(),
@@ -2021,6 +2046,7 @@ async function handleRequest(
                     session.snapshot(),
             });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The secret could not be attached.",
             });
@@ -2064,6 +2090,7 @@ async function handleRequest(
             session.setGoal(body, mutationId);
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The goal could not be started.",
             });
@@ -2089,6 +2116,7 @@ async function handleRequest(
             session.changeGoalStatus(body, mutationId === undefined ? {} : { mutationId });
             sendJson<GoalSessionResponse>(response, 200, { session: session.snapshot() });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 409, {
                 error: error instanceof Error ? error.message : "The goal could not be updated.",
             });
@@ -2129,6 +2157,7 @@ async function handleRequest(
             }
             sendJson(response, 200, { session: snapshot });
         } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
             sendJson(response, 400, {
                 error: error instanceof Error ? error.message : "The answer is invalid.",
             });

@@ -6,6 +6,8 @@ import {
     type GitChangeState,
     type GlobalLiveEvent,
 } from "../protocol/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import { runScanGit } from "./runScanGit.js";
 import { scanGitRepository } from "./scanGitRepository.js";
 import type { TaskDrain } from "../server/TrackedTaskDrain.js";
@@ -397,10 +399,12 @@ export class GitStateTracker {
                 }
             };
             const task = this.#taskDrain?.run(run) ?? run();
-            void task.catch(() => {
+            void task.catch((error: unknown) => {
                 // The drain rejects without ever invoking the task once it is closing, so the slot
                 // has to be released here or every scan slot leaks and scanning deadlocks.
                 if (!started) this.#releaseScanSlot();
+                // Released first, so the slot is accounted for even as the failure leaves.
+                rethrowDatabaseFailure(error);
             });
         }
     }
@@ -453,7 +457,10 @@ export class GitStateTracker {
             // A success cancels any retry the previous failure armed.
             if (tracker.backoffTimer !== undefined) clearTimeout(tracker.backoffTimer);
             tracker.backoffTimer = undefined;
-        } catch {
+        } catch (error) {
+            // Backoff answers a repository that cannot be read. A database failure is neither
+            // repository state nor something a later scan can repair, so it is not retried.
+            if (isDatabaseFailure(error)) throw error;
             if (this.#disposed || tracker.generation !== generation) return;
             // A repository that keeps failing backs off instead of spinning on every dirty signal.
             const delay = tracker.backoffMs;
@@ -495,6 +502,9 @@ export class GitStateTracker {
         try {
             this.#onSnapshot?.(entity, snapshot);
         } catch (error) {
+            // A broken database is not enrichment a later scan can repeat, so it leaves the
+            // tracker entirely instead of being reported and retried.
+            if (isDatabaseFailure(error)) throw error;
             // Persisting slow-moving facts is enrichment the next scan repeats, but a write that
             // keeps failing would otherwise be invisible.
             this.#report(error, entity);
@@ -505,6 +515,8 @@ export class GitStateTracker {
             // the event, so a swallowed subscriber failure cannot be mistaken for delivery.
             return this.#onLiveEvent(this.#createLiveEvent(entity, snapshot));
         } catch (error) {
+            // Some delivery callbacks may persist related state before publishing the live event.
+            if (isDatabaseFailure(error)) throw error;
             this.#report(error, entity);
             return false;
         }

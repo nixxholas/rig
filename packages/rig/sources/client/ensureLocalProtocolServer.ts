@@ -13,6 +13,7 @@ import {
     type LocalServerPaths,
 } from "../server/index.js";
 import { daemonIdentitiesMatch, getDaemonIdentity } from "../daemon/index.js";
+import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { RigUserError } from "../RigUserError.js";
 import type { DaemonIdentity, ReadyHealthResponse } from "../protocol/index.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
@@ -82,6 +83,7 @@ export async function ensureLocalProtocolServer(
             socketPath: paths.socketPath,
             tokenPath: paths.tokenPath,
         }).catch((error: unknown) => {
+            if (isDatabaseFailure(error)) throw error;
             options.onStatus?.(
                 `Local daemon stopped: ${error instanceof Error ? error.message : String(error)}`,
             );
