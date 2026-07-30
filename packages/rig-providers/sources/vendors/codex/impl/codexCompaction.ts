@@ -18,6 +18,7 @@ import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionMessage, SessionUserMessage } from "@/core/SessionContext.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { responseInputItems } from "@/protocol/responses/responseInputItems.js";
+import { responseStreamError } from "@/protocol/responses/responseStreamError.js";
 import { createResponsesLiteSseRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import { context_checkpoint_summary_prefix } from "@/vendors/codex/prompts/context_checkpoint_compaction_instructions.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
@@ -287,16 +288,10 @@ export async function collectCodexCompaction(
             throw new Error(`Incomplete compaction response returned, reason: ${reason}`);
         }
         if (event.type === "response.failed") {
-            throw new Error(
-                event.response.error?.message ??
-                    event.response.incomplete_details?.reason ??
-                    "Codex failed to compact the conversation.",
-            );
+            throw responseStreamError(event, "Codex failed to compact the conversation.");
         }
         if (event.type === "error") {
-            throw new Error(
-                event.code === null ? event.message : `${event.code}: ${event.message}`,
-            );
+            throw responseStreamError(event, "Codex failed to compact the conversation.");
         }
         if (event.type !== "response.completed") continue;
         const completedItems = event.response.output.filter(

@@ -25,6 +25,7 @@ export function classifyCodexError(message: string): SessionErrorKind {
 
 /** Detects a server rejection that can be retried with a smaller compaction input. */
 export function isCodexContextWindowError(error: unknown): boolean {
+    if (hasErrorCode(error, "context_length_exceeded", new Set())) return true;
     const message = error instanceof Error ? error.message : String(error);
     return /context window|context length|maximum context|too many tokens|prompt tokens.+exceed.+model maximum/iu.test(
         message,
@@ -130,10 +131,11 @@ function readDetails(
 
 export function isRetryableCodexStreamError(error: unknown): boolean {
     if (hasAbortError(error, new Set())) return false;
-    return isRetryable(error, new Set());
+    return shouldRetry(error, new Set());
 }
 
-function isRetryable(error: unknown, seen: Set<object>): boolean {
+/** Unknown inference failures are transient unless the provider proves they are fatal. */
+function shouldRetry(error: unknown, seen: Set<object>): boolean {
     const directive = readCodexErrorHeader(error, "x-should-retry")?.trim().toLowerCase();
     if (directive === "true") return true;
     if (directive === "false") return false;
@@ -146,10 +148,22 @@ function isRetryable(error: unknown, seen: Set<object>): boolean {
     const status =
         numericProperty(error, "status") ??
         readCodexWebSocketHandshakeStatus(stringProperty(error, "message"));
-    if (status !== undefined)
-        return status === 408 || status === 409 || status === 429 || status >= 500;
+    if (status !== undefined) {
+        if (status === 408 || status === 409 || status === 429 || status >= 500) return true;
+        if (status >= 400 && status < 500) return false;
+    }
     const code = stringProperty(error, "code") ?? stringProperty(error, "errno");
+    if (code !== undefined && FATAL_CODES.has(code.toLowerCase())) return false;
     if (code !== undefined && RETRYABLE_CODES.has(code.toUpperCase())) return true;
+    const serverError = readWebSocketServerError(error);
+    if (
+        serverError !== undefined &&
+        [stringProperty(serverError, "type"), stringProperty(serverError, "code")].some(
+            (value) => value !== undefined && FATAL_CODES.has(value.toLowerCase()),
+        )
+    )
+        return false;
+    if (isCodexContextWindowError(error)) return false;
     if (isWebSocketError(error)) {
         if (readWebSocketServerEvent(error) === undefined) return true;
     } else {
@@ -162,7 +176,7 @@ function isRetryable(error: unknown, seen: Set<object>): boolean {
         typeof error === "object" && error !== null && "cause" in error
             ? (error as { cause?: unknown }).cause
             : undefined;
-    return cause !== undefined && isRetryable(cause, seen);
+    return cause === undefined ? true : shouldRetry(cause, seen);
 }
 
 function hasAbortError(error: unknown, seen: Set<object>): boolean {
@@ -189,6 +203,44 @@ const RETRYABLE_NAMES = new Set([
     "APIConnectionTimeoutError",
     "TimeoutError",
 ]);
+
+const FATAL_CODES = new Set([
+    "authentication_error",
+    "billing_error",
+    "bio_policy",
+    "content_policy_violation",
+    "context_length_exceeded",
+    "cyber_policy",
+    "empty_image_file",
+    "image_content_policy_violation",
+    "image_file_not_found",
+    "image_file_too_large",
+    "image_parse_error",
+    "image_too_large",
+    "image_too_small",
+    "insufficient_quota",
+    "invalid_base64_image",
+    "invalid_image",
+    "invalid_image_format",
+    "invalid_image_mode",
+    "invalid_image_url",
+    "invalid_prompt",
+    "invalid_request_error",
+    "model_not_found",
+    "permission_error",
+    "unsupported_image_media_type",
+]);
+
+function hasErrorCode(error: unknown, expected: string, seen: Set<object>): boolean {
+    if (typeof error !== "object" || error === null || seen.has(error)) return false;
+    seen.add(error);
+    if (stringProperty(error, "code") === expected) return true;
+    return ["cause", "error"].some(
+        (property) =>
+            property in error &&
+            hasErrorCode((error as Record<string, unknown>)[property], expected, seen),
+    );
+}
 
 const WEBSOCKET_ERROR_NAME = "WebSocketError";
 

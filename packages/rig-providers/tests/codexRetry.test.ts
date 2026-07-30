@@ -14,6 +14,7 @@ import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.
 import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexWebSocketUnavailableError } from "@/vendors/codex/errors/codexErrors.js";
+import { collectCodexCompaction } from "@/vendors/codex/impl/codexCompaction.js";
 import { resolveCodexInstallationId } from "@/vendors/codex/impl/resolveCodexInstallationId.js";
 import { resolveCodexInstallationIdAt } from "@/vendors/codex/impl/resolveCodexInstallationIdAt.js";
 import {
@@ -27,9 +28,14 @@ describe("Codex stream retries", () => {
     it("recognizes the Bedrock prompt-token overflow returned during compaction", () => {
         expect(
             isCodexContextWindowError(
-                new Error(
-                    "prompt tokens (286638) exceed customer model maximum (278528)",
-                ),
+                new Error("prompt tokens (286638) exceed customer model maximum (278528)"),
+            ),
+        ).toBe(true);
+        expect(
+            isCodexContextWindowError(
+                Object.assign(new Error("Request failed."), {
+                    code: "context_length_exceeded",
+                }),
             ),
         ).toBe(true);
     });
@@ -92,6 +98,8 @@ describe("Codex stream retries", () => {
             cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
         }),
         new Error("socket disconnected"),
+        new Error("The server had an error while processing your request. Sorry about that!"),
+        new Error("invalid response payload"),
     ])("recognizes retryable transport errors", (error) => {
         expect(isRetryableCodexStreamError(error)).toBe(true);
     });
@@ -195,12 +203,30 @@ describe("Codex stream retries", () => {
     });
 
     it.each([
-        new Error("invalid response payload"),
         Object.assign(new Error("bad request"), { status: 400 }),
         Object.assign(new Error("unauthorized"), { status: 401 }),
+        Object.assign(new Error("The prompt was rejected."), { code: "invalid_prompt" }),
+        Object.assign(new Error("Policy rejected the request."), { code: "cyber_policy" }),
+        Object.assign(new Error("Request failed."), { code: "context_length_exceeded" }),
         new DOMException("Request was aborted", "AbortError"),
-    ])("does not retry semantic or programming errors", (error) => {
+    ])("does not retry explicitly fatal errors", (error) => {
         expect(isRetryableCodexStreamError(error)).toBe(false);
+    });
+
+    it("preserves fatal response codes from Codex compaction", async () => {
+        const events = (async function* () {
+            yield {
+                type: "response.failed",
+                response: {
+                    error: { code: "invalid_prompt", message: "Compaction prompt was rejected." },
+                },
+            } as never;
+        })();
+
+        await expect(collectCodexCompaction(events, {})).rejects.toMatchObject({
+            code: "invalid_prompt",
+            message: "Compaction prompt was rejected.",
+        });
     });
 
     it("rejects a retry delay immediately when already aborted", async () => {

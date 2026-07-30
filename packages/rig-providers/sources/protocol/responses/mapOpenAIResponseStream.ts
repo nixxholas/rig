@@ -8,6 +8,7 @@ import type {
     ResponsesToolCallType,
     ResponsesToolVendor,
 } from "@/protocol/responses/ResponsesToolVendor.js";
+import { responseStreamError } from "@/protocol/responses/responseStreamError.js";
 
 interface ActiveOutputItem {
     callId?: string;
@@ -477,17 +478,11 @@ export async function* mapOpenAIResponseStream(
         }
 
         if (event.type === "error") {
-            throw new Error(
-                event.code === null ? event.message : `${event.code}: ${event.message}`,
-            );
+            throw responseStreamError(event, options.failureMessage);
         }
 
         if (event.type === "response.failed") {
-            throw new Error(
-                event.response.error?.message ??
-                    event.response.incomplete_details?.reason ??
-                    options.failureMessage,
-            );
+            throw responseStreamError(event, options.failureMessage);
         }
     }
 

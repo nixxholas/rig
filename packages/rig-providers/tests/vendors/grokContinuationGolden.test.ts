@@ -340,13 +340,15 @@ describe("Grok continuation goldens", () => {
                     stream([
                         {
                             type: "response.failed",
-                            response: { error: { message: "backend unavailable" } },
+                            response: {
+                                error: { code: "server_error", message: "backend unavailable" },
+                            },
                         },
                     ]),
                     { failureMessage: "Grok failed." },
                 ),
             ),
-        ).rejects.toThrow("backend unavailable");
+        ).rejects.toMatchObject({ code: "server_error", message: "backend unavailable" });
     });
 
     it("rejects a stream that closes without a terminal response event", async () => {
