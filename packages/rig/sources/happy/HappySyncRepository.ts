@@ -1,5 +1,3 @@
-import { asc, eq } from "drizzle-orm";
-
 import { happyOutboxAcknowledge } from "../persistence/happy/happyOutboxAcknowledge.js";
 import {
     happyOutboxEnqueue,
@@ -11,11 +9,12 @@ import {
     type HappySessionState,
 } from "../persistence/happy/happySessionEnsure.js";
 import { happySessionSetRemote } from "../persistence/happy/happySessionSetRemote.js";
+import { queryHappyOutbox } from "../persistence/happy/queryHappyOutbox.js";
+import { queryHappySession } from "../persistence/happy/queryHappySession.js";
 import {
     openSessionDatabase,
     type SessionDatabase,
 } from "../persistence/database/openSessionDatabase.js";
-import { happyOutbox, happySessions } from "../persistence/database/schema.js";
 import type { HappyEncryptionVariant, HappySessionProtocolMessage } from "./types.js";
 
 const MAX_PENDING_MESSAGES_PER_SESSION = 10_000;
@@ -37,9 +36,6 @@ export class HappySyncRepository {
         const opened = openSessionDatabase(databasePath);
         this.#client = opened.client;
         this.#database = opened.database;
-        this.#client.pragma("journal_mode = WAL");
-        this.#client.pragma("synchronous = FULL");
-        this.#client.pragma("foreign_keys = ON");
         this.#maxPendingMessagesPerSession = maxPendingMessagesPerSession;
         this.#now = now;
     }
@@ -74,32 +70,11 @@ export class HappySyncRepository {
     }
 
     getSession(sessionId: string): HappySessionState | undefined {
-        const row = this.#database
-            .select()
-            .from(happySessions)
-            .where(eq(happySessions.sessionId, sessionId))
-            .get();
-        if (row === undefined) return undefined;
-        return {
-            credentialFingerprint: row.credentialFingerprint,
-            encryptionKey: new Uint8Array(Buffer.from(row.encryptionKeyBase64, "base64")),
-            encryptionVariant: row.encryptionVariant as HappyEncryptionVariant,
-            lastRemoteSeq: row.lastRemoteSeq,
-            ...(row.remoteSessionId === null ? {} : { remoteSessionId: row.remoteSessionId }),
-            sessionId,
-            tag: row.tag,
-        };
+        return queryHappySession(this.#database, sessionId);
     }
 
     pending(sessionId: string, limit = 50): readonly HappySessionProtocolMessage[] {
-        return this.#database
-            .select({ payloadJson: happyOutbox.payloadJson })
-            .from(happyOutbox)
-            .where(eq(happyOutbox.sessionId, sessionId))
-            .orderBy(asc(happyOutbox.seq))
-            .limit(limit)
-            .all()
-            .map((row) => JSON.parse(row.payloadJson) as HappySessionProtocolMessage);
+        return queryHappyOutbox(this.#database, sessionId, limit);
     }
 
     setRemoteSession(sessionId: string, remoteSessionId: string): void {

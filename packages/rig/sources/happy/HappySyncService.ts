@@ -157,9 +157,12 @@ export class HappySyncService {
         this.#clients.clear();
         this.#messageMappers.clear();
         this.#repository.close();
-        const failure = results.find(
-            (result): result is PromiseRejectedResult => result.status === "rejected",
-        );
+        const failure =
+            results.find(
+                (result): result is PromiseRejectedResult =>
+                    result.status === "rejected" && isDatabaseFailure(result.reason),
+            ) ??
+            results.find((result): result is PromiseRejectedResult => result.status === "rejected");
         if (failure !== undefined) throw failure.reason;
     }
 

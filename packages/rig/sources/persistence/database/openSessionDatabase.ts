@@ -18,6 +18,11 @@ export function openSessionDatabase(
         readonly: options.readOnly ?? false,
         timeout: 5_000,
     });
+    if (options.readOnly !== true) {
+        client.pragma("journal_mode = WAL");
+        client.pragma("synchronous = FULL");
+    }
+    client.pragma("foreign_keys = ON");
     const database = drizzle(client, { schema });
     return { client, database };
 }

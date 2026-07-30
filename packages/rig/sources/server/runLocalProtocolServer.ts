@@ -191,6 +191,7 @@ export async function runLocalProtocolServer(
             try {
                 await mcpToolProvider.close();
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 daemonLog.record(
                     "error",
                     "daemon_mcp_shutdown_failed",
@@ -364,6 +365,7 @@ export async function runLocalProtocolServer(
                 service.start();
                 happySyncService = service;
             } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
                 daemonLog.record(
                     "warning",
                     "daemon_happy_unavailable",
