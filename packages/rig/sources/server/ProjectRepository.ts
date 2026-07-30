@@ -1,10 +1,8 @@
 import { createHash } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
 import { existsSync } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
 import sharp from "sharp";
@@ -58,21 +56,25 @@ import { workspaceReorder } from "../persistence/project/workspaceReorder.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
+import { normalizeProjectCwd } from "../utils/normalizeProjectCwd.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
-import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
-import { runScanGit } from "./runScanGit.js";
-import { type GitRepositoryProbe, probeGitRepository } from "./probeGitRepository.js";
+import { createGitWorktree } from "../git/createGitWorktree.js";
+import { isGitWorktreeAt } from "../git/isGitWorktreeAt.js";
+import { parseHostingRepository } from "../git/parseHostingRepository.js";
+import { type GitRepositoryProbe, probeGitRepository } from "../git/probeGitRepository.js";
+import { readGitCommonDir } from "../git/readGitCommonDir.js";
+import { readGitTopLevel } from "../git/readGitTopLevel.js";
+import { remoteProjectName } from "../git/remoteProjectName.js";
+import { removeGitWorktree } from "../git/removeGitWorktree.js";
+import { resolveGitCommit } from "../git/resolveGitCommit.js";
+import { runGitCommand } from "../git/runGitCommand.js";
+import { runSandboxedGitCommand } from "../git/runSandboxedGitCommand.js";
+import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
+import type { GitCommandRunner } from "../git/types.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
-import {
-    folderProjectName,
-    parseHostingRepository,
-    projectNameKey,
-    remoteProjectName,
-    validateProjectName,
-} from "./projectIdentity.js";
+import { folderProjectName, projectNameKey, validateProjectName } from "./projectIdentity.js";
 
-const execFile = promisify(execFileCallback);
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
 const GIT_PROBE_CONCURRENCY = 4;
 const MAX_AVATAR_BYTES = 8 * 1024 * 1024;
@@ -101,11 +103,10 @@ export interface ProjectAvatarAsset {
     mediaType: "image/webp";
 }
 
-export type ProjectGitRunner = (cwd: string, args: readonly string[]) => Promise<string>;
-
 export interface ProjectRepositoryOptions {
     database: SessionDatabase;
-    git?: ProjectGitRunner;
+    /** Replaces both Git execution surfaces at once, so a test can drive lifecycle without Git. */
+    git?: GitCommandRunner;
     homeDirectory?: string;
     now?: () => number;
     /** Reports whether a project still has a session that would be stranded by removal. */
@@ -122,8 +123,12 @@ export class ProjectRepository {
     readonly #avatarLifecycle = new Map<string, Promise<void>>();
     readonly #createEventId = createEventIdFactory();
     readonly #database: SessionDatabase;
-    readonly #gitRunner: ProjectGitRunner;
-    readonly #injectedGitRunner: ProjectGitRunner | undefined;
+    readonly #git: GitCommandRunner;
+    /**
+     * Background probes run unattended, so they read through the sandbox for the same reason live
+     * scans do: a repository must not be able to make an unattended read execute a helper.
+     */
+    readonly #probeGit: GitCommandRunner;
     readonly #homeDirectory: string;
     readonly #initializing = new Set<string>();
     readonly #pendingInitializations: string[] = [];
@@ -141,8 +146,8 @@ export class ProjectRepository {
 
     constructor(options: ProjectRepositoryOptions) {
         this.#database = options.database;
-        this.#gitRunner = options.git ?? runGit;
-        this.#injectedGitRunner = options.git;
+        this.#git = options.git ?? runGitCommand;
+        this.#probeGit = options.git ?? runSandboxedGitCommand;
         this.#homeDirectory = normalizeProjectCwd(options.homeDirectory ?? homedir());
         this.#now = options.now ?? Date.now;
         this.#onEvent = options.onEvent;
@@ -321,7 +326,7 @@ export class ProjectRepository {
 
     async #reconcileProjectGitFacts(project: Project): Promise<void> {
         const probe = await probeGitRepository({
-            git: (cwd, args) => this.#probeGit(cwd, args),
+            git: this.#probeGit,
             isHome: project.kind === "home",
             path: project.path,
         });
@@ -339,7 +344,7 @@ export class ProjectRepository {
 
     async #reconcileWorkspaceGitFacts(workspace: ProjectWorkspace): Promise<void> {
         const probe = await probeGitRepository({
-            git: (cwd, args) => this.#probeGit(cwd, args),
+            git: this.#probeGit,
             path: workspace.path,
         });
         if (this.#closed) return;
@@ -540,35 +545,19 @@ export class ProjectRepository {
             return retry;
         }
 
-        const gitTopLevel = normalizeProjectCwd(
-            await this.#git(project.path, ["rev-parse", "--show-toplevel"]),
-        );
+        const gitTopLevel = await readGitTopLevel(this.#git, project.path);
         if (gitTopLevel !== project.path) {
             throw new Error("Managed workspaces require a Git repository project.");
         }
-        const gitCommonDir = normalizeProjectCwd(
-            resolve(
-                project.path,
-                await this.#git(project.path, [
-                    "rev-parse",
-                    "--path-format=absolute",
-                    "--git-common-dir",
-                ]),
-            ),
-        );
-        const commit = await this.#git(project.path, [
-            "rev-parse",
-            "--verify",
-            "--end-of-options",
-            `${baseRef}^{commit}`,
-        ]);
-        if (!/^[a-f0-9]{40,64}$/iu.test(commit)) {
+        const gitCommonDir = await readGitCommonDir(this.#git, project.path);
+        const commit = await resolveGitCommit(this.#git, project.path, baseRef);
+        if (commit === undefined) {
             throw new Error("The workspace base reference did not resolve to a commit.");
         }
 
         const reservation = this.#mutate((tx) => {
             const result = workspaceReserve(tx, {
-                baseCommit: commit.toLocaleLowerCase(),
+                baseCommit: commit,
                 baseRef,
                 clientRequestId,
                 gitCommonDir,
@@ -590,7 +579,7 @@ export class ProjectRepository {
         if (reservation.created) {
             setImmediate(() => {
                 this.#runBackgroundTask(() =>
-                    this.#materializeWorkspace(workspace, project.path, commit.toLocaleLowerCase()),
+                    this.#materializeWorkspace(workspace, project.path, commit),
                 );
             });
         }
@@ -786,11 +775,9 @@ export class ProjectRepository {
             let remote: string | undefined;
             let repositoryTopLevel = false;
             try {
-                const topLevel = normalizeProjectCwd(
-                    await this.#git(project.path, ["rev-parse", "--show-toplevel"]),
-                );
-                repositoryTopLevel = topLevel === project.path;
-                if (repositoryTopLevel) remote = await this.#selectRemote(project.path);
+                repositoryTopLevel =
+                    (await readGitTopLevel(this.#git, project.path)) === project.path;
+                if (repositoryTopLevel) remote = await selectGitRemoteUrl(this.#git, project.path);
             } catch {
                 // A regular non-Git directory is a valid project.
             }
@@ -872,40 +859,6 @@ export class ProjectRepository {
                     });
                 });
         }
-    }
-
-    async #selectRemote(cwd: string): Promise<string | undefined> {
-        try {
-            const branch = await this.#git(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
-            const trackedRemote = await this.#git(cwd, [
-                "config",
-                "--get",
-                `branch.${branch}.remote`,
-            ]);
-            if (trackedRemote !== ".") {
-                return await this.#git(cwd, ["config", "--get", `remote.${trackedRemote}.url`]);
-            }
-        } catch {
-            // Fall through to origin and then stable remote order.
-        }
-        try {
-            return await this.#git(cwd, ["config", "--get", "remote.origin.url"]);
-        } catch {
-            // Fall through.
-        }
-        try {
-            const remotes = (await this.#git(cwd, ["remote"]))
-                .split(/\r?\n/gu)
-                .map((value) => value.trim())
-                .filter(Boolean);
-            for (const remote of remotes) {
-                const url = await this.#git(cwd, ["config", "--get", `remote.${remote}.url`]);
-                if (remoteProjectName(url) !== undefined) return url;
-            }
-        } catch {
-            // No usable remote.
-        }
-        return undefined;
     }
 
     async #findRepositoryAvatar(root: string): Promise<Buffer | undefined> {
@@ -1081,50 +1034,27 @@ export class ProjectRepository {
         }
         try {
             if (existsSync(workspace.path)) {
-                try {
-                    const topLevel = normalizeProjectCwd(
-                        await this.#git(workspace.path, ["rev-parse", "--show-toplevel"]),
-                    );
-                    const commonDirectory = normalizeProjectCwd(
-                        resolve(
-                            workspace.path,
-                            await this.#git(workspace.path, [
-                                "rev-parse",
-                                "--path-format=absolute",
-                                "--git-common-dir",
-                            ]),
-                        ),
-                    );
-                    if (
-                        topLevel === normalizeProjectCwd(workspace.path) &&
-                        commonDirectory === workspace.gitCommonDir
-                    ) {
-                        this.#markWorkspaceReady(workspace);
-                        return;
-                    }
-                } catch {
-                    // A partial managed worktree is cleaned up before retrying creation.
+                const adoptable = await isGitWorktreeAt({
+                    commonDir: workspace.gitCommonDir,
+                    git: this.#git,
+                    path: workspace.path,
+                });
+                if (adoptable) {
+                    this.#markWorkspaceReady(workspace);
+                    return;
                 }
+                // A partial managed worktree is cleaned up before retrying creation.
                 await this.#removeWorkspaceDirectory(project, workspace);
             }
             if (this.#closed) return;
             if (workspace.baseRef === undefined) {
                 throw new Error("The workspace base reference is unavailable.");
             }
-            const commit = await this.#git(project.path, [
-                "rev-parse",
-                "--verify",
-                "--end-of-options",
-                `${workspace.baseRef}^{commit}`,
-            ]);
-            if (!/^[a-f0-9]{40,64}$/iu.test(commit)) {
+            const commit = await resolveGitCommit(this.#git, project.path, workspace.baseRef);
+            if (commit === undefined) {
                 throw new Error("The workspace base reference no longer resolves to a commit.");
             }
-            await this.#materializeWorkspaceLocked(
-                workspace,
-                project.path,
-                commit.toLocaleLowerCase(),
-            );
+            await this.#materializeWorkspaceLocked(workspace, project.path, commit);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (!this.#closed) {
@@ -1167,29 +1097,13 @@ export class ProjectRepository {
         if (this.#closed) return;
 
         if (existsSync(project.path)) {
-            const sourceCommonDirectory = normalizeProjectCwd(
-                resolve(
-                    project.path,
-                    await this.#git(project.path, [
-                        "rev-parse",
-                        "--path-format=absolute",
-                        "--git-common-dir",
-                    ]),
-                ),
-            );
-            if (sourceCommonDirectory !== workspace.gitCommonDir) {
-                throw new Error("The source repository no longer owns this workspace.");
-            }
-            if (workspaceExists) {
-                await this.#git(project.path, [
-                    "worktree",
-                    "remove",
-                    "--force",
-                    "--force",
-                    workspace.path,
-                ]);
-            }
-            await this.#git(project.path, ["worktree", "prune"]);
+            await removeGitWorktree({
+                expectedCommonDir: workspace.gitCommonDir,
+                git: this.#git,
+                projectPath: project.path,
+                removeDirectory: workspaceExists,
+                workspacePath: workspace.path,
+            });
             return;
         }
 
@@ -1220,44 +1134,14 @@ export class ProjectRepository {
     ): Promise<void> {
         if (this.#closed) return;
         try {
-            await mkdir(dirname(workspace.path), { recursive: true, mode: 0o700 });
-            await this.#git(projectPath, [
-                "worktree",
-                "add",
-                "-b",
-                `worktree/${workspace.storageKey}`,
-                "--",
-                workspace.path,
+            await createGitWorktree({
+                branch: `worktree/${workspace.storageKey}`,
                 commit,
-            ]);
-            const topLevel = normalizeProjectCwd(
-                await this.#git(workspace.path, ["rev-parse", "--show-toplevel"]),
-            );
-            const commonDirectory = normalizeProjectCwd(
-                resolve(
-                    workspace.path,
-                    await this.#git(workspace.path, [
-                        "rev-parse",
-                        "--path-format=absolute",
-                        "--git-common-dir",
-                    ]),
-                ),
-            );
-            if (topLevel !== normalizeProjectCwd(workspace.path)) {
-                throw new Error("Git created the worktree at an unexpected path.");
-            }
-            if (commonDirectory !== workspace.gitCommonDir) {
-                throw new Error("Git created the worktree from an unexpected repository.");
-            }
-            let hasOrigin = true;
-            try {
-                await this.#git(workspace.path, ["remote", "get-url", "origin"]);
-            } catch {
-                hasOrigin = false;
-            }
-            if (hasOrigin) {
-                await this.#git(workspace.path, ["fetch", "origin"]);
-            }
+                expectedCommonDir: workspace.gitCommonDir,
+                git: this.#git,
+                projectPath,
+                workspacePath: workspace.path,
+            });
             if (this.#closed) return;
             this.#markWorkspaceReady(workspace);
         } catch (error) {
@@ -1293,22 +1177,6 @@ export class ProjectRepository {
             const changed = workspaceCompleteArchive(tx, projectId, workspaceId, now);
             if (changed > 0) this.#publishedWorkspace(projectId, workspaceId);
         });
-    }
-
-    async #git(cwd: string, args: readonly string[]): Promise<string> {
-        return this.#gitRunner(cwd, args);
-    }
-
-    /**
-     * Reads used by background probes. They run in the daemon rather than inside a session, so they
-     * go through the sandboxed scan runner for the same reason live scans do: a repository must not
-     * be able to make an unattended read execute a helper. An injected runner still wins so tests
-     * can drive probes without Git.
-     */
-    async #probeGit(cwd: string, args: readonly string[]): Promise<string> {
-        if (this.#injectedGitRunner !== undefined) return this.#injectedGitRunner(cwd, args);
-        const result = await runScanGit({ args, cwd });
-        return result.stdout.trim();
     }
 
     #mutate<T>(body: (tx: TX) => T): T {
@@ -1462,15 +1330,6 @@ async function readBoundedResponseBytes(
         chunks.map((chunk) => Buffer.from(chunk)),
         byteLength,
     );
-}
-
-async function runGit(cwd: string, args: readonly string[]): Promise<string> {
-    const result = await execFile("git", ["-C", cwd, ...args], {
-        encoding: "utf8",
-        maxBuffer: 1024 * 1024,
-        timeout: 5_000,
-    });
-    return result.stdout.trim();
 }
 
 interface GitFactValues {

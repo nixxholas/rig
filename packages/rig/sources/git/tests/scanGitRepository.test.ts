@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { scanGitRepository } from "./scanGitRepository.js";
+import { scanGitRepository } from "../scanGitRepository.js";
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];

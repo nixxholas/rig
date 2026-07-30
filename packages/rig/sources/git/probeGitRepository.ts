@@ -5,9 +5,8 @@ import type {
     ProjectPresence,
     ProjectWorktreeSupport,
 } from "../protocol/index.js";
-import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
-
-export type GitProbeRunner = (cwd: string, args: readonly string[]) => Promise<string>;
+import { normalizeProjectCwd } from "../utils/normalizeProjectCwd.js";
+import type { GitCommandRunner } from "./types.js";
 
 export interface GitRepositoryProbe {
     facts?: GitRepositoryFacts;
@@ -24,7 +23,7 @@ export interface GitRepositoryProbe {
  * the caller.
  */
 export async function probeGitRepository(options: {
-    git: GitProbeRunner;
+    git: GitCommandRunner;
     /** The home project can never host a worktree, whatever Git reports about it. */
     isHome?: boolean;
     path: string;

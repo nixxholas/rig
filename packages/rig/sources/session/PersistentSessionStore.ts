@@ -46,13 +46,10 @@ import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
+import type { GitCommandRunner } from "../git/types.js";
 import { InMemoryGlobalEventQueue } from "../server/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../server/LiveGlobalEventQueue.js";
-import {
-    ProjectRepository,
-    type ProjectAvatarAsset,
-    type ProjectGitRunner,
-} from "../server/ProjectRepository.js";
+import { ProjectRepository, type ProjectAvatarAsset } from "../server/ProjectRepository.js";
 import { shouldPublishGlobalEvent } from "../server/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
@@ -128,7 +125,7 @@ export interface PersistentSessionStoreOptions {
     onSessionAccess?: (session: InMemorySession) => void;
     onSessionEvent?: (event: SessionEvent, session: InMemorySession | undefined) => void;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
-    projectGit?: ProjectGitRunner;
+    projectGit?: GitCommandRunner;
     taskDrain?: TaskDrain;
     secrets?: readonly SecretRegistration[];
     homeDirectory?: string;

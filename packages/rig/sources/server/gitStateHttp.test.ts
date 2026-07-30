@@ -9,7 +9,7 @@ import type { Server } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
-import { GitStateTracker } from "./GitStateTracker.js";
+import { GitStateTracker } from "../git/GitStateTracker.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 
 const execFile = promisify(execFileCallback);

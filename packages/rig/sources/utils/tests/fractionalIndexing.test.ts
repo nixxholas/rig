@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { describe, expect, it } from "vitest";
 
-import { BASE_52_DIGITS, generateKeyBetween, generateNKeysBetween } from "./fractionalIndexing.js";
+import { BASE_52_DIGITS, generateKeyBetween, generateNKeysBetween } from "../fractionalIndexing.js";
 
 describe("generateKeyBetween", () => {
     it.each([

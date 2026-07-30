@@ -8,7 +8,7 @@ import {
 } from "../protocol/index.js";
 import { runScanGit } from "./runScanGit.js";
 import { scanGitRepository } from "./scanGitRepository.js";
-import type { TaskDrain } from "./TrackedTaskDrain.js";
+import type { TaskDrain } from "../server/TrackedTaskDrain.js";
 import { watchGitRepositoryChanges } from "./watchGitRepositoryChanges.js";
 
 type GitLiveEvent = Extract<

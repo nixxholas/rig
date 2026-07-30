@@ -9,12 +9,12 @@ import {
     type DaemonStartupState,
 } from "./createDaemonStartupRequestListener.js";
 import { createModelCatalog } from "./createModelCatalog.js";
-import { GitStateTracker } from "./GitStateTracker.js";
+import { GitStateTracker } from "../git/GitStateTracker.js";
 import { getEnvironmentLocalServerPaths } from "./getEnvironmentLocalServerPaths.js";
 import { installDaemonProcessFailureLogging } from "./installDaemonProcessFailureLogging.js";
 import { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyIntegration.js";
-import { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
-import { publishGitLiveEvent } from "./publishGitLiveEvent.js";
+import { markGitStateFromSessionEvent } from "../git/markGitStateFromSessionEvent.js";
+import { publishGitLiveEvent } from "../git/publishGitLiveEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
 import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";

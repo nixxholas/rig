@@ -6,10 +6,10 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { GitStateTracker, type GitChangeSnapshot } from "./GitStateTracker.js";
-import { supportsRecursiveWorktreeWatch } from "./watchGitRepositoryChanges.js";
-import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
-import type { Project } from "../protocol/index.js";
+import { GitStateTracker, type GitChangeSnapshot } from "../GitStateTracker.js";
+import { supportsRecursiveWorktreeWatch } from "../watchGitRepositoryChanges.js";
+import { resolveGitTrackedEntity } from "../resolveGitTrackedEntity.js";
+import type { Project } from "../../protocol/index.js";
 
 const execFile = promisify(execFileCallback);
 const cleanups: (() => Promise<void>)[] = [];

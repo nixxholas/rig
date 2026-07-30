@@ -13,7 +13,8 @@ import { openSessionDatabase } from "../persistence/database/openSessionDatabase
 import { projects, projectWorkspaces } from "../persistence/database/schema.js";
 import { PersistentGlobalEventQueue } from "./PersistentGlobalEventQueue.js";
 import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
-import { ProjectRepository, type ProjectGitRunner } from "./ProjectRepository.js";
+import type { GitCommandRunner } from "../git/types.js";
+import { ProjectRepository } from "./ProjectRepository.js";
 
 const execFile = promisify(execFileCallback);
 const cleanups: (() => Promise<void>)[] = [];
@@ -704,7 +705,7 @@ async function createFixture(
     options: {
         durableGlobalEventQueue?: boolean;
         onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
-        projectGit?: ProjectGitRunner;
+        projectGit?: GitCommandRunner;
     } = {},
 ): Promise<{
     home: string;

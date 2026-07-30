@@ -6,7 +6,7 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { gitWatchTargets, watchGitRepositoryChanges } from "./watchGitRepositoryChanges.js";
+import { gitWatchTargets, watchGitRepositoryChanges } from "../watchGitRepositoryChanges.js";
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];

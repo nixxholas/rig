@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { GitChangeState } from "../protocol/index.js";
-import { InMemoryGlobalEventQueue } from "./InMemoryGlobalEventQueue.js";
+import type { GitChangeState } from "../../protocol/index.js";
+import { InMemoryGlobalEventQueue } from "../../server/InMemoryGlobalEventQueue.js";
 import {
     GitStateTracker,
     type GitChangeSnapshot,
     type GitTrackedEntity,
-} from "./GitStateTracker.js";
+} from "../GitStateTracker.js";
 
 const trackers: GitStateTracker[] = [];
 

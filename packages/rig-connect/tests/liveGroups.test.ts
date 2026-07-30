@@ -7,10 +7,10 @@ import { promisify } from "node:util";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { GitStateTracker } from "../../rig/sources/server/GitStateTracker.js";
+import { GitStateTracker } from "../../rig/sources/git/GitStateTracker.js";
 import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { PersistentSessionStore } from "../../rig/sources/session/PersistentSessionStore.js";
-import { publishGitLiveEvent } from "../../rig/sources/server/publishGitLiveEvent.js";
+import { publishGitLiveEvent } from "../../rig/sources/git/publishGitLiveEvent.js";
 import type { SessionStore } from "../../rig/sources/session/SessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
 import {

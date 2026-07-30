@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { normalizeProjectCwd } from "./normalizeProjectCwd.js";
+import { normalizeProjectCwd } from "../normalizeProjectCwd.js";
 
 describe("normalizeProjectCwd", () => {
     it("uses filesystem identity for existing project directories", async () => {

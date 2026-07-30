@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { orderKeyAfter } from "./orderKeyAfter.js";
+import { orderKeyAfter } from "../orderKeyAfter.js";
 
 describe("orderKeyAfter", () => {
     const items = [
