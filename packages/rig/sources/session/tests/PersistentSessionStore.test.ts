@@ -3358,6 +3358,45 @@ describe("PersistentSessionStore", () => {
             await cleanup();
         }
     });
+
+    it("drops a stored position from a subagent instead of listing it as a chat", async () => {
+        const { cleanup, databasePath } = await createDatabasePath();
+        try {
+            const store = new PersistentSessionStore({ databasePath });
+            store.saveSession(sessionState());
+            // A position written by an older build, when a subagent was given a
+            // key of its own. It is still not a chat in any list.
+            store.saveSession(
+                sessionState({
+                    agent: {
+                        depth: 1,
+                        description: "Inspect the ordering",
+                        parentSessionId: "session-1",
+                        rootSessionId: "session-1",
+                        type: "subagent",
+                    },
+                    agentId: "agent-2",
+                    id: "subagent-1",
+                    orderKey: "a1",
+                    status: "completed",
+                }),
+            );
+            store.close();
+
+            const restoredStore = new PersistentSessionStore({ databasePath });
+            try {
+                const subagent = restoredStore.get("subagent-1");
+
+                expect(subagent?.snapshot().orderKey).toBeUndefined();
+                expect(subagent?.summary().orderKey).toBeUndefined();
+                expect(restoredStore.list().map((session) => session.id)).toEqual(["session-1"]);
+            } finally {
+                restoredStore.close();
+            }
+        } finally {
+            await cleanup();
+        }
+    });
 });
 
 async function waitForExternalToolCall(session: InMemorySession) {

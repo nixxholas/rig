@@ -614,8 +614,12 @@ export class InMemorySession {
         );
         this.#projectId = options.restore?.projectId ?? options.projectId ?? createId();
         this.#workspaceId = options.restore?.workspaceId ?? options.workspaceId;
-        this.#orderKey =
-            options.restore?.orderKey ?? options.orderKey ?? generateKeyBetween(null, null);
+        // A subagent belongs to the session that started it, not to any ordered
+        // list, so it holds no position no matter what a caller or an older
+        // stored row supplies. An empty key is how "no position" is stored.
+        this.#orderKey = this.isSubagent()
+            ? ""
+            : (options.restore?.orderKey ?? options.orderKey ?? generateKeyBetween(null, null));
         this.#draft = options.restore?.draft;
         this.#draftUpdatedAt = options.restore?.draftUpdatedAt;
         this.#appendSystemPrompt =

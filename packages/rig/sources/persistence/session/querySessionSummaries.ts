@@ -67,11 +67,14 @@ export function querySessionSummaries(
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
         const workspaceId = readOptionalString(row, "workspace_id");
+        // An empty stored key means the session has no place in an ordered
+        // list, which the protocol says by leaving the position out.
+        const orderKey = readString(row, "order_key");
         return {
             id: readString(row, "id"),
             archived: readNumber(row, "archived") !== 0,
             projectId: readString(row, "project_id"),
-            orderKey: readString(row, "order_key"),
+            ...(orderKey === "" ? {} : { orderKey }),
             ...(workspaceId === undefined ? {} : { workspaceId }),
             trackUnread: readNumber(row, "track_unread") !== 0,
             ...(unreadReason !== undefined && unreadSince !== undefined

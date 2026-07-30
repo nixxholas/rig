@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ModelCatalog } from "../../protocol/index.js";
+import { createEventIdFactory, type ModelCatalog } from "../../protocol/index.js";
 import { defineModel } from "@slopus/rig-execution";
+import { InMemorySession } from "../InMemorySession.js";
 import { InMemorySessionStore } from "../InMemorySessionStore.js";
 
 describe("InMemorySession", () => {
@@ -26,6 +27,65 @@ describe("InMemorySession", () => {
         );
         expect(session.state().messages).toEqual([]);
         expect(session.state().queuedRuns).toEqual([]);
+    });
+
+    it("keeps a subagent out of the ordered list whatever position it is handed", () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "openai/subagent-position",
+            name: "Subagent position model",
+            thinkingLevels: ["off"],
+        });
+        const modelCatalog: ModelCatalog = {
+            defaultModelId: model.id,
+            defaultProviderId: "codex",
+            models: [model],
+            providers: [{ providerId: "codex", models: [model] }],
+        };
+        const metadata = {
+            depth: 1,
+            description: "Inspect the ordering",
+            parentSessionId: "session-parent",
+            rootSessionId: "session-parent",
+            type: "subagent",
+        } as const;
+
+        const created = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            metadata,
+            modelCatalog,
+            orderKey: "a0",
+            request: { cwd: "/tmp/rig-subagent-position" },
+        });
+        const restored = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog,
+            request: { cwd: "/tmp/rig-subagent-position" },
+            restore: {
+                agent: metadata,
+                agentId: "agent-2",
+                cwd: "/tmp/rig-subagent-position",
+                id: "subagent-1",
+                messages: [],
+                modelId: model.id,
+                models: [],
+                nextTaskId: 1,
+                orderKey: "a1",
+                permissionMode: "workspace_write",
+                providerId: "codex",
+                queuedRuns: [],
+                status: "completed",
+                tasks: [],
+                titleStatus: "idle",
+                tools: [],
+            },
+        });
+
+        for (const session of [created, restored]) {
+            expect(session.snapshot().orderKey).toBeUndefined();
+            expect(session.summary().orderKey).toBeUndefined();
+            expect(session.state().orderKey).toBe("");
+        }
     });
 
     it("treats repeated client submission IDs as one durable message", () => {

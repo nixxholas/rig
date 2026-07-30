@@ -148,7 +148,6 @@ export class ChatStore {
             modelLocked: false,
             modelId: "",
             models: [],
-            orderKey: "",
             pendingSteeringMessages: [],
             pendingUserInputs: [],
             permissionMode: "",
