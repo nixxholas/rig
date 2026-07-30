@@ -12,6 +12,7 @@ interface ActiveProjectConfigPlaceholder {
     created: Stats;
     gitExclude?: GitExcludeTarget;
     references: number;
+    target: Awaited<ReturnType<typeof open>>;
 }
 
 const activePlaceholders = new Map<string, ActiveProjectConfigPlaceholder>();
@@ -44,11 +45,11 @@ export async function prepareProjectConfigPlaceholder(
                 throw error;
             }
             const created = await target.stat();
-            await target.close();
             try {
                 const createdState: ActiveProjectConfigPlaceholder = {
                     created,
                     references: 0,
+                    target,
                 };
                 if (gitExcludePath !== undefined) {
                     createdState.gitExclude = await prepareGitExcludeTarget(gitExcludePath);
@@ -56,7 +57,19 @@ export async function prepareProjectConfigPlaceholder(
                 state = createdState;
                 activePlaceholders.set(path, createdState);
             } catch (error) {
-                await removeOwnedTarget(path, created);
+                const cleanup = await Promise.allSettled([
+                    removeOwnedTarget(path, created),
+                    target.close(),
+                ]);
+                const cleanupErrors = cleanup.flatMap((result) =>
+                    result.status === "rejected" ? [result.reason] : [],
+                );
+                if (cleanupErrors.length > 0) {
+                    throw new AggregateError(
+                        [error, ...cleanupErrors],
+                        "Could not clean up the project config target after setup failed.",
+                    );
+                }
                 throw error;
             }
         } else {
@@ -161,15 +174,26 @@ async function releasePlaceholder(
     state.references -= 1;
     if (state.references > 0) return;
     if (activePlaceholders.get(path) === state) activePlaceholders.delete(path);
-    const results = await Promise.allSettled([
-        removeOwnedTarget(path, state.created),
-        state.gitExclude?.created === undefined
-            ? Promise.resolve()
-            : removeOwnedTarget(state.gitExclude.path, state.gitExclude.created),
-    ]);
-    const errors = results.flatMap((result) =>
-        result.status === "rejected" ? [result.reason] : [],
-    );
+    const errors: unknown[] = [];
+    try {
+        await removeOwnedTarget(path, state.created);
+    } catch (error) {
+        errors.push(error);
+    }
+    if (state.gitExclude?.created !== undefined) {
+        try {
+            await removeOwnedTarget(state.gitExclude.path, state.gitExclude.created);
+        } catch (error) {
+            errors.push(error);
+        }
+    }
+    try {
+        // Keep the original inode pinned until ownership checks finish. Otherwise ext4 may reuse
+        // it for an empty replacement and make that user-created file look like our target.
+        await state.target.close();
+    } catch (error) {
+        errors.push(error);
+    }
     if (errors.length > 0) {
         throw new AggregateError(errors, "Could not remove an owned project config mount target.");
     }
