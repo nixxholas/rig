@@ -9,6 +9,7 @@ export { getRigHome } from "./getRigHome.js";
 export { loadConfig } from "./loadConfig.js";
 export { loadDaemonSettings } from "./loadDaemonSettings.js";
 export { mergeConfigValues } from "./mergeConfigValues.js";
+export { loadNetworkConfig, loadNetworkConfigForProject } from "./loadNetworkConfig.js";
 export { parseConfigToml } from "./parseConfigToml.js";
 export { resolveConfigPaths } from "./resolveConfigPaths.js";
 export { writeRuntimeConfig } from "./writeRuntimeConfig.js";

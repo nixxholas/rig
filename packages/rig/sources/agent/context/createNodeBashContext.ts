@@ -16,10 +16,7 @@ import {
     startLinuxManagedNetworkBridge,
     type LinuxManagedNetworkBridge,
 } from "./startLinuxManagedNetworkBridge.js";
-import {
-    loadProjectManagedNetworkPolicy,
-    mergeManagedNetworkPolicies,
-} from "./loadProjectManagedNetworkPolicy.js";
+import { loadProjectManagedNetworkPolicy } from "./loadProjectManagedNetworkPolicy.js";
 import { createProtectedPathMonitor } from "./createProtectedPathMonitor.js";
 import { createToolEnvironment } from "./createToolEnvironment.js";
 import { waitForBashSessionCompletion } from "./waitForBashSessionCompletion.js";
@@ -152,10 +149,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 globalThis.process.env,
                 { cwd: options.cwd },
             );
-            const networkPolicy = mergeManagedNetworkPolicies(
-                await loadProjectManagedNetworkPolicy(options.cwd),
-                runOptions.network,
-            );
+            const networkPolicy = await loadProjectManagedNetworkPolicy(options.cwd);
             const managedNetwork = await startCommandManagedNetwork(networkPolicy);
             let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
             try {
@@ -222,10 +216,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     globalThis.process.env,
                     { cwd: options.cwd },
                 );
-                const networkPolicy = mergeManagedNetworkPolicies(
-                    await loadProjectManagedNetworkPolicy(options.cwd),
-                    runOptions.network,
-                );
+                const networkPolicy = await loadProjectManagedNetworkPolicy(options.cwd);
                 const managedNetwork = await startCommandManagedNetwork(networkPolicy);
                 let sandboxedCommand: Awaited<ReturnType<typeof createSandboxedCommand>>;
                 try {

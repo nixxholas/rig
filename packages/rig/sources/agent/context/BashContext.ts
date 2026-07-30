@@ -6,7 +6,6 @@ export interface BashRunOptions {
     secrets?: readonly string[];
     shell?: string;
     signal?: AbortSignal;
-    network?: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy;
 }
 
 export interface BashRunResult {

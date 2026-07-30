@@ -1,6 +1,8 @@
 import type Dockerode from "dockerode";
 
 import type { ManagedNetworkPolicy } from "../agent/context/ManagedNetworkPolicy.js";
+import { toManagedNetworkPolicy } from "../agent/context/loadProjectManagedNetworkPolicy.js";
+import { loadNetworkConfigForProject } from "../config/loadNetworkConfig.js";
 import { parseConfigToml } from "../config/parseConfigToml.js";
 import { runDockerExec } from "./runDockerExec.js";
 
@@ -15,22 +17,8 @@ export async function loadDockerProjectManagedNetworkPolicy(
         "rig",
         cwd,
     ]);
-    if (result.exitCode === 44) return undefined;
-    if (result.exitCode !== 0) throw new Error("Could not read the Docker project's rig.toml.");
-    const network = parseConfigToml(result.stdout.toString("utf8")).network;
-    if (network === undefined) return undefined;
-    const ports = network.allowedPorts ?? [443];
-    return {
-        ...(network.allowedDomains === undefined
-            ? {}
-            : {
-                  allowedDomains: network.allowedDomains.map((domain) => ({ domain, ports })),
-              }),
-        ...(network.allowedLoopbackPorts === undefined
-            ? {}
-            : { allowedLoopbackPorts: network.allowedLoopbackPorts }),
-        ...(network.deniedDomains === undefined
-            ? {}
-            : { deniedDomains: network.deniedDomains.map((domain) => ({ domain })) }),
-    };
+    if (result.exitCode !== 0 && result.exitCode !== 44)
+        throw new Error("Could not read the Docker project's rig.toml.");
+    const project = result.exitCode === 44 ? {} : parseConfigToml(result.stdout.toString("utf8"));
+    return toManagedNetworkPolicy(await loadNetworkConfigForProject(project));
 }

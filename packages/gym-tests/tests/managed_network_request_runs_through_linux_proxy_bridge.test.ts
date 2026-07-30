@@ -19,9 +19,6 @@ describe("managed shell network in the Linux sandbox", () => {
                             {
                                 arguments: {
                                     cmd: "printf NETWORK_COMMAND_RAN > marker.txt",
-                                    network: {
-                                        allowed_domains: [{ domain: "example.com", ports: [443] }],
-                                    },
                                 },
                                 id: "managed-network-command",
                                 name: "exec_command",
@@ -39,6 +36,9 @@ describe("managed shell network in the Linux sandbox", () => {
                 return {
                     content: [{ text: "MANAGED_NETWORK_BRIDGE_READY", type: "text" }],
                 };
+            },
+            files: {
+                "rig.toml": '[network]\nallowed_domains = ["example.com"]\n',
             },
             mode: "docker",
             permissionMode: "workspace_write",

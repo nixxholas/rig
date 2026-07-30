@@ -1,20 +1,17 @@
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-
-import { parseConfigToml } from "../../config/parseConfigToml.js";
+import { loadNetworkConfig } from "../../config/loadNetworkConfig.js";
+import type { ConfigNetwork } from "../../config/types.js";
 import type { ManagedNetworkPolicy } from "./ManagedNetworkPolicy.js";
 
 export async function loadProjectManagedNetworkPolicy(
     cwd: string,
 ): Promise<ManagedNetworkPolicy | undefined> {
-    let source: string;
-    try {
-        source = await readFile(join(cwd, "rig.toml"), "utf8");
-    } catch (error) {
-        if (error instanceof Error && "code" in error && error.code === "ENOENT") return undefined;
-        throw error;
-    }
-    const network = parseConfigToml(source).network;
+    const network = await loadNetworkConfig({ cwd });
+    return toManagedNetworkPolicy(network);
+}
+
+export function toManagedNetworkPolicy(
+    network: ConfigNetwork | undefined,
+): ManagedNetworkPolicy | undefined {
     if (network === undefined) return undefined;
     const ports = network.allowedPorts ?? [443];
     return {
@@ -31,21 +28,5 @@ export async function loadProjectManagedNetworkPolicy(
         ...(network.allowedLoopbackPorts === undefined
             ? {}
             : { allowedLoopbackPorts: network.allowedLoopbackPorts }),
-    };
-}
-
-export function mergeManagedNetworkPolicies(
-    ...policies: readonly (ManagedNetworkPolicy | undefined)[]
-): ManagedNetworkPolicy | undefined {
-    const present = policies.filter(
-        (policy): policy is ManagedNetworkPolicy => policy !== undefined,
-    );
-    if (present.length === 0) return undefined;
-    return {
-        allowedDomains: present.flatMap((policy) => policy.allowedDomains ?? []),
-        allowedLoopbackPorts: [
-            ...new Set(present.flatMap((policy) => policy.allowedLoopbackPorts ?? [])),
-        ],
-        deniedDomains: present.flatMap((policy) => policy.deniedDomains ?? []),
     };
 }

@@ -13,11 +13,6 @@ import {
     summarizeShellOutput,
 } from "../../../tools/utils/index.js";
 import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
-import {
-    describeManagedNetworkAccess,
-    managedNetworkToolSchema,
-    toManagedNetworkPolicy,
-} from "../../context/managedNetworkToolSchema.js";
 
 export const claudeBashTool = defineTool({
     name: "Bash",
@@ -71,35 +66,25 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
                         "Request reviewed execution outside the workspace sandbox in Auto mode. Use only when the sandbox blocks a necessary command.",
                 }),
             ),
-            network: Type.Optional(managedNetworkToolSchema),
         },
         { additionalProperties: false },
     ),
     returnType: shellToolOutputSchema,
     autoPermissionInstructions:
         "For Bash, request full-access execution with dangerouslyDisableSandbox: true only when the workspace sandbox blocks necessary work. The command remains sandboxed when this field is false or omitted.",
-    describeAutoPermissionAction: ({ command, network }, context) =>
-        network === undefined
-            ? summarizeEscalatedShellAction({ command, cwd: context.fs.cwd })
-            : describeManagedNetworkAccess(network),
+    describeAutoPermissionAction: ({ command }, context) =>
+        summarizeEscalatedShellAction({ command, cwd: context.fs.cwd }),
     availableToPermissionReviewer: true,
-    shouldReviewInAutoMode: ({ dangerouslyDisableSandbox, network }) =>
-        dangerouslyDisableSandbox === true || network !== undefined,
+    shouldReviewInAutoMode: ({ dangerouslyDisableSandbox }) => dangerouslyDisableSandbox === true,
     shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox }) =>
         dangerouslyDisableSandbox === true,
-    execute: async (
-        { command, network, run_in_background, secrets, timeout },
-        context,
-        execution,
-    ) => {
-        const networkPolicy = toManagedNetworkPolicy(network);
+    execute: async ({ command, run_in_background, secrets, timeout }, context, execution) => {
         if (run_in_background === true) {
             const sessionId = await context.bash.startSession({
                 command,
                 maxOutputBytes: SHELL_CAPTURE_MAX_BYTES,
                 ...(secrets === undefined ? {} : { secrets }),
                 ...(timeout === undefined ? {} : { timeoutMs: timeout }),
-                ...(networkPolicy === undefined ? {} : { network: networkPolicy }),
             });
             return {
                 backgroundTaskId: String(sessionId),
@@ -114,7 +99,6 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
         };
         if (secrets !== undefined) options.secrets = secrets;
         if (timeout !== undefined) options.timeoutMs = timeout;
-        if (networkPolicy !== undefined) options.network = networkPolicy;
         if (execution.onProgress !== undefined) options.onProgress = execution.onProgress;
         if (execution.signal !== undefined) options.signal = execution.signal;
         return runShellCommand(command, options, context);

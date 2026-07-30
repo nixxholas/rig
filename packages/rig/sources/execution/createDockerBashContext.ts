@@ -13,7 +13,6 @@ import type {
 } from "../agent/context/BashContext.js";
 import { assertCanUseCustomShell } from "../agent/context/assertCanUseCustomShell.js";
 import type { ManagedNetworkProxyHandle } from "../agent/context/ManagedNetworkPolicy.js";
-import { mergeManagedNetworkPolicies } from "../agent/context/loadProjectManagedNetworkPolicy.js";
 import {
     startLinuxManagedNetworkBridge,
     type LinuxManagedNetworkBridge,
@@ -105,10 +104,7 @@ export function createDockerBashContext(
         const networkPolicy =
             permissionMode === "full_access"
                 ? undefined
-                : mergeManagedNetworkPolicies(
-                      await loadDockerProjectManagedNetworkPolicy(container, cwd),
-                      options.network,
-                  );
+                : await loadDockerProjectManagedNetworkPolicy(container, cwd);
         const managedNetwork =
             networkPolicy === undefined
                 ? undefined
