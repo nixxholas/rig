@@ -92,7 +92,7 @@ node -e "console.log('\''quoted & safe'\'')"'`,
     );
 
     it.runIf(process.platform === "darwin")(
-        "grants workspace writes while protecting repository metadata",
+        "grants workspace and Git writes while protecting agent metadata",
         async () => {
             const cwd = await mkdtemp(join(process.cwd(), ".rig-seatbelt-command-"));
             tempDirectories.push(cwd);
@@ -108,9 +108,8 @@ node -e "console.log('\''quoted & safe'\'')"'`,
             expect(result.args?.[1]).toContain("(allow file-read*)");
             expect(result.args?.[1]).toContain("(allow file-write*");
             expect(result.args).toContain(`-DWRITABLE_ROOT_0=${cwd}`);
-            expect(result.args).toContain(`-DPROTECTED_WRITE_0=${join(cwd, ".git")}`);
-            expect(result.args).toContain(`-DPROTECTED_WRITE_1=${join(cwd, ".agents")}`);
-            expect(result.args).toContain(`-DPROTECTED_WRITE_2=${join(cwd, ".codex")}`);
+            expect(result.args).toContain(`-DPROTECTED_WRITE_0=${join(cwd, ".agents")}`);
+            expect(result.args).toContain(`-DPROTECTED_WRITE_1=${join(cwd, ".codex")}`);
         },
     );
 });

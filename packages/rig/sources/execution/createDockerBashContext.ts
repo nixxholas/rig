@@ -94,7 +94,7 @@ export function createDockerBashContext(
         const protectedCreatePaths =
             workspaceCwd === undefined || permissionMode === "read_only"
                 ? []
-                : [".git", ".agents", ".codex"].map((name) => posix.join(workspaceCwd, name));
+                : [".agents", ".codex"].map((name) => posix.join(workspaceCwd, name));
         const exec = await container.exec({
             AttachStdin: true,
             AttachStderr: true,

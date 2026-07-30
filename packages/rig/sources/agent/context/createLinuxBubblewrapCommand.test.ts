@@ -59,7 +59,7 @@ describe("createLinuxBubblewrapCommand", () => {
         expect(bindMode(result.args, await realpath(cwd))).toBeUndefined();
     });
 
-    it("rebinds writable roots before protecting metadata and Rig control paths", async () => {
+    it("rebinds writable roots before protecting agent metadata and Rig control paths", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-bwrap-workspace-write-"));
         temporaryDirectories.push(root);
         const cwd = join(root, "workspace");
@@ -93,8 +93,8 @@ describe("createLinuxBubblewrapCommand", () => {
 
         expect(bindMode(result.args, canonicalCwd)).toBe("--bind");
         expect(bindMode(result.args, canonicalTemporaryDirectory)).toBe("--bind");
+        expect(bindMode(result.args, gitDirectory)).not.toBe("--ro-bind");
         for (const protectedPath of [
-            gitDirectory,
             agentsDirectory,
             codexDirectory,
             controlDirectory,
@@ -132,7 +132,8 @@ describe("createLinuxBubblewrapCommand", () => {
         });
         const canonicalCwd = await realpath(cwd);
 
-        for (const name of [".git", ".agents", ".codex"]) {
+        expect(result.protectedCreatePaths).not.toContain(join(canonicalCwd, ".git"));
+        for (const name of [".agents", ".codex"]) {
             const path = join(cwd, name);
             expect(result.protectedCreatePaths).toContain(join(canonicalCwd, name));
             await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });

@@ -25,7 +25,7 @@ export function createDockerSandboxCommand(options: {
         command.push("--bind", "/tmp", "/tmp");
         command.push("--bind", options.workspaceCwd, options.workspaceCwd);
     }
-    for (const name of [".git", ".agents", ".codex"])
+    for (const name of [".agents", ".codex"])
         command.push(
             "--ro-bind-try",
             `${options.workspaceCwd}/${name}`,

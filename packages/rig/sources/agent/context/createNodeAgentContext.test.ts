@@ -325,7 +325,7 @@ describe("createNodeAgentContext", () => {
     });
 
     it.runIf(process.platform === "darwin" || process.platform === "linux")(
-        "lets Git read a global ignore file outside the workspace without allowing protected writes",
+        "lets Git read global configuration and write repository metadata",
         async () => {
             const root = await makeWorkspaceRoot();
             const cwd = join(root, "workspace");
@@ -350,14 +350,11 @@ describe("createNodeAgentContext", () => {
             });
             expect(status).toMatchObject({ exitCode: 0, stderr: "", stdout: "" });
 
-            const gitConfigBefore = await readFile(join(cwd, ".git", "config"), "utf8");
             const gitMetadataWrite = await context.bash.run({
-                command: "printf blocked > .git/config",
+                command: "printf '[core]\\n' > .git/config",
             });
-            expect(gitMetadataWrite.exitCode).not.toBe(0);
-            await expect(readFile(join(cwd, ".git", "config"), "utf8")).resolves.toBe(
-                gitConfigBefore,
-            );
+            expect(gitMetadataWrite.exitCode).toBe(0);
+            await expect(readFile(join(cwd, ".git", "config"), "utf8")).resolves.toBe("[core]\n");
 
             const outsideWrite = await context.bash.run({
                 command: `printf blocked > ${JSON.stringify(join(home, "blocked.txt"))}`,
@@ -395,7 +392,7 @@ describe("createNodeAgentContext", () => {
     );
 
     it.runIf(process.platform === "darwin")(
-        "protects both lexical and resolved workspace metadata paths",
+        "does not grant writes through an unvalidated Git metadata link",
         async () => {
             const root = await makeWorkspaceRoot();
             const cwd = join(root, "workspace");
@@ -410,12 +407,10 @@ describe("createNodeAgentContext", () => {
                 processManager: new NativeProcessManager(),
             });
 
-            const replaceAlias = await context.bash.run({ command: "rm .git" });
             const writeTarget = await context.bash.run({
                 command: "printf poisoned > .git/config",
             });
 
-            expect(replaceAlias.exitCode).not.toBe(0);
             expect(writeTarget.exitCode).not.toBe(0);
             await expect(readFile(join(cwd, ".git", "config"), "utf8")).resolves.toBe(
                 "protected\n",

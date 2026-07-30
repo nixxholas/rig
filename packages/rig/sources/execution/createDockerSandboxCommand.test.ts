@@ -41,7 +41,8 @@ describe("createDockerSandboxCommand", () => {
         expect(bindMode(command, "/tmp")).toBe("--bind");
         expect(bindMode(command, "/workspace")).toBe("--bind");
         expect(command).not.toContain("--tmpfs");
-        expect(bindMode(command, "/workspace/.git")).toBe("--ro-bind-try");
+        expect(bindMode(command, "/workspace/.git")).toBeUndefined();
+        expect(bindMode(command, "/workspace/.agents")).toBe("--ro-bind-try");
         expect(command.slice(command.indexOf("--chdir"), command.indexOf("--chdir") + 2)).toEqual([
             "--chdir",
             "/workspace/packages/rig",

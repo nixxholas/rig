@@ -2,12 +2,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { PermissionMode } from "../../permissions/index.js";
+import { findGitWritablePaths } from "./findGitWritablePaths.js";
 import { MACOS_SEATBELT_BASE_POLICY } from "./macOsSeatbeltBasePolicy.js";
 import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
 const MACOS_SEATBELT_EXECUTABLE = "/usr/bin/sandbox-exec";
-const PROTECTED_WORKSPACE_NAMES = [".git", ".agents", ".codex"] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex"] as const;
 
 export async function createMacOsSeatbeltCommand(options: {
     /**
@@ -30,7 +31,12 @@ export async function createMacOsSeatbeltCommand(options: {
     const writableCandidates =
         options.mode === "read_only"
             ? [temporaryDirectory, "/tmp"]
-            : [options.cwd, temporaryDirectory, "/tmp"];
+            : [
+                  options.cwd,
+                  ...(await findGitWritablePaths(options.cwd)),
+                  temporaryDirectory,
+                  "/tmp",
+              ];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ];

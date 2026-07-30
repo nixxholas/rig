@@ -3,10 +3,11 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join, relative } from "node:path";
 
 import type { PermissionMode } from "../../permissions/index.js";
+import { findGitWritablePaths } from "./findGitWritablePaths.js";
 import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
-const PROTECTED_WORKSPACE_NAMES = [".git", ".agents", ".codex"] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex"] as const;
 
 export async function createLinuxBubblewrapCommand(options: {
     /**
@@ -38,7 +39,12 @@ export async function createLinuxBubblewrapCommand(options: {
     const writableCandidates =
         options.mode === "read_only"
             ? [temporaryDirectory, "/tmp"]
-            : [options.cwd, temporaryDirectory, "/tmp"];
+            : [
+                  options.cwd,
+                  ...(await findGitWritablePaths(options.cwd)),
+                  temporaryDirectory,
+                  "/tmp",
+              ];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ].filter(existsSync);
