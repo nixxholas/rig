@@ -4,6 +4,7 @@ import { Value } from "@sinclair/typebox/value";
 import { assistantMessageToAgentMessage } from "./assistantMessageToAgentMessage.js";
 import { boundToolResultBlocks } from "./boundToolResultBlocks.js";
 import { createErrorToolResultBlock } from "./createErrorToolResultBlock.js";
+import { formatInvalidToolArguments } from "./formatInvalidToolArguments.js";
 import { createErrorMessage } from "./createErrorMessage.js";
 import { createToolResultBlock } from "./createToolResultBlock.js";
 import type { AgentContext } from "./context/AgentContext.js";
@@ -1472,8 +1473,10 @@ async function executeToolCall(
     }
 
     if (!Value.Check(tool.arguments, toolCall.arguments)) {
-        return createErrorToolResultBlock(toolCall, `Invalid arguments for tool '${tool.name}'`, {
+        const message = formatInvalidToolArguments(tool.name, tool.arguments, toolCall.arguments);
+        return createErrorToolResultBlock(toolCall, message, {
             kind: "invalid_arguments",
+            message,
         });
     }
 

@@ -4,6 +4,7 @@ import { errorToMessage } from "../errorToMessage.js";
 import type { AgentContext } from "./context/AgentContext.js";
 import { createErrorToolResultBlock } from "./createErrorToolResultBlock.js";
 import { createToolResultBlock } from "./createToolResultBlock.js";
+import { formatInvalidToolArguments } from "./formatInvalidToolArguments.js";
 import type { AnyDefinedTool, Message, ToolResultBlock } from "./types.js";
 
 export async function executePreapprovedToolCall(options: {
@@ -24,11 +25,15 @@ export async function executePreapprovedToolCall(options: {
         );
     }
     if (!Value.Check(tool.arguments, options.toolCall.arguments)) {
-        return createErrorToolResultBlock(
-            options.toolCall,
-            `Invalid arguments for tool '${tool.name}'`,
-            { kind: "invalid_arguments" },
+        const message = formatInvalidToolArguments(
+            tool.name,
+            tool.arguments,
+            options.toolCall.arguments,
         );
+        return createErrorToolResultBlock(options.toolCall, message, {
+            kind: "invalid_arguments",
+            message,
+        });
     }
     if (options.context.permissions === undefined) {
         return createErrorToolResultBlock(

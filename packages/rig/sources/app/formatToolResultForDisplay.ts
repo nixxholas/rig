@@ -9,7 +9,10 @@ export function formatToolResultForDisplay(
     }
 
     if (block.failure?.kind === "invalid_arguments") {
-        return `The model supplied invalid information for ${humanizeToolName(block.toolName)}.`;
+        return (
+            block.failure.message ??
+            `The model supplied invalid information for ${humanizeToolName(block.toolName)}.`
+        );
     }
 
     return block.failure?.kind === "execution_failed" && block.failure.message !== undefined

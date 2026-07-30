@@ -16,10 +16,16 @@ describe("formatToolResultForDisplay", () => {
         expect(
             formatToolResultForDisplay({
                 display: "The request could not be validated.",
-                failure: { kind: "invalid_arguments" },
+                failure: {
+                    kind: "invalid_arguments",
+                    message:
+                        "Invalid arguments for tool 'Bash':\n- timeout: Expected number to be less or equal to 600000",
+                },
                 toolName: "exec_command",
             }),
-        ).toBe("The model supplied invalid information for Exec command.");
+        ).toBe(
+            "Invalid arguments for tool 'Bash':\n- timeout: Expected number to be less or equal to 600000",
+        );
     });
 
     it("removes redundant raw tool prefixes while preserving the useful cause", () => {
