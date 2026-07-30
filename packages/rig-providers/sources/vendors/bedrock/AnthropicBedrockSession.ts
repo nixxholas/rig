@@ -1,6 +1,4 @@
 import { BaseSession } from "@/core/BaseSession.js";
-import { addSessionCacheUsage } from "@/core/addSessionCacheUsage.js";
-import type { SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type { SessionContext, SessionToolCall } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
@@ -8,7 +6,6 @@ import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import type { BedrockCredential } from "@/vendors/VendorCredential.js";
-import type { AnthropicBedrockCompactionVendor } from "@/vendors/bedrock/AnthropicBedrockCompactionVendor.js";
 import type { AnthropicBedrockTransport } from "@/vendors/bedrock/AnthropicBedrockTransport.js";
 import {
     describeAnthropicBedrockRetry,
@@ -23,12 +20,7 @@ import { createAnthropicRequest } from "@/protocol/anthropic/createAnthropicRequ
 import { mapAnthropicStream } from "@/protocol/anthropic/mapAnthropicStream.js";
 import { requestAnthropicBedrockCompaction } from "@/vendors/bedrock/impl/requestAnthropicBedrockCompaction.js";
 import { resolveAnthropicBedrockModelId } from "@/vendors/bedrock/impl/resolveAnthropicBedrockModelId.js";
-import { restoreAnthropicBedrockCompaction } from "@/vendors/bedrock/impl/restoreAnthropicBedrockCompaction.js";
 import { resolveClaudeTools } from "@/vendors/claude/impl/resolveClaudeTools.js";
-
-const COMPACTION_PROMPT =
-    "Summarize the conversation for continuation. Preserve user requests, decisions, exact identifiers, unfinished work, and tool outcomes. Output only the summary.";
-const NATIVE_COMPACTION_TRIGGER_TOKENS = 50_000;
 
 export type AnthropicBedrockClient = CreatedAnthropicBedrockClient;
 
@@ -95,136 +87,62 @@ export class AnthropicBedrockSession extends BaseSession {
                 ? this.context
                 : {
                       instructions: this.context.instructions,
-                      messages: restoreAnthropicBedrockCompaction(
-                          this.context.messages,
-                          [...options.context.messages],
-                      ),
+                      messages: [...options.context.messages],
                   };
         if (options.signal?.aborted) return { status: "cancelled", context: original };
         const model = this.activeModel ?? this.model;
         if (model === undefined) {
             throw new Error("A model is required for Anthropic Bedrock compaction.");
         }
-        const instructions = options.instructions?.trim();
-        const prompt =
-            instructions === undefined || instructions.length === 0
-                ? COMPACTION_PROMPT
-                : `${COMPACTION_PROMPT}\n\nRetention instructions:\n${instructions}`;
-        let nativeUsage: SessionCacheUsage | undefined;
-        if ((options.inputTokens ?? 0) >= NATIVE_COMPACTION_TRIGGER_TOKENS) {
-            try {
-                const native = await requestAnthropicBedrockCompaction({
-                    client: this.connection.client(),
-                    request: this.createRequest({
-                        compactionInstructions: prompt,
-                        context: original,
-                        model,
-                        tools: [],
-                        ...(this.activeEffort === undefined ? {} : { effort: this.activeEffort }),
-                    }),
-                    ...(options.signal === undefined ? {} : { signal: options.signal }),
-                });
-                nativeUsage = native.usage;
-                if (options.signal?.aborted) return { status: "cancelled", context: original };
-                const content = native.block?.content?.trim();
-                if (content) {
-                    const vendor: AnthropicBedrockCompactionVendor = {
-                        type: "anthropic_compaction",
-                        encryptedContent: native.block?.encrypted_content ?? null,
-                    };
-                    const compaction = {
-                        role: "compaction" as const,
-                        content,
-                        vendor,
-                    };
-                    const preservedMessages = original.messages.filter(
-                        (message) => message.role === "system",
-                    );
-                    this.context = {
-                        instructions: original.instructions,
-                        messages: [...preservedMessages, compaction],
-                    };
-                    return {
-                        status: "completed",
-                        compaction,
-                        preservedMessages,
-                        usage: native.usage,
-                        context: this.context,
-                    };
-                }
-            } catch (error) {
-                if (options.signal?.aborted) return { status: "cancelled", context: original };
+        try {
+            const native = await requestAnthropicBedrockCompaction({
+                client: this.connection.client(),
+                request: this.createRequest({
+                    compactionInstructions: options.instructions ?? null,
+                    context: original,
+                    model,
+                    tools: [],
+                    ...(this.activeEffort === undefined ? {} : { effort: this.activeEffort }),
+                }),
+                ...(options.signal === undefined ? {} : { signal: options.signal }),
+            });
+            if (options.signal?.aborted) return { status: "cancelled", context: original };
+            if (native.block === undefined) {
                 return {
                     status: "failed",
                     kind: "inference_error",
-                    message: error instanceof Error ? error.message : String(error),
+                    message: "Anthropic Bedrock native compaction returned no compaction block.",
                     context: original,
                 };
             }
-        }
-        let summary = "";
-        let usage: SessionCacheUsage | undefined;
-        let done: Extract<SessionEvent, { type: "done" }> | undefined;
-        for await (const event of this.streamQuery({
-            context: {
-                instructions: original.instructions,
-                messages: [...original.messages, { role: "user", content: prompt }],
-            },
-            model,
-            tools: [],
-            ...(this.activeEffort === undefined ? {} : { effort: this.activeEffort }),
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-        })) {
-            if (event.type === "text_delta") summary += event.delta;
-            if (event.type === "token_usage") usage = event.usage;
-            if (event.type === "done") done = event;
-        }
-        if (options.signal?.aborted) return { status: "cancelled", context: original };
-        if (done?.state === "tool_call") {
-            return {
-                status: "failed",
-                kind: "tool_call",
-                message: "Claude attempted to call a tool while compacting.",
-                context: original,
+            const compaction = {
+                role: "compaction" as const,
+                content: native.block.content,
+                encryptedContent: native.block.encrypted_content,
             };
-        }
-        if (done?.state === "error") {
+            const preservedMessages = original.messages.filter(
+                (message) => message.role === "system",
+            );
+            this.context = {
+                instructions: original.instructions,
+                messages: [...preservedMessages, compaction],
+            };
+            return {
+                status: "completed",
+                compaction,
+                preservedMessages,
+                usage: native.usage,
+                context: this.context,
+            };
+        } catch (error) {
+            if (options.signal?.aborted) return { status: "cancelled", context: original };
             return {
                 status: "failed",
                 kind: "inference_error",
-                message: done.message,
+                message: error instanceof Error ? error.message : String(error),
                 context: original,
             };
         }
-        if (summary.trim().length === 0) {
-            return {
-                status: "failed",
-                kind: "invalid_summary",
-                message: "Anthropic Bedrock returned an empty compaction summary.",
-                context: original,
-            };
-        }
-        usage = addSessionCacheUsage(nativeUsage, usage);
-        const preservedMessages = original.messages.filter(
-            (message) => message.role === "system",
-        );
-        this.context = {
-            instructions: original.instructions,
-            messages: [
-                ...preservedMessages,
-                {
-                    role: "user",
-                    content: `<conversation_summary>\n${summary.trim()}\n</conversation_summary>`,
-                },
-            ],
-        };
-        return {
-            status: "completed",
-            summary: summary.trim(),
-            preservedMessages,
-            ...(usage === undefined ? {} : { usage }),
-            context: this.context,
-        };
     }
 
     destroy(): void {
@@ -239,10 +157,9 @@ export class AnthropicBedrockSession extends BaseSession {
         this.activeModel = model;
         const effort = request.effort ?? this.activeEffort;
         this.activeEffort = effort;
-        const rebuiltMessages = [...request.context.messages];
         this.context = {
             instructions: this.context.instructions,
-            messages: restoreAnthropicBedrockCompaction(this.context.messages, rebuiltMessages),
+            messages: [...request.context.messages],
         };
         let assistantText = "";
         let encryptedReasoning: string | undefined;
@@ -361,7 +278,7 @@ export class AnthropicBedrockSession extends BaseSession {
     }
 
     private createRequest(options: {
-        compactionInstructions?: string;
+        compactionInstructions?: string | null;
         context: SessionContext;
         effort?: SessionReasoningEffort;
         model: string;
@@ -382,7 +299,12 @@ export class AnthropicBedrockSession extends BaseSession {
             tools,
             ...(options.compactionInstructions === undefined
                 ? {}
-                : { compaction: { instructions: options.compactionInstructions } }),
+                : {
+                      compaction:
+                          options.compactionInstructions === null
+                              ? {}
+                              : { instructions: options.compactionInstructions },
+                  }),
             ...(options.effort === undefined ? {} : { effort: options.effort }),
         });
     }

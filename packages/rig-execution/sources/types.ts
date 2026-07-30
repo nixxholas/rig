@@ -10,6 +10,8 @@ import type {
     ClaudeAuxiliaryQueryRequest,
     ClaudeAuxiliaryQueryResponse,
     ProviderQuota,
+    SessionAssistantMessage,
+    SessionToolResultMessage,
 } from "@slopus/rig-providers";
 
 export type ProfileProviderType = "bedrock" | "claude" | "codex" | "grok";
@@ -125,7 +127,8 @@ export interface UserMessage {
  */
 export interface CompactionMessage {
     role: "compaction";
-    content: string;
+    content: string | null;
+    encryptedContent: string | null;
     /** Opaque provider metadata required to replay the checkpoint natively. */
     vendor?: unknown;
     timestamp: number;
@@ -146,6 +149,8 @@ export interface AssistantMessage {
     errorCode?: ProviderErrorCode;
     errorMessage?: string;
     providerError?: ProviderError;
+    /** Exact provider-session message retained when compaction authored this context entry. */
+    sessionMessage?: SessionAssistantMessage;
     timestamp: number;
 }
 
@@ -160,6 +165,8 @@ export interface ToolResultMessage {
     isError: boolean;
     /** Opaque provider metadata copied from the originating tool call. */
     vendor?: unknown;
+    /** Exact provider-session message retained when compaction authored this context entry. */
+    sessionMessage?: SessionToolResultMessage;
     timestamp: number;
 }
 
@@ -348,6 +355,7 @@ export interface Provider {
         context: Context;
         inputTokens?: number;
         instructions?: string;
+        model: Model;
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
@@ -396,6 +404,7 @@ export function defineProvider(provider: {
         context: Context;
         inputTokens?: number;
         instructions?: string;
+        model: Model;
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;

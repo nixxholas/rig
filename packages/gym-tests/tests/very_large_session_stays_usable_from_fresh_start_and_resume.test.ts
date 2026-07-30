@@ -18,7 +18,6 @@ afterEach(async () => {
 describe("a very large historical session", () => {
     it("keeps both a fresh session and a cold-resumed heavy session usable", async () => {
         let agentCallCount = 0;
-        let compactionCallCount = 0;
         const gym = await createGym({
             cols: 120,
             entrypoint: ["bash", "/workspace/run-heavy-session-gym.sh"],
@@ -35,25 +34,20 @@ describe("a very large historical session", () => {
                 },
             },
             inference(request) {
-                const latestMessage = request.context.messages.at(-1);
-                const latestText =
-                    latestMessage?.role === "user"
-                        ? typeof latestMessage.content === "string"
-                            ? latestMessage.content
-                            : latestMessage.content
-                                  .flatMap((block) => (block.type === "text" ? [block.text] : []))
-                                  .join("")
-                        : "";
-                const isCompaction = latestText.startsWith("Create a detailed continuation brief");
-                if (isCompaction === true) {
-                    compactionCallCount += 1;
+                if (request.options.intent === "compaction") {
                     return {
-                        content: [
-                            {
-                                text: "The historical session is healthy. Continue with the latest user request.",
-                                type: "text",
-                            },
-                        ],
+                        compactionContext: {
+                            ...request.context,
+                            messages: [
+                                {
+                                    role: "user",
+                                    content:
+                                        "The historical session is healthy. Continue with the latest user request.",
+                                    timestamp: 1,
+                                },
+                            ],
+                        },
+                        content: [],
                     };
                 }
                 const lastUserMessage = [...request.context.messages]

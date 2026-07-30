@@ -34,7 +34,10 @@ describe("agent identity and exact-id steering", () => {
                         role: "toolResult",
                         toolName: "agent_me",
                     });
-                    const content = result?.content[0];
+                    if (result?.role !== "toolResult") {
+                        throw new Error("agent_me returned no tool result.");
+                    }
+                    const content = result.content[0];
                     expect(content).toMatchObject({ type: "text" });
                     if (
                         typeof content !== "object" ||
@@ -66,7 +69,10 @@ describe("agent identity and exact-id steering", () => {
                         role: "toolResult",
                         toolName: "agent_info",
                     });
-                    const content = result?.content[0];
+                    if (result?.role !== "toolResult") {
+                        throw new Error("agent_info returned no tool result.");
+                    }
+                    const content = result.content[0];
                     expect(content).toMatchObject({ type: "text" });
                     if (
                         typeof content !== "object" ||

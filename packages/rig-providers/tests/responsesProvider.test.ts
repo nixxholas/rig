@@ -189,7 +189,8 @@ describe("ResponsesProvider", () => {
             status: "completed",
             compaction: {
                 role: "compaction",
-                content: "opaque-checkpoint",
+                content: null,
+                encryptedContent: "opaque-checkpoint",
                 vendor: { type: "responses_compaction", id: "compaction-1" },
             },
             preservedMessages: [{ role: "user", content: "Provider kept this." }],

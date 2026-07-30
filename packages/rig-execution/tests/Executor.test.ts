@@ -19,6 +19,30 @@ const TEST_ENVIRONMENT = {
 };
 
 describe("Executor", () => {
+    it("creates the native session when compaction is the first operation", async () => {
+        const native = new RecordingProvider();
+        const executor = new Executor(
+            [
+                {
+                    id: "codex",
+                    native,
+                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
+                },
+            ],
+            { environment: TEST_ENVIRONMENT },
+        );
+
+        await expect(
+            executor.compact({
+                context: {
+                    messages: [{ role: "user", content: "Restored history.", timestamp: 1 }],
+                },
+                model: profile("codex", "codex", "openai/sol", "Sol").model,
+            }),
+        ).resolves.toMatchObject({ status: "completed" });
+        expect(native.sessions).toHaveLength(1);
+    });
+
     it("assembles prompts and preserves caller-owned tools while continuing compatible models", async () => {
         const native = new RecordingProvider();
         const executor = new Executor(
@@ -110,6 +134,7 @@ describe("Executor", () => {
                 context: compactContext,
                 inputTokens: 60_000,
                 instructions: "Keep decisions.",
+                model: profile("codex", "codex", "openai/terra", "Terra").model,
             }),
         ).resolves.toMatchObject({
             status: "completed",

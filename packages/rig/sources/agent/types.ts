@@ -5,7 +5,13 @@
 import type { Static, TSchema } from "@sinclair/typebox";
 
 import type { AgentContext } from "./context/AgentContext.js";
-import type { Model, Provider, Tool as ExecutorTool, Usage } from "@slopus/rig-execution";
+import type {
+    Message as ProviderMessage,
+    Model,
+    Provider,
+    Tool as ExecutorTool,
+    Usage,
+} from "@slopus/rig-execution";
 import type { ToolResultPresentation } from "./ToolResultPresentation.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { UserInputResponse } from "../user-input/types.js";
@@ -131,21 +137,19 @@ export interface CompactionMessage {
     role: "compaction";
     id: string;
     blocks: readonly ContentBlock[];
-    /** Whether the provider supplied an opaque native checkpoint or a readable summary. */
-    kind: "native" | "summary";
     /** Messages removed from the model context by this compaction. */
     replacedMessageIds: readonly string[];
     statistics: {
         before: { exact: true; tokens: number };
         after: { exact: boolean; tokens: number };
     };
-    /** Provider that issued this opaque checkpoint. */
+    /** Provider that owns this replacement context. */
     providerId: string;
-    content: string;
-    /** Opaque provider metadata required for native replay. */
-    vendor?: unknown;
-    /** Human-readable fallback when a different provider cannot read the checkpoint. */
-    summary: string;
+    /**
+     * Complete provider-authored replacement context. Present only on the private model-context
+     * copy; the visible transcript copy deliberately does not expose provider-native payloads.
+     */
+    replacementMessages?: readonly ProviderMessage[];
     /** Compaction is durable visible history and can never be hidden as internal context. */
     internal?: never;
 }

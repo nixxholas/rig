@@ -1831,18 +1831,18 @@ describe("PersistentSessionStore", () => {
     it("resumes from compacted model context instead of the visible transcript", async () => {
         const { cleanup, databasePath } = await createDatabasePath();
         const summaryMessage: CompactionMessage = {
-            blocks: [{ text: "Earlier work.", type: "text" }],
-            content: "Earlier work.",
+            blocks: [],
             id: "summary-1",
-            kind: "summary",
             providerId: "claude",
+            replacementMessages: [
+                { role: "user", content: "Earlier work.", timestamp: 1 },
+            ],
             replacedMessageIds: ["visible-1"],
             role: "compaction",
             statistics: {
                 after: { exact: false, tokens: 20 },
                 before: { exact: true, tokens: 100 },
             },
-            summary: "Earlier work.",
         };
         const visibleMessage = textUserMessage("visible-1", "The original full transcript.");
         try {

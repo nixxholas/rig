@@ -52,13 +52,11 @@ The SDK's hidden retries are disabled. The provider performs Claude-compatible r
 connection, 408, 409, 429, and 5xx retries itself, emits `retrying` events, and never retries after
 stream content has begun.
 
-`compact()` uses Bedrock's native server-side compaction when the selected context is at or above
-the 50,000-token minimum, with the `compact-2026-01-12` beta and `compact_20260112`
-context-management edit. It pauses at the native compaction boundary, aggregates per-iteration
-usage, and retains the opaque replay metadata. Below the minimum, or when a native request returns
-no compaction block, it falls back to one tool-less summary request. Usage from both requests is
-retained when a native attempt falls back. In all cases the result contains the complete
-replacement context.
+`compact()` always uses Bedrock's native server-side compaction with the `compact-2026-01-12`
+beta and `compact_20260112` context-management edit. It pauses at the native compaction boundary,
+aggregates per-iteration usage, and retains both `content` and `encrypted_content` exactly as the
+provider returned them, including null values. A missing compaction block fails the operation;
+Rig never sends a separate summarization request.
 
 ## Credentials
 

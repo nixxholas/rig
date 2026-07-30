@@ -91,8 +91,11 @@ export interface SessionToolResultMessage {
 /** Opaque provider-native context checkpoint returned by a compaction request. */
 export interface SessionCompactionMessage {
     readonly role: "compaction";
-    readonly content: string;
-    /** Opaque provider metadata required to replay the checkpoint natively. */
+    /** Provider-returned summary text, including null when the provider returned no text. */
+    readonly content: string | null;
+    /** Provider-returned encrypted compaction payload, including null when absent. */
+    readonly encryptedContent: string | null;
+    /** Additional opaque provider metadata required to replay the checkpoint natively. */
     readonly vendor?: any;
 }
 

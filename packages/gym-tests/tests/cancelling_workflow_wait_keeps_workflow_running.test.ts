@@ -146,7 +146,7 @@ function submit(gym: Gym, text: string): void {
 
 function textOfLastMessage(request: GymInferenceRequest): string {
     const message = request.context.messages.at(-1);
-    if (message === undefined) return "";
+    if (message?.content == null) return "";
     if (typeof message.content === "string") return message.content;
     return message.content
         .filter((block) => block.type === "text")

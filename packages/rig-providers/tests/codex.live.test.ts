@@ -158,7 +158,7 @@ describeLive("CodexProvider live", () => {
                 if (compacted.status !== "completed") return;
                 expect(compacted.summary).toBeUndefined();
                 expect(compacted.compaction?.role).toBe("compaction");
-                expect(compacted.compaction?.content.length).toBeGreaterThan(0);
+                expect(compacted.compaction?.encryptedContent?.length).toBeGreaterThan(0);
                 expect(compacted.context.messages.at(-1)).toEqual(compacted.compaction);
 
                 const switched = await collectSessionEvents(

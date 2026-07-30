@@ -172,9 +172,9 @@ describe("Claude SendMessage to a completed agent", () => {
 });
 
 function messageText(
-    message: { content: string | readonly { text?: string; type: string }[] } | undefined,
+    message: { content: string | readonly { text?: string; type: string }[] | null } | undefined,
 ): string {
-    if (message === undefined) return "";
+    if (message?.content == null) return "";
     if (typeof message.content === "string") return message.content;
     return message.content
         .filter((block): block is { text: string; type: string } => typeof block.text === "string")

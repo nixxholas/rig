@@ -2,14 +2,13 @@ import { estimateMessagesTokens } from "./estimateMessagesTokens.js";
 import { requestProviderCompaction } from "./requestProviderCompaction.js";
 import { resolveCompactionInputTokens } from "./resolveCompactionInputTokens.js";
 import { resolveAutoCompactThreshold } from "./resolveAutoCompactThreshold.js";
-import type { CompactionMessage, Message, UserMessage } from "../types.js";
+import type { CompactionMessage, Message } from "../types.js";
 import type {
     Context,
     Message as ProviderMessage,
     Model,
     Provider,
     ServiceTier,
-    UserContent as ProviderUserContent,
 } from "@slopus/rig-execution";
 
 export interface CompactConversationResult {
@@ -69,33 +68,26 @@ export async function compactConversation(options: {
         provider: options.provider,
         model: options.model,
         now: options.now,
-        ...(options.startDate === undefined ? {} : { startDate: options.startDate }),
-        ...(options.serviceTier !== undefined ? { serviceTier: options.serviceTier } : {}),
-        ...(options.thinking !== undefined ? { thinking: options.thinking } : {}),
         ...(options.signal !== undefined ? { signal: options.signal } : {}),
     });
     const replacement = toAgentReplacementContext({
         compactionId,
-        idFactory: options.idFactory,
         providerId: options.provider.id,
         replacement: summary.context.messages,
         source: options.messages,
         summary,
     });
-    const contextMessages = replacement.contextMessages;
-    const sourceIds = new Set(options.messages.map((message) => message.id));
-    const retainedMessageCount = contextMessages.filter((message) =>
-        sourceIds.has(message.id),
-    ).length;
+    const contextMessages = [replacement.contextMessage];
+    const estimatedTokensAfter = estimateProviderMessagesTokens(summary.context.messages);
 
     return {
         compacted: true,
-        compactedMessageCount: options.messages.length - retainedMessageCount,
-        compactionMessage: replacement.compactionMessage,
+        compactedMessageCount: options.messages.length,
+        compactionMessage: replacement.transcriptMessage,
         contextMessages,
-        estimatedTokensAfter: estimateMessagesTokens(contextMessages),
+        estimatedTokensAfter,
         estimatedTokensBefore,
-        retainedMessageCount,
+        retainedMessageCount: 0,
     };
 }
 
@@ -135,192 +127,48 @@ function unchanged(
 
 function toAgentReplacementContext(options: {
     compactionId: string;
-    idFactory: () => string;
     providerId: string;
     replacement: readonly ProviderMessage[];
     source: readonly Message[];
     summary: {
-        summary: string;
-        encrypted?: { content: string; vendor?: unknown };
         usage: {
             input: number;
             cacheRead: number;
             cacheWrite: number;
         };
     };
-}): { compactionMessage: CompactionMessage; contextMessages: Message[] } {
-    const used = new Set<string>();
-    let kind: CompactionMessage["kind"] | undefined;
-    let content: string | undefined;
-    let vendor: unknown;
-    let insertion = -1;
-    const contextMessages: Message[] = [];
-    for (const message of options.replacement) {
-        const preserved = findPreservedAgentMessage(message, options.source, used);
-        if (preserved !== undefined) {
-            used.add(preserved.id);
-            contextMessages.push(preserved);
-            continue;
-        }
-        if (message.role === "system") {
-            contextMessages.push({
-                role: "system",
-                id: options.idFactory(),
-                blocks: [{ type: "text", text: message.content }],
-                internal: true,
-            });
-            continue;
-        }
-        if (message.role === "compaction") {
-            if (kind !== undefined) {
-                throw new Error("Provider compaction returned more than one replacement message.");
-            }
-            kind = "native";
-            content = message.content;
-            vendor = message.vendor;
-            insertion = contextMessages.length;
-            continue;
-        }
-        if (message.role === "user") {
-            if (kind !== undefined) {
-                throw new Error("Provider compaction returned more than one replacement message.");
-            }
-            const replacementText =
-                typeof message.content === "string"
-                    ? message.content
-                    : message.content
-                          .filter((block) => block.type === "text")
-                          .map((block) => block.text)
-                          .join("\n");
-            if (
-                message.sourceMessageId !== undefined ||
-                replacementText !== options.summary.summary
-            ) {
-                throw new Error(
-                    "Provider compaction returned an unmatched user message without source identity.",
-                );
-            }
-            kind = "summary";
-            content = replacementText;
-            insertion = contextMessages.length;
-            continue;
-        }
-        throw new Error(
-            `Provider compaction returned an unmatched ${message.role} message in replacement context.`,
-        );
-    }
-    if (kind === undefined || content === undefined || insertion < 0) {
-        throw new Error("Provider compaction did not return a replacement message.");
-    }
-    const replacedMessageIds = options.source
-        .filter((message) => !used.has(message.id))
-        .map((message) => message.id);
+}): { contextMessage: CompactionMessage; transcriptMessage: CompactionMessage } {
     const beforeTokens =
         options.summary.usage.input +
         options.summary.usage.cacheRead +
         options.summary.usage.cacheWrite;
-    const initial: CompactionMessage = {
+    const transcriptMessage: CompactionMessage = {
         role: "compaction",
         id: options.compactionId,
-        blocks: [{ type: "text", text: options.summary.summary }],
-        kind,
-        replacedMessageIds,
+        blocks: [],
+        replacedMessageIds: options.source.map((message) => message.id),
         statistics: {
             before: { exact: true, tokens: beforeTokens },
-            after: { exact: false, tokens: 0 },
-        },
-        providerId: options.providerId,
-        content,
-        ...(vendor === undefined ? {} : { vendor }),
-        summary: options.summary.summary,
-    };
-    contextMessages.splice(insertion, 0, initial);
-    const compactionMessage: CompactionMessage = {
-        ...initial,
-        statistics: {
-            ...initial.statistics,
             after: {
                 exact: false,
-                tokens: estimateMessagesTokens(contextMessages),
+                tokens: estimateProviderMessagesTokens(options.replacement),
             },
         },
+        providerId: options.providerId,
     };
-    contextMessages[insertion] = compactionMessage;
-    return { compactionMessage, contextMessages };
+    return {
+        transcriptMessage,
+        contextMessage: {
+            ...transcriptMessage,
+            replacementMessages: options.replacement,
+        },
+    };
 }
 
-function findPreservedAgentMessage(
-    providerMessage: ProviderMessage,
-    source: readonly Message[],
-    used: ReadonlySet<string>,
-): Message | undefined {
-    if (
-        (providerMessage.role === "system" || providerMessage.role === "user") &&
-        providerMessage.sourceMessageId !== undefined
-    ) {
-        return source.find(
-            (message) => !used.has(message.id) && message.id === providerMessage.sourceMessageId,
-        );
+function estimateProviderMessagesTokens(messages: readonly ProviderMessage[]): number {
+    try {
+        return Math.ceil(JSON.stringify(messages).length / 4);
+    } catch {
+        return 0;
     }
-    if (providerMessage.role === "system") {
-        return source.find(
-            (message) =>
-                !used.has(message.id) &&
-                message.role === "system" &&
-                message.blocks
-                    .filter((block) => block.type === "text")
-                    .map((block) => block.text)
-                    .join("\n") === providerMessage.content,
-        );
-    }
-    if (providerMessage.role === "user") {
-        return source.find(
-            (message) =>
-                !used.has(message.id) &&
-                message.role === "user" &&
-                message.encryptedAgentMessage === undefined &&
-                sameProviderContent(
-                    message.blocks.map(agentContentToProviderContent),
-                    typeof providerMessage.content === "string"
-                        ? [{ type: "text", text: providerMessage.content }]
-                        : providerMessage.content,
-                ),
-        );
-    }
-    return undefined;
-}
-
-function sameProviderContent(
-    left: readonly ProviderUserContent[],
-    right: readonly ProviderUserContent[],
-): boolean {
-    if (left.length !== right.length) return false;
-    return left.every((block, index) => {
-        const other = right[index];
-        if (other === undefined || block.type !== other.type) return false;
-        if (block.type === "text" && other.type === "text") {
-            return (
-                block.text === other.text && Object.keys(block).length === Object.keys(other).length
-            );
-        }
-        return (
-            block.type === "image" &&
-            other.type === "image" &&
-            block.data === other.data &&
-            block.mimeType === other.mimeType &&
-            block.detail === other.detail &&
-            Object.keys(block).length === Object.keys(other).length
-        );
-    });
-}
-
-function agentContentToProviderContent(block: UserMessage["blocks"][number]): ProviderUserContent {
-    return block.type === "text"
-        ? { type: "text", text: block.text }
-        : {
-              type: "image",
-              data: block.data,
-              mimeType: block.mediaType,
-              ...(block.detail === undefined ? {} : { detail: block.detail }),
-          };
 }

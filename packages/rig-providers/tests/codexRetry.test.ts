@@ -9,6 +9,7 @@ import { CodexProvider } from "@/vendors/codex/CodexProvider.js";
 import { formatCodexUserAgent } from "@/vendors/codex/impl/codexUserAgent.js";
 import { classifyCodexError } from "@/vendors/codex/errors/codexErrors.js";
 import { codexErrorMessage } from "@/vendors/codex/errors/codexErrors.js";
+import { isCodexContextWindowError } from "@/vendors/codex/errors/codexErrors.js";
 import { isRetryableCodexStreamError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexPreviousResponseNotFoundError } from "@/vendors/codex/errors/codexErrors.js";
 import { isCodexUnauthorizedError } from "@/vendors/codex/errors/codexErrors.js";
@@ -23,6 +24,16 @@ import {
 } from "@/vendors/codex/impl/codexRetry.js";
 
 describe("Codex stream retries", () => {
+    it("recognizes the Bedrock prompt-token overflow returned during compaction", () => {
+        expect(
+            isCodexContextWindowError(
+                new Error(
+                    "prompt tokens (286638) exceed customer model maximum (278528)",
+                ),
+            ),
+        ).toBe(true);
+    });
+
     it("keeps an HTTP status in non-WebSocket diagnostic errors", () => {
         const message = "403 User is not authorized to invoke this operation.";
         const error = Object.assign(new Error(message), {

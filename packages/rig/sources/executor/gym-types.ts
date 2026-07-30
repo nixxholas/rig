@@ -16,6 +16,8 @@ export interface GymInferenceRequest {
 }
 
 export interface GymInferenceResponse {
+    compactionContext?: Context;
+    compactionSummary?: string;
     completionDelayMs?: number;
     content: readonly AssistantContent[];
     delayMs?: number;

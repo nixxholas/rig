@@ -1239,20 +1239,17 @@ describe("ChatStore", () => {
                 type: "context_compaction_finished",
             }),
         );
-        const compaction: Message = {
+        const compaction = {
             role: "compaction",
             id: "c1",
-            blocks: [{ type: "text", text: "Earlier context." }],
-            content: "Earlier context.",
-            kind: "summary",
+            blocks: [],
             providerId: "claude",
             replacedMessageIds: ["m1", "m2"],
             statistics: {
                 after: { exact: false, tokens: 40_000 },
                 before: { exact: true, tokens: 121_000 },
             },
-            summary: "Earlier context.",
-        };
+        } satisfies Message;
         store.apply(event("agent_message", { message: compaction, runId: "run-1" }));
 
         expect(store.elements().filter((element) => element.kind === "compaction")).toHaveLength(1);
@@ -1316,11 +1313,9 @@ describe("ChatStore", () => {
             turnKind: "compaction",
         });
 
-        const compaction: Message = {
-            blocks: [{ text: "Earlier context.", type: "text" }],
-            content: "Earlier context.",
+        const compaction = {
+            blocks: [],
             id: "manual-compaction-message",
-            kind: "summary",
             providerId: "claude",
             replacedMessageIds: ["older-message"],
             role: "compaction",
@@ -1328,8 +1323,7 @@ describe("ChatStore", () => {
                 after: { exact: false, tokens: 40 },
                 before: { exact: true, tokens: 120 },
             },
-            summary: "Earlier context.",
-        };
+        } satisfies Message;
         const opening = hello();
         const restored = new ChatStore("session-1");
         restored.applyHello({
@@ -3571,9 +3565,7 @@ describe("ChatStore and the failures inside a group", () => {
 function compactionMessage(id: string, replaced: number, before: number, after: number) {
     return {
         blocks: [],
-        content: "",
         id,
-        kind: "summary" as const,
         providerId: "claude",
         replacedMessageIds: Array.from({ length: replaced }, (_unused, index) => `gone-${index}`),
         role: "compaction" as const,
@@ -3581,7 +3573,6 @@ function compactionMessage(id: string, replaced: number, before: number, after: 
             after: { exact: false, tokens: after },
             before: { exact: true as const, tokens: before },
         },
-        summary: "Earlier work.",
     };
 }
 

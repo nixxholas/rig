@@ -80,10 +80,7 @@ describeLive("Anthropic protocol through the native API", () => {
                         {
                             role: "compaction",
                             content: block.content,
-                            vendor: {
-                                type: "anthropic_compaction",
-                                encryptedContent: block.encrypted_content,
-                            },
+                            encryptedContent: block.encrypted_content,
                         },
                         {
                             role: "user",

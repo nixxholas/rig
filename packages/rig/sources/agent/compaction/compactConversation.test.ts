@@ -14,6 +14,81 @@ const model = defineModel({
 });
 
 describe("compactConversation", () => {
+    it("adopts provider-authored continuation text without comparing it to summary metadata", async () => {
+        const source: Message[] = [
+            {
+                role: "user",
+                id: "old-user",
+                blocks: [{ type: "text", text: "Old request." }],
+            },
+            {
+                role: "agent",
+                id: "old-agent",
+                blocks: [{ type: "text", text: "Old response." }],
+            },
+        ];
+        const continuation =
+            "<conversation_summary>\nProvider-authored continuation.\n</conversation_summary>";
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            compact: async (options) => ({
+                status: "completed",
+                summary: "Different optional metadata.",
+                usage: zeroUsage(),
+                context: {
+                    ...options.context,
+                    messages: [{ role: "user", content: continuation, timestamp: 4 }],
+                },
+            }),
+            stream: vi.fn(() => {
+                throw new Error("Provider-owned compaction must not use ordinary inference.");
+            }),
+        });
+
+        const result = await compactConversation({
+            provider,
+            model,
+            messages: source,
+            createProviderContext: async () => ({
+                messages: [
+                    { role: "user", content: "Old request.", timestamp: 1 },
+                    {
+                        role: "assistant",
+                        content: [{ type: "text", text: "Old response." }],
+                        api: "test",
+                        provider: "test",
+                        model: model.id,
+                        usage: zeroUsage(),
+                        stopReason: "stop",
+                        timestamp: 2,
+                    },
+                ],
+            }),
+            force: true,
+            idFactory: () => "compaction-id",
+            now: () => 5,
+        });
+
+        expect(result.compactionMessage).toMatchObject({
+            blocks: [],
+            replacedMessageIds: ["old-user", "old-agent"],
+        });
+        expect(
+            toProviderMessages(result.contextMessages, {
+                model,
+                now: () => 6,
+                providerId: "test",
+            }),
+        ).toEqual([
+            {
+                role: "user",
+                content: continuation,
+                timestamp: 4,
+            },
+        ]);
+    });
+
     it("passes the full closed context and adopts the provider replacement context", async () => {
         const source: Message[] = [
             {
@@ -68,6 +143,7 @@ describe("compactConversation", () => {
                     compaction: {
                         role: "compaction",
                         content: "opaque-checkpoint",
+                        encryptedContent: "encrypted-checkpoint",
                         vendor: { id: "checkpoint-1" },
                         timestamp: 4,
                     },
@@ -79,6 +155,7 @@ describe("compactConversation", () => {
                             {
                                 role: "compaction",
                                 content: "opaque-checkpoint",
+                                encryptedContent: "encrypted-checkpoint",
                                 vendor: { id: "checkpoint-1" },
                                 timestamp: 4,
                             },
@@ -111,30 +188,29 @@ describe("compactConversation", () => {
             "user",
         ]);
         expect(result.contextMessages).toEqual([
-            source[2],
             {
                 role: "compaction",
                 id: "replacement-id",
-                blocks: [
-                    {
-                        type: "text",
-                        text: "The earlier conversation was compacted into a provider context checkpoint.",
-                    },
-                ],
+                blocks: [],
                 providerId: "test",
-                kind: "native",
-                replacedMessageIds: ["old-user", "old-agent"],
+                replacedMessageIds: ["old-user", "old-agent", "current-user"],
                 statistics: {
                     after: { exact: false, tokens: expect.any(Number) },
                     before: { exact: true, tokens: 12 },
                 },
-                content: "opaque-checkpoint",
-                vendor: { id: "checkpoint-1" },
-                summary:
-                    "The earlier conversation was compacted into a provider context checkpoint.",
+                replacementMessages: [
+                    providerInput.messages[2],
+                    {
+                        role: "compaction",
+                        content: "opaque-checkpoint",
+                        encryptedContent: "encrypted-checkpoint",
+                        vendor: { id: "checkpoint-1" },
+                        timestamp: 4,
+                    },
+                ],
             },
         ]);
-        expect(result.compactionMessage).toBe(result.contextMessages[1]);
+        expect(result.compactionMessage).not.toBe(result.contextMessages[0]);
         expect(
             toProviderMessages(result.contextMessages, {
                 model,
@@ -144,8 +220,9 @@ describe("compactConversation", () => {
         ).toEqual({
             role: "compaction",
             content: "opaque-checkpoint",
+            encryptedContent: "encrypted-checkpoint",
             vendor: { id: "checkpoint-1" },
-            timestamp: 6,
+            timestamp: 4,
         });
         expect(
             toProviderMessages(result.contextMessages, {
@@ -154,15 +231,82 @@ describe("compactConversation", () => {
                 providerId: "other",
             }).at(-1),
         ).toEqual({
-            role: "user",
-            content: [
-                {
-                    type: "text",
-                    text: "The earlier conversation was compacted into a provider context checkpoint.",
-                },
-            ],
-            timestamp: 7,
+            role: "compaction",
+            content: "opaque-checkpoint",
+            encryptedContent: "encrypted-checkpoint",
+            vendor: { id: "checkpoint-1" },
+            timestamp: 4,
         });
+    });
+
+    it("replays an arbitrary provider replacement context without interpreting it", async () => {
+        const source: Message[] = [
+            {
+                role: "user",
+                id: "old-user",
+                blocks: [{ type: "text", text: "Old request." }],
+            },
+            {
+                role: "agent",
+                id: "old-agent",
+                blocks: [{ type: "text", text: "Old response." }],
+            },
+        ];
+        const replacement: Context["messages"] = [
+            {
+                role: "assistant",
+                content: [{ type: "text", text: "Provider continuation." }],
+                api: "native",
+                provider: "test",
+                model: model.id,
+                usage: zeroUsage(),
+                stopReason: "stop",
+                timestamp: 40,
+            },
+            { role: "user", content: "Provider follow-up.", timestamp: 41 },
+            {
+                role: "compaction",
+                content: null,
+                encryptedContent: "opaque",
+                timestamp: 42,
+            },
+            {
+                role: "compaction",
+                content: "second checkpoint",
+                encryptedContent: null,
+                timestamp: 43,
+            },
+        ];
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            compact: async (options) => ({
+                status: "completed",
+                usage: zeroUsage(),
+                context: { ...options.context, messages: replacement },
+            }),
+            stream: vi.fn(() => {
+                throw new Error("Provider-owned compaction must not use ordinary inference.");
+            }),
+        });
+
+        const result = await compactConversation({
+            provider,
+            model,
+            messages: source,
+            createProviderContext: async () => ({ messages: [] }),
+            force: true,
+            idFactory: () => "opaque-context",
+            now: () => 50,
+        });
+
+        expect(
+            toProviderMessages(result.contextMessages, {
+                model,
+                now: () => 100,
+                providerId: "test",
+            }),
+        ).toEqual(replacement);
     });
 });
 

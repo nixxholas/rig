@@ -120,10 +120,10 @@ describe("createDebugProvider", () => {
             messages: [{ role: "user" as const, content: "original", timestamp: 1 }],
         };
 
-        await expect(debugProvider.compact?.({ context })).resolves.toMatchObject({
+        await expect(debugProvider.compact?.({ context, model })).resolves.toMatchObject({
             status: "completed",
             context: { messages: [{ role: "user", content: "summary" }] },
         });
-        expect(compact).toHaveBeenCalledWith({ context });
+        expect(compact).toHaveBeenCalledWith({ context, model });
     });
 });

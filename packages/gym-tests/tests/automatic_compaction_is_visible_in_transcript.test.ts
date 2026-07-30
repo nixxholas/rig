@@ -29,9 +29,6 @@ describe("automatic conversation compaction", () => {
             cols: 92,
             contextWindow: 500,
             async inference(request, callIndex) {
-                const isCompaction = lastUserText(request.context).startsWith(
-                    "Create a detailed continuation brief",
-                );
                 if (callIndex === 0) {
                     firstInferenceContext = request.context;
                     firstResponseStarted.resolve();
@@ -47,8 +44,7 @@ describe("automatic conversation compaction", () => {
                     };
                 }
                 if (callIndex === 1) {
-                    expect(isCompaction).toBe(true);
-                    expect(request.context.systemPrompt).toBe(firstInferenceContext?.systemPrompt);
+                    expect(request.options.intent).toBe("compaction");
                     expect(request.context.tools).toEqual(firstInferenceContext?.tools);
                     expect(request.context.messages[0]).toMatchObject({
                         role: firstInferenceContext?.messages[0]?.role,
@@ -57,11 +53,21 @@ describe("automatic conversation compaction", () => {
                     compactionStarted.resolve();
                     await releaseCompaction.promise;
                     return {
-                        content: [{ text: "The earlier context was summarized.", type: "text" }],
+                        compactionContext: {
+                            ...request.context,
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: "The earlier context was summarized.",
+                                    timestamp: 1,
+                                },
+                            ],
+                        },
+                        content: [],
                     };
                 }
                 expect(callIndex).toBe(2);
-                expect(isCompaction).toBe(false);
+                expect(request.options.intent).not.toBe("compaction");
                 return {
                     content: [{ text: "Continued with compacted context.", type: "text" }],
                     usage: usage(100, 30),
@@ -136,20 +142,6 @@ function usage(input: number, output: number) {
         output,
         totalTokens: input + output,
     };
-}
-
-function lastUserText(context: {
-    messages: readonly {
-        role: string;
-        content?: string | readonly { type: string; text?: string }[];
-    }[];
-}): string {
-    const message = context.messages.at(-1);
-    if (message?.role !== "user") return "";
-    if (typeof message.content === "string") return message.content;
-    return (message.content ?? [])
-        .flatMap((block) => (block.type === "text" && block.text !== undefined ? [block.text] : []))
-        .join("");
 }
 
 async function captureReviewImage(snapshot: TerminalSnapshot, fileName: string): Promise<void> {

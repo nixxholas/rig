@@ -207,7 +207,8 @@ describe("Codex SSE goldens", () => {
             );
             expect(compacted.compaction).toEqual({
                 role: "compaction",
-                content: "opaque-native-compaction",
+                content: null,
+                encryptedContent: "opaque-native-compaction",
             });
             expect(captured[1]!.client_metadata["x-codex-window-id"]).toBe(
                 captured[0]!.client_metadata["x-codex-window-id"],

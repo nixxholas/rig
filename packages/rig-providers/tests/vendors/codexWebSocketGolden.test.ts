@@ -1083,7 +1083,8 @@ describe("Codex CLI mode WebSocket goldens", () => {
             status: "completed",
             compaction: {
                 role: "compaction",
-                content: "opaque-native-compaction",
+                content: null,
+                encryptedContent: "opaque-native-compaction",
             },
         });
         expect(switched.model).toBe("gpt-5.6-terra");
@@ -1654,7 +1655,8 @@ describe("Codex CLI mode WebSocket goldens", () => {
             { role: "user", content: "compact this" },
             {
                 role: "compaction",
-                content: "opaque-native-compaction",
+                content: null,
+                encryptedContent: "opaque-native-compaction",
             },
         ]);
         expect(JSON.stringify(compacted.context)).not.toContain("conversation_summary");

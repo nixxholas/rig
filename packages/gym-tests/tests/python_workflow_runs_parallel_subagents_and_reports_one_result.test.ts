@@ -90,7 +90,7 @@ describe("Python workflow orchestration", () => {
                         (message) =>
                             message.role === "toolResult" && message.toolName === "workflow",
                     );
-                if (launchResult !== undefined && !sawLaunchResult) {
+                if (launchResult?.role === "toolResult" && !sawLaunchResult) {
                     sawLaunchResult = true;
                     const text =
                         typeof launchResult.content === "string"

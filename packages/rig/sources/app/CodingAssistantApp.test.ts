@@ -3614,8 +3614,9 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
+            compact: async ({ context }) => completedCompaction(context),
             stream() {
-                return streamText("A concise continuation brief.");
+                return streamText("unused");
             },
         });
         const harness = createJustBashToolHarness();
@@ -3678,12 +3679,13 @@ describe("CodingAssistantApp", () => {
             const provider = defineProvider({
                 id: "codex",
                 models: [model],
+                compact: async ({ context }) => {
+                    started.resolve();
+                    await release.promise;
+                    return completedCompaction(context);
+                },
                 stream() {
-                    return streamTextStart(
-                        "A concise continuation brief.",
-                        started.resolve,
-                        release.promise,
-                    );
+                    return streamText("unused");
                 },
             });
             const harness = createJustBashToolHarness();
@@ -3747,13 +3749,14 @@ describe("CodingAssistantApp", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream() {
+            compact: async ({ context }) => {
                 requests += 1;
-                return streamTextStart(
-                    "A concise continuation brief.",
-                    started.resolve,
-                    release.promise,
-                );
+                started.resolve();
+                await release.promise;
+                return completedCompaction(context);
+            },
+            stream() {
+                return streamText("unused");
             },
         });
         const harness = createJustBashToolHarness();
@@ -4222,7 +4225,11 @@ describe("CodingAssistantApp", () => {
         submit(app, "/skill:review inspect this diff");
         await app.waitForIdle();
 
-        const sentContent = contexts[0]?.messages[0]?.content[0];
+        const sentMessage = contexts[0]?.messages[0];
+        const sentContent =
+            sentMessage?.role === "user" && Array.isArray(sentMessage.content)
+                ? sentMessage.content[0]
+                : undefined;
         const sentText =
             typeof sentContent === "string"
                 ? sentContent
@@ -9826,6 +9833,23 @@ function zeroUsage(): Usage {
             cacheWrite: 0,
             total: 0,
         },
+    };
+}
+
+function completedCompaction(context: Context) {
+    return {
+        status: "completed" as const,
+        context: {
+            ...context,
+            messages: [
+                {
+                    role: "user" as const,
+                    content: "A concise continuation brief.",
+                    timestamp: 1,
+                },
+            ],
+        },
+        usage: zeroUsage(),
     };
 }
 

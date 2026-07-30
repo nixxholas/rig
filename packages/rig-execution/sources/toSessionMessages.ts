@@ -12,6 +12,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
             return {
                 role: "compaction",
                 content: message.content,
+                encryptedContent: message.encryptedContent,
                 ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
             };
         }
@@ -50,6 +51,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
             };
         }
         if (message.role === "toolResult") {
+            if (message.sessionMessage !== undefined) return message.sessionMessage;
             const input = message.content.map((content) =>
                 content.type === "text"
                     ? { type: "text" as const, text: content.text }
@@ -71,6 +73,7 @@ export function toSessionMessages(messages: Context["messages"]): SessionMessage
                 ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
             };
         }
+        if (message.sessionMessage !== undefined) return message.sessionMessage;
         const thinking = message.content.filter((content) => content.type === "thinking");
         const toolCalls = message.content
             .filter((content) => content.type === "toolCall")

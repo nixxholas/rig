@@ -198,12 +198,14 @@ function toSessionStoreEntries(
             parentUuid = uuid;
             continue;
         }
+        const content = message.content;
+        if (content === null) continue;
         entries.push({
             ...base,
             message: {
                 role: "user",
                 content: toSdkContent(
-                    message.content,
+                    content,
                     message.role === "user" ? message.input : undefined,
                 ),
             },

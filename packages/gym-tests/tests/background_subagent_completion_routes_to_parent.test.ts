@@ -79,7 +79,10 @@ describe("background subagent completion routes to its parent", () => {
                         (message) =>
                             message.role === "toolResult" && message.toolName === "spawn_agent",
                     );
-                if (spawnResultMessage !== undefined && !parentObservedSpawnResult) {
+                if (
+                    spawnResultMessage?.role === "toolResult" &&
+                    !parentObservedSpawnResult
+                ) {
                     const spawnResultText =
                         typeof spawnResultMessage.content === "string"
                             ? spawnResultMessage.content

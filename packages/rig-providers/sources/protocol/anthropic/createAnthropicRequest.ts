@@ -11,7 +11,7 @@ export type AnthropicRequest = MessageCreateParamsStreaming;
 
 export function createAnthropicRequest(options: {
     compaction?: {
-        instructions: string;
+        instructions?: string;
     };
     context: SessionContext;
     effort?: SessionReasoningEffort;
@@ -34,9 +34,9 @@ export function createAnthropicRequest(options: {
                       edits: [
                           {
                               type: "compact_20260112" as const,
-                              instructions:
-                                  options.compaction?.instructions ??
-                                  "Preserve the conversation for continuation.",
+                              ...(options.compaction?.instructions === undefined
+                                  ? {}
+                                  : { instructions: options.compaction.instructions }),
                               pause_after_compaction: true,
                               trigger: { type: "input_tokens" as const, value: 50_000 },
                           },

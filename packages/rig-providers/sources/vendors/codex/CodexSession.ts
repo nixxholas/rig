@@ -243,7 +243,8 @@ export class CodexSession extends BaseSession {
                 if (signal?.aborted) return { status: "cancelled", context: this.context };
                 const compaction = {
                     role: "compaction" as const,
-                    content: collected.item.encrypted_content,
+                    content: null,
+                    encryptedContent: collected.item.encrypted_content,
                 };
                 const preservedMessages = preserveCodexCompactionMessages(context.messages);
                 this.context = {

@@ -223,16 +223,12 @@ export interface CompactionMessage {
     role: "compaction";
     id: string;
     blocks: readonly ContentBlock[];
-    kind: "native" | "summary";
     replacedMessageIds: readonly string[];
     statistics: {
         before: { exact: true; tokens: number };
         after: { exact: boolean; tokens: number };
     };
     providerId: string;
-    content: string;
-    vendor?: unknown;
-    summary: string;
     internal?: never;
 }
 
@@ -953,6 +949,7 @@ export type AgentLoopEvent =
           compactionId: string;
           elapsedMs: number;
           status: "cancelled" | "completed" | "failed";
+          errorMessage?: string;
       }
     | {
           type: "permission_review";

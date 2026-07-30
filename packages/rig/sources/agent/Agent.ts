@@ -424,21 +424,13 @@ export class Agent {
                   });
 
         try {
-            try {
-                await this.#compactContext({
-                    eventOptions: options,
-                    force: false,
-                    provider,
-                    reason: "threshold",
-                    ...(options.signal !== undefined ? { signal: options.signal } : {}),
-                });
-            } catch (error) {
-                // The main loop still gets a chance to report an abort or the provider's
-                // context-limit error when automatic compaction is unavailable.
-                if (!options.signal?.aborted) {
-                    this.#console.error?.(`[agent:${this.id}] automatic compaction failed`, error);
-                }
-            }
+            await this.#compactContext({
+                eventOptions: options,
+                force: false,
+                provider,
+                reason: "threshold",
+                ...(options.signal !== undefined ? { signal: options.signal } : {}),
+            });
 
             const beforeAgentsMd = this.#contextMessages ?? this.#messages;
             const withAgentsMd =
@@ -487,31 +479,21 @@ export class Agent {
                 takeSteering: () => this.#takeSteering(),
                 getSteeringSignal: () => this.#steeringController.signal,
                 compactContext: async (messages, compaction) => {
-                    try {
-                        const result = await this.#compactMessages({
-                            eventOptions: options,
-                            messages,
-                            createProviderContext: compaction.createProviderContext,
-                            force: compaction.force,
-                            provider,
-                            reason: compaction.force ? "context_window" : "threshold",
-                            ...(compaction.reportedTokens === undefined
-                                ? {}
-                                : { reportedTokens: compaction.reportedTokens }),
-                            ...(options.signal === undefined ? {} : { signal: options.signal }),
-                        });
-                        if (this.#resetVersion !== resetVersion) return undefined;
-                        contextCompactedDuringRun ||= result.compacted;
-                        return result;
-                    } catch (error) {
-                        if (!options.signal?.aborted) {
-                            this.#console.error?.(
-                                `[agent:${this.id}] automatic compaction failed`,
-                                error,
-                            );
-                        }
-                        return undefined;
-                    }
+                    const result = await this.#compactMessages({
+                        eventOptions: options,
+                        messages,
+                        createProviderContext: compaction.createProviderContext,
+                        force: compaction.force,
+                        provider,
+                        reason: compaction.force ? "context_window" : "threshold",
+                        ...(compaction.reportedTokens === undefined
+                            ? {}
+                            : { reportedTokens: compaction.reportedTokens }),
+                        ...(options.signal === undefined ? {} : { signal: options.signal }),
+                    });
+                    if (this.#resetVersion !== resetVersion) return undefined;
+                    contextCompactedDuringRun ||= result.compacted;
+                    return result;
                 },
             };
             if (this.#contextMessages !== undefined) {

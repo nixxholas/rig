@@ -47,9 +47,12 @@ export function toOpenAIResponseInput(context: SessionContext): ResponseInput {
             continue;
         }
         if (message.role === "compaction") {
+            if (message.encryptedContent === null) {
+                throw new Error("Responses compaction is missing encrypted content.");
+            }
             input.push({
                 type: "compaction",
-                encrypted_content: message.content,
+                encrypted_content: message.encryptedContent,
             });
             continue;
         }

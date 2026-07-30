@@ -860,14 +860,33 @@ describe("InMemorySession abort", () => {
             name: "Manual compaction",
             thinkingLevels: ["off"],
         });
-        let streamCount = 0;
         const provider = defineProvider({
             id: "test",
             models: [model],
+            compact: async ({ context }) => ({
+                status: "completed",
+                context: {
+                    ...context,
+                    messages: [{ role: "user", content: "Earlier summary", timestamp: 1 }],
+                },
+                usage: {
+                    cacheRead: 0,
+                    cacheWrite: 0,
+                    cost: {
+                        cacheRead: 0,
+                        cacheWrite: 0,
+                        input: 0,
+                        output: 0,
+                        total: 0,
+                    },
+                    input: 0,
+                    output: 0,
+                    totalTokens: 0,
+                },
+            }),
             stream: (_model, _context, options) => {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
-                streamCount += 1;
-                return responseStream(streamCount === 1 ? "Earlier answer" : "Earlier summary");
+                return responseStream("Earlier answer");
             },
         });
         const session = new InMemorySession({
@@ -899,7 +918,7 @@ describe("InMemorySession abort", () => {
             );
         expect(compactionMessages).toHaveLength(1);
         expect(compactionMessages?.[0]).toMatchObject({
-            kind: "summary",
+            blocks: [],
             replacedMessageIds: expect.arrayContaining([expect.any(String), expect.any(String)]),
         });
         const events = session.events.since(undefined);
@@ -947,14 +966,18 @@ describe("InMemorySession abort", () => {
             thinkingLevels: ["off"],
         });
         const failure = "The compaction provider was unavailable.";
-        let streamCount = 0;
         const provider = defineProvider({
             id: "test",
             models: [model],
+            compact: async ({ context }) => ({
+                status: "failed",
+                kind: "inference_error",
+                message: failure,
+                context,
+            }),
             stream: (_model, _context, options) => {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
-                streamCount += 1;
-                return streamCount === 1 ? responseStream("Earlier answer") : errorStream(failure);
+                return responseStream("Earlier answer");
             },
         });
         const session = new InMemorySession({
@@ -1009,16 +1032,21 @@ describe("InMemorySession abort", () => {
         const compactStarted = new Promise<void>((resolve) => {
             compactStartedResolve = resolve;
         });
-        let streamCount = 0;
         const provider = defineProvider({
             id: "test",
             models: [model],
+            compact: async ({ context, signal }) => {
+                compactStartedResolve?.();
+                if (signal?.aborted !== true) {
+                    await new Promise<void>((resolve) =>
+                        signal?.addEventListener("abort", () => resolve(), { once: true }),
+                    );
+                }
+                return { status: "cancelled", context };
+            },
             stream: (_model, _context, options) => {
                 if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
-                streamCount += 1;
-                if (streamCount === 1) return responseStream("Earlier answer");
-                compactStartedResolve?.();
-                return abortedStream(options?.signal);
+                return responseStream("Earlier answer");
             },
         });
         const session = new InMemorySession({

@@ -227,8 +227,9 @@ const result = await session.compact({ instructions, context, inputTokens, signa
 ```
 
 The result is `completed`, `cancelled`, or `failed`. A completed compaction returns the
-replacement `context` to adopt, along with either a plain-text `summary` or an opaque native
-`compaction` checkpoint, plus any `preservedMessages`.
+replacement `context` to adopt. Native compaction messages retain independent nullable `content`
+and `encryptedContent` fields exactly as returned; non-native providers may instead return a
+plain-text `summary`. The result also includes any `preservedMessages`.
 
 ## Models and quota
 

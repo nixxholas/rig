@@ -138,6 +138,7 @@ export type AgentLoopEvent =
           compactionId: string;
           elapsedMs: number;
           status: "cancelled" | "completed" | "failed";
+          errorMessage?: string;
       }
     | {
           type: "inference_iteration_start";
@@ -1169,20 +1170,10 @@ export function toProviderMessages(
         }
 
         if (message.role === "compaction") {
-            providerMessages.push(
-                message.kind === "native" && message.providerId === options.providerId
-                    ? {
-                          role: "compaction",
-                          content: message.content,
-                          ...(message.vendor === undefined ? {} : { vendor: message.vendor }),
-                          timestamp: options.now(),
-                      }
-                    : {
-                          role: "user",
-                          content: [{ type: "text", text: message.summary }],
-                          timestamp: options.now(),
-                      },
-            );
+            if (message.replacementMessages === undefined) {
+                throw new Error("Compaction context is missing its provider replacement messages.");
+            }
+            providerMessages.push(...message.replacementMessages);
             continue;
         }
 

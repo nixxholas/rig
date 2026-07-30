@@ -215,10 +215,7 @@ describe("AnthropicBedrockProvider", () => {
             compaction: {
                 role: "compaction",
                 content: "Native summary",
-                vendor: {
-                    type: "anthropic_compaction",
-                    encryptedContent: "opaque-compaction-metadata",
-                },
+                encryptedContent: "opaque-compaction-metadata",
             },
             usage: {
                 input: 60_000,
@@ -257,16 +254,7 @@ describe("AnthropicBedrockProvider", () => {
         for await (const _event of session.run({
             context: {
                 messages: [
-                    {
-                        role: "user",
-                        content: "<conversation_summary>\nNative summary\n</conversation_summary>",
-                        input: [
-                            {
-                                type: "text",
-                                text: "<conversation_summary>\nNative summary\n</conversation_summary>",
-                            },
-                        ],
-                    },
+                    result.compaction,
                     { role: "user", content: "retained turn" },
                 ],
             },
@@ -301,16 +289,7 @@ describe("AnthropicBedrockProvider", () => {
         await session.compact({
             context: {
                 messages: [
-                    {
-                        role: "user",
-                        content: "<conversation_summary>\nNative summary\n</conversation_summary>",
-                        input: [
-                            {
-                                type: "text",
-                                text: "<conversation_summary>\nNative summary\n</conversation_summary>",
-                            },
-                        ],
-                    },
+                    result.compaction,
                     { role: "user", content: "retained turn" },
                 ],
             },
@@ -342,7 +321,7 @@ describe("AnthropicBedrockProvider", () => {
         ]);
     });
 
-    it("uses one summary request instead of probing native compaction below its trigger", async () => {
+    it("uses native compaction below the server trigger and round-trips null content", async () => {
         const capturedRequests: Record<string, unknown>[] = [];
         const credential = await BedrockBearerTokenCredential.tryLoad({
             bearerToken: "bedrock-small-compaction-token",
@@ -356,23 +335,40 @@ describe("AnthropicBedrockProvider", () => {
                         return streamEvents([
                             {
                                 type: "message_start",
-                                message: { usage: { input_tokens: 1_000, output_tokens: 0 } },
+                                message: {
+                                    usage: {
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        iterations: null,
+                                    },
+                                },
                             },
                             {
                                 type: "content_block_start",
                                 index: 0,
-                                content_block: { type: "text", text: "" },
-                            },
-                            {
-                                type: "content_block_delta",
-                                index: 0,
-                                delta: { type: "text_delta", text: "Fallback summary" },
+                                content_block: {
+                                    type: "compaction",
+                                    content: null,
+                                    encrypted_content: "opaque-null-content",
+                                },
                             },
                             { type: "content_block_stop", index: 0 },
                             {
                                 type: "message_delta",
-                                delta: { stop_reason: "end_turn", stop_sequence: null },
-                                usage: { output_tokens: 2 },
+                                delta: { stop_reason: "compaction", stop_sequence: null },
+                                usage: {
+                                    output_tokens: 0,
+                                    iterations: [
+                                        {
+                                            type: "compaction",
+                                            input_tokens: 49_999,
+                                            output_tokens: 0,
+                                            cache_read_input_tokens: 0,
+                                            cache_creation_input_tokens: 0,
+                                            cache_creation: null,
+                                        },
+                                    ],
+                                },
                             },
                             { type: "message_stop" },
                         ]);
@@ -398,27 +394,45 @@ describe("AnthropicBedrockProvider", () => {
         });
 
         expect(capturedRequests).toHaveLength(1);
-        expect(capturedRequests[0]).not.toHaveProperty("context_management");
-        expect(capturedRequests[0]?.messages).toMatchObject([
-            {
-                role: "user",
-                content: "selected short prefix",
-            },
-            {
-                role: "user",
-                content: [{ type: "text", text: expect.stringContaining("Summarize") }],
-            },
-        ]);
+        expect(capturedRequests[0]).toHaveProperty("context_management");
         expect(result).toMatchObject({
             status: "completed",
-            summary: "Fallback summary",
+            compaction: {
+                role: "compaction",
+                content: null,
+                encryptedContent: "opaque-null-content",
+            },
+            context: {
+                messages: [
+                    {
+                        role: "compaction",
+                        content: null,
+                    },
+                ],
+            },
         });
+        if (result.status !== "completed" || result.compaction === undefined) {
+            throw new Error("Expected native Anthropic Bedrock compaction.");
+        }
+        expect(toAnthropicMessages([result.compaction])).toEqual([
+            {
+                role: "assistant",
+                content: [
+                    {
+                        type: "compaction",
+                        content: null,
+                        encrypted_content: "opaque-null-content",
+                        cache_control: { type: "ephemeral" },
+                    },
+                ],
+            },
+        ]);
     });
 
-    it("includes native attempt usage when a missing checkpoint falls back to a summary", async () => {
+    it("does not send a summarization request when native compaction returns no block", async () => {
         const capturedRequests: Record<string, unknown>[] = [];
         const credential = await BedrockBearerTokenCredential.tryLoad({
-            bearerToken: "bedrock-compaction-fallback-token",
+            bearerToken: "bedrock-compaction-missing-block-token",
         });
         if (credential === null) throw new Error("Expected a Bedrock test credential.");
         const client = {
@@ -426,46 +440,21 @@ describe("AnthropicBedrockProvider", () => {
                 messages: {
                     create: async (request: Record<string, unknown>) => {
                         capturedRequests.push(request);
-                        if (capturedRequests.length === 1) {
-                            return streamEvents([
-                                {
-                                    type: "message_start",
-                                    message: { usage: { input_tokens: 40, output_tokens: 0 } },
-                                },
-                                {
-                                    type: "content_block_start",
-                                    index: 0,
-                                    content_block: { type: "text", text: "" },
-                                },
-                                { type: "content_block_stop", index: 0 },
-                                {
-                                    type: "message_delta",
-                                    delta: { stop_reason: "end_turn", stop_sequence: null },
-                                    usage: { output_tokens: 5 },
-                                },
-                                { type: "message_stop" },
-                            ]);
-                        }
                         return streamEvents([
                             {
                                 type: "message_start",
-                                message: { usage: { input_tokens: 10, output_tokens: 0 } },
+                                message: {
+                                    usage: {
+                                        input_tokens: 40,
+                                        output_tokens: 0,
+                                        iterations: null,
+                                    },
+                                },
                             },
-                            {
-                                type: "content_block_start",
-                                index: 0,
-                                content_block: { type: "text", text: "" },
-                            },
-                            {
-                                type: "content_block_delta",
-                                index: 0,
-                                delta: { type: "text_delta", text: "Fallback summary" },
-                            },
-                            { type: "content_block_stop", index: 0 },
                             {
                                 type: "message_delta",
                                 delta: { stop_reason: "end_turn", stop_sequence: null },
-                                usage: { output_tokens: 2 },
+                                usage: { output_tokens: 5, iterations: null },
                             },
                             { type: "message_stop" },
                         ]);
@@ -488,19 +477,12 @@ describe("AnthropicBedrockProvider", () => {
             inputTokens: 50_000,
         });
 
-        expect(capturedRequests).toHaveLength(2);
+        expect(capturedRequests).toHaveLength(1);
         expect(capturedRequests[0]).toHaveProperty("context_management");
-        expect(capturedRequests[1]).not.toHaveProperty("context_management");
         expect(result).toMatchObject({
-            status: "completed",
-            summary: "Fallback summary",
-            usage: {
-                input: 50,
-                output: 7,
-                cacheRead: 0,
-                cacheWrite: 0,
-                totalTokens: 57,
-            },
+            status: "failed",
+            kind: "inference_error",
+            message: "Anthropic Bedrock native compaction returned no compaction block.",
         });
     });
 

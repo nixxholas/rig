@@ -115,7 +115,8 @@ export class ResponsesSession extends BaseSession {
             }
             const compaction = {
                 role: "compaction" as const,
-                content: item.encrypted_content,
+                content: null,
+                encryptedContent: item.encrypted_content,
                 vendor: { type: "responses_compaction", id: item.id },
             };
             const preservedMessages = preservedResponsesMessages(

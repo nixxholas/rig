@@ -21,6 +21,7 @@ export async function runCompactionWithEvents(options: {
           }
         | undefined;
     let status: "cancelled" | "completed" | "failed" = "failed";
+    let errorMessage: string | undefined;
     try {
         const result = await options.compact(async ({ compactionId, estimatedTokensBefore }) => {
             lifecycle = {
@@ -49,6 +50,9 @@ export async function runCompactionWithEvents(options: {
         return result;
     } catch (error) {
         status = options.signal?.aborted === true ? "cancelled" : "failed";
+        if (status === "failed") {
+            errorMessage = error instanceof Error ? error.message : String(error);
+        }
         throw error;
     } finally {
         if (lifecycle !== undefined) {
@@ -57,6 +61,7 @@ export async function runCompactionWithEvents(options: {
                 compactionId: lifecycle.compactionId,
                 elapsedMs: Math.max(0, options.now() - lifecycle.startedAt),
                 status,
+                ...(errorMessage === undefined ? {} : { errorMessage }),
             });
         }
     }

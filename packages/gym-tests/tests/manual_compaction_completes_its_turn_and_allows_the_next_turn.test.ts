@@ -25,9 +25,19 @@ describe("manual conversation compaction", () => {
                     };
                 }
                 if (callIndex === 1) {
-                    expect(context).toContain("Create a detailed continuation brief");
+                    expect(request.options.intent).toBe("compaction");
                     return {
-                        content: [{ text: "MANUAL_COMPACTION_SUMMARY", type: "text" }],
+                        compactionContext: {
+                            ...request.context,
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: "MANUAL_COMPACTION_SUMMARY",
+                                    timestamp: 1,
+                                },
+                            ],
+                        },
+                        content: [],
                     };
                 }
                 expect(callIndex).toBe(2);

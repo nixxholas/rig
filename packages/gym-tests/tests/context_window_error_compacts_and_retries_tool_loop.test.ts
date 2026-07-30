@@ -15,7 +15,7 @@ afterEach(async () => {
 });
 
 describe("context-window recovery during a tool loop", () => {
-    it("compacts older context and retries without exposing the provider rejection", async () => {
+    it("compacts older context and retries while preserving the failed attempt", async () => {
         let currentStepContext: Gym["inference"]["requests"][number]["context"] | undefined;
         const gym = await createGym({
             files: {
@@ -24,9 +24,6 @@ describe("context-window recovery during a tool loop", () => {
             inference(request, callIndex) {
                 const context = JSON.stringify(request.context.messages);
                 const lastMessage = JSON.stringify(request.context.messages.at(-1));
-                const isCompaction = lastUserText(request.context).startsWith(
-                    "Create a detailed continuation brief",
-                );
 
                 if (callIndex === 0) {
                     expect(lastMessage).toContain(HISTORY_PROMPT);
@@ -82,26 +79,33 @@ describe("context-window recovery during a tool loop", () => {
                 }
 
                 if (callIndex === 4) {
-                    expect(isCompaction).toBe(true);
-                    expect(request.context.systemPrompt).toBe(currentStepContext?.systemPrompt);
+                    expect(request.options.intent).toBe("compaction");
                     expect(request.context.tools).toEqual(currentStepContext?.tools);
-                    expect(request.context.messages.slice(0, -1)).toEqual(
-                        currentStepContext?.messages.slice(0, -1),
-                    );
-                    expect(request.options.thinking).toBe("off");
                     expect(context).toContain("HISTORY_FIXTURE_SENTINEL");
                     return {
-                        content: [
-                            {
-                                text: "The earlier fixture inspection is complete.",
-                                type: "text",
-                            },
-                        ],
+                        compactionContext: {
+                            ...request.context,
+                            messages: [
+                                {
+                                    role: "user",
+                                    content: [
+                                        {
+                                            text: "The earlier fixture inspection is complete.",
+                                            type: "text",
+                                        },
+                                        { text: RETRY_PROMPT, type: "text" },
+                                        { text: "current-step-ready", type: "text" },
+                                    ],
+                                    timestamp: 1,
+                                },
+                            ],
+                        },
+                        content: [],
                     };
                 }
 
                 if (callIndex === 5) {
-                    expect(isCompaction).toBe(false);
+                    expect(request.options.intent).not.toBe("compaction");
                     expect(context).toContain("The earlier fixture inspection is complete.");
                     expect(context).toContain(RETRY_PROMPT);
                     expect(context).toContain("current-step-ready");
@@ -118,16 +122,10 @@ describe("context-window recovery during a tool loop", () => {
         await gym.terminal.waitForText("History loaded.", 30_000);
 
         submit(gym, RETRY_PROMPT);
-        const outcome = await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes(RECOVERED) ||
-                snapshot.text.includes("Your input exceeds the context window"),
-            "transparent recovery or the context-window regression",
-            30_000,
-        );
+        const outcome = await gym.terminal.waitForText(RECOVERED, 30_000);
 
         expect(outcome.text).toContain(RECOVERED);
-        expect(outcome.text).not.toContain("Your input exceeds the context window");
+        expect(outcome.text).toContain("Inference attempt 1 failed and was retried");
         expect(agentRequests(gym)).toHaveLength(6);
     }, 120_000);
 });
@@ -141,11 +139,4 @@ function agentRequests(gym: Gym) {
     return gym.inference.requests.filter(
         (request) => request.options.sessionId?.endsWith(":title") !== true,
     );
-}
-
-function lastUserText(context: Gym["inference"]["requests"][number]["context"]): string {
-    const message = context.messages.at(-1);
-    if (message?.role !== "user") return "";
-    if (typeof message.content === "string") return message.content;
-    return message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
 }

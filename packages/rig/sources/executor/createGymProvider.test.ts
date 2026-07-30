@@ -80,6 +80,48 @@ describe("createGymProvider", () => {
         }
     });
 
+    it("uses the mock provider's native replacement context for compaction", async () => {
+        const replacement = {
+            messages: [
+                {
+                    role: "compaction" as const,
+                    content: null,
+                    encryptedContent: "opaque",
+                    timestamp: 7,
+                },
+            ],
+        };
+        const request = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+            const payload = JSON.parse(String(init?.body)) as {
+                options: { intent?: string };
+            };
+            expect(payload.options.intent).toBe("compaction");
+            return new Response(
+                JSON.stringify({
+                    compactionContext: replacement,
+                    content: [],
+                }),
+                { status: 200 },
+            );
+        });
+        const provider = createGymProvider({
+            endpoint: "https://gym.test/inference",
+            fetch: request as typeof fetch,
+        });
+
+        await expect(
+            provider.compact?.({
+                context: { messages: [{ role: "user", content: "old", timestamp: 1 }] },
+                inputTokens: 100,
+                model: gymModel,
+            }),
+        ).resolves.toMatchObject({
+            status: "completed",
+            context: replacement,
+        });
+        expect(request).toHaveBeenCalledOnce();
+    });
+
     it("keeps runtime model identity when a native provider prepares the prompt", async () => {
         let payload:
             | {

@@ -57,6 +57,54 @@ export function createGymProvider(options: CreateGymProviderOptions) {
         reset() {
             providerSessionGeneration += 1;
         },
+        async compact({ context, model, signal }) {
+            const response = await request(options.endpoint, {
+                body: JSON.stringify({
+                    context,
+                    modelId: model.id,
+                    options: { intent: "compaction" },
+                    providerSessionGeneration,
+                    providerId,
+                } satisfies GymInferenceRequest),
+                headers: {
+                    "content-type": "application/json",
+                    ...(options.token === undefined
+                        ? {}
+                        : { authorization: `Bearer ${options.token}` }),
+                },
+                method: "POST",
+                ...(signal === undefined ? {} : { signal }),
+            });
+            if (!response.ok) {
+                const detail = (await response.text()).trim();
+                return {
+                    status: "failed",
+                    kind: "inference_error",
+                    message:
+                        detail.length === 0
+                            ? `Gym compaction failed with HTTP ${response.status}.`
+                            : `Gym compaction failed with HTTP ${response.status}: ${detail}`,
+                    context,
+                };
+            }
+            const reply = (await response.json()) as GymInferenceResponse;
+            if (reply.compactionContext === undefined) {
+                return {
+                    status: "failed",
+                    kind: "inference_error",
+                    message: "Gym compaction response did not include a replacement context.",
+                    context,
+                };
+            }
+            return {
+                status: "completed",
+                context: reply.compactionContext,
+                ...(reply.compactionSummary === undefined
+                    ? {}
+                    : { summary: reply.compactionSummary }),
+                usage: reply.usage ?? zeroUsage(),
+            };
+        },
         stream(model, context, streamOptions = {}) {
             return createInferenceStream(async function* () {
                 const runtimeModel = `# Runtime model\nModel ID: ${model.id}\nProvider ID: ${providerId}`;

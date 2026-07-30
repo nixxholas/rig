@@ -641,17 +641,13 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
+            compact: async ({ context }) =>
+                completedCompaction(context, "Earlier work was summarized."),
             stream(_model, context) {
                 contexts.push(context);
-                const isCompaction = isCompactionContext(context);
                 return streamFor({
                     role: "assistant",
-                    content: [
-                        {
-                            type: "text",
-                            text: isCompaction ? "Earlier work was summarized." : "continued",
-                        },
-                    ],
+                    content: [{ type: "text", text: "continued" }],
                     api: "test",
                     provider: "codex",
                     model: model.id,
@@ -685,17 +681,11 @@ describe("Agent", () => {
 
         await agent.send("Continue from there.");
 
-        expect(contexts).toHaveLength(2);
-        expect(contexts[0]?.tools).toBeUndefined();
-        expect(contexts[1]?.messages).toMatchObject([
+        expect(contexts).toHaveLength(1);
+        expect(contexts[0]?.messages).toMatchObject([
             {
                 role: "user",
-                content: [
-                    {
-                        type: "text",
-                        text: expect.stringContaining("Earlier work was summarized."),
-                    },
-                ],
+                content: "Earlier work was summarized.",
             },
         ]);
         expect(agent.snapshot().messages).toMatchObject([
@@ -713,6 +703,66 @@ describe("Agent", () => {
             role: "compaction",
             statistics: { after: { exact: true, tokens: 0 } },
         });
+    });
+
+    it("ends the run when automatic compaction fails instead of retrying unchanged context", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+            contextWindow: 40_000,
+        });
+        let compactions = 0;
+        let inferences = 0;
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            compact: async (options) => {
+                compactions += 1;
+                return {
+                    status: "failed",
+                    kind: "inference_error",
+                    message: "native compaction failed",
+                    context: options.context,
+                };
+            },
+            stream() {
+                inferences += 1;
+                return streamFor({
+                    role: "assistant",
+                    content: [{ type: "text", text: "should not run" }],
+                    api: "test",
+                    provider: "codex",
+                    model: model.id,
+                    usage: zeroUsage(),
+                    stopReason: "stop",
+                    timestamp: 1,
+                });
+            },
+        });
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: createJustBashToolHarness().context,
+            messages: [
+                {
+                    role: "user",
+                    id: "user-old",
+                    blocks: [{ type: "text", text: "A".repeat(20_000) }],
+                },
+                {
+                    role: "agent",
+                    id: "agent-old",
+                    blocks: [{ type: "text", text: "B".repeat(20_000) }],
+                },
+            ],
+            printToConsole: false,
+        });
+
+        await expect(agent.send("Continue.")).rejects.toThrow("native compaction failed");
+        expect(compactions).toBe(1);
+        expect(inferences).toBe(0);
     });
 
     it.each([
@@ -744,9 +794,10 @@ describe("Agent", () => {
             const provider = defineProvider({
                 id: "codex",
                 models: [model],
+                compact: async ({ context }) =>
+                    completedCompaction(context, "Earlier work was summarized."),
                 stream(_model, context) {
                     contexts.push(context);
-                    const isCompaction = isCompactionContext(context);
                     if (contexts.length === 1) {
                         return streamFor({
                             role: "assistant",
@@ -771,7 +822,7 @@ describe("Agent", () => {
                         content: [
                             {
                                 type: "text",
-                                text: isCompaction ? "Earlier work was summarized." : "continued",
+                                text: "continued",
                             },
                         ],
                         api: "test",
@@ -809,29 +860,11 @@ describe("Agent", () => {
             const result = await agent.send("Continue with the tool.");
 
             expect(result.stopReason).toBe("stop");
-            expect(contexts).toHaveLength(3);
-            expect(contexts[1]?.systemPrompt).toBe(contexts[0]?.systemPrompt);
-            expect(contexts[1]?.tools).toEqual(contexts[0]?.tools);
-            expect(
-                contexts[1]?.messages
-                    .slice(0, -3)
-                    .map(({ timestamp: _timestamp, ...message }) => message),
-            ).toEqual(
-                contexts[0]?.messages.map(({ timestamp: _timestamp, ...message }) => message),
-            );
-            expect(contexts[1]?.messages.slice(-3, -1).map((message) => message.role)).toEqual([
-                "assistant",
-                "toolResult",
-            ]);
-            expect(contexts[2]?.messages).toMatchObject([
+            expect(contexts).toHaveLength(2);
+            expect(contexts[1]?.messages).toMatchObject([
                 {
                     role: "user",
-                    content: [
-                        {
-                            type: "text",
-                            text: expect.stringContaining("Earlier work was summarized."),
-                        },
-                    ],
+                    content: "Earlier work was summarized.",
                 },
             ]);
             expect(agent.snapshot().messages.slice(0, 2)).toEqual(messages);
@@ -852,9 +885,10 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
+            compact: async ({ context }) =>
+                completedCompaction(context, "Earlier work was summarized."),
             stream(_model, context) {
                 contexts.push(context);
-                const isCompaction = isCompactionContext(context);
                 if (contexts.length === 1) {
                     return streamFor({
                         role: "assistant",
@@ -874,7 +908,7 @@ describe("Agent", () => {
                     content: [
                         {
                             type: "text",
-                            text: isCompaction ? "Earlier work was summarized." : "recovered",
+                            text: "recovered",
                         },
                     ],
                     api: "test",
@@ -914,18 +948,12 @@ describe("Agent", () => {
         const result = await agent.send("Continue after compacting.");
 
         expect(result.stopReason).toBe("stop");
-        expect(contexts).toHaveLength(3);
-        expect(contexts[1]?.systemPrompt).toBe(contexts[0]?.systemPrompt);
-        expect(contexts[2]?.messages[0]).toMatchObject({
+        expect(contexts).toHaveLength(2);
+        expect(contexts[1]?.messages[0]).toMatchObject({
             role: "user",
-            content: [
-                {
-                    type: "text",
-                    text: expect.stringContaining("Earlier work was summarized."),
-                },
-            ],
+            content: "Earlier work was summarized.",
         });
-        expect(contexts[2]?.messages.at(-1)).toMatchObject({
+        expect(contexts[1]?.messages.at(-1)).toMatchObject({
             role: "user",
             content: [
                 {
@@ -1111,22 +1139,16 @@ describe("Agent", () => {
             thinkingLevels: ["off", "low", "high"],
             defaultThinkingLevel: "low",
         });
-        const compactionThinking: (string | undefined)[] = [];
-        const compactionServiceTiers: (string | undefined)[] = [];
         const compactionEvents: AgentLoopEvent[] = [];
         const provider = defineProvider({
             id: "codex",
             models: [model],
             serviceTiers: ["fast"],
-            stream(_model, context, options) {
-                const isCompaction = isCompactionContext(context);
-                if (isCompaction) {
-                    compactionThinking.push(options?.thinking);
-                    compactionServiceTiers.push(options?.serviceTier);
-                }
+            compact: async ({ context }) => completedCompaction(context, "Brief."),
+            stream() {
                 return streamFor({
                     role: "assistant",
-                    content: [{ type: "text", text: isCompaction ? "Brief." : "done" }],
+                    content: [{ type: "text", text: "done" }],
                     api: "test",
                     provider: "codex",
                     model: model.id,
@@ -1163,7 +1185,7 @@ describe("Agent", () => {
             ...visibleMessages,
             expect.objectContaining({
                 role: "compaction",
-                kind: "summary",
+                blocks: [],
                 replacedMessageIds: visibleMessages.map((message) => message.id),
                 statistics: {
                     after: { exact: false, tokens: expect.any(Number) },
@@ -1174,12 +1196,13 @@ describe("Agent", () => {
         expect(agent.snapshot().contextMessages).toMatchObject([
             {
                 role: "compaction",
-                blocks: [{ type: "text", text: expect.stringContaining("Brief.") }],
+                blocks: [],
+                replacementMessages: [
+                    { role: "user", content: "Brief.", timestamp: expect.any(Number) },
+                ],
             },
         ]);
-        expect(agent.snapshot().contextMessages?.[0]).toBe(agent.snapshot().messages.at(-1));
-        expect(compactionThinking).toEqual(["high"]);
-        expect(compactionServiceTiers).toEqual(["fast"]);
+        expect(agent.snapshot().contextMessages?.[0]).not.toBe(agent.snapshot().messages.at(-1));
         expect(compactionEvents.map((event) => event.type)).toEqual([
             "context_compaction_started",
             "context_compacted",
@@ -1219,17 +1242,18 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
-                const isCompaction = isCompactionContext(context);
-                if (isCompaction && !steeredDuringCompaction) {
+            compact: async ({ context }) => {
+                if (!steeredDuringCompaction) {
                     steeredDuringCompaction = true;
                     void agent.steer("stale compaction steering");
-                } else if (!isCompaction) {
-                    normalContexts.push(context);
                 }
+                return completedCompaction(context, "Brief.");
+            },
+            stream(_model, context) {
+                normalContexts.push(context);
                 return streamFor({
                     role: "assistant",
-                    content: [{ type: "text", text: isCompaction ? "Brief." : "done" }],
+                    content: [{ type: "text", text: "done" }],
                     api: "test",
                     provider: "codex",
                     model: model.id,
@@ -1265,17 +1289,21 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
-            stream(_model, context) {
-                const isCompaction = isCompactionContext(context);
+            compact: async ({ context }) => ({
+                status: "failed",
+                kind: "inference_error",
+                message: "summary failed",
+                context,
+            }),
+            stream() {
                 return streamFor({
                     role: "assistant",
-                    content: isCompaction ? [] : [{ type: "text", text: "done" }],
+                    content: [{ type: "text", text: "done" }],
                     api: "test",
                     provider: "codex",
                     model: model.id,
                     usage: zeroUsage(),
-                    stopReason: isCompaction ? "error" : "stop",
-                    ...(isCompaction ? { errorMessage: "summary failed" } : {}),
+                    stopReason: "stop",
                     timestamp: 1,
                 });
             },
@@ -1301,6 +1329,7 @@ describe("Agent", () => {
             "context_compaction_finished",
         ]);
         expect(compactionEvents[1]).toMatchObject({
+            errorMessage: "summary failed",
             status: "failed",
             type: "context_compaction_finished",
         });
@@ -2148,8 +2177,13 @@ describe("Agent", () => {
         const provider = defineProvider({
             id: "codex",
             models: [model],
+            compact: async ({ context }) => {
+                started.resolve();
+                await release.promise;
+                return completedCompaction(context, "summary");
+            },
             stream() {
-                return streamAfterRelease(started.resolve, release.promise, "summary");
+                return streamAfterRelease(() => {}, Promise.resolve(), "done");
             },
         });
         const harness = createJustBashToolHarness();
@@ -2180,13 +2214,15 @@ function createDeterministicIds(): () => string {
     return () => `id-${++next}`;
 }
 
-function isCompactionContext(context: Context): boolean {
-    const message = context.messages.at(-1);
-    return (
-        message?.role === "user" &&
-        typeof message.content === "string" &&
-        message.content.startsWith("Create a detailed continuation brief")
-    );
+function completedCompaction(context: Context, content: string) {
+    return {
+        status: "completed" as const,
+        context: {
+            ...context,
+            messages: [{ role: "user" as const, content, timestamp: 1 }],
+        },
+        usage: zeroUsage(),
+    };
 }
 
 function streamFor(message: AssistantMessage): InferenceStream {
