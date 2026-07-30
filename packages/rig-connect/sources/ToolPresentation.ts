@@ -96,6 +96,10 @@ export function projectToolPresentation(
                     kind: "terminal_input",
                     terminalId: result.sessionId,
                 };
+            case "exploration":
+                // A command that was exploring while it ran is still exploration
+                // once it finishes, so the row a reader is watching stays put.
+                return { kind: "exploration", steps: result.operations };
             case "file_diff":
                 return {
                     files: result.files,

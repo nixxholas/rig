@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import { claudeBashTool } from "../agent/tools/claude/Bash.js";
+import { codexExecCommandTool } from "../agent/tools/codex/exec_command.js";
 import { grokRunTerminalCommandTool } from "./grok/run_terminal_command.js";
+import { createJustBashToolHarness } from "./testing/createJustBashToolHarness.js";
 import { parseOptionalTerminalSessionId } from "./utils/parseOptionalTerminalSessionId.js";
 
 describe("tool result presentations", () => {
@@ -63,6 +65,51 @@ describe("tool result presentations", () => {
         ).toEqual({
             command: "pnpm dev",
             output: "",
+            type: "exec_command",
+        });
+    });
+
+    it("keeps a finished exploration command in the shape its call announced", () => {
+        const command = "sed -n '1,20p' src/example.ts";
+        const context = createJustBashToolHarness().context;
+        const callPresentation = claudeBashTool.toCallPresentation?.({ command }, context);
+
+        expect(callPresentation).toEqual({
+            operations: [{ kind: "read", name: "example.ts" }],
+            type: "exploration",
+        });
+        expect(
+            claudeBashTool.toPresentation?.(
+                { exitCode: 0, stderr: "", stdout: "export const needle = 42;", timedOut: false },
+                { command },
+            ),
+        ).toEqual(callPresentation);
+        expect(
+            codexExecCommandTool.toPresentation?.(
+                { exit_code: 0, output: "export const needle = 42;", wall_time_seconds: 0.1 },
+                { cmd: command },
+            ),
+        ).toEqual(callPresentation);
+        expect(
+            grokRunTerminalCommandTool.toPresentation?.(
+                { text: "export const needle = 42;" },
+                { background: false, command, description: "Read the example" },
+            ),
+        ).toEqual(callPresentation);
+    });
+
+    it("presents an exploration command that is still running as that command", () => {
+        const command = "sed -n '1,20p' src/example.ts";
+
+        expect(
+            codexExecCommandTool.toPresentation?.(
+                { command, output: "still reading", session_id: 7, wall_time_seconds: 0.1 },
+                { cmd: command },
+            ),
+        ).toEqual({
+            command,
+            output: "still reading",
+            sessionId: 7,
             type: "exec_command",
         });
     });

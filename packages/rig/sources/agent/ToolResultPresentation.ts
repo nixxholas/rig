@@ -1,3 +1,5 @@
+import type { ExplorationToolCallPresentation } from "./ToolCallPresentation.js";
+
 export type FileDiffKind = "add" | "delete" | "update";
 
 export type FileDiffLineKind = "add" | "context" | "delete";
@@ -44,7 +46,15 @@ export interface ExecCommandPresentation {
     readonly type: "exec_command";
 }
 
+/**
+ * A finished tool keeps the shape its call announced.
+ *
+ * Exploration is a result presentation as well as a call presentation so a
+ * command that was shown as exploration while it ran is still exploration when
+ * it finishes, instead of turning into a second, unrelated row.
+ */
 export type ToolResultPresentation =
     | BackgroundTerminalInteractionPresentation
     | ExecCommandPresentation
+    | ExplorationToolCallPresentation
     | FileDiffToolResultPresentation;

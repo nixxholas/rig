@@ -5088,6 +5088,15 @@ export class CodingAssistantApp implements Component, Focusable {
             ) {
                 delete existing.exploration;
             }
+            if (block.presentation?.type === "exploration" && block.isError !== true) {
+                existing.exploration = block.presentation;
+                delete existing.backgroundTerminalInteraction;
+                delete existing.detail;
+                delete existing.execCommand;
+                delete existing.fileDiffs;
+                delete existing.omittedFileDiffs;
+                return;
+            }
             if (block.presentation?.type === "exec_command") {
                 existing.execCommand = block.presentation;
                 delete existing.backgroundTerminalInteraction;
@@ -5147,7 +5156,9 @@ export class CodingAssistantApp implements Component, Focusable {
                 ? { backgroundTerminalInteraction: block.presentation }
                 : block.presentation?.type === "exec_command"
                   ? { execCommand: block.presentation }
-                  : { detail }),
+                  : block.presentation?.type === "exploration" && block.isError !== true
+                    ? { exploration: block.presentation }
+                    : { detail }),
             ...(block.isError !== true &&
             block.presentation?.type === "file_diff" &&
             block.presentation.files.length > 0

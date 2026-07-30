@@ -104,6 +104,24 @@ describe("projectToolPresentation", () => {
         });
     });
 
+    it("stays exploration once the exploration finished", () => {
+        const call: ToolCallPresentation = {
+            operations: [{ kind: "read", name: "example.ts" }],
+            type: "exploration",
+        };
+        const result: ToolResultPresentation = {
+            operations: [{ kind: "read", name: "example.ts" }],
+            type: "exploration",
+        };
+
+        // A finished exploration must not become a command row. The reader is
+        // already looking at the exploration the call announced.
+        expect(projectToolPresentation(call, result)).toEqual({
+            kind: "exploration",
+            steps: [{ kind: "read", name: "example.ts" }],
+        });
+    });
+
     it("keeps the command of a search that named neither query nor path", () => {
         const call: ToolCallPresentation = {
             operations: [{ command: "rg --files", kind: "search" }],

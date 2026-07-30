@@ -12,7 +12,7 @@ import {
     shellToolOutputSchema,
     summarizeShellOutput,
 } from "../../../tools/utils/index.js";
-import { parseShellExplorationPresentation } from "../../../tools/utils/parseShellExplorationPresentation.js";
+import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
 
 export const claudeBashTool = defineTool({
     name: "Bash",
@@ -104,18 +104,24 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
         return runShellCommand(command, options, context);
     },
     toCallPresentation: ({ command, run_in_background }) =>
-        (run_in_background === true ? undefined : parseShellExplorationPresentation(command)) ?? {
+        shellExplorationPresentation({ background: run_in_background === true, command }) ?? {
             command,
             type: "exec_command",
         },
-    toPresentation: (result, { command }) => {
+    toPresentation: (result, { command, run_in_background }) => {
         const sessionId = parseOptionalTerminalSessionId(result.backgroundTaskId);
-        return {
-            command,
-            output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
-            ...(sessionId === undefined ? {} : { sessionId }),
-            type: "exec_command",
-        };
+        return (
+            shellExplorationPresentation({
+                background: run_in_background === true,
+                command,
+                ...(sessionId === undefined ? {} : { sessionId }),
+            }) ?? {
+                command,
+                output: [result.stdout, result.stderr].filter(Boolean).join("\n"),
+                ...(sessionId === undefined ? {} : { sessionId }),
+                type: "exec_command",
+            }
+        );
     },
     toLLM: shellOutputToText,
     toUI: (result) => summarizeShellOutput(result),

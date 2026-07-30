@@ -188,6 +188,7 @@ export interface ExecCommandResultPresentation {
 export type ToolResultPresentation =
     | BackgroundTerminalInteractionPresentation
     | ExecCommandResultPresentation
+    | ExplorationToolCallPresentation
     | FileDiffToolResultPresentation;
 
 export type AgentBlock = ContentBlock | ThinkingBlock | ToolCallBlock | ToolResultBlock;

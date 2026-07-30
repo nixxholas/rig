@@ -9,7 +9,7 @@ import {
     unifiedExecOutputSchema,
 } from "./impl/unifiedExecOutput.js";
 import { readSessionWithProgress } from "../../../tools/utils/readSessionWithProgress.js";
-import { parseShellExplorationPresentation } from "../../../tools/utils/parseShellExplorationPresentation.js";
+import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
 
 export const codexExecCommandTool = defineTool({
     name: "exec_command",
@@ -147,18 +147,22 @@ export const codexExecCommandTool = defineTool({
         );
     },
     toCallPresentation: ({ cmd }) =>
-        parseShellExplorationPresentation(cmd) ?? {
+        shellExplorationPresentation({ command: cmd }) ?? {
             command: cmd,
             type: "exec_command",
         },
     isError: (result) => result.exit_code !== undefined && result.exit_code !== 0,
     toLLM: (result) => [{ type: "text", text: formatUnifiedExecOutput(result) }],
-    toPresentation: (result) => ({
-        command: result.command ?? "",
-        output: result.output,
-        ...(result.session_id === undefined ? {} : { sessionId: result.session_id }),
-        type: "exec_command",
-    }),
+    toPresentation: (result, { cmd }) =>
+        shellExplorationPresentation({
+            command: cmd,
+            ...(result.session_id === undefined ? {} : { sessionId: result.session_id }),
+        }) ?? {
+            command: result.command ?? "",
+            output: result.output,
+            ...(result.session_id === undefined ? {} : { sessionId: result.session_id }),
+            type: "exec_command",
+        },
     toUI: (result) => {
         const summary = summarizeTextOutput(result.output, "");
         if (result.exit_code !== undefined && result.exit_code !== 0) {
