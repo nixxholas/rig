@@ -18,6 +18,8 @@ InMemorySession ----> createAbortRequestKey          identity for a pending abor
 
 SessionEventLog -----> affectsSessionUsage           does this event move usage
 isLiveOnlySessionEvent -> isTransientInferenceSessionEvent
+InMemorySessionStore ----\
+PersistentSessionStore ---> sessionOrderKeyForCreation  sidebar position at create
 
 latestObservedProviderQuotas  most recent quota per provider from an event list
 ```

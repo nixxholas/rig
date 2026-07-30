@@ -45,6 +45,7 @@ import {
     openSessionDatabase,
     type SessionDatabase,
 } from "../persistence/database/openSessionDatabase.js";
+import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -327,12 +328,9 @@ export class InMemorySessionStore implements SessionStore {
             ...(contextMessages !== undefined ? { initialContextMessages: contextMessages } : {}),
             ...(id === undefined ? {} : { id }),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
-            // A subagent belongs to the session that started it, not to the
-            // sidebar. Giving it a position would put it in a list it is not in.
-            orderKey:
-                metadata?.type === "subagent"
-                    ? ""
-                    : this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
+            orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
+                this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
+            ),
             projectId: ownership.project.id,
             projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,

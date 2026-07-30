@@ -108,6 +108,7 @@ import { querySessionTranscriptPage } from "../persistence/session/querySessionT
 import { querySessionTranscriptSince } from "../persistence/session/querySessionTranscriptSince.js";
 import { querySubagentSessionIdsByRoot } from "../persistence/session/querySubagentSessionIdsByRoot.js";
 import { querySubagentSummaries } from "../persistence/session/querySubagentSummaries.js";
+import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 import { queryTerminalRunEvent } from "../persistence/session/queryTerminalRunEvent.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
@@ -487,13 +488,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : {}),
                 ...(id === undefined ? {} : { id }),
                 onAppendEvent: (event) => this.#appendEvent(event),
-                orderKey:
-                    inherited === undefined
-                        ? this.#newLastSessionOrderKey(
-                              ownership.project.id,
-                              ownership.workspace?.id,
-                          )
-                        : generateKeyBetween(null, null),
+                orderKey: sessionOrderKeyForCreation(metadata?.type, () =>
+                    this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
+                ),
                 persistence: this,
                 projectId: ownership.project.id,
                 projectSecretIds: this.#projectSecrets(ownership.project.id),
