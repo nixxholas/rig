@@ -176,7 +176,7 @@ import { stat } from "node:fs/promises";
 import { DatabaseSync } from "node:sqlite";
 
 import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js";
-import { PersistentSessionStore } from "/app/packages/rig/dist/server/index.js";
+import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";
 
 const databasePath = "/home/rig/.rig/sessions.sqlite";
 const semanticMessageCount = requiredEvenCount("HEAVY_SEMANTIC_MESSAGES");

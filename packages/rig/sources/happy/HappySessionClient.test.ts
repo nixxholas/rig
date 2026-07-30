@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import tweetnacl from "tweetnacl";
 
 import { createSessionDatabaseFixture } from "../persistence/database/test/createSessionDatabaseFixture.js";
-import type { InMemorySession } from "../server/InMemorySession.js";
+import type { InMemorySession } from "../session/InMemorySession.js";
 import { decryptHappyPayload, encryptHappyPayload } from "./happyEncryption.js";
 import { HappySessionClient } from "./HappySessionClient.js";
 import { HappySyncRepository } from "./HappySyncRepository.js";

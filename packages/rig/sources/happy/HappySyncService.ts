@@ -7,7 +7,7 @@ import type {
     SubagentSummary,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import type { InMemorySession } from "../server/InMemorySession.js";
+import type { InMemorySession } from "../session/InMemorySession.js";
 import { HappyMachineClient } from "./HappyMachineClient.js";
 import { HappySessionClient, type HappySessionClientOptions } from "./HappySessionClient.js";
 import { HappySyncOutboxFullError, HappySyncRepository } from "./HappySyncRepository.js";

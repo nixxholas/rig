@@ -8,7 +8,7 @@ import type {
     SubagentSummary,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import type { InMemorySession } from "../server/InMemorySession.js";
+import type { InMemorySession } from "../session/InMemorySession.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
 import { createHappySessionMetadata } from "./createHappySessionMetadata.js";

@@ -1,4 +1,4 @@
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 
 export type HttpProxySessionResolution =
     | { allowed: true }

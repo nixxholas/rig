@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { InMemorySessionStore } from "../../server/InMemorySessionStore.js";
+import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
 import { claudeTaskCreateTool } from "../../agent/tools/claude/TaskCreate.js";
 import { claudeTaskGetTool } from "../../agent/tools/claude/TaskGet.js";

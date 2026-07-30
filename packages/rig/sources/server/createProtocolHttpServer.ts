@@ -83,21 +83,21 @@ import { createEventIdFactory, RIG_PROTOCOL_VERSION } from "../protocol/index.js
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
-import { InMemorySessionStore } from "./InMemorySessionStore.js";
-import type { SessionUsageSummary } from "./sessionUsage/index.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
+import type { SessionUsageSummary } from "../session/usage/index.js";
 import { createModelCatalog } from "./createModelCatalog.js";
 import { FileSearchService, type FileSearchServiceContract } from "./FileSearchService.js";
-import type { SessionEventLog } from "./SessionEventLog.js";
-import { isLiveOnlySessionEvent } from "./isLiveOnlySessionEvent.js";
+import type { SessionEventLog } from "../session/SessionEventLog.js";
+import { isLiveOnlySessionEvent } from "../session/isLiveOnlySessionEvent.js";
 import { isSubmitMessageRequest } from "./isSubmitMessageRequest.js";
 import { limitProtocolSessionMessages } from "./limitProtocolSessionMessages.js";
 import type { GlobalStreamHello } from "../protocol/index.js";
 import type { GlobalEventQueue } from "./GlobalEventQueue.js";
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 import { isGlobalEventRoute } from "./isGlobalEventRoute.js";
 import { parseGlobalEventCursor } from "./parseGlobalEventCursor.js";
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
-import { selectRecentSessionEvents } from "./selectRecentSessionEvents.js";
+import { selectRecentSessionEvents } from "../session/selectRecentSessionEvents.js";
 import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
@@ -107,12 +107,12 @@ import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
 import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permissions/index.js";
 import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
-import { configureSessionRequest } from "./configureSessionRequest.js";
+import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import {
     DEFAULT_CODEX_STREAM_MAX_RETRIES,
     MAX_CODEX_STREAM_MAX_RETRIES,
 } from "../config/codexStreamRetrySettings.js";
-import { SessionConfigurationError } from "./SessionConfigurationError.js";
+import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
 import type { TaskDrain } from "./TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 import type { SecretRegistration } from "../secrets/index.js";
@@ -125,8 +125,8 @@ import type {
 } from "../terminal/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
-import { SessionTerminalTracker } from "./SessionTerminalTracker.js";
-import { sessionSummaryWithTerminalPresence } from "./sessionSummaryWithTerminalPresence.js";
+import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
+import { sessionSummaryWithTerminalPresence } from "../session/sessionSummaryWithTerminalPresence.js";
 import { attachHttpConnectProxy } from "./attachHttpConnectProxy.js";
 import {
     readSessionFile,

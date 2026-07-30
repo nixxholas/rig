@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
-import type { PersistedSessionMessage } from "../../server/InMemorySession.js";
+import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
 import type { TX } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "./impl/sqliteRow.js";
 

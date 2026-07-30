@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
-import { configureSessionRequest } from "./configureSessionRequest.js";
+import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import {
     createDaemonStartupRequestListener,
     type DaemonStartupState,
@@ -16,7 +16,7 @@ import { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyInte
 import { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
 import { publishGitLiveEvent } from "./publishGitLiveEvent.js";
 import { prepareLocalServerDirectory } from "./prepareLocalServerDirectory.js";
-import { PersistentSessionStore } from "./PersistentSessionStore.js";
+import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { TrackedTaskDrain } from "./TrackedTaskDrain.js";
 import { readLocalServerToken } from "./readLocalServerToken.js";
 import { removeStaleSocket } from "./removeStaleSocket.js";

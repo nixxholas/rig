@@ -19,7 +19,7 @@ import type {
     PersistedQueuedRun,
     PersistedSessionState,
     PersistedWorkflowRun,
-} from "../../server/InMemorySession.js";
+} from "../../session/InMemorySession.js";
 import type { TX } from "../Transaction.js";
 import { parsePersistedUsage } from "./impl/persistedUsage.js";
 import {

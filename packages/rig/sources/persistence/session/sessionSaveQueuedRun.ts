@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 
 import { queuedRuns } from "../database/schema.js";
-import type { PersistedQueuedRun } from "../../server/InMemorySession.js";
+import type { PersistedQueuedRun } from "../../session/InMemorySession.js";
 import type { TX } from "../Transaction.js";
 
 export function sessionSaveQueuedRun(

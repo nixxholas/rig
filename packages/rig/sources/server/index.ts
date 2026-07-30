@@ -1,12 +1,6 @@
-export { InMemorySession } from "./InMemorySession.js";
-export { InMemorySessionStore, type InMemorySessionStoreOptions } from "./InMemorySessionStore.js";
 export { getLocalServerPaths, type LocalServerPaths } from "./LocalServerPaths.js";
 export { getEnvironmentLocalServerPaths } from "./getEnvironmentLocalServerPaths.js";
 export { loadHappyIntegration, type HappyIntegrationMode } from "./loadHappyIntegration.js";
-export {
-    PersistentSessionStore,
-    type PersistentSessionStoreOptions,
-} from "./PersistentSessionStore.js";
 export { SecretRegistry } from "../secrets/index.js";
 export type {
     RigSecret,
@@ -20,7 +14,6 @@ export type {
     GlobalEventQueueListener,
     ListGlobalEventQueueOptions,
 } from "./GlobalEventQueue.js";
-export { SessionEventLog, type SessionEventListener } from "./SessionEventLog.js";
 export { TrackedTaskDrain, type TaskDrain } from "./TrackedTaskDrain.js";
 export { getDefaultSessionDatabasePath } from "./getDefaultSessionDatabasePath.js";
 export { createModelCatalog, type CreateModelCatalogOptions } from "./createModelCatalog.js";

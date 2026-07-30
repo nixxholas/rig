@@ -2,7 +2,7 @@ import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionStore.js";
+import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
 import { streamLiveEvents, type LiveStreamHello } from "@/streamLiveEvents.js";
 import type { GlobalEvent } from "@/protocol.js";

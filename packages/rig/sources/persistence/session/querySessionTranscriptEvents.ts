@@ -1,7 +1,7 @@
 import { sql, type SQL } from "drizzle-orm";
 
 import type { SessionEvent } from "../../protocol/index.js";
-import type { PersistedSessionMessage } from "../../server/InMemorySession.js";
+import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
 import type { TX } from "../Transaction.js";
 import { readSessionEventRow } from "./impl/sessionEventRow.js";
 

@@ -5,7 +5,7 @@ import type { Duplex } from "node:stream";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { proxyHttpRequest } from "./proxyHttpRequest.js";
 import { resolveHttpProxySession } from "./resolveHttpProxySession.js";
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 
 export function attachHttpConnectProxy(server: Server, token: string, store: SessionStore): void {
     const tunnels = new Set<Duplex>();

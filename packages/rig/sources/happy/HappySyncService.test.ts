@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { ModelCatalog } from "../protocol/index.js";
-import { PersistentSessionStore } from "../server/PersistentSessionStore.js";
+import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { createHappySpawnSessionId } from "./createHappySpawnSessionId.js";
 import { decryptHappyPayload, encryptHappyPayload } from "./happyEncryption.js";
 import { HappySyncService } from "./HappySyncService.js";

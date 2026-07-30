@@ -14,8 +14,8 @@ import type {
     PermissionReviewTranscript,
     PermissionReviewTranscriptEntry,
 } from "./PermissionReviewAgent.js";
-import { addUsage } from "../server/sessionUsage/addUsage.js";
-import { zeroUsage } from "../server/sessionUsage/zeroUsage.js";
+import { addUsage } from "../session/usage/addUsage.js";
+import { zeroUsage } from "../session/usage/zeroUsage.js";
 
 /**
  * Builds the sister agent that reviews Auto permission decisions.

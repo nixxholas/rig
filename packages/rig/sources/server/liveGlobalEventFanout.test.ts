@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { InMemorySessionStore } from "./InMemorySessionStore.js";
-import { PersistentSessionStore } from "./PersistentSessionStore.js";
-import type { SessionStore } from "./SessionStore.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
+import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 import type { GlobalEvent } from "../protocol/index.js";
 
 /**

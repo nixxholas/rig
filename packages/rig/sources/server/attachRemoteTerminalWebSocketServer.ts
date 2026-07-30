@@ -6,7 +6,7 @@ import { WebSocketServer } from "ws";
 import { WebSocketDuplex } from "../terminal/WebSocketDuplex.js";
 import { createNodeBinaryWebSocket } from "../terminal/createNodeBinaryWebSocket.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 
 const MAX_WIRE_MESSAGE_BYTES = 4 * 1024 * 1024 + 20;
 

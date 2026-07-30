@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { GlobalStreamHello } from "../protocol/index.js";
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
-import { InMemorySessionStore } from "./InMemorySessionStore.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 
 const cleanups: (() => Promise<void>)[] = [];
 

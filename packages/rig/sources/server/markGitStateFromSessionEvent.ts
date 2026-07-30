@@ -1,7 +1,7 @@
 import type { SessionEvent } from "../protocol/index.js";
 import type { GitStateTracker } from "./GitStateTracker.js";
 import { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
-import type { SessionStore } from "./SessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 
 /**
  * Marks a session's project or workspace as possibly changed when the agent does work.

@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { SessionEvent } from "../protocol/index.js";
 import { GitStateTracker, type GitTrackedEntity } from "./GitStateTracker.js";
-import { InMemorySessionStore } from "./InMemorySessionStore.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
 
 const execFile = promisify(execFileCallback);

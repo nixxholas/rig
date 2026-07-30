@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { GitStateTracker } from "./GitStateTracker.js";
-import { InMemorySessionStore } from "./InMemorySessionStore.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 
 const execFile = promisify(execFileCallback);
 const cleanups: (() => Promise<void>)[] = [];

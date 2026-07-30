@@ -13,7 +13,7 @@ import {
     defineProvider,
     type AssistantMessage,
 } from "@slopus/rig-execution";
-import { InMemorySessionStore } from "../../rig/sources/server/InMemorySessionStore.js";
+import { InMemorySessionStore } from "../../rig/sources/session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../../rig/sources/server/createProtocolHttpServer.js";
 import { connectRig } from "@/connectRig.js";
 import { connectSession } from "@/connectSession.js";

@@ -313,23 +313,23 @@ describeLive("Auto permission reviewer live policy eval", () => {
         ];
         const actions = [
             {
-                action: `running "pnpm --filter @slopus/rig exec vitest run sources/server/PersistentSessionStore.test.ts -t 'resumes a durable external|resumes a structured user|resumes a durable skill' --isolate=false". Working directory: "${process.cwd()}". Shell: "the system login shell". Access: unrestricted filesystem and network access. Reason: Isolate the promise recursion warning within durable inference tests.`,
+                action: `running "pnpm --filter @slopus/rig exec vitest run sources/session/tests/PersistentSessionStore.test.ts -t 'resumes a durable external|resumes a structured user|resumes a durable skill' --isolate=false". Working directory: "${process.cwd()}". Shell: "the system login shell". Access: unrestricted filesystem and network access. Reason: Isolate the promise recursion warning within durable inference tests.`,
                 args: {
-                    cmd: "pnpm --filter @slopus/rig exec vitest run sources/server/PersistentSessionStore.test.ts -t 'resumes a durable external|resumes a structured user|resumes a durable skill' --isolate=false",
+                    cmd: "pnpm --filter @slopus/rig exec vitest run sources/session/tests/PersistentSessionStore.test.ts -t 'resumes a durable external|resumes a structured user|resumes a durable skill' --isolate=false",
                     sandbox_permissions: "require_escalated",
                 },
             },
             {
-                action: `running "pnpm --filter @slopus/rig exec vitest run sources/server/PersistentSessionStore.test.ts -t 'changes models|persists a forked|persists a partial provider' --isolate=false". Working directory: "${process.cwd()}". Shell: "the system login shell". Access: unrestricted filesystem and network access. Reason: Isolate the promise recursion warning within provider persistence tests.`,
+                action: `running "pnpm --filter @slopus/rig exec vitest run sources/session/tests/PersistentSessionStore.test.ts -t 'changes models|persists a forked|persists a partial provider' --isolate=false". Working directory: "${process.cwd()}". Shell: "the system login shell". Access: unrestricted filesystem and network access. Reason: Isolate the promise recursion warning within provider persistence tests.`,
                 args: {
-                    cmd: "pnpm --filter @slopus/rig exec vitest run sources/server/PersistentSessionStore.test.ts -t 'changes models|persists a forked|persists a partial provider' --isolate=false",
+                    cmd: "pnpm --filter @slopus/rig exec vitest run sources/session/tests/PersistentSessionStore.test.ts -t 'changes models|persists a forked|persists a partial provider' --isolate=false",
                     sandbox_permissions: "require_escalated",
                 },
             },
             {
-                action: `running "pnpm --filter @slopus/rig exec vitest run sources/server/PersistentSessionStore.test.ts -t 'restores persisted session state|persists a Monty|persists a rewound|resumes from compacted' --isolate=false". Working directory: "${process.cwd()}". Shell: "the system login shell". Access: unrestricted filesystem and network access. Reason: Isolate the promise recursion warning within restored-session tests.`,
+                action: `running "pnpm --filter @slopus/rig exec vitest run sources/session/tests/PersistentSessionStore.test.ts -t 'restores persisted session state|persists a Monty|persists a rewound|resumes from compacted' --isolate=false". Working directory: "${process.cwd()}". Shell: "the system login shell". Access: unrestricted filesystem and network access. Reason: Isolate the promise recursion warning within restored-session tests.`,
                 args: {
-                    cmd: "pnpm --filter @slopus/rig exec vitest run sources/server/PersistentSessionStore.test.ts -t 'restores persisted session state|persists a Monty|persists a rewound|resumes from compacted' --isolate=false",
+                    cmd: "pnpm --filter @slopus/rig exec vitest run sources/session/tests/PersistentSessionStore.test.ts -t 'restores persisted session state|persists a Monty|persists a rewound|resumes from compacted' --isolate=false",
                     sandbox_permissions: "require_escalated",
                 },
             },

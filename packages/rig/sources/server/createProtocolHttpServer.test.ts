@@ -17,10 +17,10 @@ import {
     type SessionSummary,
 } from "../protocol/index.js";
 import { modelOpenaiGpt55, modelOpenaiGpt56Sol } from "@slopus/rig-execution";
-import { InMemorySessionStore } from "./InMemorySessionStore.js";
-import type { PersistedSessionState } from "./InMemorySession.js";
-import { PersistentSessionStore } from "./PersistentSessionStore.js";
-import type { SessionStore } from "./SessionStore.js";
+import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
+import type { PersistedSessionState } from "../session/InMemorySession.js";
+import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
+import type { SessionStore } from "../session/SessionStore.js";
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import type { FileSearchServiceContract } from "./FileSearchService.js";
 import type { DockerExecutionConfig } from "../execution/index.js";

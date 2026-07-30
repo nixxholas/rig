@@ -133,7 +133,7 @@ import type { TerminalTheme } from "./TerminalTheme.js";
 import type { StartupStatusCardModel } from "./StartupStatusCardModel.js";
 import { SecretMenuController } from "./SecretMenuController.js";
 import { TemporaryFullscreenController } from "./TemporaryFullscreenController.js";
-import { updateSessionTokenCount } from "../sessionTokenCount/updateSessionTokenCount.js";
+import { updateSessionTokenCount } from "../session/usage/updateSessionTokenCount.js";
 import { renderFullscreenComponent } from "./renderFullscreenComponent.js";
 
 const RESET = "\x1b[0m";

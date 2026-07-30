@@ -1,8 +1,8 @@
 import type { Usage } from "@slopus/rig-execution";
 
 import type { EventId } from "../../../protocol/index.js";
-import type { PersistedSessionState } from "../../../server/InMemorySession.js";
-import type { SessionUsageSummary } from "../../../server/sessionUsage/index.js";
+import type { PersistedSessionState } from "../../../session/InMemorySession.js";
+import type { SessionUsageSummary } from "../../../session/usage/index.js";
 
 export interface PersistedUsageEnvelope {
     committed: Usage;

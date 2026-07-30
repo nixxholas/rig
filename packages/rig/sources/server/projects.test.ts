@@ -12,7 +12,7 @@ import { migrateSessionDatabase } from "../persistence/database/migrateSessionDa
 import { openSessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import { projects, projectWorkspaces } from "../persistence/database/schema.js";
 import { PersistentGlobalEventQueue } from "./PersistentGlobalEventQueue.js";
-import { PersistentSessionStore } from "./PersistentSessionStore.js";
+import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
 import { ProjectRepository, type ProjectGitRunner } from "./ProjectRepository.js";
 
 const execFile = promisify(execFileCallback);

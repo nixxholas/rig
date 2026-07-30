@@ -2,7 +2,7 @@ import { and, eq, gte, sql } from "drizzle-orm";
 
 import type { Message } from "../../agent/types.js";
 import { sessionContextMessages, sessions } from "../database/schema.js";
-import type { PersistedSessionState } from "../../server/InMemorySession.js";
+import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 
