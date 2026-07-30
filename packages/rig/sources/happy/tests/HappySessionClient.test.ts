@@ -16,6 +16,7 @@ import type { HappyConnectionConfiguration, HappyRemoteMessage } from "../types.
 const directories: string[] = [];
 
 afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(
         directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
     );
@@ -419,6 +420,238 @@ describe("HappySessionClient", () => {
         repository.close();
     });
 
+    it("publishes a pending question to Happy and applies the answer that comes back", async () => {
+        let now = 1_000;
+        vi.spyOn(Date, "now").mockImplementation(() => now);
+        const { repository } = await createRepository();
+        const sessionKey = new Uint8Array(32).fill(7);
+        const account = tweetnacl.box.keyPair.fromSecretKey(new Uint8Array(32).fill(9));
+        repository.ensureSession({
+            credentialFingerprint: "account",
+            encryptionKey: sessionKey,
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        const harness = fakeSession([]);
+        const socket = new FakeSocket();
+        const request = vi.fn<typeof fetch>(async (input, init) => {
+            const url = String(input);
+            if (url.endsWith("/v1/sessions")) {
+                const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+                return Response.json({
+                    session: {
+                        agentStateVersion: 0,
+                        id: "remote-1",
+                        metadata: body.metadata,
+                        metadataVersion: 0,
+                    },
+                });
+            }
+            return Response.json({ hasMore: false, messages: [] });
+        });
+        const client = new HappySessionClient({
+            configuration: configuration(account.publicKey),
+            fetch: request,
+            repository,
+            session: harness.session,
+            socketFactory: () => socket,
+        });
+        client.start();
+        await waitFor(() => socket.emitted.some(([event]) => event === "session-alive"));
+
+        // Nothing is asked yet, so Happy should not have been told about any
+        // pending permission request.
+        expect(socket.emitted.some(([event]) => event === "update-state")).toBe(false);
+
+        harness.snapshot.pendingUserInputs = [
+            {
+                questions: [
+                    {
+                        header: "Storage",
+                        id: "question_1",
+                        multiSelect: false,
+                        options: [
+                            { description: "Sync everywhere", label: "In settings" },
+                            { description: "Device only", label: "Locally" },
+                        ],
+                        question: "Where should the order live?",
+                    },
+                ],
+                requestId: "call-1",
+            },
+        ];
+        client.kick();
+        await waitFor(() => socket.emitted.some(([event]) => event === "update-state"));
+
+        const published = socket.emitted.find(([event]) => event === "update-state")?.[1] as any;
+        const pendingState = decryptHappyPayload(
+            sessionKey,
+            "dataKey",
+            Buffer.from(published.agentState, "base64"),
+        ) as any;
+        expect(pendingState).toMatchObject({
+            requests: {
+                "call-1": {
+                    arguments: {
+                        questions: [
+                            expect.objectContaining({ question: "Where should the order live?" }),
+                        ],
+                    },
+                    createdAt: 1_000,
+                    tool: "AskUserQuestion",
+                },
+            },
+        });
+
+        now = 2_000;
+        const aliveCount = socket.emitted.filter(([event]) => event === "session-alive").length;
+        client.kick();
+        await waitFor(
+            () => socket.emitted.filter(([event]) => event === "session-alive").length > aliveCount,
+        );
+        expect(socket.emitted.filter(([event]) => event === "update-state")).toHaveLength(1);
+
+        // Happy answers through the permission channel, keyed by question text.
+        now = 3_000;
+        const rpcResponse = await socket.requestRpc({
+            method: "remote-1:permission",
+            params: encodeRemote(sessionKey, {
+                approved: true,
+                decision: "approved",
+                id: "call-1",
+                updatedInput: { answers: { "Where should the order live?": "Locally" } },
+            }),
+        });
+        expect(
+            decryptHappyPayload(sessionKey, "dataKey", Buffer.from(rpcResponse, "base64")),
+        ).toEqual({ success: true });
+        expect(harness.answeredUserInputs).toEqual([
+            { requestId: "call-1", response: { answers: { question_1: ["Locally"] } } },
+        ]);
+        await waitFor(
+            () => socket.emitted.filter(([event]) => event === "update-state").length === 2,
+        );
+        const completed = socket.emitted.filter(([event]) => event === "update-state")[1]?.[1];
+        expect(
+            decryptHappyPayload(sessionKey, "dataKey", Buffer.from(completed.agentState, "base64")),
+        ).toMatchObject({
+            completedRequests: {
+                "call-1": {
+                    completedAt: 3_000,
+                    createdAt: 1_000,
+                    status: "approved",
+                    tool: "AskUserQuestion",
+                },
+            },
+        });
+
+        now = 4_000;
+        harness.snapshot.pendingUserInputs = [
+            {
+                questions: [
+                    {
+                        header: "Branch",
+                        id: "question_2",
+                        multiSelect: false,
+                        options: [{ description: "Keep going", label: "Continue" }],
+                        question: "Continue this run?",
+                    },
+                ],
+                requestId: "call-2",
+            },
+        ];
+        client.kick();
+        await waitFor(
+            () => socket.emitted.filter(([event]) => event === "update-state").length === 3,
+        );
+
+        now = 5_000;
+        const deniedResponse = await socket.requestRpc({
+            method: "remote-1:permission",
+            params: encodeRemote(sessionKey, {
+                approved: false,
+                decision: "denied",
+                id: "call-2",
+            }),
+        });
+        expect(
+            decryptHappyPayload(sessionKey, "dataKey", Buffer.from(deniedResponse, "base64")),
+        ).toEqual({ success: true });
+        expect(harness.abortCalls).toBe(1);
+        expect(harness.snapshot.pendingUserInputs).toEqual([]);
+        await waitFor(
+            () => socket.emitted.filter(([event]) => event === "update-state").length === 4,
+        );
+        const cancelled = socket.emitted.filter(([event]) => event === "update-state")[3]?.[1];
+        expect(
+            decryptHappyPayload(sessionKey, "dataKey", Buffer.from(cancelled.agentState, "base64")),
+        ).toMatchObject({
+            completedRequests: {
+                "call-2": {
+                    completedAt: 5_000,
+                    createdAt: 4_000,
+                    status: "canceled",
+                },
+            },
+        });
+
+        await client.close();
+        repository.close();
+    });
+
+    it("clears stale agent state when reconnecting an existing Happy session", async () => {
+        const { repository } = await createRepository();
+        const sessionKey = new Uint8Array(32).fill(7);
+        const account = tweetnacl.box.keyPair.fromSecretKey(new Uint8Array(32).fill(9));
+        repository.ensureSession({
+            credentialFingerprint: "account",
+            encryptionKey: sessionKey,
+            encryptionVariant: "dataKey",
+            sessionId: "session-1",
+        });
+        const socket = new FakeSocket();
+        const request = vi.fn<typeof fetch>(async (input) => {
+            if (String(input).endsWith("/v1/sessions")) {
+                return Response.json({
+                    session: {
+                        agentState: encodeRemote(sessionKey, {
+                            completedRequests: {},
+                            requests: {
+                                stale: {
+                                    arguments: { questions: [] },
+                                    createdAt: 1,
+                                    tool: "AskUserQuestion",
+                                },
+                            },
+                        }),
+                        agentStateVersion: 7,
+                        id: "remote-1",
+                        metadataVersion: 0,
+                    },
+                });
+            }
+            return Response.json({ hasMore: false, messages: [] });
+        });
+        const client = new HappySessionClient({
+            configuration: configuration(account.publicKey),
+            fetch: request,
+            repository,
+            session: fakeSession([]).session,
+            socketFactory: () => socket,
+        });
+        client.start();
+
+        await waitFor(() => socket.emitted.some(([event]) => event === "update-state"));
+        expect(socket.emitted.find(([event]) => event === "update-state")?.[1]).toMatchObject({
+            agentState: null,
+            expectedVersion: 7,
+            sid: "remote-1",
+        });
+
+        await client.close();
+        repository.close();
+    });
+
     it("retries a versioned metadata update after a concurrent Happy update", async () => {
         const { repository } = await createRepository();
         const sessionKey = new Uint8Array(32).fill(7);
@@ -511,7 +744,7 @@ class FakeSocket {
         const callback = values.find((candidate) => typeof candidate === "function") as
             | ((answer: unknown) => void)
             | undefined;
-        if (event === "update-metadata" && callback) {
+        if ((event === "update-metadata" || event === "update-state") && callback) {
             callback(this.metadataAnswer(value));
         }
     }
@@ -528,11 +761,13 @@ class FakeSocket {
 function fakeSession(submitted: unknown[]): {
     activity: any;
     abortCalls: number;
+    answeredUserInputs: { requestId: string; response: unknown }[];
     changedModels: unknown[];
     changedPermissionModes: string[];
     session: InMemorySession;
     snapshot: any;
 } {
+    const answeredUserInputs: { requestId: string; response: unknown }[] = [];
     const submittedIds = new Set<string>();
     const changedModels: unknown[] = [];
     const changedPermissionModes: string[] = [];
@@ -554,6 +789,7 @@ function fakeSession(submitted: unknown[]): {
                 thinkingLevels: ["low", "high"],
             },
         ],
+        pendingUserInputs: [],
         permissionMode: "auto",
         providerId: "codex",
         skills: [],
@@ -568,12 +804,14 @@ function fakeSession(submitted: unknown[]): {
             return abortCalls;
         },
         activity,
+        answeredUserInputs,
         changedModels,
         changedPermissionModes,
         session: {
             activity: () => structuredClone(activity),
             abort: async () => {
                 abortCalls += 1;
+                snapshot.pendingUserInputs = [];
                 return { aborted: true };
             },
             changeEffort: ({ effort }: { effort: string }) => {
@@ -599,6 +837,28 @@ function fakeSession(submitted: unknown[]): {
                         data: { message: { id } },
                         type: "message_submitted",
                     })),
+            },
+            answerUserInput: (requestId: string, response: unknown) => {
+                const pending = snapshot.pendingUserInputs.find(
+                    (candidate: { requestId: string }) => candidate.requestId === requestId,
+                );
+                const answers = (response as { answers?: Record<string, unknown> }).answers ?? {};
+                for (const question of pending?.questions ?? []) {
+                    const selected = answers[question.id];
+                    if (
+                        question.required !== false &&
+                        (!Array.isArray(selected) || selected.length === 0)
+                    ) {
+                        throw new Error(
+                            `Answer the ${question.header} question before continuing.`,
+                        );
+                    }
+                }
+                answeredUserInputs.push({ requestId, response });
+                snapshot.pendingUserInputs = snapshot.pendingUserInputs.filter(
+                    (pending: { requestId: string }) => pending.requestId !== requestId,
+                );
+                return snapshot;
             },
             id: "session-1",
             snapshot: () => snapshot,

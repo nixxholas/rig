@@ -9,9 +9,17 @@ import type {
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { InMemorySession } from "../session/InMemorySession.js";
+import type { UserInputRequest } from "../user-input/index.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { isPermissionMode } from "../permissions/index.js";
+import {
+    createHappyAgentState,
+    rememberHappyResolvedRequest,
+    toHappyArguments,
+    type HappyResolvedRequest,
+} from "./createHappyAgentState.js";
 import { createHappySessionMetadata } from "./createHappySessionMetadata.js";
+import { resolveHappyUserInputAnswers } from "./resolveHappyUserInputAnswers.js";
 import { decryptHappyBlob } from "./decryptHappyBlob.js";
 import { HAPPY_SESSION_RPC_METHODS, handleHappySessionRpc } from "./handleHappySessionRpc.js";
 import { decryptHappyPayload, encryptHappyPayload, wrapHappyDataKey } from "./happyEncryption.js";
@@ -64,6 +72,12 @@ export class HappySessionClient {
     #closed = false;
     readonly #closeController = new AbortController();
     #needsAnotherSync = false;
+    #agentStateVersion: number | undefined;
+    // Sessions are created with a null agent state, so nothing needs publishing
+    // until a question actually arrives.
+    #lastAgentState: string | undefined = "null";
+    readonly #resolvedQuestions = new Map<string, HappyResolvedRequest>();
+    readonly #questionFirstSeen = new Map<string, number>();
     #lastMetadata: string | undefined;
     #metadataBase: Record<string, unknown> = {};
     #metadataVersion: number | undefined;
@@ -156,6 +170,7 @@ export class HappySessionClient {
                 await this.#fetchIncoming(state);
                 await this.#syncMetadata(state);
                 this.#sendKeepAlive(state.remoteSessionId!);
+                await this.#syncAgentState(state);
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
                 // Happy is optional. The durable outbox and periodic sync retain work for retry.
@@ -194,6 +209,12 @@ export class HappySessionClient {
         const remote = readRemoteSession(body);
         const remoteSessionId = remote.id;
         this.#metadataVersion = remote.metadataVersion;
+        this.#agentStateVersion = remote.agentStateVersion;
+        // Creating by tag may return an old session. A null or omitted state is
+        // already in sync; a non-null state must be reconciled with Rig's
+        // current pending questions, including clearing a stale prompt.
+        this.#lastAgentState =
+            remote.agentState === null || remote.agentState === undefined ? "null" : undefined;
         if (remote.metadata !== undefined) {
             const decoded = decodePayload(current, remote.metadata);
             if (isRecord(decoded)) this.#metadataBase = decoded;
@@ -443,6 +464,9 @@ export class HappySessionClient {
                 } else {
                     response = await handleHappySessionRpc({
                         abort: () => this.#session.abort(),
+                        answerQuestion: (requestId, answers) =>
+                            this.#answerQuestion(requestId, answers),
+                        cancelQuestion: (requestId) => this.#cancelQuestion(requestId),
                         context: () => this.#session.externalControlContext(),
                         method: request.method.slice(prefix.length),
                         params,
@@ -498,6 +522,124 @@ export class HappySessionClient {
             throw new Error("Happy rejected the metadata update.");
         }
         throw new Error("Happy metadata changed concurrently.");
+    }
+
+    /**
+     * Publishes Rig's pending questions as Happy permission requests. Happy has
+     * no other way to surface an interactive prompt, so without this a session
+     * that asks a question simply stalls with nothing on screen.
+     */
+    async #syncAgentState(state: HappySessionState): Promise<void> {
+        if (
+            this.#socket === undefined ||
+            this.#socket.connected === false ||
+            this.#agentStateVersion === undefined
+        ) {
+            return;
+        }
+        const pending = this.#session.snapshot().pendingUserInputs ?? [];
+        const pendingRequestIds = new Set(pending.map((request) => request.requestId));
+        for (const requestId of this.#questionFirstSeen.keys()) {
+            if (!pendingRequestIds.has(requestId)) this.#questionFirstSeen.delete(requestId);
+        }
+        const agentState = createHappyAgentState({
+            completed: this.#resolvedQuestions,
+            createdAt: (requestId) => this.#firstSeen(requestId),
+            pending,
+        });
+        const serialized = JSON.stringify(agentState);
+        if (serialized === this.#lastAgentState) return;
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+            const answer = await this.#emitWithAck("update-state", {
+                agentState: agentState === null ? null : encodePayload(state, agentState),
+                expectedVersion: this.#agentStateVersion,
+                sid: state.remoteSessionId,
+            });
+            if (!isRecord(answer)) {
+                throw new Error("Happy returned an invalid agent state response.");
+            }
+            if (answer.result === "success" && typeof answer.version === "number") {
+                this.#agentStateVersion = answer.version;
+                this.#lastAgentState = serialized;
+                return;
+            }
+            // Happy owns the version, not the contents: adopt the new version
+            // and republish, since Rig is the only writer of question state.
+            if (answer.result === "version-mismatch" && typeof answer.version === "number") {
+                this.#agentStateVersion = answer.version;
+                continue;
+            }
+            throw new Error("Happy rejected the agent state update.");
+        }
+        throw new Error("Happy agent state changed concurrently.");
+    }
+
+    /** First time this question was published, so its timestamp stays stable. */
+    #firstSeen(requestId: string): number {
+        const existing = this.#questionFirstSeen.get(requestId);
+        if (existing !== undefined) return existing;
+        const now = Date.now();
+        this.#questionFirstSeen.set(requestId, now);
+        return now;
+    }
+
+    #pendingQuestion(requestId: string): UserInputRequest | undefined {
+        return (this.#session.snapshot().pendingUserInputs ?? []).find(
+            (pending) => pending.requestId === requestId,
+        );
+    }
+
+    /**
+     * Applies an answer that arrived from Happy. `answerUserInput` validates the
+     * selection and throws on a malformed one, so the question is only recorded
+     * as completed once it has actually been accepted; otherwise the error goes
+     * back to Happy and the prompt stays on screen.
+     */
+    #answerQuestion(requestId: string, answers: Record<string, unknown>): void {
+        const request = this.#pendingQuestion(requestId);
+        if (request === undefined) return;
+        const createdAt = this.#firstSeen(requestId);
+        this.#session.answerUserInput(requestId, resolveHappyUserInputAnswers(request, answers));
+        rememberHappyResolvedRequest(this.#resolvedQuestions, requestId, {
+            arguments: toHappyArguments(request),
+            completedAt: Date.now(),
+            createdAt,
+            status: "approved",
+        });
+        this.#questionFirstSeen.delete(requestId);
+        this.kick();
+    }
+
+    /**
+     * Rig cannot decline a single question: a question is cancelled by aborting
+     * the run that asked it, which is what makes the waiting tool throw. So a
+     * denial from Happy aborts rather than inventing an empty answer, which
+     * `answerUserInput` would reject anyway.
+     */
+    async #cancelQuestion(requestId: string): Promise<void> {
+        const request = this.#pendingQuestion(requestId);
+        if (request === undefined) return;
+        const createdAt = this.#firstSeen(requestId);
+        const cancellation = this.#session.abort();
+        rememberHappyResolvedRequest(this.#resolvedQuestions, requestId, {
+            arguments: toHappyArguments(request),
+            completedAt: Date.now(),
+            createdAt,
+            status: "canceled",
+        });
+        try {
+            await cancellation;
+            if (this.#pendingQuestion(requestId) !== undefined) {
+                throw new Error("The pending question could not be cancelled.");
+            }
+        } catch (error) {
+            this.#resolvedQuestions.delete(requestId);
+            this.kick();
+            throw error;
+        }
+        this.#questionFirstSeen.delete(requestId);
+        this.kick();
     }
 
     #emitWithAck(event: string, value: unknown): Promise<unknown> {
@@ -614,6 +756,8 @@ function decodePayload(state: HappySessionState, value: string): unknown {
 }
 
 function readRemoteSession(value: unknown): {
+    agentState?: string | null;
+    agentStateVersion: number;
     id: string;
     metadata?: string;
     metadataVersion: number;
@@ -627,6 +771,13 @@ function readRemoteSession(value: unknown): {
         throw new Error("Happy returned an invalid session.");
     }
     return {
+        ...(typeof session.agentState === "string" || session.agentState === null
+            ? { agentState: session.agentState }
+            : {}),
+        // Older Happy servers omit the agent state version; starting at zero
+        // matches a session that has never published any state.
+        agentStateVersion:
+            typeof session.agentStateVersion === "number" ? session.agentStateVersion : 0,
         id: session.id,
         ...(typeof session.metadata === "string" ? { metadata: session.metadata } : {}),
         metadataVersion: session.metadataVersion,

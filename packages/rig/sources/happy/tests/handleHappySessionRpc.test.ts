@@ -27,11 +27,19 @@ describe("handleHappySessionRpc", () => {
             processManager: new NativeProcessManager(),
         });
         let abortCalls = 0;
+        const answered: { answers: Record<string, unknown>; requestId: string }[] = [];
+        const cancelled: string[] = [];
         const call = (method: string, params: unknown) =>
             handleHappySessionRpc({
                 abort: async () => {
                     abortCalls += 1;
                     return { aborted: true };
+                },
+                answerQuestion: (requestId, answers) => {
+                    answered.push({ answers, requestId });
+                },
+                cancelQuestion: (requestId) => {
+                    cancelled.push(requestId);
                 },
                 context: () => context,
                 method,
@@ -65,6 +73,25 @@ describe("handleHappySessionRpc", () => {
             success: true,
         });
 
+        await expect(
+            call("permission", {
+                approved: true,
+                decision: "approved",
+                id: "call-1",
+                updatedInput: { answers: { "Where to?": "Locally" } },
+            }),
+        ).resolves.toMatchObject({ success: true });
+        expect(answered).toEqual([{ answers: { "Where to?": "Locally" }, requestId: "call-1" }]);
+
+        await expect(
+            call("permission", { approved: false, decision: "denied", id: "call-2" }),
+        ).resolves.toMatchObject({ success: true });
+        expect(cancelled).toEqual(["call-2"]);
+
+        await expect(call("permission", { approved: true, id: "call-3" })).rejects.toThrow(
+            "Happy approved a question without any answers.",
+        );
+
         context.permissions?.setMode("read_only");
         await expect(
             call("writeFile", {
@@ -73,5 +100,36 @@ describe("handleHappySessionRpc", () => {
                 path: "note.txt",
             }),
         ).rejects.toThrow("File changes are disabled in read-only mode");
+    });
+
+    it("waits for a denied question to finish cancelling", async () => {
+        let finishCancellation = () => {};
+        let cancelled = false;
+        const cancellation = new Promise<void>((resolve) => {
+            finishCancellation = resolve;
+        });
+        const result = handleHappySessionRpc({
+            abort: async () => ({ aborted: true }),
+            answerQuestion: () => {},
+            cancelQuestion: async () => {
+                await cancellation;
+                cancelled = true;
+            },
+            context: () => {
+                throw new Error("The permission RPC does not need an agent context.");
+            },
+            method: "permission",
+            params: { approved: false, decision: "denied", id: "call-1" },
+        });
+        let settled = false;
+        void result.then(() => {
+            settled = true;
+        });
+
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        finishCancellation();
+        await expect(result).resolves.toEqual({ success: true });
+        expect(cancelled).toBe(true);
     });
 });
