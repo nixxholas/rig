@@ -1,6 +1,6 @@
-import { access, mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -159,7 +159,9 @@ describe("createLinuxBubblewrapCommand", () => {
 
         expect(result.command).toBe("/usr/bin/bwrap");
         expect(bindMode(result.args, "/")).toBe("--ro-bind");
-        expect(bindMode(result.args, root)).toBeUndefined();
+        expect(bindMode(result.args, root)).toBe(
+            isAtOrBelow(await realpath("/tmp"), root) ? "--ro-bind" : undefined,
+        );
         expect(result.args).toContain("--unshare-net");
         expect(result.args).toContain("--unshare-user");
         expect(result.args).toContain("--unshare-pid");
@@ -185,7 +187,10 @@ describe("createLinuxBubblewrapCommand", () => {
         });
 
         expect(bindMode(result.args, await realpath(temporaryDirectory))).toBe("--bind");
-        expect(bindMode(result.args, await realpath(cwd))).toBeUndefined();
+        const canonicalCwd = await realpath(cwd);
+        expect(bindMode(result.args, canonicalCwd)).toBe(
+            isAtOrBelow(await realpath("/tmp"), canonicalCwd) ? "--ro-bind" : undefined,
+        );
     });
 
     it("rebinds writable roots before protecting agent metadata and Rig control paths", async () => {
@@ -199,12 +204,13 @@ describe("createLinuxBubblewrapCommand", () => {
         const controlDirectory = join(temporaryDirectory, "rig-123");
         const tokenPath = join(controlDirectory, "token");
         await Promise.all([
-            mkdir(gitDirectory, { recursive: true }),
+            mkdir(join(gitDirectory, "info"), { recursive: true }),
             mkdir(agentsDirectory, { recursive: true }),
             mkdir(codexDirectory, { recursive: true }),
             mkdir(controlDirectory, { recursive: true }),
         ]);
         await writeFile(tokenPath, "secret\n");
+        await writeFile(join(gitDirectory, "info", "exclude"), "*.local\n");
         const canonicalCwd = await realpath(cwd);
         const canonicalTemporaryDirectory = await realpath(temporaryDirectory);
 
@@ -234,6 +240,18 @@ describe("createLinuxBubblewrapCommand", () => {
                 lastBindIndex(result.args, canonicalCwd),
             );
         }
+        expect(result.projectConfigPlaceholder?.gitExclude?.path).toBe(
+            join(await realpath(gitDirectory), "info", "exclude"),
+        );
+        expect(
+            mountIndex(
+                result.args,
+                "--ro-bind",
+                result.projectConfigPlaceholder!.gitExclude!.sourcePath,
+                join(await realpath(gitDirectory), "info", "exclude"),
+            ),
+        ).toBeGreaterThan(lastBindIndex(result.args, canonicalCwd));
+        await result.projectConfigPlaceholder?.close();
         expect(result.args.slice(-6)).toEqual([
             "--chdir",
             canonicalCwd,
@@ -269,12 +287,78 @@ describe("createLinuxBubblewrapCommand", () => {
         const projectConfigPath = join(canonicalCwd, "rig.toml");
         expect(result.protectedCreatePaths).not.toContain(projectConfigPath);
         expect(
-            mountIndex(result.args, "--ro-bind", projectConfigPath, projectConfigPath),
+            mountIndex(
+                result.args,
+                "--ro-bind",
+                result.projectConfigPlaceholder!.sourcePath,
+                projectConfigPath,
+            ),
         ).toBeGreaterThan(lastBindIndex(result.args, canonicalCwd));
         expect(result.projectConfigPlaceholder?.path).toBe(projectConfigPath);
         await expect(access(projectConfigPath)).resolves.toBeUndefined();
+        await expect(access(result.projectConfigPlaceholder!.sourcePath)).resolves.toBeUndefined();
         await result.projectConfigPlaceholder?.close();
         await expect(access(projectConfigPath)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("keeps caller-level config masks alive across concurrent command startup", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-concurrent-config-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "workspace");
+        const gitExcludePath = join(cwd, ".git", "info", "exclude");
+        await mkdir(join(cwd, ".git", "info"), { recursive: true });
+
+        const command = {
+            bwrapPath: "/usr/bin/bwrap",
+            command: "git status --short",
+            commandCwd: cwd,
+            cwd,
+            mode: "workspace_write" as const,
+            shell: "/bin/sh",
+            temporaryDirectory: join(root, "tmp"),
+        };
+        const [first, second] = await Promise.all([
+            createLinuxBubblewrapCommand(command),
+            createLinuxBubblewrapCommand(command),
+        ]);
+        const projectConfigPath = join(await realpath(cwd), "rig.toml");
+
+        expect(first.projectConfigPlaceholder).toBeDefined();
+        expect(second.projectConfigPlaceholder).toBeDefined();
+        expect(first.projectConfigPlaceholder!.sourcePath).not.toBe(
+            second.projectConfigPlaceholder!.sourcePath,
+        );
+        expect(first.projectConfigPlaceholder!.gitExclude?.sourcePath).not.toBe(
+            second.projectConfigPlaceholder!.gitExclude?.sourcePath,
+        );
+        await first.projectConfigPlaceholder!.close();
+        await expect(access(projectConfigPath)).resolves.toBeUndefined();
+        await expect(access(gitExcludePath)).resolves.toBeUndefined();
+        await second.projectConfigPlaceholder!.close();
+        await expect(access(projectConfigPath)).rejects.toMatchObject({ code: "ENOENT" });
+        await expect(access(gitExcludePath)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("rejects a Git exclude symlink that escapes trusted repository metadata", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-bwrap-exclude-symlink-"));
+        temporaryDirectories.push(root);
+        const cwd = join(root, "workspace");
+        const outside = join(root, "outside-exclude");
+        await mkdir(join(cwd, ".git", "info"), { recursive: true });
+        await writeFile(outside, "*.local\n");
+        await symlink(outside, join(cwd, ".git", "info", "exclude"));
+
+        await expect(
+            createLinuxBubblewrapCommand({
+                bwrapPath: "/usr/bin/bwrap",
+                command: "git status --short",
+                commandCwd: cwd,
+                cwd,
+                mode: "workspace_write",
+                shell: "/bin/sh",
+                temporaryDirectory: join(root, "tmp"),
+            }),
+        ).rejects.toThrow("resolves outside its trusted metadata directory");
     });
 });
 
@@ -301,4 +385,9 @@ function mountIndex(
             command[index + 1] === sourceOrTarget &&
             (target === undefined || command[index + 2] === target),
     );
+}
+
+function isAtOrBelow(root: string, target: string): boolean {
+    const suffix = relative(root, target);
+    return suffix === "" || (!suffix.startsWith("..") && !isAbsolute(suffix));
 }

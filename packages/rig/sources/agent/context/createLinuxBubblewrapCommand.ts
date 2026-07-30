@@ -53,13 +53,29 @@ export async function createLinuxBubblewrapCommand(options: {
         await resolvePotentialPath(join(options.cwd, "rig.toml")),
     ];
     const projectConfigPath = join(canonicalCwd, "rig.toml");
+    const gitWritablePaths =
+        options.mode === "read_only" ? [] : await findGitWritablePaths(options.cwd);
+    const gitMetadataRoot = gitWritablePaths.at(-1);
+    const gitExcludePath =
+        gitMetadataRoot === undefined
+            ? undefined
+            : await resolvePotentialPath(join(gitMetadataRoot, "info", "exclude"));
+    if (
+        gitMetadataRoot !== undefined &&
+        gitExcludePath !== undefined &&
+        !isAtOrBelow(gitMetadataRoot, gitExcludePath)
+    ) {
+        throw new Error(
+            "The repository's Git exclude path resolves outside its trusted metadata directory.",
+        );
+    }
     // Read only withholds the workspace but still needs a writable temporary directory, matching
     // the Seatbelt policy and the sandbox-runtime filesystem config. Toolchain shims cache into
     // TMPDIR on every invocation, and denying that write costs hundreds of milliseconds per command.
     const writableCandidates =
         options.mode === "read_only"
             ? [temporaryDirectory]
-            : [canonicalCwd, ...(await findGitWritablePaths(options.cwd)), temporaryDirectory];
+            : [canonicalCwd, ...gitWritablePaths, temporaryDirectory];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ].filter((path) => existsSync(path) && path !== privateTemporaryRoot);
@@ -146,8 +162,8 @@ export async function createLinuxBubblewrapCommand(options: {
                   requestedCommand,
               ].join("\n");
     const projectConfigPlaceholder =
-        options.mode !== "read_only" && !projectConfigCandidates.some((path) => existsSync(path))
-            ? await prepareProjectConfigPlaceholder(projectConfigPath)
+        options.mode !== "read_only"
+            ? await prepareProjectConfigPlaceholder(projectConfigPath, gitExcludePath)
             : undefined;
     const protectedPaths = allProtectedPaths.filter(
         (path) =>
@@ -185,6 +201,16 @@ export async function createLinuxBubblewrapCommand(options: {
     for (const writableRoot of writableRoots) args.push("--bind", writableRoot, writableRoot);
     for (const protectedPath of protectedPaths)
         args.push("--ro-bind", protectedPath, protectedPath);
+    if (projectConfigPlaceholder !== undefined) {
+        if (projectConfigPlaceholder.gitExclude !== undefined) {
+            args.push(
+                "--ro-bind",
+                projectConfigPlaceholder.gitExclude.sourcePath,
+                projectConfigPlaceholder.gitExclude.path,
+            );
+        }
+        args.push("--ro-bind", projectConfigPlaceholder.sourcePath, projectConfigPlaceholder.path);
+    }
 
     args.push("--unshare-user", "--unshare-pid", "--unshare-net");
     args.push(options.mountProc === false ? "--bind" : "--proc", "/proc");

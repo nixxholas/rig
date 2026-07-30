@@ -10,6 +10,88 @@ afterEach(async () => {
 });
 
 describe("Workspace write uses the Codex Linux sandbox", () => {
+    it("keeps an absent rig.toml out of Git status", async () => {
+        const gym = await createGym({
+            mode: "docker",
+            inference(request, callIndex) {
+                const lastMessage = request.context.messages.at(-1);
+                if (callIndex === 0) {
+                    return {
+                        content: [
+                            {
+                                arguments: { cmd: "git init --quiet" },
+                                id: "initialize-clean-repository",
+                                name: "exec_command",
+                                type: "toolCall",
+                            },
+                        ],
+                    };
+                }
+                if (callIndex === 1) {
+                    expect(lastMessage).toMatchObject({
+                        isError: false,
+                        role: "toolResult",
+                        toolName: "exec_command",
+                    });
+                    return { content: [{ text: "CLEAN_REPOSITORY_READY", type: "text" }] };
+                }
+                if (callIndex === 2) {
+                    return {
+                        content: [
+                            {
+                                arguments: { cmd: "git status --short" },
+                                id: "inspect-clean-repository",
+                                name: "exec_command",
+                                type: "toolCall",
+                            },
+                        ],
+                    };
+                }
+
+                expect(callIndex).toBe(3);
+                expect(lastMessage).toMatchObject({
+                    isError: false,
+                    role: "toolResult",
+                    toolName: "exec_command",
+                });
+                return {
+                    content: [
+                        {
+                            text: messageText(lastMessage).includes("rig.toml")
+                                ? "PROJECT_CONFIG_MASK_VISIBLE"
+                                : "PROJECT_CONFIG_MASK_HIDDEN",
+                            type: "text",
+                        },
+                    ],
+                };
+            },
+        });
+        running.add(gym);
+
+        submit(gym, "Initialize a clean Git repository.");
+        await gym.terminal.waitForText("CLEAN_REPOSITORY_READY", 30_000);
+
+        submit(gym, "/permissions");
+        await gym.terminal.waitForText("Choose Permissions");
+        gym.terminal.press("up");
+        gym.terminal.press("up");
+        gym.terminal.press("enter");
+        await gym.terminal.waitForText("Permissions changed to Workspace write.");
+
+        submit(gym, "Check the clean repository status.");
+        const outcome = await gym.terminal.waitUntil(
+            (snapshot) =>
+                (snapshot.text.includes("PROJECT_CONFIG_MASK_HIDDEN") ||
+                    snapshot.text.includes("PROJECT_CONFIG_MASK_VISIBLE")) &&
+                snapshot.text.includes("Ask Rig to do anything"),
+            "the project config mask status",
+            30_000,
+        );
+        expect(outcome.text).toContain("PROJECT_CONFIG_MASK_HIDDEN");
+        expect(outcome.text).not.toContain("PROJECT_CONFIG_MASK_VISIBLE");
+        await expect(gym.readFile("rig.toml")).rejects.toMatchObject({ code: "ENOENT" });
+    }, 120_000);
+
     it("reads Git config from home while blocking home and repository metadata writes", async () => {
         const gym = await createGym({
             cols: 100,
