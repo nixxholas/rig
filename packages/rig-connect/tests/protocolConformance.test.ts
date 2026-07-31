@@ -34,6 +34,8 @@ type _Hello = Assignable<local.SessionStreamHello, daemon.SessionStreamHello>;
 type _PartialMessage = Assignable<local.SessionPartialMessage, daemon.SessionPartialMessage>;
 type _Git = Assignable<local.GitChangeSnapshot, daemon.GitChangeSnapshot>;
 type _TokenCount = Assignable<local.SessionTokenCount, daemon.SessionTokenCount>;
+type _UnreadState = Assignable<local.SessionUnreadState, daemon.SessionUnreadState>;
+type _UnreadReason = Assignable<local.SessionUnreadReason, daemon.SessionUnreadReason>;
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
 type ApplicationReadEventType =
     | "session_updated"

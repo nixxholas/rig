@@ -161,6 +161,7 @@ export type {
     SessionPartialMessage,
     SessionPermissionReview,
     SessionQuotaContributionChangedEvent,
+    SessionReadResponse,
     SessionStateResponse,
     SessionStreamHello,
     SessionTranscriptTurn,

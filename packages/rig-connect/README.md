@@ -213,10 +213,54 @@ for (const group of groups.projects()) {
     group.branch; // current branch, available from the opening catalog
     group.usage.totalTokens; // aggregate usage across the project's sessions
     group.git?.changedFiles; // live Git state, when the daemon is watching it
+    group.unread.count; // chats in the project itself waiting for the person
     group.sessions; // sessions in the project root
     group.workspaces; // worktrees, each with its own sessions and Git state
 }
 ```
+
+### Chats waiting for the person
+
+A chat becomes unread when it stops working or asks the person something, and stays that way until
+they catch up on it. Each `GroupSession` carries its own `unread`, and a project and a worktree each
+carry a `GroupUnread` counting the chats waiting in it.
+
+That count does not roll up. A project counts only the chats sitting directly in it, never those in
+its worktrees, because a worktree is somewhere the person goes rather than a detail of the project:
+folding its waiting chats into the project's badge would send them to the wrong place. `usage` is
+aggregated the other way, deliberately.
+
+`reason` is `turn_finished` when the agent simply stopped and `attention_needed` when it is asking.
+The stronger reason wins, so a chat that asked a question and then stopped working is still asking.
+
+Rig keeps unread state only for chats that asked for it, reported as `trackUnread` and requested
+with `trackUnread: true` at creation. Subagents never have it, so a subagent finishing its work is
+never something to read.
+
+`rig.markSessionRead(sessionId)` clears a chat, which is what an interface without a terminal uses
+in place of focusing one. It clears the badge immediately, is idempotent, and is durable: every
+client sees the chat as read. A terminal focused on a chat still clears it on its own.
+
+### Being told when a chat finishes
+
+`onSessionFinished` reports the moment a chat starts waiting, which is what an interface plays a
+sound for:
+
+```ts
+const rig = connectRig({
+    endpoint: "http://127.0.0.1:4517",
+    token,
+    onSessionFinished({ reason, sessionId }) {
+        play(reason === "attention_needed" ? asking : done);
+    },
+});
+```
+
+It reports the transition rather than the state, so a chat already waiting does not announce itself
+again, a stopped run that had asked a question announces only the question, and a reconnect that
+reloads a waiting chat makes no sound. It is told from the shared stream and the catalog, so
+supplying it keeps the catalog loaded and the notification arrives whether or not any view is
+subscribed.
 
 The `GET /catalog` snapshot contains every unarchived session, project, and worktree. Catalog
 sessions are not paged; only transcript history is. Archived session history is filtered by the
@@ -309,6 +353,10 @@ the state directly:
   merges by ordered identity, and knows nothing about transport.
 - `streamLiveEvents` follows the global stream with cursor-based resume and reports frames to
   callbacks.
+- `sessionUnreadAfterEvent` decides the unread state one event leaves a chat in. The daemon
+  publishes no event announcing that a chat became unread — the transition rides on the events that
+  cause it — so this mirrors the daemon's own rule, and `tests/sessionUnread.test.ts` runs both over
+  the same sequences to keep them from drifting apart.
 
 ## Releasing
 

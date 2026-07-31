@@ -31,6 +31,8 @@ import type {
     RemoteTerminalGroupState,
     SessionEvent,
     SessionTranscriptWindow,
+    SessionUnreadReason,
+    SessionUnreadState,
     GlobalStreamHello,
     SessionStateResponse,
 } from "./protocol.js";
@@ -59,6 +61,27 @@ export interface ConnectRigOptions {
     onMutationRejected?: (delta: MutationRejectedDelta) => void;
     /** Reports the result of the daemon protocol handshake. */
     onCompatibilityChange?: (compatibility: ServerCompatibility) => void;
+    /**
+     * Fires the moment a chat starts waiting for the person.
+     *
+     * This is the notification an interface plays a sound for, so it reports the
+     * transition rather than the state: a chat already waiting does not announce
+     * itself again, and one that stops working after asking a question announces
+     * only the question. It comes off the shared stream, so it arrives whether or
+     * not a view is subscribed to that chat, and reports only chats the daemon
+     * tracks unread state for.
+     */
+    onSessionFinished?: (finished: SessionFinished) => void;
+}
+
+/** A chat that has just started waiting for the person. */
+export interface SessionFinished {
+    projectId: string;
+    reason: SessionUnreadReason;
+    sessionId: string;
+    /** When it started waiting, from the event that caused it. */
+    since: number;
+    workspaceId?: string;
 }
 
 export interface RigSessionSubscriptionOptions {
@@ -174,6 +197,8 @@ export interface RigConnection {
     /** Returns the session's own identity, which is also this action's identity. */
     createSession: (input: CreateSessionInput) => MutationId;
     forkSession: (sessionId: string) => MutationId;
+    /** Clears a chat's unread state, the way focusing a terminal on it does. */
+    markSessionRead: (sessionId: string) => MutationId;
     sendMessage: (sessionId: string, message: string | SendMessageInput) => MutationId;
     stopRun: (sessionId: string) => MutationId;
     switchModel: (sessionId: string, selection: string | ModelSelection) => MutationId;
@@ -1171,6 +1196,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         ? event.sessionId
                         : undefined;
                 const session = sessionId === undefined ? undefined : sessionEntries.get(sessionId);
+                const unreadBefore =
+                    sessionId === undefined
+                        ? undefined
+                        : groupsEntry?.store.sessionSummary(sessionId)?.unread;
                 reconcile(
                     mutationKey === undefined ? [key] : [key, mutationKey],
                     mutationId,
@@ -1191,6 +1220,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                               }),
                     }),
                 );
+                if (sessionId !== undefined) reportFinished(sessionId, unreadBefore);
                 if (
                     event.type === "project_created" ||
                     event.type === "project_updated" ||
@@ -1234,6 +1264,29 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     publishSession(entry, entry.store.setConnection("closed"));
                 }
             });
+    };
+
+    /**
+     * Announces a chat that has just started waiting for the person.
+     *
+     * Only the transition is reported. A chat already waiting stays quiet, so a
+     * burst of events from one stopped run makes one sound, and a reconnect that
+     * reloads the same waiting chat makes none.
+     */
+    const reportFinished = (sessionId: string, before: SessionUnreadState | undefined): void => {
+        const notify = options.onSessionFinished;
+        if (notify === undefined) return;
+        const summary = groupsEntry?.store.sessionSummary(sessionId);
+        const unread = summary?.unread;
+        if (summary === undefined || unread === undefined) return;
+        if (before !== undefined && before.reason === unread.reason) return;
+        notify({
+            projectId: summary.projectId,
+            reason: unread.reason,
+            sessionId,
+            since: unread.since,
+            ...(summary.workspaceId === undefined ? {} : { workspaceId: summary.workspaceId }),
+        });
     };
 
     const rememberGlobalIdentity = (event: GlobalEvent): void => {
@@ -1399,6 +1452,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (
             groupsEntry !== undefined &&
             groupsEntry.subscribers.size === 0 &&
+            // Finish notifications are answered from the catalog, which is where
+            // the chat's project and whether it is tracked at all are known, so
+            // asking for them keeps it loaded with no view open.
+            options.onSessionFinished === undefined &&
             pendingOverlays.length === 0 &&
             queues.size === 0
         ) {
@@ -2302,6 +2359,42 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return enqueue(mutation);
     };
 
+    /**
+     * Marks a chat as caught up on, clearing its unread state everywhere.
+     *
+     * This is what an interface without a terminal uses in place of focusing
+     * one. Repeating it is harmless, so a retry after a lost answer settles on
+     * the same state rather than failing.
+     */
+    const markSessionRead = (sessionId: string): MutationId => {
+        const id = nextMutationId();
+        const mutation: PendingMutation = {
+            acknowledged: false,
+            action: "mark_session_read",
+            entityKey: sessionKey(sessionId),
+            id,
+            sessionId,
+            undo: () => undefined,
+            applyOptimistic: (publish) => {
+                if (groupsEntry === undefined) return () => undefined;
+                const entry = groupsEntry;
+                const changed = entry.store.applyOptimisticSessionRead(sessionId);
+                if (publish) publishGroups(entry, changed.deltas);
+                return changed.undo;
+            },
+            prepare: () => ({
+                headers: { "x-rig-mutation-id": id },
+                method: "POST",
+                url: endpointUrl(
+                    options.endpoint,
+                    `sessions/${encodeURIComponent(sessionId)}/read`,
+                ),
+            }),
+            matchesAuthoritative: (data) => responseEntity(data, "session")?.unread === undefined,
+        };
+        return enqueue(mutation);
+    };
+
     const renameGroup = (target: GroupTarget, name: string): MutationId => {
         const id = nextMutationId();
         const key = groupKey(target);
@@ -2338,9 +2431,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return enqueue(mutation);
     };
 
+    // Finish notifications are told from the catalog, so a caller that wants
+    // them gets it loaded and followed without opening a view of its own.
+    if (options.onSessionFinished !== undefined) startGroupEntry(createGroupEntry());
+
     return {
         archiveWorkspace,
         compatibility: () => compatibility,
+        markSessionRead,
         close: () => {
             if (closed) return;
             for (const closePresence of [...presenceClosers]) closePresence();

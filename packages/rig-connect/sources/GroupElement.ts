@@ -6,10 +6,31 @@ import type {
     RemoteTerminalSummary,
     SessionStatus,
     SessionTokenCount,
+    SessionUnreadReason,
+    SessionUnreadState,
 } from "./protocol.js";
 
 export interface GroupUsage {
     readonly totalTokens: number;
+}
+
+/**
+ * How much of a project or worktree is waiting for the human.
+ *
+ * Unlike `usage`, this does not roll up: a project counts the chats sitting
+ * directly in it and never those in its worktrees. A worktree is somewhere the
+ * person goes, not a detail of the project, so folding its unread chats into
+ * the project's badge would send them to the wrong place.
+ */
+export interface GroupUnread {
+    /** Chats in this group alone that the person has not caught up on. */
+    readonly count: number;
+    /** Chats asking the person something, a subset of `count`. */
+    readonly attentionCount: number;
+    /** The strongest reason among them, absent when nothing is unread. */
+    readonly reason?: SessionUnreadReason;
+    /** When the longest-waiting of them started waiting. */
+    readonly since?: number;
 }
 
 /** One application-shaped session row in the catalog. */
@@ -32,6 +53,10 @@ export interface GroupSession {
     readonly sessionTokenCount?: SessionTokenCount;
     readonly status: SessionStatus;
     readonly title?: string;
+    /** Whether Rig keeps unread state for this chat at all. */
+    readonly trackUnread: boolean;
+    /** Present while this chat is waiting for the person to catch up. */
+    readonly unread?: SessionUnreadState;
     readonly updatedAt: number;
     readonly workspaceId?: string;
 }
@@ -56,6 +81,8 @@ export interface ProjectGroup {
         readonly width: number;
     };
     readonly usage: GroupUsage;
+    /** Chats in the project itself that are waiting; worktrees keep their own. */
+    readonly unread: GroupUnread;
     /** Live Git state, present once the daemon is watching this project. */
     readonly git?: GitChangeSnapshot;
     /** Interactive terminals currently open for this project directory. */
@@ -77,6 +104,8 @@ export interface WorkspaceGroup {
     readonly status: "initializing" | "ready" | "failed";
     readonly title?: string;
     readonly usage: GroupUsage;
+    /** Chats in this worktree that are waiting. */
+    readonly unread: GroupUnread;
     readonly git?: GitChangeSnapshot;
     /** Interactive terminals currently open for this workspace directory. */
     readonly terminals: readonly RemoteTerminalSummary[];

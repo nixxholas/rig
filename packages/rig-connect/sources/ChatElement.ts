@@ -340,6 +340,7 @@ export type MutationAction =
     | "record_activity"
     | "stop_workflow"
     | "set_session_archived"
+    | "mark_session_read"
     | "rename_group";
 
 export interface MutationRejectedDelta {

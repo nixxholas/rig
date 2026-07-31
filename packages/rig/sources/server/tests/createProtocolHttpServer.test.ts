@@ -2367,6 +2367,33 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("lets a client without a terminal mark a chat read", async () => {
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        store.saveSession({
+            ...completedPrimaryState("read-session"),
+            trackUnread: true,
+            unread: { reason: "attention_needed", since: 123 },
+        });
+        const { client, close } = await startServer({ store });
+        try {
+            expect(await listedSession(client, "read-session")).toMatchObject({
+                unread: { reason: "attention_needed", since: 123 },
+            });
+
+            const read = await client.markSessionRead("read-session");
+            expect(read.session.unread).toBeUndefined();
+            expect((await listedSession(client, "read-session"))?.unread).toBeUndefined();
+
+            // Repeating it settles on the same state rather than failing, so a
+            // retry after a lost answer is harmless.
+            const again = await client.markSessionRead("read-session");
+            expect(again.session.unread).toBeUndefined();
+        } finally {
+            await close();
+            store.close();
+        }
+    });
+
     it("forks a completed session into a new resumable session", async () => {
         const { client, close } = await startServer();
         try {

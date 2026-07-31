@@ -62,6 +62,7 @@ import type {
     SessionEvent,
     SessionStreamHello,
     SessionArchiveResponse,
+    SessionReadResponse,
     SessionTerminalHeartbeatRequest,
     SessionTerminalHeartbeatResponse,
     ShutdownServerResponse,
@@ -474,6 +475,10 @@ export class ProtocolHttpClient {
 
     unarchiveSession(sessionId: string): Promise<SessionArchiveResponse> {
         return this.#requestJson("POST", `/sessions/${encodeURIComponent(sessionId)}/unarchive`);
+    }
+
+    markSessionRead(sessionId: string): Promise<SessionReadResponse> {
+        return this.#requestJson("POST", `/sessions/${encodeURIComponent(sessionId)}/read`);
     }
 
     forkSession(sessionId: string): Promise<ForkSessionResponse> {

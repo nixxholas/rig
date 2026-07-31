@@ -2,9 +2,11 @@ import type {
     GroupDelta,
     GroupSession,
     GroupsState,
+    GroupUnread,
     ProjectGroup,
     WorkspaceGroup,
 } from "./GroupElement.js";
+import { sessionUnreadAfterEvent } from "./sessionUnread.js";
 import type { ConnectionState } from "./ChatElement.js";
 import type {
     GitChangeSnapshot,
@@ -14,6 +16,7 @@ import type {
     ProjectWorkspace,
     RemoteTerminalGroupState,
     SessionStatus,
+    SessionEvent,
     SessionSummary,
     SessionTokenCount,
 } from "./protocol.js";
@@ -129,6 +132,29 @@ export class GroupStore {
                     type: archived ? "session_removed" : "session_added",
                 },
             ],
+            undo: () => {
+                this.#sessions.set(sessionId, known);
+                this.#markDirty(known.projectId);
+            },
+        };
+    }
+
+    /** Predicts that a chat has been caught up on, clearing its unread state. */
+    applyOptimisticSessionRead(sessionId: string): {
+        deltas: readonly GroupDelta[];
+        undo: () => void;
+    } {
+        const known = this.#sessions.get(sessionId);
+        if (known === undefined || known.unread === undefined) {
+            return { deltas: [], undo: () => undefined };
+        }
+        const previousTree = this.projects();
+        const { unread: _, ...read } = known;
+        this.#sessions.set(sessionId, read);
+        this.#markDirty(known.projectId);
+        const projects = this.projects();
+        return {
+            deltas: projects === previousTree ? [] : [{ projects, type: "projects_changed" }],
             undo: () => {
                 this.#sessions.set(sessionId, known);
                 this.#markDirty(known.projectId);
@@ -551,7 +577,9 @@ export class GroupStore {
             }
             this.#sessions.set(
                 sessionId,
-                known === undefined ? incoming : { ...known, ...incoming },
+                known === undefined
+                    ? incoming
+                    : withAuthoritativeUnread({ ...known, ...incoming }, incoming),
             );
             this.#markDirty(incoming.projectId);
             if (known !== undefined && known.projectId !== incoming.projectId) {
@@ -572,6 +600,20 @@ export class GroupStore {
                 type: archived ? "session_removed" : "session_added",
             });
             return true;
+        }
+
+        // Nothing announces that a chat started waiting for the person: the
+        // transition rides on the events that cause it, so it is derived from
+        // the same rule the daemon applies to its own copy.
+        const waiting = this.#sessions.get(sessionId);
+        if (waiting?.trackUnread === true) {
+            const unread = sessionUnreadAfterEvent(waiting.unread, event as SessionEvent);
+            if (unread !== undefined && unread !== waiting.unread) {
+                this.#sessionEventIds.set(sessionId, event.id);
+                this.#sessions.set(sessionId, { ...waiting, lastEventId: event.id, unread });
+                this.#markDirty(waiting.projectId);
+                return true;
+            }
         }
 
         // A sidebar shows a session's name and whether it is working, and both
@@ -596,7 +638,10 @@ export class GroupStore {
         this.#sessionEventIds.set(sessionId, event.id);
 
         const known = this.#sessions.get(incoming.id);
-        const merged = { ...known, ...incoming, lastEventId: event.id } as SessionSummary;
+        const merged = withAuthoritativeUnread(
+            { ...known, ...incoming, lastEventId: event.id } as SessionSummary,
+            incoming,
+        );
         // A session with no position is not in this list. A subagent is the case
         // that matters: it syncs and can be opened by id, but it belongs to the
         // session that started it, so the stream must not put it in the sidebar.
@@ -745,6 +790,7 @@ export class GroupStore {
                 presence: project.presence,
                 sessions: (sessionsByProject.get(project.id) ?? []).sort(byOrderKey),
                 terminals: this.#projectTerminals.get(project.id) ?? [],
+                unread: unreadOf(sessionsByProject.get(project.id) ?? []),
                 usage: usageOf([
                     ...(sessionsByProject.get(project.id) ?? []),
                     ...workspaces.flatMap((workspace) => workspace.sessions),
@@ -789,6 +835,7 @@ export class GroupStore {
             terminals,
             status: workspace.status as WorkspaceGroup["status"],
             ...(workspace.title === undefined ? {} : { title: workspace.title }),
+            unread: unreadOf(sessions),
             usage: usageOf(sessions),
             ...(this.#workspaceGit.has(workspace.id)
                 ? { git: this.#workspaceGit.get(workspace.id) as GitChangeSnapshot }
@@ -813,7 +860,9 @@ export class GroupStore {
             projectId: session.projectId,
             providerId: session.providerId,
             status: session.status,
+            trackUnread: session.trackUnread === true,
             updatedAt: session.updatedAt,
+            ...(session.unread === undefined ? {} : { unread: session.unread }),
             ...(session.workspaceId === undefined ? {} : { workspaceId: session.workspaceId }),
             ...(session.draft === undefined ? {} : { draft: session.draft }),
             ...(session.draftUpdatedAt === undefined
@@ -868,6 +917,36 @@ function sameSessions(left: readonly GroupSession[], right: readonly GroupSessio
     if (left.length !== right.length) return false;
     return left.every((item, index) => item === right[index]);
 }
+
+/**
+ * Sums the unread chats of one group, and only its own.
+ *
+ * A project is not given its worktrees' unread chats: the person opens the
+ * worktree to answer them, so counting them on the project would point at the
+ * wrong place. That is why this is called once per group rather than rolled up
+ * the way `usageOf` is.
+ */
+function unreadOf(sessions: readonly GroupSession[]): GroupUnread {
+    let count = 0;
+    let attentionCount = 0;
+    let since: number | undefined;
+    for (const session of sessions) {
+        if (session.archived || session.unread === undefined) continue;
+        count += 1;
+        if (session.unread.reason === "attention_needed") attentionCount += 1;
+        if (since === undefined || session.unread.since < since) since = session.unread.since;
+    }
+    if (count === 0) return EMPTY_UNREAD;
+    return {
+        attentionCount,
+        count,
+        reason: attentionCount > 0 ? "attention_needed" : "turn_finished",
+        ...(since === undefined ? {} : { since }),
+    };
+}
+
+/** Shared so a group with nothing waiting keeps the same object across rebuilds. */
+const EMPTY_UNREAD: GroupUnread = { attentionCount: 0, count: 0 };
 
 function usageOf(sessions: readonly GroupSession[]): { totalTokens: number } {
     return {
@@ -972,7 +1051,7 @@ function sessionSummaryAfterEvent(
 ): SessionSummary | undefined {
     if (event.type === "session_current") {
         const incoming = (event.data as { session: SessionSummary }).session;
-        return { ...session, ...incoming };
+        return withAuthoritativeUnread({ ...session, ...incoming }, incoming);
     }
     if (event.type === "session_archived") {
         const { archived } = event.data as { archived: boolean };
@@ -981,13 +1060,41 @@ function sessionSummaryAfterEvent(
     if (event.type === "session_created" || event.type === "session_updated") {
         const incoming = (event.data as { session?: Partial<SessionSummary> }).session;
         if (incoming === undefined) return undefined;
-        return { ...session, ...incoming, lastEventId: event.id };
+        return withAuthoritativeUnread(
+            { ...session, ...incoming, lastEventId: event.id },
+            incoming,
+        );
+    }
+    // The daemon publishes no event for a chat becoming unread; the transition
+    // rides on the events that cause it, so it is derived from the same rule.
+    const unread =
+        session.trackUnread === true
+            ? sessionUnreadAfterEvent(session.unread, event as SessionEvent)
+            : session.unread;
+    if (unread !== undefined && unread !== session.unread) {
+        return { ...session, lastEventId: event.id, unread };
     }
     const patch = sessionPatch(event);
     if (patch === undefined) return undefined;
     const updated = { ...session, ...patch.set, lastEventId: event.id };
     for (const key of patch.clear ?? []) delete updated[key];
     return updated;
+}
+
+/**
+ * A full summary decides unread by itself, including by leaving it out.
+ *
+ * The daemon omits `unread` from a chat the person has caught up on, so merging
+ * a fresh summary over a stale one would otherwise keep a badge that was just
+ * cleared.
+ */
+function withAuthoritativeUnread(
+    merged: SessionSummary,
+    incoming: Partial<SessionSummary>,
+): SessionSummary {
+    if (Object.hasOwn(incoming, "unread")) return merged;
+    const { unread: _, ...read } = merged;
+    return read;
 }
 
 function sessionPatch(event: GlobalEvent): SessionPatch | undefined {

@@ -333,6 +333,20 @@ export interface SessionTokenCount {
     totalTokens: number;
 }
 
+/**
+ * Why a chat is waiting for the human.
+ *
+ * `attention_needed` outranks `turn_finished`: a chat that asked a question and
+ * then stopped working is still asking, so the stronger reason stands rather
+ * than decaying into the weaker one when the run ends.
+ */
+export type SessionUnreadReason = "attention_needed" | "turn_finished";
+
+export interface SessionUnreadState {
+    reason: SessionUnreadReason;
+    since: number;
+}
+
 export interface ModelSummary {
     autoCompactWindow?: number;
     contextWindow?: number;
@@ -1072,7 +1086,9 @@ export interface SessionSummary {
     updatedAt: number;
     lastMessageAt?: number;
     lastEventId?: EventId;
-    unread?: object;
+    /** Whether the daemon keeps unread state for this chat at all. */
+    trackUnread?: boolean;
+    unread?: SessionUnreadState;
 }
 
 export interface RemoteTerminalSummary {

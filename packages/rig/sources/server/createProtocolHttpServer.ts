@@ -58,6 +58,7 @@ import type {
     SessionActivity,
     SessionArchiveResponse,
     SessionPartialMessage,
+    SessionReadResponse,
     SessionStreamHello,
     SessionTranscriptWindow,
     SessionTerminalHeartbeatRequest,
@@ -1271,6 +1272,24 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "POST" && route.name === "read") {
+        if (session.isSubagent()) {
+            sendJson(response, 409, {
+                error: "Subagent histories are read-only and are never unread.",
+            });
+            return;
+        }
+        /*
+         * Marking a chat read is what a client without a terminal uses in place
+         * of focusing one. It is idempotent: a session that was already read
+         * answers with its current state rather than failing, so a repeated
+         * request after a retry is harmless.
+         */
+        session.markRead();
+        sendJson<SessionReadResponse>(response, 200, { session: session.snapshot() });
+        return;
+    }
+
     if (request.method === "POST" && (route.name === "archive" || route.name === "unarchive")) {
         if (session.isSubagent()) {
             sendJson(response, 409, {
@@ -2266,6 +2285,7 @@ function matchRoute(pathname: string):
               | "messages"
               | "model"
               | "permissions"
+              | "read"
               | "reorder"
               | "reset"
               | "rewind"
@@ -2475,6 +2495,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "messages") return { name: "messages", sessionId };
     if (parts[2] === "model") return { name: "model", sessionId };
     if (parts[2] === "permissions") return { name: "permissions", sessionId };
+    if (parts[2] === "read") return { name: "read", sessionId };
     if (parts[2] === "reset") return { name: "reset", sessionId };
     if (parts[2] === "rewind") return { name: "rewind", sessionId };
     if (parts[2] === "secrets") return { name: "secrets", sessionId };
@@ -2503,6 +2524,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "external-tool-call",
                 "fork",
                 "messages",
+                "read",
                 "reorder",
                 "reset",
                 "rewind",

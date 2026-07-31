@@ -987,3 +987,129 @@ describe("GroupStore", () => {
         expect(store.projects()).toBe(before);
     });
 });
+
+describe("GroupStore and chats waiting for the person", () => {
+    /** A tracked chat: the daemon only keeps unread state when asked to. */
+    function tracked(id: string, projectId: string, workspaceId?: string): SessionSummary {
+        return { ...session(id, projectId, workspaceId), trackUnread: true };
+    }
+
+    it("marks a chat unread when its turn ends, and reads the reason from the event", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [tracked("s1", "p1")] }));
+        expect(store.projects()[0]?.sessions[0]?.unread).toBeUndefined();
+
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s1" }));
+
+        expect(store.projects()[0]?.sessions[0]?.unread).toMatchObject({
+            reason: "turn_finished",
+        });
+        expect(store.projects()[0]?.unread).toMatchObject({ attentionCount: 0, count: 1 });
+    });
+
+    it("says a chat needs the person when it asks something", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [tracked("s1", "p1")] }));
+
+        store.apply(event("user_input_requested", { requestId: "q1" }, { sessionId: "s1" }));
+        // The run ending afterwards does not answer the question.
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s1" }));
+
+        expect(store.projects()[0]?.unread).toMatchObject({
+            attentionCount: 1,
+            count: 1,
+            reason: "attention_needed",
+        });
+    });
+
+    it("leaves an untracked chat read, so a subagent finishing says nothing", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s1" }));
+
+        expect(store.projects()[0]?.sessions[0]?.unread).toBeUndefined();
+        expect(store.projects()[0]?.unread).toEqual({ attentionCount: 0, count: 0 });
+    });
+
+    it("counts a worktree's waiting chats on the worktree, never on the project", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [tracked("s1", "p1"), tracked("s2", "p1", "w1")],
+                workspaces: [workspace("w1", "p1")],
+            }),
+        );
+
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s2" }));
+
+        const group = store.projects()[0];
+        // The chat waiting is inside the worktree, and that is where the person
+        // has to go to answer it, so the project itself is still caught up.
+        expect(group?.workspaces[0]?.unread).toMatchObject({ count: 1 });
+        expect(group?.unread).toEqual({ attentionCount: 0, count: 0 });
+
+        store.apply(event("run_finished", { runId: "r2" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.unread).toMatchObject({ count: 1 });
+        expect(store.projects()[0]?.workspaces[0]?.unread).toMatchObject({ count: 1 });
+    });
+
+    it("reports the longest wait and the strongest reason across a group", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [tracked("s1", "p1"), tracked("s2", "p1")] }));
+
+        const first = event("run_finished", { runId: "r1" }, { sessionId: "s1" });
+        store.apply(first);
+        store.apply(event("user_input_requested", { requestId: "q1" }, { sessionId: "s2" }));
+
+        expect(store.projects()[0]?.unread).toEqual({
+            attentionCount: 1,
+            count: 2,
+            reason: "attention_needed",
+            since: first.createdAt,
+        });
+    });
+
+    it("clears unread when the daemon says the chat was caught up on", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [tracked("s1", "p1")] }));
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.unread.count).toBe(1);
+
+        // A read chat is reported by leaving `unread` out entirely, so the
+        // omission has to clear it rather than merge as no change.
+        store.apply(
+            event("session_updated", { session: tracked("s1", "p1") }, { sessionId: "s1" }),
+        );
+
+        expect(store.projects()[0]?.sessions[0]?.unread).toBeUndefined();
+        expect(store.projects()[0]?.unread).toEqual({ attentionCount: 0, count: 0 });
+    });
+
+    it("predicts a chat being read, and puts it back if the daemon refuses", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [tracked("s1", "p1")] }));
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s1" }));
+
+        const changed = store.applyOptimisticSessionRead("s1");
+        expect(store.projects()[0]?.unread.count).toBe(0);
+
+        changed.undo();
+        expect(store.projects()[0]?.unread.count).toBe(1);
+        // Predicting it twice is not an error; the second is simply nothing.
+        store.applyOptimisticSessionRead("s1");
+        expect(store.applyOptimisticSessionRead("s1").deltas).toEqual([]);
+    });
+
+    it("leaves an archived chat out of the count", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [tracked("s1", "p1")] }));
+        store.apply(event("run_finished", { runId: "r1" }, { sessionId: "s1" }));
+        expect(store.projects()[0]?.unread.count).toBe(1);
+
+        store.apply(event("session_archived", { archived: true }, { sessionId: "s1" }));
+
+        expect(store.projects()[0]?.unread).toEqual({ attentionCount: 0, count: 0 });
+    });
+});

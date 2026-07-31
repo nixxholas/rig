@@ -646,6 +646,10 @@ export interface SessionArchiveResponse {
     session: ProtocolSession;
 }
 
+export interface SessionReadResponse {
+    session: ProtocolSession;
+}
+
 export interface ListSubagentsResponse {
     subagents: readonly SubagentSummary[];
 }

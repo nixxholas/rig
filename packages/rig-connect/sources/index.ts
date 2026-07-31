@@ -13,6 +13,7 @@ export type {
     RigSessionConnection,
     RigSessionSubscriptionOptions,
     SendMessageInput,
+    SessionFinished,
     SecretAttachmentScope,
     ShellCommandInput,
     TerminalPresence,
@@ -67,10 +68,12 @@ export type {
     GroupDelta,
     GroupSession,
     GroupsState,
+    GroupUnread,
     GroupUsage,
     ProjectGroup,
     WorkspaceGroup,
 } from "./GroupElement.js";
+export { sessionUnreadAfterEvent } from "./sessionUnread.js";
 export type {
     BackgroundProcess,
     BackgroundProcessSnapshot,
@@ -105,6 +108,8 @@ export type {
     SessionExecutionEnvironment,
     SessionInterruption,
     SessionTranscriptGroup,
+    SessionUnreadReason,
+    SessionUnreadState,
     SessionEvent,
     SessionStreamHello,
     SessionTask,

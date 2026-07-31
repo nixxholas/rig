@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatDelta } from "@/ChatElement.js";
 import { connectRig } from "@/connectRig.js";
+import type { SessionFinished } from "@/connectRig.js";
 import type {
     GlobalStreamHello,
     SessionStateResponse,
@@ -1502,6 +1503,180 @@ describe("connectRig mutations", () => {
             expect(frames.every((frame) => frame.length <= 1)).toBe(true);
         } finally {
             connection.close();
+            rig.close();
+        }
+    });
+});
+
+describe("connectRig and chats that finish", () => {
+    /** A catalog holding one tracked chat, which is what unread state needs. */
+    function catalogWithTrackedSession(): Omit<GlobalStreamHello, "cursor"> {
+        return {
+            ...groupsCatalog(),
+            sessions: [
+                {
+                    archived: false,
+                    createdAt: 1,
+                    cwd: "/work",
+                    id: "session-1",
+                    modelId: "sonnet-5",
+                    orderKey: "a",
+                    permissionMode: "auto",
+                    projectId: "project-1",
+                    providerId: "claude",
+                    status: "idle",
+                    titleStatus: "idle",
+                    trackUnread: true,
+                    updatedAt: 1,
+                },
+            ],
+        };
+    }
+
+    function connect(options: {
+        catalog?: Omit<GlobalStreamHello, "cursor">;
+        onSessionFinished?: (finished: SessionFinished) => void;
+        stream: ReturnType<typeof streamResponse>;
+        calls?: { init?: RequestInit; url: URL }[];
+    }) {
+        const catalog = options.catalog ?? catalogWithTrackedSession();
+        return connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                options.calls?.push({ ...(init === undefined ? {} : { init }), url });
+                if (url.pathname === "/events/live")
+                    return Promise.resolve(options.stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(new Response(JSON.stringify(catalog), { status: 200 }));
+                }
+                return Promise.resolve(new Response("{}", { status: 200 }));
+            },
+            randomValues,
+            token: "secret",
+            ...(options.onSessionFinished === undefined
+                ? {}
+                : { onSessionFinished: options.onSessionFinished }),
+        });
+    }
+
+    it("announces a chat that stopped working, without any view being open", async () => {
+        const stream = streamResponse();
+        const finished: SessionFinished[] = [];
+        // No connectSession and no connectGroups: asking for the notification is
+        // what loads the catalog it is told from.
+        const rig = connect({ onSessionFinished: (item) => finished.push(item), stream });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            stream.write(
+                event("run_finished", { modelLocked: false, runId: "run-1", stopReason: "end" }),
+            );
+            await settle();
+
+            expect(finished).toEqual([
+                {
+                    projectId: "project-1",
+                    reason: "turn_finished",
+                    sessionId: "session-1",
+                    since: 2,
+                },
+            ]);
+        } finally {
+            rig.close();
+        }
+    });
+
+    it("announces a question once, and does not repeat itself as the run ends", async () => {
+        const stream = streamResponse();
+        const finished: SessionFinished[] = [];
+        const rig = connect({ onSessionFinished: (item) => finished.push(item), stream });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            stream.write(
+                event(
+                    "user_input_requested",
+                    { questions: [], requestId: "q1" },
+                    "01900000-0000-7000-8000-000000000010",
+                ),
+            );
+            stream.write(
+                event(
+                    "run_finished",
+                    { modelLocked: false, runId: "run-1", stopReason: "end" },
+                    "01900000-0000-7000-8000-000000000011",
+                ),
+            );
+            await settle();
+
+            // One sound, for the question. The run stopping afterwards does not
+            // answer it, so it is not a second thing to be told about.
+            expect(finished).toEqual([
+                {
+                    projectId: "project-1",
+                    reason: "attention_needed",
+                    sessionId: "session-1",
+                    since: 2,
+                },
+            ]);
+        } finally {
+            rig.close();
+        }
+    });
+
+    it("stays quiet for a chat Rig does not track, such as a subagent", async () => {
+        const stream = streamResponse();
+        const finished: SessionFinished[] = [];
+        const catalog = catalogWithTrackedSession();
+        const rig = connect({
+            catalog: {
+                ...catalog,
+                sessions: [{ ...catalog.sessions[0]!, trackUnread: false }],
+            },
+            onSessionFinished: (item) => finished.push(item),
+            stream,
+        });
+        try {
+            stream.write(liveHello());
+            await settle();
+            stream.write(
+                event("run_finished", { modelLocked: false, runId: "run-1", stopReason: "end" }),
+            );
+            await settle();
+
+            expect(finished).toEqual([]);
+        } finally {
+            rig.close();
+        }
+    });
+
+    it("clears a chat the moment it is marked read, and tells the daemon", async () => {
+        const stream = streamResponse();
+        const calls: { init?: RequestInit; url: URL }[] = [];
+        const rig = connect({ calls, stream });
+        const groups = rig.connectGroups({ onChange: () => undefined });
+        const unreadCount = () => groups.projects()[0]?.unread.count;
+        try {
+            stream.write(liveHello());
+            await settle();
+            stream.write(
+                event("run_finished", { modelLocked: false, runId: "run-1", stopReason: "end" }),
+            );
+            await settle();
+            expect(unreadCount()).toBe(1);
+
+            rig.markSessionRead("session-1");
+            // The badge clears at once rather than after a round trip.
+            expect(unreadCount()).toBe(0);
+            await settle();
+
+            const readCall = calls.find((call) => call.url.pathname === "/sessions/session-1/read");
+            expect(readCall?.init?.method).toBe("POST");
+        } finally {
+            groups.close();
             rig.close();
         }
     });
