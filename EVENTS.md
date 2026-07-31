@@ -177,9 +177,12 @@ something. It writes nothing: the answer is folded from the durable lifecycle ev
 `user_input_resolved` — narrowed in SQL before any payload is read. Clearing session history
 therefore clears the timeline with it, and no separate span table can disagree with the events.
 
-A scope is a project, a workspace, or a session; a session scope includes its subagents at any
-depth. The response carries the live-stream cursor it reflects, so a client can tell whether a later
-event is already included and then keep the chart current from the same global stream.
+A scope is global, a project, a workspace, or a session; a session scope includes its subagents at
+any depth. A global scope covers every agent Rig knows about, across every project, and is
+deliberately unfiltered: it grows with everything Rig has ever run, so callers bound it with `since`
+when only recent work is wanted. The response carries the live-stream cursor it reflects, so a
+client can tell whether a later event is already included and then keep the chart current from the
+same global stream.
 
 Because a run's start and end are durable but its interior is not, a timeline reports run
 granularity rather than individual inference and tool calls. A run with no recorded ending, on a

@@ -174,6 +174,7 @@ export class TimelineStore {
     }
 
     #inScope(session: ProtocolSession): boolean {
+        if (this.#scope.kind === "global") return true;
         if (this.#scope.kind === "project") return session.projectId === this.#scope.projectId;
         if (this.#scope.kind === "workspace") {
             return session.workspaceId === this.#scope.workspaceId;

@@ -108,6 +108,54 @@ describe("timeline over HTTP", () => {
         expect(all.body.agents).toHaveLength(1);
     });
 
+    it("charts every chat at once for a global scope", async () => {
+        const fixture = await startServer();
+        const first = fixture.store.create({
+            cwd: "/tmp/rig-timeline",
+            modelId: "test/timeline",
+            providerId: "test",
+        });
+        const second = fixture.store.create({
+            cwd: "/tmp/rig-timeline-elsewhere",
+            modelId: "test/timeline",
+            providerId: "test",
+        });
+        // Two different directories, so these are two different projects; a
+        // global chart is the only scope that shows both.
+        expect(first.summary().projectId).not.toBe(second.summary().projectId);
+
+        const response = await fixture.post("/timeline", { scope: { kind: "global" } });
+
+        expect(response.status).toBe(200);
+        expect(
+            (response.body.agents as TimelineAgent[]).map((agent) => agent.sessionId).sort(),
+        ).toEqual([first.id, second.id].sort());
+        expect(response.body.scope).toEqual({ kind: "global" });
+    });
+
+    it("bounds a global chart to recent work while keeping what is still open", async () => {
+        const fixture = await startServer();
+        const session = fixture.store.create({
+            cwd: "/tmp/rig-timeline",
+            modelId: "test/timeline",
+            providerId: "test",
+        });
+        const submitted = session.submit({ text: "Do the thing" });
+        await session.waitForRun(submitted.runId);
+
+        const response = await fixture.post("/timeline", {
+            scope: { kind: "global" },
+            since: Date.now() + 60_000,
+        });
+
+        // The finished run falls outside the window and is dropped. The chat is
+        // still waiting for the person right now, though, so that span has no
+        // end to fall outside it and the row survives.
+        const agent = (response.body.agents as TimelineAgent[])[0];
+        expect(agent?.spans.every((span) => span.endedAt === undefined)).toBe(true);
+        expect(agent?.spans.map((span) => span.kind)).toEqual(["waiting"]);
+    });
+
     it("refuses a request that does not say what to chart", async () => {
         const fixture = await startServer();
 
@@ -119,7 +167,7 @@ describe("timeline over HTTP", () => {
         });
 
         expect(missing.status).toBe(400);
-        expect(missing.body.error).toContain("project, a workspace, or a session");
+        expect(missing.body.error).toContain("global");
         expect(nonsense.status).toBe(400);
         expect(badSince.status).toBe(400);
         expect(badSince.body.error).toContain("milliseconds");

@@ -2753,11 +2753,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 function timelineKey(subscription: RigTimelineSubscriptionOptions): string {
     const scope = subscription.scope;
     const target =
-        scope.kind === "project"
-            ? `project:${scope.projectId}`
-            : scope.kind === "workspace"
-              ? `workspace:${scope.projectId}:${scope.workspaceId}`
-              : `session:${scope.sessionId}`;
+        scope.kind === "global"
+            ? "global"
+            : scope.kind === "project"
+              ? `project:${scope.projectId}`
+              : scope.kind === "workspace"
+                ? `workspace:${scope.projectId}:${scope.workspaceId}`
+                : `session:${scope.sessionId}`;
     return `timeline:${target}:${String(subscription.includeArchived ?? false)}:${String(subscription.since ?? "")}`;
 }
 

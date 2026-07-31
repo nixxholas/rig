@@ -21,7 +21,7 @@ export function parseTimelineRequest(
     const scope = parseScope(candidate.scope);
     if (scope === undefined) {
         return {
-            error: "The timeline scope must name a project, a workspace, or a session.",
+            error: "The timeline scope must be global, or name a project, a workspace, or a session.",
         };
     }
     if (candidate.includeArchived !== undefined && typeof candidate.includeArchived !== "boolean") {
@@ -52,6 +52,7 @@ function parseScope(value: unknown): TimelineScope | undefined {
         sessionId?: unknown;
         workspaceId?: unknown;
     };
+    if (scope.kind === "global") return { kind: "global" };
     if (scope.kind === "project" && typeof scope.projectId === "string") {
         return { kind: "project", projectId: scope.projectId };
     }

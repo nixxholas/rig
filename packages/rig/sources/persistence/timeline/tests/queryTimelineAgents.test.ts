@@ -21,6 +21,41 @@ describe("timeline persistence", () => {
         ]);
     });
 
+    it("covers every agent Rig knows about for a global scope", () => {
+        const database = seed();
+
+        const agents = queryTimelineAgents(database, { kind: "global" }, false);
+
+        expect(agents.map((agent) => agent.sessionId)).toEqual([
+            "root",
+            "child",
+            "grandchild",
+            "worktree",
+        ]);
+    });
+
+    it("reaches across projects, which is the point of a global scope", () => {
+        const database = seed();
+        insertProject(database, "p2", "/other");
+        insertSession(database, { createdAtMs: 60, id: "elsewhere", projectId: "p2" });
+
+        const global = queryTimelineAgents(database, { kind: "global" }, false);
+        const scoped = queryTimelineAgents(database, { kind: "project", projectId: "p1" }, false);
+
+        expect(global.map((agent) => agent.sessionId)).toContain("elsewhere");
+        expect(scoped.map((agent) => agent.sessionId)).not.toContain("elsewhere");
+    });
+
+    it("still leaves archived chats out of a global scope", () => {
+        const database = seed();
+
+        const active = queryTimelineAgents(database, { kind: "global" }, false);
+        const all = queryTimelineAgents(database, { kind: "global" }, true);
+
+        expect(active.some((agent) => agent.sessionId === "archived")).toBe(false);
+        expect(all.some((agent) => agent.sessionId === "archived")).toBe(true);
+    });
+
     it("stops at the worktree for a workspace scope", () => {
         const database = seed();
 
@@ -108,29 +143,7 @@ describe("timeline persistence", () => {
 function seed(): SessionDatabase {
     const opened = openSessionDatabase(":memory:");
     migrateSessionDatabase(opened.database);
-    opened.database
-        .insert(projects)
-        .values({
-            createdAtMs: 1,
-            gitAhead: 0,
-            gitBehind: 0,
-            gitDetached: false,
-            id: "p1",
-            initializationAttempt: 0,
-            initializationStatus: "ready",
-            kind: "regular",
-            name: "Rig",
-            nameKey: "rig",
-            nameSource: "folder",
-            orderKey: "a0",
-            path: "/rig",
-            presence: "present",
-            storageKey: "rig",
-            updatedAtMs: 1,
-            version: 1,
-            worktreeSupport: "supported",
-        })
-        .run();
+    insertProject(opened.database, "p1", "/rig");
     opened.database
         .insert(projectWorkspaces)
         .values({
@@ -180,6 +193,32 @@ function seed(): SessionDatabase {
     return opened.database;
 }
 
+function insertProject(database: SessionDatabase, id: string, path: string): void {
+    database
+        .insert(projects)
+        .values({
+            createdAtMs: 1,
+            gitAhead: 0,
+            gitBehind: 0,
+            gitDetached: false,
+            id,
+            initializationAttempt: 0,
+            initializationStatus: "ready",
+            kind: "regular",
+            name: id,
+            nameKey: id,
+            nameSource: "folder",
+            orderKey: "a0",
+            path,
+            presence: "present",
+            storageKey: id,
+            updatedAtMs: 1,
+            version: 1,
+            worktreeSupport: "supported",
+        })
+        .run();
+}
+
 function insertSession(
     database: SessionDatabase,
     overrides: {
@@ -188,6 +227,7 @@ function insertSession(
         depth?: number;
         id: string;
         parentSessionId?: string;
+        projectId?: string;
         sessionKind?: string;
         status?: string;
         workspaceId?: string;
@@ -211,7 +251,7 @@ function insertSession(
             nextTaskId: 1,
             orderKey: "a0",
             permissionMode: "workspace_write",
-            projectId: "p1",
+            projectId: overrides.projectId ?? "p1",
             providerId: "codex",
             rootSessionId: overrides.parentSessionId === undefined ? overrides.id : "root",
             secretIdsJson: "[]",

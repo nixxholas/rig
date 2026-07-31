@@ -3,11 +3,16 @@ import type { SessionAgentType } from "./SessionProtocol.js";
 /**
  * How much of Rig one timeline covers.
  *
- * A project timeline reaches every workspace inside it and every chat inside
- * those, a workspace timeline stops at that worktree, and a session timeline
- * covers one chat together with the subagents it started.
+ * A global timeline covers every agent Rig knows about. A project timeline
+ * reaches every workspace inside it and every chat inside those, a workspace
+ * timeline stops at that worktree, and a session timeline covers one chat
+ * together with the subagents it started.
+ *
+ * A global timeline grows with everything Rig has ever run, so pair it with
+ * `since` when only recent work is wanted.
  */
 export type TimelineScope =
+    | { kind: "global" }
     | { kind: "project"; projectId: string }
     | { kind: "session"; sessionId: string }
     | { kind: "workspace"; projectId: string; workspaceId: string };

@@ -138,6 +138,30 @@ describe("TimelineStore", () => {
         expect(store.agents()[0]).toMatchObject({ label: "Fix the parser", sessionId: "new" });
     });
 
+    it("adopts a chat from any project into a global chart", () => {
+        const store = new TimelineStore({ kind: "global" });
+        store.applySnapshot({
+            agents: [],
+            cursor: "01900000-0000-7000-8000-000000000001",
+            scope: { kind: "global" },
+        });
+
+        store.apply(
+            event("session_created", MINUTE, {
+                session: {
+                    agentId: "agent-far",
+                    id: "far",
+                    modelId: "model",
+                    // A project this chart was never told about; global means global.
+                    projectId: "some-other-project",
+                    providerId: "codex",
+                },
+            }),
+        );
+
+        expect(store.agents().map((node) => node.sessionId)).toEqual(["far"]);
+    });
+
     it("ignores a chat created outside the chart's scope", () => {
         const store = new TimelineStore({ kind: "project", projectId: "p1" });
         store.applySnapshot(snapshot([]));

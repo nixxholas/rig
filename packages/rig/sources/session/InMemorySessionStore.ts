@@ -471,6 +471,7 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     #inTimelineScope(session: InMemorySession, scope: TimelineScope): boolean {
+        if (scope.kind === "global") return true;
         const summary = session.summary();
         if (scope.kind === "project") return summary.projectId === scope.projectId;
         if (scope.kind === "workspace") return summary.workspaceId === scope.workspaceId;

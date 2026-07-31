@@ -1131,6 +1131,7 @@ export interface GlobalStreamHello {
 
 /** How much of Rig one timeline covers. */
 export type TimelineScope =
+    | { kind: "global" }
     | { kind: "project"; projectId: string }
     | { kind: "session"; sessionId: string }
     | { kind: "workspace"; projectId: string; workspaceId: string };

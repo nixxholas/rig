@@ -301,9 +301,15 @@ for (const agent of timeline.agents()) {
 timeline.close();
 ```
 
-A scope is a project, a worktree, or a single chat. A project reaches every worktree and chat inside
-it; a worktree stops there; a chat covers itself and its subagents at any depth. Pass
-`includeArchived` to keep archived chats, and `since` to drop work that had already finished.
+A scope is global, a project, a worktree, or a single chat. Global covers every agent across every
+project; a project reaches every worktree and chat inside it; a worktree stops there; a chat covers
+itself and its subagents at any depth. Pass `includeArchived` to keep archived chats, and `since` to
+drop work that had already finished.
+
+A global chart grows with everything Rig has ever run, so `since` is worth pairing with it. Note
+that a span still open has no end to fall outside the window: a chat waiting for the person right
+now stays on the chart however recent the window is, which is usually what you want from a view of
+what is happening.
 
 Every boundary is a millisecond timestamp, because that is what Rig records. A chart that reads in
 minutes is the consumer's choice, and nothing is rounded on the way out.
