@@ -128,6 +128,12 @@ export interface SessionAgentMetadata {
     parentSessionId?: string;
     parentToolCallId?: string;
     taskName?: string;
+    /**
+     * The session that started this visible conversation on the user's behalf. Unlike a subagent
+     * parent, a delegator does not own the session: the conversation keeps its own place in the
+     * session list, and the user may take it over at any time.
+     */
+    delegatedBySessionId?: string;
 }
 
 export interface SessionInterruption {

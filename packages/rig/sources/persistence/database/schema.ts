@@ -149,6 +149,8 @@ export const sessions = sqliteTable(
         lastMessageAtMs: integer("last_message_at_ms"),
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
+        // Added by a later migration, so it follows the columns of the initial schema.
+        delegatedBySessionId: text("delegated_by_session_id"),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),

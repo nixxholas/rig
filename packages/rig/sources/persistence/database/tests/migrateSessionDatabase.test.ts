@@ -71,7 +71,9 @@ describe("migrateSessionDatabase", () => {
                 sql.raw("SELECT name FROM sqlite_master WHERE name = 'legacy_data'"),
             ),
         ).toBeUndefined();
-        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({ user_version: 1 });
+        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+            user_version: CURRENT_SESSION_DATABASE_VERSION,
+        });
 
         opened.client.close();
     });
@@ -103,12 +105,14 @@ describe("migrateSessionDatabase", () => {
             sql.raw(`PRAGMA user_version = ${String(CURRENT_SESSION_DATABASE_VERSION + 1)}`),
         );
 
-        expect(() => migrateSessionDatabase(opened.database)).toThrow(/supports up to 1/u);
+        expect(() => migrateSessionDatabase(opened.database)).toThrow(
+            new RegExp(`supports up to ${String(CURRENT_SESSION_DATABASE_VERSION)}`, "u"),
+        );
 
         opened.client.close();
     });
 
-    it("keeps the Drizzle schema identical to the init migration", () => {
+    it("keeps the Drizzle schema identical to the applied migrations", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database);
 

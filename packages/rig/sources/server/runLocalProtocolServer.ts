@@ -321,6 +321,10 @@ export async function runLocalProtocolServer(
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
             mcpToolProvider,
             modelCatalog,
+            workspaceFeatures: {
+                crossWorkspace: loadedConfig.config.features.crossWorkspace,
+                workspaces: loadedConfig.config.features.workspaces,
+            },
             ...(happyModule === undefined
                 ? {}
                 : { onSessionAccess: (session) => happySyncService?.attach(session) }),

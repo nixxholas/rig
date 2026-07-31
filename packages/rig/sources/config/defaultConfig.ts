@@ -7,7 +7,9 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         permissionMode: "workspace_write",
     },
     features: {
+        crossWorkspace: false,
         workflows: true,
+        workspaces: true,
     },
     mcpServers: {},
     providerDefaultEnable: true,

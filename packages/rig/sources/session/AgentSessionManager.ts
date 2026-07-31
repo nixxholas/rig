@@ -1,3 +1,5 @@
+import { createId } from "@paralleldrive/cuid2";
+
 import {
     createSubagentInstructions,
     findLastAgentResponseText,
@@ -17,9 +19,17 @@ import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2Colla
 import type {
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    Project,
     ProjectWorkspace,
     SessionAgentMetadata,
 } from "../protocol/index.js";
+import type {
+    AgentProject,
+    AgentWorkspace,
+    AgentWorkspaceSession,
+    DelegatedSession,
+    DelegatedSessionRequest,
+} from "../agent/context/WorkspaceContext.js";
 import type { Message } from "../agent/types.js";
 import type { PermissionMode } from "../permissions/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
@@ -48,14 +58,26 @@ export interface AgentSessionRepository {
         metadata: SessionAgentMetadata,
         contextMessages?: readonly Message[],
     ): InMemorySession;
+    createDelegatedSession?(
+        request: CreateSessionRequest,
+        metadata: SessionAgentMetadata,
+        id: string,
+    ): InMemorySession;
     findByAgentId?(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
+    listProjects?(): readonly Project[];
+    listProjectWorkspaces?(projectId: string): readonly ProjectWorkspace[];
+    listProjectSessions?(target: {
+        projectId: string;
+        workspaceId?: string;
+    }): readonly AgentWorkspaceSession[];
     ownedWorkspace?(
         ownerSessionId: string,
         projectId: string,
         workspaceId: string,
     ): ProjectWorkspace | undefined;
+    workspace?(projectId: string, workspaceId: string): ProjectWorkspace | undefined;
 }
 
 export interface AgentSessionManagerOptions {
@@ -141,6 +163,213 @@ export class AgentSessionManager {
         return workspace;
     }
 
+    listProjects(sessionId: string): readonly AgentProject[] {
+        const list = this.#repository.listProjects;
+        if (list === undefined) throw new Error("This session cannot list projects.");
+        const currentProjectId = this.#current(sessionId).snapshot().projectId;
+        return list().map((project) => ({
+            current: project.id === currentProjectId,
+            id: project.id,
+            name: project.name,
+            path: project.path,
+        }));
+    }
+
+    listWorkspaces(
+        sessionId: string,
+        projectId: string | undefined,
+        options: { crossWorkspace: boolean },
+    ): readonly AgentWorkspace[] {
+        const list = this.#repository.listProjectWorkspaces;
+        if (list === undefined) throw new Error("This session cannot list workspaces.");
+        const target = this.#targetProjectId(sessionId, projectId, options);
+        return list(target).map((workspace) => this.#agentWorkspace(sessionId, workspace));
+    }
+
+    listSessions(
+        sessionId: string,
+        target: { projectId?: string; workspaceId?: string },
+        options: { crossWorkspace: boolean },
+    ): readonly AgentWorkspaceSession[] {
+        const list = this.#repository.listProjectSessions;
+        if (list === undefined) throw new Error("This session cannot list conversations.");
+        const projectId = this.#targetProjectId(sessionId, target.projectId, options);
+        return list({
+            projectId,
+            ...(target.workspaceId === undefined ? {} : { workspaceId: target.workspaceId }),
+        });
+    }
+
+    /**
+     * Starts a user-visible conversation in another workspace on behalf of a session.
+     *
+     * The new session is a primary one: it holds its own place in the session list and the user
+     * may take it over. The delegator is recorded so it can be told when they do, and it talks to
+     * the session afterwards through the ordinary agent messaging tools.
+     */
+    async delegate(
+        delegatorSessionId: string,
+        request: DelegatedSessionRequest,
+    ): Promise<DelegatedSession> {
+        const delegator = this.#current(delegatorSessionId);
+        const create = this.#repository.createDelegatedSession;
+        const resolveWorkspace = this.#repository.workspace;
+        if (create === undefined || resolveWorkspace === undefined) {
+            throw new Error("This session cannot start work in another workspace.");
+        }
+        if (delegator.isSubagent()) {
+            throw new Error("Only a primary session can start work in another workspace.");
+        }
+        const snapshot = delegator.snapshot();
+        const projectId = request.projectId ?? snapshot.projectId;
+        const workspace = await this.#waitForWorkspace(() =>
+            resolveWorkspace(projectId, request.workspaceId),
+        );
+        if (workspace === undefined) {
+            throw new Error("That workspace was not found in that project.");
+        }
+        if (workspace.status !== "ready") {
+            throw new Error(`The workspace is ${workspace.status} and cannot start work yet.`);
+        }
+        if (workspace.id === snapshot.workspaceId) {
+            throw new Error("That workspace is the one this session already works in.");
+        }
+        const sessionId = createId();
+        const delegate = create(
+            {
+                ...delegator.requestForSubagent(),
+                cwd: workspace.path,
+                projectId,
+                trackUnread: true,
+                workspaceId: workspace.id,
+            },
+            {
+                delegatedBySessionId: delegatorSessionId,
+                depth: 0,
+                rootSessionId: sessionId,
+                type: "primary",
+                ...(request.title === undefined ? {} : { description: request.title }),
+            },
+            sessionId,
+        );
+        const submitted = delegate.submit({
+            agentMessageTriggerTurn: true,
+            provenance: "agent",
+            text: request.prompt,
+        });
+        this.#startDelegatedRunMonitor(delegator, delegate, submitted.runId);
+        return {
+            agentId: delegate.agentIdentity().agentId,
+            projectId,
+            sessionId: delegate.id,
+            title: request.title ?? "Untitled conversation",
+            workspaceId: workspace.id,
+            workspacePath: workspace.path,
+        };
+    }
+
+    /**
+     * Tells a delegator that the user has taken their delegated session over.
+     *
+     * The delegator keeps working, but it must not assume it is still the only voice in that
+     * conversation, so it is given what the user actually said.
+     */
+    notifyDelegatorOfUserMessage(sessionId: string, text: string): void {
+        const delegate = this.#repository.get(sessionId);
+        const delegatorSessionId = delegate?.agentMetadata().delegatedBySessionId;
+        if (delegate === undefined || delegatorSessionId === undefined) return;
+        const delegator = this.#repository.get(delegatorSessionId);
+        if (delegator === undefined || delegator.isClosing?.() === true) return;
+        const title = delegate.agentIdentity().title ?? "the delegated conversation";
+        try {
+            delegator.deliverNotification({
+                displayText: `The user replied in "${title}" themselves.`,
+                text: [
+                    "<delegated-session-notification>",
+                    `Session: ${delegate.id}`,
+                    `Agent ID: ${delegate.agentIdentity().agentId}`,
+                    `Title: ${title}`,
+                    "The user wrote to this delegated session directly. They are steering it now.",
+                    "User message:",
+                    text,
+                    "</delegated-session-notification>",
+                ].join("\n"),
+            });
+        } catch (error) {
+            // Reaching the delegator is best effort; a delegator that cannot take the news must
+            // not break the user's own message. A database that cannot record it still must.
+            if (isDatabaseFailure(error)) throw error;
+        }
+    }
+
+    #targetProjectId(
+        sessionId: string,
+        projectId: string | undefined,
+        options: { crossWorkspace: boolean },
+    ): string {
+        const currentProjectId = this.#current(sessionId).snapshot().projectId;
+        if (projectId === undefined || projectId === currentProjectId) return currentProjectId;
+        if (!options.crossWorkspace) {
+            throw new Error(
+                "Looking into another project is turned off. Ask the user to enable features.cross_workspace in their Rig configuration.",
+            );
+        }
+        return projectId;
+    }
+
+    #agentWorkspace(sessionId: string, workspace: ProjectWorkspace): AgentWorkspace {
+        const owned =
+            this.#repository.ownedWorkspace?.(sessionId, workspace.projectId, workspace.id) !==
+            undefined;
+        return {
+            id: workspace.id,
+            name: workspace.name,
+            path: workspace.path,
+            projectId: workspace.projectId,
+            status: workspace.status,
+            ...(owned ? { owned } : {}),
+        };
+    }
+
+    #startDelegatedRunMonitor(
+        delegator: InMemorySession,
+        delegate: InMemorySession,
+        runId: string,
+    ): void {
+        const monitor = async () => {
+            const completion = await delegate.waitForRun(runId);
+            if (delegator.isClosing?.() === true) return;
+            const title = delegate.agentIdentity().title ?? "the delegated conversation";
+            const output = this.#completionOutput(
+                delegate,
+                completion.status,
+                completion.errorMessage,
+            );
+            delegator.deliverNotification({
+                displayText: `Delegated work in "${title}" ${
+                    completion.status === "completed"
+                        ? "completed"
+                        : completion.status === "aborted"
+                          ? "was stopped"
+                          : "failed"
+                }.`,
+                text: [
+                    "<delegated-session-notification>",
+                    `Session: ${delegate.id}`,
+                    `Agent ID: ${delegate.agentIdentity().agentId}`,
+                    `Title: ${title}`,
+                    `Status: ${completion.status}`,
+                    `Result: ${output}`,
+                    "</delegated-session-notification>",
+                ].join("\n"),
+            });
+        };
+        const task = this.#taskDrain?.run(monitor) ?? monitor();
+        void task.catch((error: unknown) => {
+            if (isDatabaseFailure(error)) throw error;
+        });
+    }
+
     async spawnInWorkspace(
         parentSessionId: string,
         request: Omit<SpawnSubagentRequest, "cwd" | "workspaceId"> & { workspaceId: string },
@@ -151,11 +380,9 @@ export class AgentSessionManager {
         if (parent === undefined || resolveWorkspace === undefined) {
             throw new Error("This session cannot start workspace agents.");
         }
-        const workspace = await this.#waitForOwnedWorkspace(
-            resolveWorkspace,
-            parentSessionId,
-            parent.snapshot().projectId,
-            request.workspaceId,
+        const projectId = parent.snapshot().projectId;
+        const workspace = await this.#waitForWorkspace(
+            () => resolveWorkspace(parentSessionId, projectId, request.workspaceId),
             signal,
         );
         if (workspace === undefined) {
@@ -171,17 +398,18 @@ export class AgentSessionManager {
         );
     }
 
-    async #waitForOwnedWorkspace(
-        resolveWorkspace: NonNullable<AgentSessionRepository["ownedWorkspace"]>,
-        ownerSessionId: string,
-        projectId: string,
-        workspaceId: string,
+    /**
+     * Waits out the moments between a workspace being created and its worktree being usable, so an
+     * agent that just made one does not have to poll for it before starting work there.
+     */
+    async #waitForWorkspace(
+        resolveWorkspace: () => ProjectWorkspace | undefined,
         signal?: AbortSignal,
     ): Promise<ProjectWorkspace | undefined> {
         const deadline = Date.now() + 120_000;
         for (;;) {
             signal?.throwIfAborted();
-            const workspace = resolveWorkspace(ownerSessionId, projectId, workspaceId);
+            const workspace = resolveWorkspace();
             if (
                 workspace === undefined ||
                 workspace.status !== "initializing" ||

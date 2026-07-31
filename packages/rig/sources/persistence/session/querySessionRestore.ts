@@ -84,6 +84,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     const activeSince = readOptionalNumber(row, "active_since_ms");
     const permissionMode = parsePermissionMode(readString(row, "permission_mode"));
     const parentSessionId = readOptionalString(row, "parent_session_id");
+    const delegatedBySessionId = readOptionalString(row, "delegated_by_session_id");
     const parentToolCallId = readOptionalString(row, "parent_tool_call_id");
     const taskName = readOptionalString(row, "task_name");
     const description = readOptionalString(row, "description");
@@ -98,6 +99,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         type: readString(row, "session_kind") as SessionAgentMetadata["type"],
         ...(description !== undefined ? { description } : {}),
         ...(parentSessionId !== undefined ? { parentSessionId } : {}),
+        ...(delegatedBySessionId !== undefined ? { delegatedBySessionId } : {}),
         ...(parentToolCallId !== undefined ? { parentToolCallId } : {}),
         ...(taskName !== undefined ? { taskName } : {}),
     };

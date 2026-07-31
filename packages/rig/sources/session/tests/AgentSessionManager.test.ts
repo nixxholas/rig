@@ -1766,7 +1766,169 @@ describe("AgentSessionManager", () => {
         ).rejects.toThrow("not created by the current session");
         expect(createSubagent).toHaveBeenCalledOnce();
     });
+
+    it("starts a delegated conversation the user can see and take over", async () => {
+        const delegated = {
+            agentIdentity: () => ({ agentId: "delegate-agent", folder: "changelog" }),
+            agentMetadata: () => ({
+                delegatedBySessionId: "root-1",
+                depth: 0,
+                rootSessionId: "delegate-1",
+                type: "primary" as const,
+            }),
+            id: "delegate-1",
+            isSubagent: () => false,
+            submit: vi.fn(() => ({ runId: "delegate-run" })),
+            waitForRun: vi.fn(() => new Promise(() => {})),
+        } as unknown as InMemorySession;
+        const delegator = delegatorSession();
+        const createDelegatedSession = vi.fn(() => delegated);
+        const manager = new AgentSessionManager({
+            repository: {
+                createDelegatedSession,
+                createSubagent: vi.fn(),
+                get: (id) => (id === delegator.id ? delegator : undefined),
+                listByRoot: () => [],
+                workspace: (projectId, workspaceId) =>
+                    projectId === "project-1" && workspaceId === "workspace-2"
+                        ? ({
+                              id: workspaceId,
+                              name: "Changelog",
+                              path: "/workspaces/changelog",
+                              projectId,
+                              status: "ready",
+                          } as ProjectWorkspace)
+                        : undefined,
+            },
+        });
+
+        await expect(
+            manager.delegate(delegator.id, {
+                prompt: "Update the changelog.",
+                title: "Update the changelog",
+                workspaceId: "workspace-2",
+            }),
+        ).resolves.toEqual({
+            agentId: "delegate-agent",
+            projectId: "project-1",
+            sessionId: "delegate-1",
+            title: "Update the changelog",
+            workspaceId: "workspace-2",
+            workspacePath: "/workspaces/changelog",
+        });
+        expect(createDelegatedSession).toHaveBeenCalledWith(
+            expect.objectContaining({
+                cwd: "/workspaces/changelog",
+                projectId: "project-1",
+                trackUnread: true,
+                workspaceId: "workspace-2",
+            }),
+            expect.objectContaining({
+                delegatedBySessionId: "root-1",
+                description: "Update the changelog",
+                type: "primary",
+            }),
+            expect.any(String),
+        );
+        await expect(
+            manager.delegate(delegator.id, { prompt: "Nope.", workspaceId: "missing-workspace" }),
+        ).rejects.toThrow("was not found in that project");
+    });
+
+    it("tells the delegator what the user said when they take a delegated session over", () => {
+        const deliverNotification = vi.fn();
+        const delegator = delegatorSession({ deliverNotification });
+        const delegated = {
+            agentIdentity: () => ({
+                agentId: "delegate-agent",
+                folder: "changelog",
+                title: "Update the changelog",
+            }),
+            agentMetadata: () => ({
+                delegatedBySessionId: "root-1",
+                depth: 0,
+                rootSessionId: "delegate-1",
+                type: "primary" as const,
+            }),
+            id: "delegate-1",
+            isSubagent: () => false,
+        } as unknown as InMemorySession;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (id) =>
+                    id === delegator.id ? delegator : id === delegated.id ? delegated : undefined,
+                listByRoot: () => [],
+            },
+        });
+
+        manager.notifyDelegatorOfUserMessage(delegated.id, "Stop and rewrite the summary.");
+
+        expect(deliverNotification).toHaveBeenCalledOnce();
+        const notification = deliverNotification.mock.calls[0]![0] as {
+            displayText: string;
+            text: string;
+        };
+        expect(notification.displayText).toBe(
+            'The user replied in "Update the changelog" themselves.',
+        );
+        expect(notification.text).toContain("Stop and rewrite the summary.");
+        expect(notification.text).toContain("They are steering it now.");
+    });
+
+    it("keeps another project's workspaces and conversations behind cross-workspace access", () => {
+        const delegator = delegatorSession();
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (id) => (id === delegator.id ? delegator : undefined),
+                listByRoot: () => [],
+                listProjectSessions: () => [],
+                listProjectWorkspaces: () => [],
+            },
+        });
+
+        expect(() =>
+            manager.listWorkspaces(delegator.id, "project-2", { crossWorkspace: false }),
+        ).toThrow("features.cross_workspace");
+        expect(
+            manager.listWorkspaces(delegator.id, "project-1", { crossWorkspace: false }),
+        ).toEqual([]);
+        expect(() =>
+            manager.listSessions(
+                delegator.id,
+                { projectId: "project-2" },
+                { crossWorkspace: false },
+            ),
+        ).toThrow("features.cross_workspace");
+        expect(
+            manager.listSessions(
+                delegator.id,
+                { projectId: "project-2" },
+                { crossWorkspace: true },
+            ),
+        ).toEqual([]);
+    });
 });
+
+function delegatorSession(overrides: Partial<InMemorySession> = {}): InMemorySession {
+    return {
+        agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" as const }),
+        deliverNotification: vi.fn(),
+        id: "root-1",
+        isClosing: () => false,
+        isSubagent: () => false,
+        requestForSubagent: () => ({
+            cwd: "/project",
+            modelId: "openai/gpt-5.6-sol",
+            permissionMode: "auto",
+            providerId: "codex",
+            trackUnread: false,
+        }),
+        snapshot: () => ({ projectId: "project-1" }),
+        ...overrides,
+    } as unknown as InMemorySession;
+}
 
 function historySession(options: {
     id: string;

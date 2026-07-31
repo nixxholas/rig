@@ -42,7 +42,7 @@ import { selectCollaborationToolsForModel } from "./selectCollaborationToolsForM
 import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
-import { workspaceTools } from "../tools/workspaces/workspaceTools.js";
+import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
 
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
@@ -248,7 +248,11 @@ export function createCodingAssistantAgent(
                 );
     const toolsWithoutGoals = [
         ...baseTools,
-        ...(options.workspaces === undefined ? [] : workspaceTools),
+        ...(options.workspaces === undefined
+            ? []
+            : options.workspaces.crossWorkspace
+              ? [...workspaceTools, ...crossWorkspaceTools]
+              : workspaceTools),
         ...agentCommunicationTools,
         ...(options.chatHistory === undefined ? [] : [readAgentHistoryTool]),
         ...availableCollaborationTools,

@@ -346,8 +346,20 @@ export interface InMemorySessionOptions {
     secretRegistry?: SecretRegistry;
     restore?: PersistedSessionState;
     taskDrain?: TaskDrain;
+    workspaceFeatures?: WorkspaceFeatures;
     workspaceId?: string;
 }
+
+/** Which parts of Rig's workspace API the agent in this session may use. */
+export interface WorkspaceFeatures {
+    crossWorkspace: boolean;
+    workspaces: boolean;
+}
+
+export const DEFAULT_WORKSPACE_FEATURES: WorkspaceFeatures = {
+    crossWorkspace: false,
+    workspaces: true,
+};
 
 interface ActiveRun {
     controller: AbortController;
@@ -545,10 +557,12 @@ export class InMemorySession {
     #tools: readonly string[] = [];
     #workflowRuns = new Map<string, InternalWorkflowRun>();
     #workflowsEnabled: boolean;
+    readonly #workspaceFeatures: WorkspaceFeatures;
     #workspaceArchived = false;
 
     constructor(options: InMemorySessionOptions) {
         this.#agentManager = options.agentManager;
+        this.#workspaceFeatures = options.workspaceFeatures ?? DEFAULT_WORKSPACE_FEATURES;
         this.#createEventId = options.createEventId;
         this.#createdAt = options.restore?.createdAt ?? (options.now ?? Date.now)();
         this.#createRuntime = options.createRuntime ?? createCodingAssistantAgent;
@@ -3343,6 +3357,9 @@ export class InMemorySession {
         });
         this.#startDrainQueue();
         this.#restartMetadataSettlement();
+        if (options.source === undefined && request.provenance !== "agent") {
+            this.#reportUserInterventionToDelegator(displayText);
+        }
         return {
             ...(queued.debugDirectory === undefined
                 ? {}
@@ -3351,6 +3368,17 @@ export class InMemorySession {
             runId,
             sessionId: this.id,
         };
+    }
+
+    /**
+     * Tells whichever session delegated this conversation that the user is speaking here now.
+     *
+     * A delegated session belongs to the user, not to the agent that started it, so the delegator
+     * has to learn when they take it over instead of continuing to assume it is alone.
+     */
+    #reportUserInterventionToDelegator(text: string): void {
+        if (this.#agentMetadata.delegatedBySessionId === undefined) return;
+        this.#agentManager?.notifyDelegatorOfUserMessage(this.id, text);
     }
 
     steer(request: SteerMessageRequest): SteerMessageResponse {
@@ -3418,6 +3446,7 @@ export class InMemorySession {
                 runId: activeRun.runId,
             });
             this.#restartMetadataSettlement();
+            this.#reportUserInterventionToDelegator(displayText);
             return {
                 delivery: "steer",
                 eventId: event.id,
@@ -3452,6 +3481,7 @@ export class InMemorySession {
             });
         }
         this.#restartMetadataSettlement();
+        this.#reportUserInterventionToDelegator(displayText);
         return {
             delivery: "steer",
             eventId: event.id,
@@ -5010,23 +5040,34 @@ export class InMemorySession {
                 spawn: (request, signal) => agentManager.spawn(this.id, request, signal),
                 wait: (timeoutMs, signal) => agentManager.wait(this.id, timeoutMs, signal),
             };
-            if (!this.isSubagent()) {
+            if (!this.isSubagent() && this.#workspaceFeatures.workspaces) {
+                const crossWorkspace = this.#workspaceFeatures.crossWorkspace;
                 const workspaceResult = (workspace: {
                     id: string;
                     name: string;
                     path: string;
+                    projectId: string;
                     status: "initializing" | "ready" | "failed" | "archiving" | "archived";
                 }) => ({
                     id: workspace.id,
                     name: workspace.name,
                     path: workspace.path,
+                    projectId: workspace.projectId,
                     status: workspace.status,
+                    owned: true,
                 });
                 options.workspaces = {
                     archive: async (workspaceId) =>
                         workspaceResult(await agentManager.archiveWorkspace(this.id, workspaceId)),
                     create: async (input) =>
                         workspaceResult(await agentManager.createWorkspace(this.id, input)),
+                    crossWorkspace,
+                    delegate: (request) => agentManager.delegate(this.id, request),
+                    listProjects: () => agentManager.listProjects(this.id),
+                    listSessions: (target) =>
+                        agentManager.listSessions(this.id, target, { crossWorkspace }),
+                    listWorkspaces: (projectId) =>
+                        agentManager.listWorkspaces(this.id, projectId, { crossWorkspace }),
                     spawn: (request, signal) =>
                         agentManager.spawnInWorkspace(this.id, request, signal),
                 };

@@ -177,9 +177,17 @@ export function parseConfigToml(source: string): PartialRigConfig {
     const mcpServers = readMcpServers(table.mcp_servers);
     const featuresTable = readTable(table.features, "features");
     if (featuresTable !== undefined) {
-        assertKnownKeys(featuresTable, "features", ["workflows"]);
+        assertKnownKeys(featuresTable, "features", ["cross_workspace", "workflows", "workspaces"]);
         const workflows = readBoolean(featuresTable, "workflows", "features.workflows");
         if (workflows !== undefined) features.workflows = workflows;
+        const workspaces = readBoolean(featuresTable, "workspaces", "features.workspaces");
+        if (workspaces !== undefined) features.workspaces = workspaces;
+        const crossWorkspace = readBoolean(
+            featuresTable,
+            "cross_workspace",
+            "features.cross_workspace",
+        );
+        if (crossWorkspace !== undefined) features.crossWorkspace = crossWorkspace;
     }
 
     return {

@@ -40,7 +40,9 @@ export async function createConfigFile(
                 show_usage: config.settings.showUsage,
             },
             features: {
+                cross_workspace: config.features.crossWorkspace,
                 workflows: config.features.workflows,
+                workspaces: config.features.workspaces,
             },
             providers: serializeProviders(config.providers, config.providerDefaultEnable),
             theme: config.theme,

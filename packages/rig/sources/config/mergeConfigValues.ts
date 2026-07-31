@@ -68,6 +68,12 @@ export function mergeConfigValues(
         if (config.features?.workflows !== undefined) {
             features.workflows = config.features.workflows;
         }
+        if (config.features?.workspaces !== undefined) {
+            features.workspaces = config.features.workspaces;
+        }
+        if (config.features?.crossWorkspace !== undefined) {
+            features.crossWorkspace = config.features.crossWorkspace;
+        }
         if (config.providerDefaultEnable !== undefined) {
             providerDefaultEnable = config.providerDefaultEnable;
         }

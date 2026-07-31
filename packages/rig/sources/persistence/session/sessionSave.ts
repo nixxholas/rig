@@ -47,6 +47,7 @@ export function sessionSave(
             nextTaskId: state.nextTaskId,
             orderKey: state.orderKey,
             parentSessionId: state.agent.parentSessionId ?? null,
+            delegatedBySessionId: state.agent.delegatedBySessionId ?? null,
             parentToolCallId: state.agent.parentToolCallId ?? null,
             permissionMode: state.permissionMode,
             projectId: input.projectId,

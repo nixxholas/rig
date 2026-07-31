@@ -2,8 +2,9 @@ import { sql } from "drizzle-orm";
 
 import type { SessionDatabase } from "./openSessionDatabase.js";
 import { init } from "./migrations/01-init.js";
+import { delegatedSessions } from "./migrations/02-delegated-sessions.js";
 
-const migrations = [init] as const;
+const migrations = [init, delegatedSessions] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 
 export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;

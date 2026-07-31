@@ -45,11 +45,15 @@ export interface PartialConfigSettings {
 }
 
 export interface ConfigFeatures {
+    crossWorkspace: boolean;
     workflows: boolean;
+    workspaces: boolean;
 }
 
 export interface PartialConfigFeatures {
+    crossWorkspace?: boolean;
     workflows?: boolean;
+    workspaces?: boolean;
 }
 
 interface ConfigProviderBase {

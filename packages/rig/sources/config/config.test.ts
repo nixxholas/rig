@@ -126,6 +126,8 @@ brand = "ansi:202"
 
 [features]
 workflows = false
+workspaces = false
+cross_workspace = true
 
 [providers.codex]
 enabled = false
@@ -180,7 +182,9 @@ mounts = [
                 secondary: "bright_black",
             },
             features: {
+                crossWorkspace: true,
                 workflows: false,
+                workspaces: false,
             },
             providers: {
                 bedrock: { enabled: true, type: "bedrock" },
@@ -341,6 +345,8 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
         ['[settings]\nshow_usage = "yes"\n', "settings.show_usage must be a boolean."],
         ["[theme]\nprimary = 5\n", "theme.primary must be a string."],
         ['[features]\nworkflows = "yes"\n', "features.workflows must be a boolean."],
+        ['[features]\nworkspaces = "yes"\n', "features.workspaces must be a boolean."],
+        ['[features]\ncross_workspace = "yes"\n', "features.cross_workspace must be a boolean."],
         ['[defaults]\nmodle = "openai/gpt-5.6"\n', "Unknown defaults.modle setting."],
         ["[settings]\nshow_useage = true\n", "Unknown settings.show_useage setting."],
         ['[theme]\nprimari = "bright_white"\n', "Unknown theme.primari setting."],
@@ -563,7 +569,9 @@ codex_stream_max_retries = 8
                     showUsage: true,
                 },
                 features: {
+                    crossWorkspace: false,
                     workflows: false,
+                    workspaces: true,
                 },
                 mcpServers: {},
                 providerDefaultEnable: false,
@@ -617,7 +625,9 @@ codex_stream_max_retries = 8
                     "show_usage = true",
                     "",
                     "[features]",
+                    "cross_workspace = false",
                     "workflows = false",
+                    "workspaces = true",
                     "",
                     "[providers]",
                     "default_enable = false",

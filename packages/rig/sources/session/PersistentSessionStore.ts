@@ -27,12 +27,14 @@ import type {
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import {
+    DEFAULT_WORKSPACE_FEATURES,
     InMemorySession,
     type InMemorySessionOptions,
     type InMemorySessionPersistence,
     type PersistedQueuedRun,
     type PersistedSessionMessage,
     type PersistedSessionState,
+    type WorkspaceFeatures,
 } from "./InMemorySession.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
@@ -96,6 +98,7 @@ import { queryInterruptedSessionCandidates } from "../persistence/session/queryI
 import { queryLatestSessionDocker } from "../persistence/session/queryLatestSessionDocker.js";
 import { queryProjectSecretIds } from "../persistence/session/queryProjectSecretIds.js";
 import { queryRootSessionIdsForProject } from "../persistence/session/queryRootSessionIdsForProject.js";
+import { queryWorkspaceSessions } from "../persistence/session/queryWorkspaceSessions.js";
 import { querySecretRegistrations } from "../persistence/session/querySecretRegistrations.js";
 import { querySessionEvents } from "../persistence/session/querySessionEvents.js";
 import { querySessionHasEarlierTranscriptMessage } from "../persistence/session/querySessionHasEarlierTranscriptMessage.js";
@@ -133,6 +136,7 @@ export interface PersistentSessionStoreOptions {
     secrets?: readonly SecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
+    workspaceFeatures?: WorkspaceFeatures;
 }
 
 export class PersistentSessionStore implements SessionStore, InMemorySessionPersistence {
@@ -154,6 +158,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #globalEventQueue: GlobalEventQueue;
     #projects: ProjectRepository;
     #secrets: SecretRegistry;
+    readonly #workspaceFeatures: WorkspaceFeatures;
     #sessions = new Map<string, WeakRef<InMemorySession>>();
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
@@ -177,6 +182,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#onSessionEvent = options.onSessionEvent;
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#taskDrain = options.taskDrain;
+        this.#workspaceFeatures = options.workspaceFeatures ?? DEFAULT_WORKSPACE_FEATURES;
         if (options.databasePath !== ":memory:") {
             mkdirSync(dirname(options.databasePath), { mode: 0o700, recursive: true });
         }
@@ -235,11 +241,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     this.#projects.createWorkspace(projectId, request, ownerSessionId),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
+                createDelegatedSession: (request, metadata, id) =>
+                    this.#createSession(request, metadata, undefined, id),
                 findByAgentId: (agentId) => this.findByAgentId(agentId),
                 get: (sessionId) => this.get(sessionId),
                 listByRoot: (rootSessionId) => this.#listSubagentSessionsByRoot(rootSessionId),
+                listProjects: () => this.#projects.listProjects(),
+                listProjectWorkspaces: (projectId) => this.#projects.listWorkspaces(projectId),
+                listProjectSessions: (target) => queryWorkspaceSessions(this.#tx(), target),
                 ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
+                workspace: (projectId, workspaceId) =>
+                    this.#projects.getWorkspace(projectId, workspaceId),
             },
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });
@@ -404,6 +417,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#transaction(() => {
             session = new InMemorySession({
                 agentManager: this.#agentManager,
+                workspaceFeatures: this.#workspaceFeatures,
                 createEventId: createEventIdFactory(),
                 ...(this.#createRuntime === undefined
                     ? {}
@@ -494,6 +508,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             })();
             session = new InMemorySession({
                 agentManager: this.#agentManager,
+                workspaceFeatures: this.#workspaceFeatures,
                 createEventId: createEventIdFactory(),
                 ...(this.#createRuntime === undefined
                     ? {}
@@ -1162,6 +1177,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (loaded === undefined) return undefined;
         return new InMemorySession({
             agentManager: this.#agentManager,
+            workspaceFeatures: this.#workspaceFeatures,
             createEventId: createEventIdFactory(
                 loaded.lastEventId === undefined ? {} : { after: loaded.lastEventId },
             ),
