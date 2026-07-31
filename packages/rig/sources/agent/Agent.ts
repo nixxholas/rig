@@ -15,7 +15,14 @@ import { prepareProviderMessageImages } from "./prepareProviderMessageImages.js"
 import { reconcileAgentsMdMessages } from "./reconcileAgentsMdMessages.js";
 import { createDebugProvider, type DebugLog } from "../debug/index.js";
 import { printAgentMessageToConsole, type AgentConsole } from "./printAgentMessageToConsole.js";
-import type { AnyDefinedTool, ContentBlock, Message, SystemMessage, UserMessage } from "./types.js";
+import type {
+    AnyDefinedTool,
+    ContentBlock,
+    Message,
+    SteeringMessage,
+    SystemMessage,
+    UserMessage,
+} from "./types.js";
 import type { Context, Model, Provider, ServiceTier } from "@slopus/rig-execution";
 import { toLocalDate } from "../executor/toLocalDate.js";
 import type { PermissionMode, PermissionReviewAgent } from "../permissions/index.js";
@@ -140,7 +147,7 @@ export class Agent {
     #messages: Message[] = [];
     #contextMessages: Message[] | undefined;
     #queue: QueuedAgentMessage[] = [];
-    #steeringQueue: UserMessage[] = [];
+    #steeringQueue: SteeringMessage[] = [];
     #steeringController = new AbortController();
     #status: AgentStatus = "idle";
     #lastRunId: string | undefined;
@@ -244,7 +251,7 @@ export class Agent {
         }
     }
 
-    #takeSteering(): readonly UserMessage[] {
+    #takeSteering(): readonly SteeringMessage[] {
         const steering = this.#steeringQueue;
         this.#steeringQueue = [];
         if (this.#steeringController.signal.aborted) {
@@ -364,7 +371,7 @@ export class Agent {
         });
     }
 
-    steerMessage(message: UserMessage): void {
+    steerMessage(message: SteeringMessage): void {
         if (this.#activeRunId === undefined) {
             throw new Error(`Agent '${this.id}' is not running`);
         }

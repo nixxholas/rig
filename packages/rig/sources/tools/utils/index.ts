@@ -12,6 +12,7 @@ export * from "./path.js";
 export * from "./parseOptionalTerminalSessionId.js";
 export * from "./readTextFile.js";
 export * from "./search.js";
+export * from "./sendShellSessionInput.js";
 export * from "./shell.js";
 export * from "./singleLineText.js";
 export * from "./summarizeShellOutput.js";

@@ -23,6 +23,7 @@ describe("Claude tool parity", () => {
             "WebFetch",
             "WebSearch",
             "TaskStop",
+            "TaskInput",
             "AskUserQuestion",
         ]);
         expect(claudeCollaborationTools.map((tool) => tool.name)).toEqual([

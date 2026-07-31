@@ -7,7 +7,7 @@ import {
     type ProcessRunResult,
 } from "../../processes/index.js";
 import { assertPermissionRevision, type PermissionContext } from "../../permissions/index.js";
-import type { BashContext, BashSessionSnapshot } from "./BashContext.js";
+import type { BashContext, BashSessionExit, BashSessionSnapshot } from "./BashContext.js";
 import { assertCanUseCustomShell } from "./assertCanUseCustomShell.js";
 import { createSandboxedCommand } from "./createSandboxedCommand.js";
 import {
@@ -49,6 +49,8 @@ interface NodeBashSession {
     completionStderrDelta?: string;
     completionWaiters: Set<() => void>;
     cwd: string;
+    /** A read has already returned this session's final status. */
+    exitObserved: boolean;
     process: ManagedProcess;
     managedNetwork?: CommandManagedNetwork;
     result?: ProcessRunResult;
@@ -56,7 +58,6 @@ interface NodeBashSession {
     stderrOffset: number;
     stdoutOffset: number;
     timedOut: boolean;
-    timeout?: NodeJS.Timeout;
 }
 
 export function createNodeBashContext(options: CreateNodeBashContextOptions): BashContext {
@@ -64,6 +65,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
     let nextSessionId = 1;
     let pendingSessionStarts = 0;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
+    let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
     const activeSessionCount = () =>
         [...sessions.values()].filter((session) => session.result === undefined).length;
     const activeSessions = () =>
@@ -75,11 +77,26 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 sessionId: session.sessionId,
                 status: "running" as const,
             }));
+    /**
+     * Makes room for one more command. Running out of slots is our problem, not
+     * the model's, so the oldest command is evicted to free one.
+     *
+     * Eviction takes effect immediately: the session is dropped here rather
+     * than when its process finally dies, so a command that ignores the signal
+     * cannot keep the next one from starting.
+     */
     const reserveSessionStart = () => {
-        if (activeSessionCount() + pendingSessionStarts >= MAX_ACTIVE_BASH_SESSIONS) {
-            throw new Error(
-                `No more than ${String(MAX_ACTIVE_BASH_SESSIONS)} background commands can run at once.`,
-            );
+        while (activeSessionCount() + pendingSessionStarts >= MAX_ACTIVE_BASH_SESSIONS) {
+            const oldest = [...sessions.values()]
+                .filter((session) => session.result === undefined)
+                .sort((left, right) => left.sessionId - right.sessionId)[0];
+            if (oldest === undefined) {
+                throw new Error(
+                    `No more than ${String(MAX_ACTIVE_BASH_SESSIONS)} background commands can run at once.`,
+                );
+            }
+            sessions.delete(oldest.sessionId);
+            void oldest.process.kill("SIGTERM", { forceAfterMs: 500 });
         }
         pendingSessionStarts += 1;
         let released = false;
@@ -114,10 +131,14 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             session.stdoutOffset,
             session.stderrOffset,
         );
+        const peeking = readOptions.peek === true;
         const completionStderrDelta = session.completionStderrDelta ?? "";
-        delete session.completionStderrDelta;
-        session.stdoutOffset = processSnapshot.stdoutOffset;
-        session.stderrOffset = processSnapshot.stderrOffset;
+        if (!peeking) {
+            delete session.completionStderrDelta;
+            session.stdoutOffset = processSnapshot.stdoutOffset;
+            session.stderrOffset = processSnapshot.stderrOffset;
+            if (session.result !== undefined) session.exitObserved = true;
+        }
         return {
             command: session.command,
             cwd: session.cwd,
@@ -141,6 +162,10 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         activeSessionCount,
         activeSessions,
         cwd: options.cwd,
+        detachSession(sessionId) {
+            const session = sessions.get(sessionId);
+            if (session !== undefined) session.process.detached = true;
+        },
         async interruptSession(sessionId) {
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
@@ -157,6 +182,12 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
             await session.process.kill("SIGTERM", { forceAfterMs: 500 });
+            // The process is gone, but this session records the outcome from a
+            // separate continuation. Wait for that before reporting status,
+            // otherwise a just-killed command still reads as running.
+            if (session.result === undefined) {
+                await waitForBashSessionCompletion(session.completionWaiters, 5_000);
+            }
             return readSession(sessionId);
         },
         readSession,
@@ -301,7 +332,6 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     throw error;
                 }
                 const processStartOptions: Parameters<NativeProcessManager["start"]>[0] = {
-                    cleanupProcessGroupOnExit: true,
                     command: sandboxedCommand.command,
                     cwd,
                     env: withManagedNetworkProxy(
@@ -352,6 +382,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     command: runOptions.command,
                     completionWaiters: new Set(),
                     cwd,
+                    exitObserved: false,
                     process,
                     ...(managedNetwork === undefined ? {} : { managedNetwork }),
                     sessionId,
@@ -368,13 +399,6 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 );
                 sessions.set(sessionId, session);
                 onActiveSessionCountChange?.(activeSessionCount());
-                if (runOptions.timeoutMs !== undefined) {
-                    session.timeout = setTimeout(() => {
-                        session.timedOut = true;
-                        void process.kill("SIGTERM", { forceAfterMs: 500 });
-                    }, runOptions.timeoutMs);
-                    session.timeout.unref();
-                }
                 void completion.then(async (result) => {
                     stopObservingNetworkDenials?.();
                     const cleanup = await cleanUpCommandResources(
@@ -405,9 +429,19 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                         killed: networkDenial === undefined ? result.killed : false,
                         stderr: `${result.stderr}${completionStderrDelta}`,
                     };
-                    if (session.timeout !== undefined) clearTimeout(session.timeout);
+                    const awaited = session.completionWaiters.size > 0;
                     for (const finish of session.completionWaiters) finish();
                     onActiveSessionCountChange?.(activeSessionCount());
+                    // Nobody was waiting on this command, so nobody is about to
+                    // learn that it ended. Say so, without the output.
+                    if (!awaited && !session.exitObserved) {
+                        onSessionExit?.({
+                            command: session.command,
+                            exitCode: session.result.exitCode,
+                            sessionId,
+                            status: session.result.killed ? "killed" : "completed",
+                        });
+                    }
                 });
                 if (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
                     const completed = [...sessions.values()].find(
@@ -423,6 +457,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         setActiveSessionCountListener(listener) {
             onActiveSessionCountChange = listener;
             listener?.(activeSessionCount());
+        },
+        setSessionExitListener(listener) {
+            onSessionExit = listener;
         },
         supportsSessionInput: true,
         async writeSession(sessionId, data) {

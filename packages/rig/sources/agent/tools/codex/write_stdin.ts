@@ -9,7 +9,7 @@ import {
 } from "./impl/unifiedExecOutput.js";
 import { readSessionWithProgress } from "../../../tools/utils/readSessionWithProgress.js";
 import { summarizeTextOutput } from "../../../tools/utils/index.js";
-import { sendShellSessionInput } from "./impl/sendShellSessionInput.js";
+import { sendShellSessionInput } from "../../../tools/utils/sendShellSessionInput.js";
 
 export const codexWriteStdinTool = defineTool({
     name: "write_stdin",

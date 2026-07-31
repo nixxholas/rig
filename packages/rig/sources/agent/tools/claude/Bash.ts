@@ -3,6 +3,7 @@ import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../types.js";
 import { summarizeEscalatedShellAction } from "../../../permissions/summarizeEscalatedShellAction.js";
 import {
+    BACKGROUND_START_GRACE_MS,
     SHELL_CAPTURE_MAX_BYTES,
     SHELL_OUTPUT_MAX_BYTES,
     SHELL_OUTPUT_MAX_LINES,
@@ -11,6 +12,7 @@ import {
     shellOutputToText,
     shellToolOutputSchema,
     summarizeShellOutput,
+    toShellToolOutput,
 } from "../../../tools/utils/index.js";
 import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
 
@@ -22,8 +24,9 @@ export const claudeBashTool = defineTool({
 - Commands start in the session working directory. Shell state (such as \`cd\`, environment variables, and functions) does not persist between calls.
 - Try to maintain the current working directory by using absolute paths and avoiding usage of \`cd\`. In particular, never prepend \`cd <current-directory>\` to a \`git\` command: Git already operates on the current working tree, and making it a compound command can trigger an unnecessary permission review.
 - Prefer the dedicated file and search tools over shell equivalents when one fits.
-- \`timeout\` is in milliseconds: default 120000, max 600000.
-- \`run_in_background\` runs the command detached: it keeps running across turns and re-invokes you when it exits. No \`&\` needed.
+- \`timeout\` is in milliseconds: default 120000, max 600000. It is how long you wait, not how long the command may live: a command still running when the wait ends keeps running in the background and comes back with a task ID.
+- \`run_in_background\` starts the command in the background right away, waiting only long enough to see that it did not fall over. Use it for dev servers and watchers. No \`&\` needed.
+- Read a background task with \`TaskOutput\`, type into it with \`TaskInput\`, and stop it with \`TaskStop\`. You are told when a background task ends on its own.
 
 # Git
 - Interactive flags such as \`git rebase -i\` and \`git add -i\` are not supported.
@@ -79,29 +82,15 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox }) =>
         dangerouslyDisableSandbox === true,
     execute: async ({ command, run_in_background, secrets, timeout }, context, execution) => {
-        if (run_in_background === true) {
-            const sessionId = await context.bash.startSession({
-                command,
-                maxOutputBytes: SHELL_CAPTURE_MAX_BYTES,
-                ...(secrets === undefined ? {} : { secrets }),
-                ...(timeout === undefined ? {} : { timeoutMs: timeout }),
-            });
-            return {
-                backgroundTaskId: String(sessionId),
-                exitCode: null,
-                stderr: "",
-                stdout: "",
-                timedOut: false,
-            };
-        }
         const options: Parameters<typeof runShellCommand>[1] = {
             maxOutputBytes: SHELL_CAPTURE_MAX_BYTES,
         };
         if (secrets !== undefined) options.secrets = secrets;
-        if (timeout !== undefined) options.timeoutMs = timeout;
+        if (run_in_background === true) options.timeoutMs = BACKGROUND_START_GRACE_MS;
+        else if (timeout !== undefined) options.timeoutMs = timeout;
         if (execution.onProgress !== undefined) options.onProgress = execution.onProgress;
         if (execution.signal !== undefined) options.signal = execution.signal;
-        return runShellCommand(command, options, context);
+        return toShellToolOutput(await runShellCommand(command, options, context));
     },
     toCallPresentation: ({ command, run_in_background }) =>
         shellExplorationPresentation({ background: run_in_background === true, command }) ?? {

@@ -37,7 +37,8 @@ export async function readGrokTask(options: {
 }
 
 function fromTerminalSnapshot(snapshot: BashSessionSnapshot): GrokTaskResult {
-    const output = [snapshot.stdout, snapshot.stderr].filter(Boolean).join("\n");
+    // Only what arrived since the last read; the model already has the rest.
+    const output = [snapshot.stdoutDelta, snapshot.stderrDelta].filter(Boolean).join("\n");
     return {
         task_id: String(snapshot.sessionId),
         status:

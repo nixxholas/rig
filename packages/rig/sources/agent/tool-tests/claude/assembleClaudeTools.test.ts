@@ -23,6 +23,7 @@ describe("assembleClaudeTools", () => {
             "WebFetch",
             "WebSearch",
             "TaskStop",
+            "TaskInput",
             "AskUserQuestion",
         ]);
         expect(claudeCollaborationTools.map((tool) => tool.name)).toEqual([

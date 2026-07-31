@@ -61,8 +61,10 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
         const stderr = result?.stderr ?? "";
         const stdoutDelta = stdout.slice(session.stdoutOffset);
         const stderrDelta = stderr.slice(session.stderrOffset);
-        session.stdoutOffset = stdout.length;
-        session.stderrOffset = stderr.length;
+        if (readOptions.peek !== true) {
+            session.stdoutOffset = stdout.length;
+            session.stderrOffset = stderr.length;
+        }
         return {
             command: session.command,
             cwd: session.cwd,

@@ -4,7 +4,9 @@ import { Type } from "@sinclair/typebox";
 import { defineTool } from "../../agent/types.js";
 import { summarizeEscalatedShellAction } from "../../permissions/summarizeEscalatedShellAction.js";
 import {
+    BACKGROUND_START_GRACE_MS,
     parseOptionalTerminalSessionId,
+    runShellCommand,
     summarizeTextOutput,
     toTextBlocks,
 } from "../utils/index.js";
@@ -16,8 +18,9 @@ export const grokRunTerminalCommandTool = defineTool({
     description: `Run a bash command and return its output.
 
 Usage notes:
-- You can specify an optional timeout in milliseconds, up to 300000. If not specified, foreground commands time out after 120000ms.
-- Use background for long-running commands such as development servers and long builds. It returns a task_id immediately; do not add '&' to the command.
+- You can specify an optional timeout in milliseconds, up to 300000. If not specified, foreground commands wait 120000ms. The timeout is how long you wait, not how long the command may live: a command still running when the wait ends keeps running and comes back with a task_id.
+- Use background for long-running commands such as development servers and long builds. It waits only long enough to see that the command did not fall over; do not add '&' to the command.
+- Read a background command with get_command_or_subagent_output, type into it with send_command_input, and stop it with kill_command_or_subagent. You are told when a background command ends on its own.
 - Output may be truncated before it is returned.`,
     arguments: Type.Object({
         command: Type.String({ description: "The bash command to run." }),
@@ -64,28 +67,31 @@ Usage notes:
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
     execute: async ({ background, command, secrets, timeout }, context, execution) => {
-        if (background) {
-            const taskId = await context.bash.startSession({
-                command,
-                maxOutputBytes: 512_000,
-                ...(secrets === undefined ? {} : { secrets }),
-                ...(timeout === undefined || timeout === 0 ? {} : { timeoutMs: timeout }),
-            });
+        const options: Parameters<typeof runShellCommand>[1] = { maxOutputBytes: 512_000 };
+        if (secrets !== undefined) options.secrets = secrets;
+        options.timeoutMs = background
+            ? BACKGROUND_START_GRACE_MS
+            : timeout === undefined || timeout === 0
+              ? 120_000
+              : timeout;
+        if (execution.onProgress !== undefined) options.onProgress = execution.onProgress;
+        if (execution.signal !== undefined) options.signal = execution.signal;
+
+        const result = await runShellCommand(command, options, context);
+        const output = [result.stdout, result.stderr].filter(Boolean).join("\n");
+        if (result.backgroundSessionId !== undefined) {
+            const taskId = String(result.backgroundSessionId);
             return {
-                task_id: String(taskId),
-                text: `Background command started with task_id ${taskId}.`,
+                task_id: taskId,
+                text: [
+                    output,
+                    `Command still running in the background with task_id ${taskId}. Read it with get_command_or_subagent_output, type into it with send_command_input, or stop it with kill_command_or_subagent.`,
+                ]
+                    .filter(Boolean)
+                    .join("\n\n"),
             };
         }
-
-        const result = await context.bash.run({
-            command,
-            maxOutputBytes: 512_000,
-            ...(secrets === undefined ? {} : { secrets }),
-            timeoutMs: timeout === undefined || timeout === 0 ? 120_000 : timeout,
-            ...(execution.signal === undefined ? {} : { signal: execution.signal }),
-        });
-        const text = [result.stdout, result.stderr].filter(Boolean).join("\n") || "(no output)";
-        if (result.timedOut) throw new Error(`${text}\n\nCommand timed out.`);
+        const text = output || "(no output)";
         if (result.exitCode !== null && result.exitCode !== 0) {
             throw new Error(`${text}\n\nCommand exited with code ${result.exitCode}.`);
         }

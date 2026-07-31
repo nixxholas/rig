@@ -208,22 +208,26 @@ describe("createNodeAgentContext", () => {
         expect(counts).toEqual([0, 1, 0]);
     });
 
-    it("enforces hard timeouts for background shell sessions", async () => {
+    it("leaves a background shell session running when a read gives up waiting", async () => {
         const cwd = await makeTempDir();
         const processManager = new NativeProcessManager();
         const context = createNodeAgentContext({ cwd, processManager });
         const sessionId = await context.bash.startSession({
             command: `${JSON.stringify(process.execPath)} -e 'setInterval(() => undefined, 1000)'`,
-            timeoutMs: 50,
         });
 
-        await expect(context.bash.readSession(sessionId, { waitMs: 2_000 })).resolves.toMatchObject(
-            {
-                status: "killed",
-                timedOut: true,
-            },
-        );
-        expect(processManager.activeCount()).toBe(0);
+        // Waiting is waiting, not a deadline: giving up on the read must not
+        // take the command down with it.
+        await expect(context.bash.readSession(sessionId, { waitMs: 50 })).resolves.toMatchObject({
+            status: "running",
+            timedOut: false,
+        });
+        expect(processManager.activeCount()).toBe(1);
+
+        await context.bash.killSession(sessionId);
+        await expect(context.bash.readSession(sessionId)).resolves.toMatchObject({
+            status: "killed",
+        });
     });
 
     it("enforces filesystem permissions across traversal and symlink escapes", async () => {

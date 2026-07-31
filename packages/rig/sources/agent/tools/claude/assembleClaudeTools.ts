@@ -10,6 +10,7 @@ import { claudeReadTool } from "./Read.js";
 import { claudeSendMessageTool } from "./SendMessage.js";
 import { claudeTaskCreateTool } from "./TaskCreate.js";
 import { claudeTaskGetTool } from "./TaskGet.js";
+import { claudeTaskInputTool } from "./TaskInput.js";
 import { claudeTaskListTool } from "./TaskList.js";
 import { claudeTaskOutputTool } from "./TaskOutput.js";
 import { claudeTaskStopTool } from "./TaskStop.js";
@@ -33,6 +34,7 @@ export const claudeTools = [
     claudeWebFetchTool,
     claudeWebSearchTool,
     claudeTaskStopTool,
+    claudeTaskInputTool,
     claudeAskUserQuestionTool,
 ] as const;
 

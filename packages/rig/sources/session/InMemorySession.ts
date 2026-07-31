@@ -22,7 +22,8 @@ import type {
     AgentSnapshot,
     ContentBlock,
 } from "../agent/index.js";
-import type { Message, UserMessage } from "../agent/types.js";
+import type { Message, SystemMessage, UserMessage } from "../agent/types.js";
+import type { BashSessionExit } from "../agent/context/BashContext.js";
 import type { BashContext } from "../agent/context/BashContext.js";
 import {
     createGoalContinuationPrompt,
@@ -135,6 +136,7 @@ import { createSessionMetadataTranscript } from "./impl/createSessionMetadataTra
 import { generateSessionMetadata } from "./generateSessionMetadata.js";
 import { createAbortRequestKey } from "./impl/createAbortRequestKey.js";
 import { createGoalTitle } from "./impl/createGoalTitle.js";
+import { formatBackgroundProcessExit } from "./formatBackgroundProcessExit.js";
 import { formatShellCommandContext } from "./impl/formatShellCommandContext.js";
 import { getProviderIdForModel } from "../model-catalog/getProviderIdForModel.js";
 import { getProviderIdsForModel } from "../model-catalog/getProviderIdsForModel.js";
@@ -936,7 +938,9 @@ export class InMemorySession {
 
         if (this.#activeRun === undefined && this.#queue.length === 0) {
             const [, stoppedDescendants] = await Promise.all([
-                this.#killRuntimeProcesses(),
+                // Nothing is running to interrupt, so this is the user asking
+                // for the background work itself to stop.
+                this.#killRuntimeProcesses({ includeBackground: true }),
                 stopDescendants,
             ]);
             return {
@@ -1003,7 +1007,9 @@ export class InMemorySession {
     ): Promise<ReadBackgroundProcessResponse | undefined> {
         const runtime = this.#runtime;
         if (runtime === undefined) return undefined;
-        return runtime.context.bash.readSession(sessionId, options);
+        // Watching a background command must not consume output the agent has
+        // not read yet, so this observer never advances the delta cursor.
+        return runtime.context.bash.readSession(sessionId, { ...options, peek: true });
     }
 
     async stopBackgroundProcess(sessionId: number): Promise<StopBackgroundProcessResponse> {
@@ -1141,6 +1147,39 @@ export class InMemorySession {
         this.#lastMessageAt = this.#now();
 
         return this.#append("shell_command_finished", result);
+    }
+
+    /**
+     * Tells the model that a background command ended.
+     *
+     * Only the fact, never the output: whatever the command last printed is
+     * still there to be read through the usual background-task tools, and
+     * pushing it here would drop it into the conversation uninvited.
+     */
+    #notifyBackgroundProcessExit(exit: BashSessionExit): void {
+        const runtime = this.#runtime;
+        if (runtime === undefined) return;
+        const message: SystemMessage = {
+            blocks: [{ type: "text", text: formatBackgroundProcessExit(exit) }],
+            id: createId(),
+            internal: true,
+            role: "system",
+        };
+        if (this.#activeRun !== undefined && runtime.agent.status === "running") {
+            runtime.agent.steerMessage(message);
+        } else {
+            runtime.agent.enqueueMessage(message);
+        }
+        this.#append("agent_event", {
+            event: {
+                command: exit.command,
+                exitCode: exit.exitCode,
+                processId: exit.sessionId,
+                status: exit.status,
+                type: "background_process_exited",
+            },
+            runId: this.#activeRun?.runId ?? this.#lastSessionRunId ?? "background",
+        });
     }
 
     async suspendByParent(): Promise<void> {
@@ -1542,7 +1581,7 @@ export class InMemorySession {
             // here; the agent falls back to the new model's default until then.
             runtime!.agent.setModel(model.id, undefined);
         } else {
-            void this.#killRuntimeProcesses();
+            void this.#killRuntimeProcesses({ includeBackground: true });
             this.#releaseMcpToolLease();
             if (reusableExecutor === undefined) {
                 void runtime?.agent.close();
@@ -1677,6 +1716,8 @@ export class InMemorySession {
         }
         if (this.#archived === archived) return this.snapshot();
         this.#archived = archived;
+        // An archived session is put away, so nothing of it should keep running.
+        if (archived) void this.#killRuntimeProcesses({ includeBackground: true });
         this.#append("session_archived", {
             archived,
             ...(mutationId === undefined ? {} : { mutationId }),
@@ -1725,7 +1766,7 @@ export class InMemorySession {
             if (running === 0 || !isPermissionReduction(previousPermissionMode, permissionMode)) {
                 return;
             }
-            await this.#killRuntimeProcesses();
+            await this.#killRuntimeProcesses({ includeBackground: true });
             const runId = this.#activeRun?.runId ?? this.#lastSessionRunId ?? "background";
             this.#append("agent_event", {
                 event: { type: "background_processes_stopped", count: running },
@@ -2312,7 +2353,7 @@ export class InMemorySession {
         activeRun?.controller.abort();
         this.#compactionController?.abort();
         this.#shutdownCleanup = Promise.all([
-            this.#killRuntimeProcesses(5_000),
+            this.#killRuntimeProcesses({ forceAfterMs: 5_000, includeBackground: true }),
             this.#runtime?.agent.close() ?? Promise.resolve(),
         ]).then(() => undefined);
         return this.#shutdownCleanup;
@@ -2518,7 +2559,7 @@ export class InMemorySession {
         }
 
         this.#shellHistoryRevision += 1;
-        void this.#killRuntimeProcesses();
+        void this.#killRuntimeProcesses({ includeBackground: true });
         this.#releaseMcpToolLease();
         void this.#runtime?.agent.close();
         this.#runtime = undefined;
@@ -4988,6 +5029,9 @@ export class InMemorySession {
             previousBackgroundCount = running;
             this.#restartMetadataSettlement();
         });
+        runtime.context.bash.setSessionExitListener?.((exit) => {
+            this.#notifyBackgroundProcessExit(exit);
+        });
         const snapshot = runtime.agent.snapshot();
         this.#runtime = runtime;
         this.#agentId = snapshot.id;
@@ -5081,11 +5125,24 @@ export class InMemorySession {
             : nativeProcesses + (runtime?.context.bash.activeSessionCount?.() ?? 0);
     }
 
-    async #killRuntimeProcesses(forceAfterMs = 500): Promise<void> {
+    /**
+     * Stops the session's processes.
+     *
+     * Work the agent deliberately left running in the background is spared
+     * unless this session is going away for good.
+     */
+    async #killRuntimeProcesses(
+        options: { forceAfterMs?: number; includeBackground?: boolean } = {},
+    ): Promise<void> {
         const runtime = this.#runtime;
         if (runtime === undefined) return;
-        await runtime.processManager.killAll({ forceAfterMs });
-        if (this.#request.docker !== undefined) await runtime.context.bash.killAllSessions?.();
+        const forceAfterMs = options.forceAfterMs ?? 500;
+        const includeBackground = options.includeBackground ?? false;
+        await runtime.processManager.killAll({
+            forceAfterMs,
+            includeDetached: includeBackground,
+        });
+        if (includeBackground) await runtime.context.bash.killAllSessions?.();
     }
 
     async #drainQueue(): Promise<void> {

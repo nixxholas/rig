@@ -7,7 +7,8 @@ export interface ProcessStartOptions {
     shell?: string;
     env?: NodeJS.ProcessEnv;
     maxOutputBytes?: number;
-    cleanupProcessGroupOnExit?: boolean;
+    /** Run the command under a pseudo-terminal instead of pipes. */
+    tty?: boolean;
 }
 
 export interface ProcessRunOptions extends ProcessStartOptions {
@@ -18,6 +19,8 @@ export interface ProcessRunOptions extends ProcessStartOptions {
 
 export interface ProcessKillOptions {
     forceAfterMs?: number;
+    /** Also stop work deliberately left running in the background. */
+    includeDetached?: boolean;
 }
 
 export interface ProcessSnapshot {

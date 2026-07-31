@@ -199,6 +199,9 @@ export interface AgentMessage {
 
 export type Message = SystemMessage | UserMessage | AgentMessage | CompactionMessage | ErrorMessage;
 
+/** A message that can be handed to a run already in progress. */
+export type SteeringMessage = SystemMessage | UserMessage;
+
 /** A fixed lock key shared across all invocations. */
 export type LockConstant = string;
 

@@ -6,6 +6,8 @@ export interface BashRunOptions {
     secrets?: readonly string[];
     shell?: string;
     signal?: AbortSignal;
+    /** Run the command under a pseudo-terminal instead of pipes. */
+    tty?: boolean;
 }
 
 export interface BashRunResult {
@@ -31,8 +33,20 @@ export interface BashSessionSnapshot {
 }
 
 export interface BashSessionReadOptions {
+    /**
+     * Look without consuming. The delta cursor belongs to the agent, so
+     * observers such as the terminal viewer must not advance it.
+     */
+    peek?: boolean;
     signal?: AbortSignal;
     waitMs?: number;
+}
+
+export interface BashSessionExit {
+    command: string;
+    exitCode: number | null;
+    sessionId: number;
+    status: "completed" | "killed";
 }
 
 export interface BashSessionActivity {
@@ -46,6 +60,11 @@ export interface BashContext {
     activeSessionCount?(): number;
     activeSessions?(): readonly BashSessionActivity[];
     cwd: string;
+    /**
+     * Marks a session as work the agent means to leave running, so that
+     * interrupting the turn no longer stops it.
+     */
+    detachSession?(sessionId: number): void;
     interruptSession?(sessionId: number): Promise<boolean | undefined>;
     killAllSessions?(): Promise<number>;
     killSession(sessionId: number): Promise<BashSessionSnapshot | undefined>;
@@ -55,6 +74,8 @@ export interface BashContext {
     ): Promise<BashSessionSnapshot | undefined>;
     run(options: BashRunOptions): Promise<BashRunResult>;
     setActiveSessionCountListener?(listener: ((count: number) => void) | undefined): void;
+    /** Reports commands that ended without anyone waiting to hear about it. */
+    setSessionExitListener?(listener: ((exit: BashSessionExit) => void) | undefined): void;
     startSession(options: Omit<BashRunOptions, "signal">): Promise<number>;
     supportsSessionInput: boolean;
     writeSession(sessionId: number, data: string | Uint8Array): Promise<boolean>;

@@ -1,4 +1,4 @@
-import type { BashContext } from "../../../context/BashContext.js";
+import type { BashContext } from "../../agent/context/BashContext.js";
 
 const INTERRUPT = "\u0003";
 

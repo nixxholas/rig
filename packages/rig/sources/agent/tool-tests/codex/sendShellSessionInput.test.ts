@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { BashContext } from "../../context/BashContext.js";
-import { sendShellSessionInput } from "../../tools/codex/impl/sendShellSessionInput.js";
+import { sendShellSessionInput } from "../../../tools/utils/sendShellSessionInput.js";
 
 describe("sendShellSessionInput", () => {
     it("preserves input surrounding an interrupt in its original order", async () => {

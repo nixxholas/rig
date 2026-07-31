@@ -4,6 +4,7 @@ export { grokKillCommandOrSubagentTool } from "./kill_command_or_subagent.js";
 export { grokListDirTool } from "../../agent/tools/grok/list_dir.js";
 export { grokReadFileTool } from "../../agent/tools/grok/read_file.js";
 export { grokRunTerminalCommandTool } from "./run_terminal_command.js";
+export { grokSendCommandInputTool } from "./send_command_input.js";
 export { grokSearchReplaceTool } from "../../agent/tools/grok/search_replace.js";
 export { grokSpawnSubagentTool } from "./spawn_subagent.js";
 export { grokFollowupSubagentTool } from "./followup_subagent.js";
@@ -15,6 +16,7 @@ import { grokKillCommandOrSubagentTool } from "./kill_command_or_subagent.js";
 import { grokListDirTool } from "../../agent/tools/grok/list_dir.js";
 import { grokReadFileTool } from "../../agent/tools/grok/read_file.js";
 import { grokRunTerminalCommandTool } from "./run_terminal_command.js";
+import { grokSendCommandInputTool } from "./send_command_input.js";
 import { grokSearchReplaceTool } from "../../agent/tools/grok/search_replace.js";
 import { grokSpawnSubagentTool } from "./spawn_subagent.js";
 import { grokFollowupSubagentTool } from "./followup_subagent.js";
@@ -28,6 +30,7 @@ export const grokBuildTools = [
     grokGrepTool,
     grokGetCommandOrSubagentOutputTool,
     grokKillCommandOrSubagentTool,
+    grokSendCommandInputTool,
 ] as const;
 
 export const grokCollaborationTools = [

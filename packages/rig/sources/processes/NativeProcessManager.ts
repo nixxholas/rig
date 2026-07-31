@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
 
 import { killProcessTree } from "./killProcessTree.js";
+import { ProcessGroupReaper } from "./ProcessGroupReaper.js";
 import { resolveSystemShell } from "./resolveSystemShell.js";
 import type {
     ManagedProcessStatus,
@@ -16,16 +17,22 @@ import type {
 const DEFAULT_MAX_OUTPUT_BYTES = 512_000;
 const DEFAULT_KILL_GRACE_MS = 1_000;
 const EXIT_STDIO_IDLE_GRACE_MS = 100;
-const CLEANUP_FORCE_GRACE_MS = 200;
 
 export class NativeProcessManager {
     readonly #processes = new Map<string, ManagedProcess>();
+    readonly #groups = new ProcessGroupReaper();
 
     start(options: ProcessStartOptions): ManagedProcess {
-        const process = new ManagedProcess(options, (id) => {
-            this.#processes.delete(id);
+        const process = new ManagedProcess(options, {
+            onGroupTerminated: (processGroupId) => {
+                this.#groups.release(processGroupId);
+            },
+            onSettled: (id) => {
+                this.#processes.delete(id);
+            },
         });
         this.#processes.set(process.id, process);
+        if (process.pid !== null) this.#groups.retain(process.pid);
         return process;
     }
 
@@ -34,10 +41,7 @@ export class NativeProcessManager {
             return abortedResult(options);
         }
 
-        const process = this.start({
-            ...options,
-            cleanupProcessGroupOnExit: options.cleanupProcessGroupOnExit ?? true,
-        });
+        const process = this.start(options);
         let timedOut = false;
         let aborted = false;
         let timeout: NodeJS.Timeout | undefined;
@@ -100,11 +104,35 @@ export class NativeProcessManager {
         return true;
     }
 
+    /**
+     * Stops running work.
+     *
+     * Detached work — a command the agent deliberately left running in the
+     * background — is spared unless the caller is shutting everything down, in
+     * which case whole process groups go too, including anything that outlived
+     * the shell that launched it.
+     */
     async killAll(options: ProcessKillOptions = {}): Promise<void> {
-        await Promise.all(
-            [...this.#processes.values()].map((process) => process.kill("SIGTERM", options)),
+        const targets = [...this.#processes.values()].filter(
+            (process) => options.includeDetached === true || !process.detached,
         );
+        await Promise.all(targets.map((process) => process.kill("SIGTERM", options)));
+        if (options.includeDetached === true) {
+            await this.#groups.terminateAll(options.forceAfterMs ?? DEFAULT_KILL_GRACE_MS);
+        }
     }
+
+    /** Process groups that a shutdown would still have to take down. */
+    pendingProcessGroups(): readonly number[] {
+        return this.#groups.pending();
+    }
+}
+
+export interface ManagedProcessHooks {
+    /** The whole process group is known to be gone. */
+    onGroupTerminated: (processGroupId: number) => void;
+    /** No more output or exit information can arrive. */
+    onSettled: (id: string) => void;
 }
 
 export class ManagedProcess {
@@ -113,10 +141,12 @@ export class ManagedProcess {
     readonly cwd: string;
     readonly pid: number | null;
 
+    /** The agent left this running on purpose; an interrupted turn spares it. */
+    detached = false;
+
     readonly #child: ChildProcess;
     readonly #maxOutputBytes: number;
-    readonly #cleanupProcessGroupOnExit: boolean;
-    readonly #onDone: (id: string) => void;
+    readonly #hooks: ManagedProcessHooks;
     readonly #waitPromise: Promise<ProcessRunResult>;
     #resolveWait!: (result: ProcessRunResult) => void;
     #stdout: Buffer<ArrayBufferLike> = Buffer.alloc(0);
@@ -132,12 +162,11 @@ export class ManagedProcess {
     #killed = false;
     #postExitTimer: NodeJS.Timeout | undefined;
 
-    constructor(options: ProcessStartOptions, onDone: (id: string) => void) {
+    constructor(options: ProcessStartOptions, hooks: ManagedProcessHooks) {
         this.command = options.command;
         this.cwd = options.cwd;
         this.#maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
-        this.#cleanupProcessGroupOnExit = options.cleanupProcessGroupOnExit ?? false;
-        this.#onDone = onDone;
+        this.#hooks = hooks;
         this.#waitPromise = new Promise((resolve) => {
             this.#resolveWait = resolve;
         });
@@ -257,8 +286,9 @@ export class ManagedProcess {
             await this.#waitPromise;
         } finally {
             if (force !== undefined) clearTimeout(force);
-            if (this.pid !== null && signal !== "SIGKILL") {
-                killProcessTree(this.pid, "SIGKILL");
+            if (this.pid !== null) {
+                if (signal !== "SIGKILL") killProcessTree(this.pid, "SIGKILL");
+                this.#hooks.onGroupTerminated(this.pid);
             }
         }
     }
@@ -358,17 +388,10 @@ export class ManagedProcess {
         this.#child.stdout?.destroy();
         this.#child.stderr?.destroy();
         this.#child.stdin?.destroy();
-        if (this.#cleanupProcessGroupOnExit && this.pid !== null && !this.#killed) {
-            killProcessTree(this.pid, "SIGTERM");
-            const force = setTimeout(() => {
-                if (this.pid !== null) {
-                    killProcessTree(this.pid, "SIGKILL");
-                }
-            }, CLEANUP_FORCE_GRACE_MS);
-            force.unref();
-        }
 
-        this.#onDone(this.id);
+        // Anything the command left running keeps running. Its process group
+        // stays registered with the manager, which reaps it at shutdown.
+        this.#hooks.onSettled(this.id);
         this.#resolveWait({
             ...this.snapshot(),
             exitCode: code,

@@ -1,5 +1,6 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -227,7 +228,7 @@ describe("createNodeBashContext", () => {
         },
     );
 
-    it("rejects background work beyond the active session limit", async () => {
+    it("evicts the oldest background command instead of refusing a new one", async () => {
         const cwd = await makeTempDir();
         const completion = new Promise<ProcessRunResult>(() => {});
         const process = {
@@ -264,10 +265,14 @@ describe("createNodeBashContext", () => {
             await context.startSession({ command: `pending-${String(index)}` });
         }
 
-        await expect(context.startSession({ command: "one-too-many" })).rejects.toThrow(
-            `No more than ${String(MAX_ACTIVE_BASH_SESSIONS)} background commands can run at once.`,
-        );
-        expect(start).toHaveBeenCalledTimes(MAX_ACTIVE_BASH_SESSIONS);
+        // Running out of slots is ours to solve, not the model's: the oldest
+        // command makes way and the new one starts.
+        const evicting = await context.startSession({ command: "one-too-many" });
+
+        expect(evicting).toBe(MAX_ACTIVE_BASH_SESSIONS + 1);
+        expect(start).toHaveBeenCalledTimes(MAX_ACTIVE_BASH_SESSIONS + 1);
+        expect(process.kill).toHaveBeenCalledWith("SIGTERM", { forceAfterMs: 500 });
+        expect(await context.readSession(1)).toBeUndefined();
     });
 
     it.runIf(process.platform !== "win32")(
@@ -299,6 +304,112 @@ describe("createNodeBashContext", () => {
                 stdout: "LOGIN_SHELL_OK",
             });
         },
+    );
+
+    it.runIf(process.platform !== "win32")(
+        "leaves a long-running child alive after the command that started it exits",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+            const marker = join(cwd, "server-was-alive.txt");
+
+            // This is the dev-server shape: the shell starts something and
+            // returns immediately. The child has to outlive its parent.
+            await context.run({
+                command: `nohup sh -c 'sleep 1; printf alive > ${marker}' >/dev/null 2>&1 &`,
+                cwd,
+            });
+            await delay(2_500);
+
+            await expect(readFile(marker, "utf8")).resolves.toBe("alive");
+        },
+        15_000,
+    );
+
+    it.runIf(process.platform !== "win32")(
+        "keeps a background command running past its wait and reports it as still running",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+            const marker = join(cwd, "finished-after-wait.txt");
+            const sessionId = await context.startSession({
+                command: `sleep 1; printf done > ${marker}`,
+                cwd,
+            });
+
+            // The wait runs out well before the command does.
+            await expect(context.readSession(sessionId, { waitMs: 100 })).resolves.toMatchObject({
+                status: "running",
+            });
+            await delay(2_000);
+
+            await expect(readFile(marker, "utf8")).resolves.toBe("done");
+            await expect(context.readSession(sessionId)).resolves.toMatchObject({
+                exitCode: 0,
+                status: "completed",
+            });
+        },
+        15_000,
+    );
+
+    it.runIf(process.platform !== "win32")(
+        "reports each read only the output that arrived since the previous one",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+            const sessionId = await context.startSession({
+                command: "printf first; sleep 1; printf second",
+                cwd,
+            });
+
+            const early = await context.readSession(sessionId, { waitMs: 300 });
+            expect(early?.stdoutDelta).toBe("first");
+
+            await delay(1_500);
+            const later = await context.readSession(sessionId);
+
+            expect(later?.stdoutDelta).toBe("second");
+            expect(later?.stdout).toBe("firstsecond");
+        },
+        15_000,
+    );
+
+    it.runIf(process.platform !== "win32")(
+        "lets an observer look at a background command without consuming the agent's output",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+            const sessionId = await context.startSession({ command: "printf watched", cwd });
+            await delay(1_000);
+
+            // The terminal viewer polls the same session while the agent is
+            // between reads; it must not eat what the agent has not seen.
+            const peeked = await context.readSession(sessionId, { peek: true });
+            expect(peeked?.stdoutDelta).toBe("watched");
+
+            const agentRead = await context.readSession(sessionId);
+            expect(agentRead?.stdoutDelta).toBe("watched");
+
+            const afterAgentRead = await context.readSession(sessionId);
+            expect(afterAgentRead?.stdoutDelta).toBe("");
+        },
+        15_000,
     );
 
     it("observes background process completion only once across repeated polls", async () => {

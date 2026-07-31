@@ -30,6 +30,8 @@ import type {
     ContentBlock,
     ErrorMessage,
     Message,
+    SteeringMessage,
+    SystemMessage,
     ToolResultBlock,
     UserMessage,
 } from "./types.js";
@@ -112,7 +114,7 @@ export interface RunAgentLoopOptions {
     onMessage?: (message: Message) => void | Promise<void>;
     /** Checkpoints canonical model context before its durable messages are published. */
     onContextChanged?: (messages: readonly Message[]) => void | Promise<void>;
-    takeSteering?: () => readonly UserMessage[];
+    takeSteering?: () => readonly SteeringMessage[];
     /** Returns the signal aborted by the next scheduled steering message. */
     getSteeringSignal?: () => AbortSignal;
     context: AgentContext;
@@ -209,6 +211,13 @@ export type AgentLoopEvent =
     | {
           type: "background_processes_stopped";
           count: number;
+      }
+    | {
+          type: "background_process_exited";
+          command: string;
+          exitCode: number | null;
+          processId: number;
+          status: "completed" | "killed";
       };
 
 type PreparedToolPermission =
@@ -1014,7 +1023,11 @@ async function appendSteering(
     for (const message of steering) {
         transcript.push(message);
         contextTranscript.push(message);
-        providerMessages.push(toProviderUserMessage(message, now));
+        providerMessages.push(
+            message.role === "system"
+                ? toProviderSystemMessage(message, now)
+                : toProviderUserMessage(message, now),
+        );
     }
     if (steering.length > 0) {
         await options.onContextChanged?.(contextTranscript);
@@ -1224,6 +1237,15 @@ function toProviderErrorMessage(message: ErrorMessage, now: () => number): Provi
     return {
         content: [{ text: heading, type: "text" }, ...message.blocks.map(toProviderUserContent)],
         role: "user",
+        sourceMessageId: message.id,
+        timestamp: now(),
+    };
+}
+
+function toProviderSystemMessage(message: SystemMessage, now: () => number): ProviderMessage {
+    return {
+        role: "system",
+        content: systemMessageToText(message),
         sourceMessageId: message.id,
         timestamp: now(),
     };

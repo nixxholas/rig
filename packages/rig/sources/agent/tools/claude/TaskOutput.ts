@@ -174,8 +174,10 @@ export const claudeTaskOutputTool = defineTool({
                 command: snapshot.command,
                 description: snapshot.command,
                 ...(stillRunning ? {} : { exitCode: snapshot.exitCode }),
+                // Only what arrived since the last read; the model already has
+                // everything before that.
                 output: boundShellOutput(
-                    [snapshot.stdout, snapshot.stderr]
+                    [snapshot.stdoutDelta, snapshot.stderrDelta]
                         .filter((value) => value.length > 0)
                         .join("\n"),
                 ),
