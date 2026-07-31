@@ -6,19 +6,26 @@ import {
     prepareDaemonDiagnostics,
     prepareLocalServerDirectory,
     readLocalServerToken,
-    removeStaleSocket,
     rotateDaemonLog,
     runLocalProtocolServer,
     writeLocalServerToken,
     type LocalServerPaths,
 } from "../server/index.js";
 import { daemonIdentitiesMatch, getDaemonIdentity } from "../daemon/index.js";
+import {
+    acquireSqliteProcessLock,
+    SqliteProcessLockUnavailableError,
+    type SqliteProcessLock,
+} from "../persistence/database/acquireSqliteProcessLock.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { RigUserError } from "../RigUserError.js";
 import type { DaemonIdentity, ReadyHealthResponse } from "../protocol/index.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 import { loadDaemonSettings } from "../config/index.js";
 import { stopLocalProtocolServer } from "./stopLocalProtocolServer.js";
+
+const DAEMON_STARTUP_LOCK_TIMEOUT_MS = 60_000;
+const DATABASE_OWNERSHIP_HANDOFF_TIMEOUT_MS = 30_000;
 
 export interface LocalProtocolServerConnection {
     client: ProtocolHttpClient;
@@ -42,40 +49,131 @@ export async function ensureLocalProtocolServer(
     const paths = getEnvironmentLocalServerPaths();
     const currentIdentity = getDaemonIdentity();
     await prepareLocalServerDirectory(paths.directory);
-    const existingToken = await readTokenIfPresent(paths.tokenPath);
-    if (existingToken !== undefined) {
-        const client = new ProtocolHttpClient({
-            socketPath: paths.socketPath,
-            token: existingToken,
-        });
-        const health = await readHealth(client);
-        const identityMatches =
-            health !== undefined && daemonIdentitiesMatch(currentIdentity, health.identity);
-        if (identityMatches) {
-            await resolveReadyHealth(client, health);
-            await reconcileDaemonSettings(client);
-            return { client, paths, token: existingToken };
+
+    for (;;) {
+        const observed = await observeLocalProtocolServer(paths);
+        if (
+            observed !== undefined &&
+            daemonIdentitiesMatch(currentIdentity, observed.health.identity)
+        ) {
+            return connectToObservedServer(observed, paths);
         }
-        if (health !== undefined) {
-            if (!identityMatches) {
-                const request: DaemonRestartRequest = {
-                    currentIdentity,
-                    runningIdentity: health.identity,
-                };
-                const shouldRestart = (await options.confirmRestart?.(request)) ?? false;
-                if (!shouldRestart) {
-                    throw new RigUserError("The running daemon does not match this Rig CLI.", {
-                        hint: "Run rig daemon stop, then try again.",
-                    });
-                }
+
+        let approvedIdentity: DaemonIdentity | undefined;
+        if (observed !== undefined) {
+            const request: DaemonRestartRequest = {
+                currentIdentity,
+                runningIdentity: observed.health.identity,
+            };
+            const shouldRestart = (await options.confirmRestart?.(request)) ?? false;
+            if (!shouldRestart) {
+                throw new RigUserError("The running daemon does not match this Rig CLI.", {
+                    hint: "Run rig daemon stop, then try again.",
+                });
             }
-            options.onStatus?.("Restarting local daemon.");
-            await stopLocalProtocolServer(client);
+            approvedIdentity = observed.health.identity;
+        }
+
+        const startupLock = await acquireDaemonStartupLock(paths);
+        try {
+            const current = await observeLocalProtocolServer(paths);
+            if (
+                current !== undefined &&
+                daemonIdentitiesMatch(currentIdentity, current.health.identity)
+            ) {
+                const connection = await connectToObservedServer(current, paths);
+                return connection;
+            }
+            if (current !== undefined) {
+                if (
+                    approvedIdentity === undefined ||
+                    !daemonIdentitiesMatch(approvedIdentity, current.health.identity)
+                ) {
+                    continue;
+                }
+                options.onStatus?.("Restarting local daemon.");
+                await stopLocalProtocolServer(current.client);
+            }
+
+            await waitForDatabaseOwnershipHandoff(paths);
+            options.onStatus?.("Starting local daemon.");
+            const connection = await startLocalProtocolServer(paths, options);
+            return connection;
+        } finally {
+            startupLock.release();
         }
     }
+}
 
-    options.onStatus?.("Starting local daemon.");
-    await removeStaleSocket(paths.socketPath);
+export async function readTokenIfPresent(tokenPath: string): Promise<string | undefined> {
+    try {
+        return await readLocalServerToken(tokenPath);
+    } catch {
+        return undefined;
+    }
+}
+
+interface ObservedLocalProtocolServer {
+    client: ProtocolHttpClient;
+    health: Awaited<ReturnType<ProtocolHttpClient["health"]>>;
+    token: string;
+}
+
+async function observeLocalProtocolServer(
+    paths: LocalServerPaths,
+): Promise<ObservedLocalProtocolServer | undefined> {
+    const token = await readTokenIfPresent(paths.tokenPath);
+    if (token === undefined) return undefined;
+    const client = new ProtocolHttpClient({ socketPath: paths.socketPath, token });
+    const health = await readHealth(client);
+    return health === undefined ? undefined : { client, health, token };
+}
+
+async function connectToObservedServer(
+    observed: ObservedLocalProtocolServer,
+    paths: LocalServerPaths,
+): Promise<LocalProtocolServerConnection> {
+    await resolveReadyHealth(observed.client, observed.health);
+    await reconcileDaemonSettings(observed.client);
+    return { client: observed.client, paths, token: observed.token };
+}
+
+async function acquireDaemonStartupLock(paths: LocalServerPaths): Promise<SqliteProcessLock> {
+    try {
+        return await acquireSqliteProcessLock(`${paths.registryPath}.startup.lock`, {
+            timeoutMs: DAEMON_STARTUP_LOCK_TIMEOUT_MS,
+        });
+    } catch (error) {
+        if (error instanceof SqliteProcessLockUnavailableError) {
+            throw new RigUserError("Rig could not coordinate local daemon startup.", {
+                hint: "Another Rig process is still starting or stopping the daemon. Try again.",
+            });
+        }
+        throw error;
+    }
+}
+
+async function waitForDatabaseOwnershipHandoff(paths: LocalServerPaths): Promise<void> {
+    let ownership: SqliteProcessLock;
+    try {
+        ownership = await acquireSqliteProcessLock(`${paths.databasePath}.lock`, {
+            timeoutMs: DATABASE_OWNERSHIP_HANDOFF_TIMEOUT_MS,
+        });
+    } catch (error) {
+        if (error instanceof SqliteProcessLockUnavailableError) {
+            throw new RigUserError("Another Rig daemon still owns the session database.", {
+                hint: "Wait for it to stop before starting a replacement.",
+            });
+        }
+        throw error;
+    }
+    ownership.release();
+}
+
+async function startLocalProtocolServer(
+    paths: LocalServerPaths,
+    options: EnsureLocalProtocolServerOptions,
+): Promise<LocalProtocolServerConnection> {
     const token = await writeLocalServerToken(paths.tokenPath);
     if (process.env.RIG_GYM_IN_PROCESS_DAEMON === "1") {
         void runLocalProtocolServer({
@@ -95,14 +193,6 @@ export async function ensureLocalProtocolServer(
     await waitForReady(client);
     await reconcileDaemonSettings(client);
     return { client, paths, token };
-}
-
-export async function readTokenIfPresent(tokenPath: string): Promise<string | undefined> {
-    try {
-        return await readLocalServerToken(tokenPath);
-    } catch {
-        return undefined;
-    }
 }
 
 async function readHealth(

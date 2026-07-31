@@ -36,5 +36,5 @@ describe("starting Rig after its development code changes", () => {
         gym.terminal.press("enter");
 
         await gym.terminal.waitForText("Ask Rig to do anything", 20_000);
-    });
+    }, 120_000);
 });

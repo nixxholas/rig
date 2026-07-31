@@ -29,9 +29,16 @@ import { resolveProviderDisabledReasons } from "../executor/resolveProviderDisab
 import { createCodingAssistantAgent } from "../runtime/createCodingAssistantAgent.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import {
+    acquireSqliteProcessLock,
+    SqliteProcessLockUnavailableError,
+    type SqliteProcessLock,
+} from "../persistence/database/acquireSqliteProcessLock.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { getNodeInspectorUrl, openNodeInspector, registerRigDebugRoot } from "../debug/index.js";
+import { RigUserError } from "../RigUserError.js";
 import type { HappySyncService } from "../happy/index.js";
+import type { LocalServerPaths } from "./LocalServerPaths.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -43,10 +50,32 @@ export async function runLocalProtocolServer(
     options: RunLocalProtocolServerOptions = {},
 ): Promise<void> {
     const paths = getEnvironmentLocalServerPaths();
+    let databaseLock: SqliteProcessLock;
+    try {
+        databaseLock = await acquireSqliteProcessLock(`${paths.databasePath}.lock`);
+    } catch (error) {
+        if (error instanceof SqliteProcessLockUnavailableError) {
+            throw new RigUserError("Another Rig daemon already owns the session database.", {
+                hint: "Connect to the running daemon or stop it before starting another.",
+            });
+        }
+        throw error;
+    }
+    try {
+        await runOwnedLocalProtocolServer(options, paths);
+    } finally {
+        databaseLock.release();
+    }
+}
+
+async function runOwnedLocalProtocolServer(
+    options: RunLocalProtocolServerOptions,
+    paths: LocalServerPaths,
+): Promise<void> {
+    await prepareLocalServerDirectory(paths.directory);
     const socketPath = options.socketPath ?? paths.socketPath;
     const tokenPath = options.tokenPath ?? paths.tokenPath;
     const startedAt = new Date().toISOString();
-    await prepareLocalServerDirectory(paths.directory);
     const identity = getDaemonIdentity();
     const daemonLog = new DaemonLog({ path: paths.logPath, version: identity.version });
     daemonLog.record("info", "daemon_starting", "Rig daemon is starting.", {
