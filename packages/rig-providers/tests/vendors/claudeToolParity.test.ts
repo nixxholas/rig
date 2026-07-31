@@ -24,12 +24,21 @@ describe("Claude provider tool goldens", () => {
             // the provider's callable shape.
             expect(productionGoldenTools.map((tool) => tool.name).sort()).toEqual(goldenNames);
             // Agent keeps the captured callable shape, but its runtime descriptions document
-            // Rig's provider/model inference extensions. The task-control tools remain exact.
-            for (const name of ["TaskOutput", "TaskStop"]) {
-                expect(productionTools.find((tool) => tool.name === name)).toEqual(
-                    goldenTools.find((tool) => tool.name === name),
-                );
-            }
+            // Rig's provider/model inference extensions. TaskStop remains exact.
+            expect(productionTools.find((tool) => tool.name === "TaskStop")).toEqual(
+                goldenTools.find((tool) => tool.name === "TaskStop"),
+            );
+
+            // TaskOutput keeps the captured arguments, but a Rig agent notifies its parent when it
+            // finishes, so waiting on one is deliberately allowed to last an hour instead of
+            // Claude's ten-minute ceiling, and its description explains that.
+            const taskOutput = productionTools.find((tool) => tool.name === "TaskOutput");
+            const goldenTaskOutput = goldenTools.find((tool) => tool.name === "TaskOutput");
+            expect(Object.keys(taskOutput?.parameters.properties ?? {})).toEqual(
+                Object.keys(goldenTaskOutput?.parameters?.properties ?? {}),
+            );
+            expect(taskOutput?.parameters.required).toEqual(goldenTaskOutput?.parameters?.required);
+            expect(taskOutput?.parameters.properties.timeout.maximum).toBe(3_600_000);
         },
     );
 });
