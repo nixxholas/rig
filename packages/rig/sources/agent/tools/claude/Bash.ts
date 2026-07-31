@@ -87,6 +87,7 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     shouldReviewInAutoMode: ({ dangerouslyDisableSandbox }) => dangerouslyDisableSandbox === true,
     shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox }) =>
         dangerouslyDisableSandbox === true,
+    steerable: true,
     execute: async ({ command, run_in_background, secrets, timeout, tty }, context, execution) => {
         const options: Parameters<typeof runShellCommand>[1] = {
             maxOutputBytes: SHELL_CAPTURE_MAX_BYTES,

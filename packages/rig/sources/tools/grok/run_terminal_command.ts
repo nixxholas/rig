@@ -72,6 +72,7 @@ Usage notes:
         sandbox_permissions === "require_escalated",
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
+    steerable: true,
     execute: async ({ background, command, secrets, timeout, tty }, context, execution) => {
         const options: Parameters<typeof runShellCommand>[1] = { maxOutputBytes: 512_000 };
         if (secrets !== undefined) options.secrets = secrets;

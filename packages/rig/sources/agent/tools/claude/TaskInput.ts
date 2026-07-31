@@ -45,6 +45,7 @@ Use it to answer a prompt, drive a REPL, or interrupt with Ctrl-C ("\\u0003"). E
         `sending ${quoteVisibleExact(input)} to background command ${task_id}`,
     availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ input }) => input.length > 0,
+    steerable: true,
     execute: async ({ input, task_id, timeout = 250 }, context, execution) => {
         const sessionId = parseBackgroundTaskId(task_id);
         if (input.length > 0) await sendShellSessionInput(context.bash, sessionId, input);

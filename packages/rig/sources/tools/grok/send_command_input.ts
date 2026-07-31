@@ -38,6 +38,7 @@ Use it to answer a prompt, drive a REPL, or interrupt with Ctrl-C ("\\u0003"). E
         `sending ${quoteVisibleExact(input)} to background command ${task_id}`,
     availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ input }) => input.length > 0,
+    steerable: true,
     execute: async ({ input, task_id, timeout_ms = 250 }, context, execution) => {
         const sessionId = parseOptionalTerminalSessionId(task_id);
         if (sessionId === undefined) throw new Error("The background command was not found.");

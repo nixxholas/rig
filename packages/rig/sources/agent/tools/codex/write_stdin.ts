@@ -73,6 +73,7 @@ export const codexWriteStdinTool = defineTool({
         `sending ${quoteVisibleExact(chars ?? "")} to shell session ${String(session_id)}`,
     availableToPermissionReviewer: true,
     shouldReviewInAutoMode: ({ chars }) => chars !== undefined && chars.length > 0,
+    steerable: true,
     execute: async (
         { session_id, chars = "", yield_time_ms, max_output_tokens },
         context,

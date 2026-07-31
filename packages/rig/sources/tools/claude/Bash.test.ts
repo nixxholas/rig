@@ -17,6 +17,10 @@ describe("Claude Code Bash tool", () => {
         expect(claudeTaskOutputTool.steerable).toBe(true);
     });
 
+    it("allows steering to interrupt foreground command waits", () => {
+        expect(claudeBashTool.steerable).toBe(true);
+    });
+
     it("executes commands through the agent context bash", async () => {
         const harness = createJustBashToolHarness();
         const progress: string[] = [];

@@ -130,6 +130,7 @@ export const codexExecCommandTool = defineTool({
         sandbox_permissions === "require_escalated",
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
+    steerable: true,
     execute: async (
         { cmd, max_output_tokens, secrets, shell, tty, workdir, yield_time_ms },
         context,
