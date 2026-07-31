@@ -14,6 +14,7 @@ export interface DaemonProcessFailureEvents {
 export function installDaemonProcessFailureLogging(
     log: DaemonLog,
     processEvents: DaemonProcessFailureEvents = process,
+    writeCrashReport?: (error: Error) => unknown,
 ): () => void {
     const onUncaughtException = (error: Error, origin: NodeJS.UncaughtExceptionOrigin): void => {
         log.record(
@@ -29,6 +30,19 @@ export function installDaemonProcessFailureLogging(
                 origin,
             },
         );
+        try {
+            writeCrashReport?.(error);
+        } catch (reportError) {
+            log.record(
+                "error",
+                "daemon_crash_report_failed",
+                "Rig could not write a diagnostic report for the daemon failure.",
+                {
+                    errorMessage:
+                        reportError instanceof Error ? reportError.message : String(reportError),
+                },
+            );
+        }
     };
     processEvents.on("uncaughtExceptionMonitor", onUncaughtException);
     return () => processEvents.off("uncaughtExceptionMonitor", onUncaughtException);

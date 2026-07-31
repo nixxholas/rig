@@ -56,12 +56,11 @@ describe("DaemonLog", () => {
                 },
             ),
         };
+        const writeCrashReport = vi.fn();
 
-        const uninstall = installDaemonProcessFailureLogging(log, processEvents);
-        processEvents.listener?.(
-            new Error("cannot send on a closed WebSocket"),
-            "unhandledRejection",
-        );
+        const uninstall = installDaemonProcessFailureLogging(log, processEvents, writeCrashReport);
+        const failure = new Error("cannot send on a closed WebSocket");
+        processEvents.listener?.(failure, "unhandledRejection");
         uninstall();
 
         const record = JSON.parse(lines[0]!) as Record<string, unknown>;
@@ -74,11 +73,50 @@ describe("DaemonLog", () => {
             origin: "unhandledRejection",
         });
         expect(record.errorStack).toContain("cannot send on a closed WebSocket");
+        expect(writeCrashReport).toHaveBeenCalledWith(failure);
         expect(processEvents.on).toHaveBeenCalledOnce();
         expect(processEvents.off).toHaveBeenCalledWith(
             "uncaughtExceptionMonitor",
             processEvents.listener,
         );
+    });
+
+    it("records a diagnostic failure without hiding the original daemon stack", () => {
+        const lines: string[] = [];
+        const log = new DaemonLog({
+            path: "/state/server.log",
+            write: (_path, line) => lines.push(line),
+        });
+        const processEvents = {
+            listener: undefined as
+                | ((error: Error, origin: NodeJS.UncaughtExceptionOrigin) => void)
+                | undefined,
+            off: vi.fn(),
+            on: vi.fn(
+                (
+                    _event: "uncaughtExceptionMonitor",
+                    listener: (error: Error, origin: NodeJS.UncaughtExceptionOrigin) => void,
+                ) => {
+                    processEvents.listener = listener;
+                },
+            ),
+        };
+
+        installDaemonProcessFailureLogging(log, processEvents, () => {
+            throw new Error("diagnostics disk is full");
+        });
+        processEvents.listener?.(new Error("daemon crash"), "uncaughtException");
+
+        expect(lines.map((line) => JSON.parse(line))).toEqual([
+            expect.objectContaining({
+                errorMessage: "daemon crash",
+                event: "daemon_fatal_error",
+            }),
+            expect.objectContaining({
+                errorMessage: "diagnostics disk is full",
+                event: "daemon_crash_report_failed",
+            }),
+        ]);
     });
 
     it("does not turn a logging failure into a daemon failure", () => {

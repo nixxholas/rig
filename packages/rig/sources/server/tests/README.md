@@ -14,6 +14,8 @@ tests
  +-- remoteTerminalHttp / httpProxyApi
  |                              external protocol boundaries
  +-- runLocalProtocolServer.*    daemon lifecycle and logging
+ +-- DaemonLog / writeDaemonCrashReport
+ |                              fatal stacks and private diagnostic reports
  +-- remaining files             focused server helpers
 ```
 

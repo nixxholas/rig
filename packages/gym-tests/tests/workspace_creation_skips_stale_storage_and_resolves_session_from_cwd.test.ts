@@ -105,7 +105,7 @@ const initialCatalog = await requestJson("GET", "/catalog");
 const project = initialCatalog.projects.find((candidate) => candidate.path === "/workspace");
 if (project === undefined) throw new Error("The workspace project is missing.");
 const workspaceRoot =
-    process.env.HOME + "/.rig/workspaces/" + encodeURIComponent(project.storageKey);
+    process.env.HOME + "/happy/workspaces/" + encodeURIComponent(project.storageKey);
 await mkdir(workspaceRoot + "/workspace", { recursive: true });
 await writeFile(workspaceRoot + "/workspace/stale.txt", "stale\n");
 execFileSync("git", ["branch", "worktree/workspace-2"], { cwd: "/workspace" });

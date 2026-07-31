@@ -151,22 +151,36 @@ const archived = await requestJson(
     undefined,
     { "if-match": '"' + workspace.version + '"' },
 );
+let archivedWorkspace = archived.workspace;
+let directoryRemoved = false;
+const archiveDeadline = Date.now() + 10_000;
+while (Date.now() < archiveDeadline) {
+    const listing = await requestJson(
+        "GET",
+        "/projects/" + encodeURIComponent(project.id) + "/workspaces",
+    );
+    archivedWorkspace = listing.workspaces.find(
+        (candidate) => candidate.id === workspace.id,
+    );
+    if (archivedWorkspace === undefined) throw new Error("The archived workspace disappeared.");
+    try {
+        await access(workspace.path);
+    } catch {
+        directoryRemoved = true;
+    }
+    if (directoryRemoved && archivedWorkspace.status === "archived") break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+}
 const sessions = await requestJson("GET", "/sessions?archived=all");
 const session = sessions.sessions.find((candidate) => candidate.id === attached.session.id);
 if (session === undefined) throw new Error("The attached session is missing.");
-let directoryRemoved = false;
-try {
-    await access(workspace.path);
-} catch {
-    directoryRemoved = true;
-}
 await writeFile(
     "/workspace/managed-worktree-result.json",
     JSON.stringify({
         directoryRemoved,
         projectId: project.id,
         sessionStatus: session.status,
-        workspaceStatus: archived.workspace.status,
+        workspaceStatus: archivedWorkspace.status,
     }),
 );
 `;

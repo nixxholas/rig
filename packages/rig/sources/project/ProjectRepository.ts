@@ -121,6 +121,7 @@ export interface ProjectRepositoryOptions {
     stateDirectory?: string;
     taskDrain?: TaskDrain;
     transaction?: <T>(body: (tx: TX) => T) => T;
+    workspacesDirectory?: string;
 }
 
 export class ProjectRepository {
@@ -145,6 +146,7 @@ export class ProjectRepository {
     readonly #stateDirectory: string;
     readonly #taskDrain: TaskDrain | undefined;
     readonly #transactionRunner: (<T>(body: (tx: TX) => T) => T) | undefined;
+    readonly #workspacesDirectory: string;
     readonly #workspaceLifecycle = new Map<string, Promise<void>>();
     readonly #workspaceSetupControllers = new Map<string, AbortController>();
     #activeInitializations = 0;
@@ -163,6 +165,9 @@ export class ProjectRepository {
         this.#stateDirectory = normalizeFuturePath(
             options.stateDirectory ??
                 join(tmpdir(), `rig-projects-${String(process.pid)}-${createId()}`),
+        );
+        this.#workspacesDirectory = normalizeFuturePath(
+            options.workspacesDirectory ?? join(this.#stateDirectory, "workspaces"),
         );
         this.#assetRoot = join(this.#stateDirectory, "assets", "project-avatars");
         setImmediate(() => {
@@ -578,7 +583,7 @@ export class ProjectRepository {
         if (commit === undefined) {
             throw new Error("The workspace base reference did not resolve to a commit.");
         }
-        const workspaceRoot = join(this.#stateDirectory, "workspaces", project.storageKey);
+        const workspaceRoot = join(this.#workspacesDirectory, project.storageKey);
         const unavailableStorageKeys = await workspaceStorageKeysInUse({
             git: this.#git,
             projectPath: project.path,
@@ -1149,13 +1154,12 @@ export class ProjectRepository {
         ) {
             throw new Error("The workspace storage identity is invalid.");
         }
-        const expectedPath = resolve(
-            this.#stateDirectory,
-            "workspaces",
-            project.storageKey,
-            workspace.storageKey,
-        );
-        if (resolve(workspace.path) !== expectedPath) {
+        const workspacePath = normalizeFuturePath(workspace.path);
+        if (
+            workspace.path !== workspacePath ||
+            basename(workspacePath) !== workspace.storageKey ||
+            basename(dirname(workspacePath)) !== project.storageKey
+        ) {
             throw new Error("The workspace path does not match its managed storage identity.");
         }
 

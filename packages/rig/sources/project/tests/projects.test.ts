@@ -411,6 +411,59 @@ describe("projects", () => {
         await expect(access(ready.path)).resolves.toBeUndefined();
     });
 
+    it("refuses cleanup after a managed workspace ancestor is replaced by a symlink", async () => {
+        const cleanupErrors: unknown[] = [];
+        const workspacesDirectory = await mkdtemp(join(tmpdir(), "rig-managed-workspaces-test-"));
+        cleanups.push(() => rm(workspacesDirectory, { force: true, recursive: true }));
+        const fixture = await createFixture({
+            onWorkspaceCleanupError: (error) => cleanupErrors.push(error),
+            workspacesDirectory,
+        });
+        const repository = await createRepository(fixture.root, "symlink-cleanup-source");
+        const source = fixture.store.create({ cwd: repository });
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            name: "Protected Cleanup",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const workspace = await waitForWorkspace(
+            fixture.store,
+            created.projectId,
+            created.id,
+            (value) => value.status === "ready",
+        );
+        const project = fixture.store.getProject(created.projectId);
+        if (project === undefined) throw new Error("Expected a project.");
+
+        await Promise.all([
+            rm(repository, { force: true, recursive: true }),
+            rm(workspacesDirectory, { force: true, recursive: true }),
+        ]);
+        const substitutedRoot = join(fixture.root, "substituted-workspaces");
+        const substitutedWorkspace = join(
+            substitutedRoot,
+            project.storageKey,
+            workspace.storageKey,
+        );
+        const protectedFile = join(substitutedWorkspace, "must-survive.txt");
+        await mkdir(substitutedWorkspace, { recursive: true });
+        await writeFile(protectedFile, "not managed by Rig\n");
+        await symlink(substitutedRoot, workspacesDirectory);
+
+        await fixture.store.archiveWorkspace(workspace.projectId, workspace.id, workspace.version);
+        await waitForWorkspace(
+            fixture.store,
+            workspace.projectId,
+            workspace.id,
+            (value) => value.status === "archived",
+        );
+
+        await expect(readFile(protectedFile, "utf8")).resolves.toBe("not managed by Rig\n");
+        expect(cleanupErrors.map(String)).toContain(
+            "Error: The workspace path does not match its managed storage identity.",
+        );
+    });
+
     it("stops instead of reporting cleanup when workspace archival hits the database", async () => {
         const databaseError = captureDriverError();
         let failRemoval = false;
@@ -998,6 +1051,7 @@ async function createFixture(
         durableGlobalEventQueue?: boolean;
         onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
         projectGit?: GitCommandRunner;
+        workspacesDirectory?: string;
     } = {},
 ): Promise<{
     home: string;
@@ -1024,6 +1078,9 @@ async function createFixture(
                 : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),
             ...(options.projectGit === undefined ? {} : { projectGit: options.projectGit }),
             stateDirectory: state,
+            ...(options.workspacesDirectory === undefined
+                ? {}
+                : { workspacesDirectory: options.workspacesDirectory }),
         });
     const stores = [open()];
     cleanups.push(async () => {

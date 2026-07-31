@@ -38,7 +38,9 @@ import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { getNodeInspectorUrl, openNodeInspector, registerRigDebugRoot } from "../debug/index.js";
 import { RigUserError } from "../RigUserError.js";
 import type { HappySyncService } from "../happy/index.js";
+import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDirectory.js";
 import type { LocalServerPaths } from "./LocalServerPaths.js";
+import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -85,7 +87,11 @@ async function runOwnedLocalProtocolServer(
             : { developmentBuildId: identity.developmentBuildId }),
         socketPath,
     });
-    const uninstallProcessFailureLogging = installDaemonProcessFailureLogging(daemonLog);
+    const uninstallProcessFailureLogging = installDaemonProcessFailureLogging(
+        daemonLog,
+        process,
+        writeDaemonCrashReport,
+    );
     let token: string;
     try {
         token = await readLocalServerToken(tokenPath);
@@ -350,6 +356,7 @@ async function runOwnedLocalProtocolServer(
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
             mcpToolProvider,
             modelCatalog,
+            workspacesDirectory: getManagedWorkspacesDirectory(),
             workspaceFeatures: {
                 crossWorkspace: loadedConfig.config.features.crossWorkspace,
                 workspaces: loadedConfig.config.features.workspaces,

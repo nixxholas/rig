@@ -2,7 +2,8 @@
 
 These tests cover the observable project and workspace lifecycle, including
 project identity normalization, durable-event rollback, Git worktree behavior,
-archival, ordering, and avatar lifecycle.
+archival, ordering, avatar lifecycle, and platform-specific managed-workspace
+roots.
 
 ```text
 tests

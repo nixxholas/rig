@@ -395,6 +395,14 @@ system temporary directory. Set `RIG_HOME` to an absolute path to use a
 different durable directory. Rig does not search or migrate older XDG config
 or state locations.
 
+Managed workspaces are user-facing folders rather than internal Rig state. New
+workspaces default to `~/Happy/Workspaces` on macOS and
+`~/happy/workspaces` on Linux. Set `RIG_WORKSPACES_DIRECTORY` to an absolute
+path before starting the daemon to choose another location. Every workspace's
+absolute path is saved in SQLite when it is created, so changing the variable
+affects only new workspaces; existing ones stay where they are and do not need
+to be moved.
+
 A small project configuration might look like this:
 
 ```toml
@@ -880,9 +888,11 @@ uses twice the plan usage.
 On Node.js runtimes that support environment redaction, Rig starts its daemon
 with private diagnostic reports for fatal runtime errors and uncaught
 exceptions. Run `rig daemon status` to see the diagnostics directory. Rig
-retains at most three crash reports. On older Node.js releases, Rig fails closed
-instead of writing credentials into a report and leaves an explanatory
-`crash-reports-unavailable.txt` file in that directory.
+also records the original stack in `server.log`. The diagnostics directory is
+private (`0700`), uncaught-exception reports are additionally forced to `0600`,
+and Rig retains at most three crash reports. On older Node.js releases, Rig
+fails closed instead of writing credentials into a report and leaves an
+explanatory `crash-reports-unavailable.txt` file in that directory.
 
 Full heap snapshots near the memory limit are opt-in because they are large and
 can contain prompts, tool results, credentials held in memory, and other

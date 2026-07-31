@@ -23,6 +23,13 @@ project and workspace events
 database access and receive `TX`; the repository owns lifecycle work around
 those operations, including filesystem cleanup and Git orchestration.
 
+`getManagedWorkspacesDirectory.ts` selects the user-facing root for new
+workspaces: `~/Happy/Workspaces` on macOS, `~/happy/workspaces` on Linux, or
+the absolute `RIG_WORKSPACES_DIRECTORY` override. A workspace's absolute path
+is persisted when it is reserved and remains authoritative for later lifecycle
+operations, so changing the root affects new workspaces without relocating old
+ones. Internal assets continue to use the separate state directory.
+
 `projectIdentity.ts` owns display-name normalization and portable storage-key
 generation used by both this module and project persistence.
 

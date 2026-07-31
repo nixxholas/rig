@@ -148,6 +148,7 @@ export interface PersistentSessionStoreOptions {
     secrets?: readonly SecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
+    workspacesDirectory?: string;
     workspaceFeatures?: WorkspaceFeatures;
 }
 
@@ -227,6 +228,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : options.databasePath === ":memory:"
                   ? {}
                   : { stateDirectory: dirname(options.databasePath) }),
+            ...(options.workspacesDirectory === undefined
+                ? {}
+                : { workspacesDirectory: options.workspacesDirectory }),
         });
         this.remoteTerminals = new ProjectRemoteTerminalStore({
             onChange: (scope, terminals) => {

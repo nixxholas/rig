@@ -33,3 +33,11 @@ runLocalProtocolServer
 The production files at this level are the server's public and operational
 shape. HTTP-only helpers stay here with the route code. Tests live in
 `tests/`.
+
+Fatal daemon failures are observed before the CLI exit handler runs. The daemon
+writes the original stack to its structured log and synchronously creates a
+compact Node diagnostic report with JavaScript and native stacks. Reports are
+written only when the runtime can exclude environment credentials and are
+pruned by `prepareDaemonDiagnostics.ts`. The directory is mode `0700`;
+uncaught-exception reports are additionally forced to `0600`. An inability to
+write the report is recorded without hiding the original failure.

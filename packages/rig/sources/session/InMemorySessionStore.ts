@@ -62,6 +62,7 @@ export interface InMemorySessionStoreOptions {
     secrets?: readonly SecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
+    workspacesDirectory?: string;
 }
 
 export class InMemorySessionStore implements SessionStore {
@@ -103,6 +104,9 @@ export class InMemorySessionStore implements SessionStore {
                 ? {}
                 : { stateDirectory: options.stateDirectory }),
             transaction: (body) => this.#transaction(body),
+            ...(options.workspacesDirectory === undefined
+                ? {}
+                : { workspacesDirectory: options.workspacesDirectory }),
         });
         this.remoteTerminals = new ProjectRemoteTerminalStore({
             onChange: (scope, terminals) => {
