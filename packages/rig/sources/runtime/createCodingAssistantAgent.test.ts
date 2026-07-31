@@ -624,6 +624,7 @@ describe("createCodingAssistantAgent", () => {
         expect(runtime.agent.tools.map((tool) => tool.name)).toEqual([
             "exec_command",
             "write_stdin",
+            "kill_session",
             "update_plan",
             "request_user_input",
             "apply_patch",

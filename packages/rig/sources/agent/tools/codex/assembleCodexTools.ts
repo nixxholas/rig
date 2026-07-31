@@ -5,6 +5,7 @@ import { codexWorkflowTool } from "../../../tools/workflows/workflowTools.js";
 import { codexWorkflowStatusTool } from "../../../tools/workflows/workflow_status.js";
 import { codexApplyPatchTool } from "./apply_patch.js";
 import { codexExecCommandTool } from "./exec_command.js";
+import { codexKillSessionTool } from "./kill_session.js";
 import { codexRequestUserInputTool } from "./request_user_input.js";
 import { codexUpdatePlanTool } from "./update_plan.js";
 import { codexViewImageTool } from "./view_image.js";
@@ -27,6 +28,7 @@ import { isCodexV2CollaborationModel } from "./isCodexV2CollaborationModel.js";
 export const codexTools = [
     codexExecCommandTool,
     codexWriteStdinTool,
+    codexKillSessionTool,
     codexUpdatePlanTool,
     codexRequestUserInputTool,
     codexApplyPatchTool,
