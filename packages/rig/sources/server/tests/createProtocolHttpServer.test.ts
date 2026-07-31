@@ -31,6 +31,15 @@ import type { ProviderQuota } from "@slopus/rig-providers";
 
 const execFile = promisify(execFileCallback);
 
+// Git keeps writing inside `.git` for a moment after a command returns, so a
+// fixture repository has to be removed with a few retries.
+const removeFixtureOptions = {
+    force: true,
+    maxRetries: 5,
+    recursive: true,
+    retryDelay: 50,
+} as const;
+
 describe("createProtocolHttpServer", () => {
     it("keeps private model context out of a bounded session state response", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
@@ -169,7 +178,7 @@ describe("createProtocolHttpServer", () => {
             ).resolves.toMatchObject({ statusCode: 409 });
         } finally {
             await close();
-            await rm(projectDirectory, { force: true, recursive: true });
+            await rm(projectDirectory, removeFixtureOptions);
         }
     });
 
@@ -262,7 +271,7 @@ describe("createProtocolHttpServer", () => {
             });
         } finally {
             await close();
-            await rm(projectDirectory, { force: true, recursive: true });
+            await rm(projectDirectory, removeFixtureOptions);
         }
     });
 
@@ -310,7 +319,7 @@ describe("createProtocolHttpServer", () => {
             });
         } finally {
             await close();
-            await rm(projectDirectory, { force: true, recursive: true });
+            await rm(projectDirectory, removeFixtureOptions);
         }
     });
 

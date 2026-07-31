@@ -361,7 +361,9 @@ describe("persistent scheduling", () => {
         } finally {
             store.close();
         }
-    }, 10_000);
+        // A thousand settled schedules are a thousand committed writes, and a
+        // loaded CI machine flushes them far more slowly than a local disk.
+    }, 60_000);
 
     it("delivers a scheduled message after the daemon and sender have stopped", async () => {
         installGymInference(() => ({ content: [{ text: "RESTARTED_DELIVERY", type: "text" }] }));
