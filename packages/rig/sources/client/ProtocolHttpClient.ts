@@ -17,6 +17,7 @@ import type {
     ChangeModelRequest,
     ChangePermissionModeRequest,
     ChangeServiceTierRequest,
+    CancelScheduledMessageResponse,
     ChangeSessionGoalStatusRequest,
     CompactSessionResponse,
     CreateProjectWorkspaceRequest,
@@ -915,6 +916,19 @@ export class ProtocolHttpClient {
             "POST",
             `/sessions/${encodeURIComponent(sessionId)}/external-tool-calls/${encodeURIComponent(callId)}`,
             request,
+        );
+    }
+
+    cancelScheduledMessage(
+        sessionId: string,
+        scheduledMessageId: string,
+        mutationId?: string,
+    ): Promise<CancelScheduledMessageResponse> {
+        return this.#requestJson(
+            "POST",
+            `/sessions/${encodeURIComponent(sessionId)}/scheduled-messages/${encodeURIComponent(scheduledMessageId)}/cancel`,
+            undefined,
+            mutationId === undefined ? {} : { "X-Rig-Mutation-Id": mutationId },
         );
     }
 

@@ -279,6 +279,7 @@ export interface RigConnection {
         callId: string,
         resolution: ExternalToolCallResolution,
     ) => MutationId;
+    cancelScheduledMessage: (sessionId: string, scheduledMessageId: string) => MutationId;
     recordActivity: (sessionId: string) => MutationId;
     connectTerminalPresence: (
         sessionId: string,
@@ -2474,6 +2475,47 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         );
     };
 
+    const cancelScheduledMessage = (sessionId: string, scheduledMessageId: string): MutationId => {
+        const id = nextMutationId();
+        const mutation: PendingMutation = {
+            acknowledged: false,
+            action: "cancel_scheduled_message",
+            entityKey: sessionKey(sessionId),
+            id,
+            sessionId,
+            undo: () => undefined,
+            applyOptimistic: (publish) => {
+                const entry = sessionEntries.get(sessionId);
+                if (entry === undefined) return () => undefined;
+                const current = entry.store.session().scheduledMessages;
+                const changed = entry.store.applyOptimisticSession({
+                    scheduledMessages: current.map((message) =>
+                        message.id === scheduledMessageId && message.status === "pending"
+                            ? { ...message, status: "cancelled", updatedAt: now() }
+                            : message,
+                    ),
+                });
+                if (publish) publishSession(entry, changed.deltas);
+                return changed.undo;
+            },
+            prepare: () => ({
+                body: {},
+                headers: { "x-rig-mutation-id": id },
+                method: "POST",
+                url: endpointUrl(
+                    options.endpoint,
+                    `sessions/${encodeURIComponent(sessionId)}/scheduled-messages/${encodeURIComponent(scheduledMessageId)}/cancel`,
+                ),
+            }),
+            matchesAuthoritative: (data) =>
+                (data as { message?: { id?: unknown; status?: unknown } } | null)?.message?.id ===
+                    scheduledMessageId &&
+                (data as { message?: { status?: unknown } } | null)?.message?.status ===
+                    "cancelled",
+        };
+        return enqueue(mutation);
+    };
+
     const recordActivity = (sessionId: string): MutationId => {
         const id = nextMutationId();
         return enqueue({
@@ -2714,6 +2756,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         },
         answerUserInput,
         attachSecret,
+        cancelScheduledMessage,
         clearGoal,
         compactSession,
         connectGroups,

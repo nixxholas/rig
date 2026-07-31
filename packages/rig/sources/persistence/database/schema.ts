@@ -320,6 +320,56 @@ export const durableUserInputs = sqliteTable(
     ],
 );
 
+export const durableWaits = sqliteTable(
+    "durable_waits",
+    {
+        id: text("id").primaryKey(),
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        runId: text("run_id").notNull(),
+        batchId: text("batch_id").notNull(),
+        toolCallId: text("tool_call_id").notNull(),
+        providerToolCallId: text("provider_tool_call_id"),
+        toolCallIndex: integer("tool_call_index").notNull(),
+        toolName: text("tool_name").notNull(),
+        kind: text("kind").notNull(),
+        argumentsJson: text("arguments_json").notNull(),
+        status: text("status").notNull(),
+        consumed: integer("consumed", { mode: "boolean" }).notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        dueAtMs: integer("due_at_ms").notNull(),
+        resultJson: text("result_json"),
+        resultBlockJson: text("result_block_json"),
+    },
+    (table) => [
+        unique().on(table.sessionId, table.toolCallId),
+        index("durable_waits_session_created").on(table.sessionId, table.createdAtMs),
+    ],
+);
+
+export const scheduledMessages = sqliteTable(
+    "scheduled_messages",
+    {
+        id: text("id").primaryKey(),
+        senderSessionId: text("sender_session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        targetAgentId: text("target_agent_id").notNull(),
+        message: text("message").notNull(),
+        dueAtMs: integer("due_at_ms").notNull(),
+        status: text("status").notNull(),
+        failure: text("failure"),
+        deliveredAtMs: integer("delivered_at_ms"),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        index("scheduled_messages_sender_created").on(table.senderSessionId, table.createdAtMs),
+        index("scheduled_messages_pending_due").on(table.status, table.dueAtMs),
+    ],
+);
+
 export const secretRegistrations = sqliteTable("secret_registrations", {
     id: text("id").primaryKey(),
     description: text("description").notNull(),

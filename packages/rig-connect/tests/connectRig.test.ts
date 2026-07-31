@@ -412,6 +412,22 @@ describe("connectRig mutations", () => {
     it("applies the expanded session actions synchronously and delivers them FIFO", async () => {
         const stream = streamResponse();
         const calls: { init?: RequestInit; url: URL }[] = [];
+        const initialState = sessionState();
+        initialState.session = {
+            ...initialState.session!,
+            scheduledMessages: [
+                {
+                    createdAt: 1,
+                    dueAt: 2,
+                    id: "scheduled-1",
+                    message: "Check later.",
+                    senderSessionId: "session-1",
+                    status: "pending",
+                    targetAgentId: "agent-1",
+                    updatedAt: 1,
+                },
+            ],
+        };
         const rig = connectRig({
             endpoint: "http://daemon.test",
             fetch: (input, init) => {
@@ -420,7 +436,7 @@ describe("connectRig mutations", () => {
                 if (url.pathname === "/events/live") return Promise.resolve(stream.response);
                 return Promise.resolve(
                     url.pathname.endsWith("/state")
-                        ? new Response(JSON.stringify(sessionState()), { status: 200 })
+                        ? new Response(JSON.stringify(initialState), { status: 200 })
                         : new Response("{}", { status: 200 }),
                 );
             },
@@ -469,6 +485,10 @@ describe("connectRig mutations", () => {
                 output: { accepted: true },
                 status: "completed",
             });
+            rig.cancelScheduledMessage("session-1", "scheduled-1");
+            expect(connection.session().scheduledMessages).toEqual([
+                expect.objectContaining({ id: "scheduled-1", status: "cancelled" }),
+            ]);
             rig.recordActivity("session-1");
 
             await settle();
@@ -494,6 +514,7 @@ describe("connectRig mutations", () => {
                 "POST /sessions/session-1/background-processes/stop",
                 "DELETE /sessions/session-1/background-processes/12",
                 "POST /sessions/session-1/external-tool-calls/call-1",
+                "POST /sessions/session-1/scheduled-messages/scheduled-1/cancel",
                 "POST /sessions/session-1/activity",
             ]);
         } finally {

@@ -1953,6 +1953,44 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("lets a user cancel a scheduled message and reconnect to its durable update", async () => {
+        const { client, close, store } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-scheduling" });
+            const session = store.get(created.session.id);
+            if (session === undefined) throw new Error("Expected the scheduled session.");
+            const scheduled = session.scheduleMessage({
+                dueAt: Date.now() + 60_000,
+                message: "Check the build later.",
+                targetAgentId: created.session.agentId,
+            });
+
+            await expect(
+                client.cancelScheduledMessage(created.session.id, scheduled.id, "cancel-1"),
+            ).resolves.toMatchObject({
+                cancelled: true,
+                message: { id: scheduled.id, status: "cancelled" },
+            });
+            await expect(client.getSession(created.session.id)).resolves.toMatchObject({
+                session: {
+                    scheduledMessages: [
+                        expect.objectContaining({ id: scheduled.id, status: "cancelled" }),
+                    ],
+                },
+            });
+            await expect(client.getEvents(created.session.id)).resolves.toMatchObject({
+                events: expect.arrayContaining([
+                    expect.objectContaining({
+                        data: expect.objectContaining({ mutationId: "cancel-1" }),
+                        type: "scheduled_message_changed",
+                    }),
+                ]),
+            });
+        } finally {
+            await close();
+        }
+    });
+
     it("serves catch-up events since a cursor", async () => {
         const { client, close, store } = await startServer();
         try {

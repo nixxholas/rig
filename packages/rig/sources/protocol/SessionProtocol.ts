@@ -30,6 +30,7 @@ import type {
     ResolveExternalToolCallResponse,
 } from "../external-tools/index.js";
 import type { DurableSkillDefinition } from "../external-skills/index.js";
+import type { ScheduledMessage } from "../scheduling/index.js";
 
 export type SessionStatus =
     | "idle"
@@ -57,6 +58,7 @@ export type SessionActivityKind =
     | "generating_message"
     | "generating_tool_call"
     | "executing_tool_call"
+    | "waiting"
     | "awaiting_input"
     | "compacting"
     | "retrying"
@@ -83,6 +85,12 @@ export interface SessionActivityRetry {
     reason: string;
 }
 
+export interface SessionActivityWait {
+    dueAt: number;
+    startedAt: number;
+    toolCallId: string;
+}
+
 export interface SessionActivity {
     /** Ready-to-display description of the current work, such as `Running Bash`. */
     label: string;
@@ -94,6 +102,7 @@ export interface SessionActivity {
     /** Requests the session is blocked on, including permission approvals. */
     pendingInputRequestIds?: readonly string[];
     retry?: SessionActivityRetry;
+    wait?: SessionActivityWait;
     /** Tool calls that have started and not yet reported a result. */
     toolCalls?: readonly SessionActivityToolCall[];
 }
@@ -297,6 +306,7 @@ export interface ProtocolSession {
     externalTools?: readonly ExternalToolDefinition[];
     skills?: readonly DurableSkillDefinition[];
     pendingExternalToolCalls?: readonly ExternalToolCall[];
+    scheduledMessages?: readonly ScheduledMessage[];
     systemPrompt?: string;
 }
 
@@ -443,6 +453,7 @@ export interface SessionStreamCurrentState {
     sessionTokenCount?: SessionTokenCount;
     sessionSecretIds?: readonly string[];
     skills?: readonly DurableSkillDefinition[];
+    scheduledMessages?: readonly ScheduledMessage[];
     titleError?: string;
     titleStatus?: SessionTitleStatus;
     workflows?: readonly WorkflowRun[];
@@ -814,6 +825,11 @@ export interface SubmitMessageResponse {
     sessionId: string;
 }
 
+export interface CancelScheduledMessageResponse {
+    cancelled: boolean;
+    message?: ScheduledMessage;
+}
+
 export interface RecordSessionActivityResponse {
     recorded: true;
 }
@@ -952,7 +968,9 @@ export type SessionEvent =
     | ExternalToolCallRequestedEvent
     | ExternalToolCallResolvedEvent
     | ShellCommandStartedEvent
-    | ShellCommandFinishedEvent;
+    | ShellCommandFinishedEvent
+    | ScheduledMessageChangedEvent
+    | ScheduledMessagesPrunedEvent;
 
 export interface BaseSessionEvent<TType extends string, TData> {
     createdAt: number;
@@ -1148,6 +1166,16 @@ export type SessionTitleChangedEvent = BaseSessionEvent<
 export type SessionActivityChangedEvent = BaseSessionEvent<
     "session_activity_changed",
     { activity: SessionActivity }
+>;
+
+export type ScheduledMessageChangedEvent = BaseSessionEvent<
+    "scheduled_message_changed",
+    { message: ScheduledMessage; mutationId?: string }
+>;
+
+export type ScheduledMessagesPrunedEvent = BaseSessionEvent<
+    "scheduled_messages_pruned",
+    { messageIds: readonly string[] }
 >;
 
 /**

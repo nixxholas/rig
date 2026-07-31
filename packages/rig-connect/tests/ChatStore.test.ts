@@ -2,7 +2,13 @@ import { describe, expect, it } from "vitest";
 
 import { ChatStore } from "@/ChatStore.js";
 import type { ChatDelta, ChatElement, ToolCallElement } from "@/ChatElement.js";
-import type { AgentLoopEvent, Message, SessionEvent, SessionStreamHello } from "@/protocol.js";
+import type {
+    AgentLoopEvent,
+    Message,
+    ScheduledMessage,
+    SessionEvent,
+    SessionStreamHello,
+} from "@/protocol.js";
 
 let clock = 0;
 
@@ -229,6 +235,96 @@ describe("ChatStore", () => {
         });
         expect(store.session().interruption).toBeUndefined();
         expect(store.session().titleError).toBeUndefined();
+    });
+
+    it("restores scheduled messages and applies durable status updates", () => {
+        const scheduled: ScheduledMessage = {
+            createdAt: 10,
+            dueAt: 20,
+            id: "scheduled-1",
+            message: "Check the deployment.",
+            senderSessionId: "session-1",
+            status: "pending",
+            targetAgentId: "agent-2",
+            updatedAt: 10,
+        };
+        const store = new ChatStore("session-1");
+        store.applyHello(
+            hello({
+                session: {
+                    ...hello().session!,
+                    scheduledMessages: [scheduled],
+                },
+            }),
+        );
+
+        expect(store.session().scheduledMessages).toEqual([scheduled]);
+
+        const cancelled: ScheduledMessage = {
+            ...scheduled,
+            status: "cancelled",
+            updatedAt: 15,
+        };
+        const deltas = store.apply(
+            event("scheduled_message_changed", {
+                message: cancelled,
+                mutationId: "cancel-1",
+            }),
+        );
+
+        expect(store.session().scheduledMessages).toEqual([cancelled]);
+        expect(deltas).toContainEqual({
+            session: expect.objectContaining({ scheduledMessages: [cancelled] }),
+            type: "session_changed",
+        });
+
+        const delivered: ScheduledMessage = {
+            ...scheduled,
+            deliveredAt: 20,
+            status: "delivered",
+            updatedAt: 20,
+        };
+        store.applyHello({
+            activity: { kind: "idle", label: "Idle", since: 20 },
+            current: { scheduledMessages: [delivered] },
+            resumed: true,
+        });
+        expect(store.session().scheduledMessages).toEqual([delivered]);
+    });
+
+    it("removes pruned scheduled-message history while connected", () => {
+        const retained: ScheduledMessage = {
+            createdAt: 10,
+            dueAt: 20,
+            id: "scheduled-retained",
+            message: "Retain this.",
+            senderSessionId: "session-1",
+            status: "cancelled",
+            targetAgentId: "agent-2",
+            updatedAt: 15,
+        };
+        const pruned = {
+            ...retained,
+            id: "scheduled-pruned",
+            message: "Prune this.",
+        };
+        const store = new ChatStore("session-1");
+        store.applyHello(
+            hello({
+                session: {
+                    ...hello().session!,
+                    scheduledMessages: [pruned, retained],
+                },
+            }),
+        );
+
+        store.apply(
+            event("scheduled_messages_pruned", {
+                messageIds: [pruned.id],
+            }),
+        );
+
+        expect(store.session().scheduledMessages).toEqual([retained]);
     });
 
     it("builds a flat, time-ordered list with one element per message, block, and tool call", () => {

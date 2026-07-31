@@ -43,6 +43,8 @@ import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
 import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
+import type { SchedulingContext } from "../scheduling/index.js";
+import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
@@ -59,6 +61,7 @@ export interface CreateCodingAssistantAgentOptions {
     goals?: GoalContext;
     instructions?: string;
     identity?: Identity;
+    isSubagent?: boolean;
     local?: boolean;
     messages?: readonly Message[];
     contextMessages?: readonly Message[];
@@ -71,6 +74,7 @@ export interface CreateCodingAssistantAgentOptions {
     serviceTier?: ServiceTier;
     startDate?: string;
     secrets?: SessionSecretContext;
+    scheduling?: SchedulingContext;
     subagents?: SubagentContext;
     systemPrompt?: string;
     tasks?: TaskContext;
@@ -129,6 +133,9 @@ export function createCodingAssistantAgent(
     }
     if (options.workspaces !== undefined) {
         context.workspaces = options.workspaces;
+    }
+    if (options.scheduling !== undefined) {
+        context.scheduling = options.scheduling;
     }
     const modelId = options.modelId ?? modelOpenaiGpt56Sol.id;
     const providerId =
@@ -248,6 +255,7 @@ export function createCodingAssistantAgent(
                 );
     const toolsWithoutGoals = [
         ...baseTools,
+        ...selectCommonToolsForModel({ isSubagent: options.isSubagent === true }),
         ...(options.workspaces === undefined
             ? []
             : options.workspaces.crossWorkspace

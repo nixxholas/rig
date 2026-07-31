@@ -446,6 +446,15 @@ export class AgentSessionManager {
         };
     }
 
+    sendScheduledMessage(
+        senderSessionId: string,
+        targetAgentId: string,
+        message: string,
+        messageId: string,
+    ): void {
+        this.#sendToAgent(senderSessionId, targetAgentId, message, messageId);
+    }
+
     async changeSubagentPermissionModes(
         parentSessionId: string,
         permissionMode: PermissionMode,
@@ -995,6 +1004,7 @@ export class AgentSessionManager {
         senderSessionId: string,
         targetAgentId: string,
         message: string,
+        messageId?: string,
     ): { delivered: true } {
         const sender = this.#current(senderSessionId);
         const target = this.#target(targetAgentId);
@@ -1028,7 +1038,7 @@ export class AgentSessionManager {
                     ].join("\n"),
                 },
             ],
-            id: crypto.randomUUID(),
+            id: messageId ?? crypto.randomUUID(),
             provenance: "agent",
             role: "user",
         });

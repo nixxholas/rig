@@ -135,6 +135,7 @@ function streaming(
 function holdsPrecedenceOverStreaming(activity: SessionActivity): boolean {
     return (
         activity.compaction !== undefined ||
+        activity.wait !== undefined ||
         (activity.pendingInputRequestIds?.length ?? 0) > 0 ||
         (activity.toolCalls?.length ?? 0) > 0
     );
@@ -248,6 +249,12 @@ function describe(activity: SessionActivity): { kind: SessionActivity["kind"]; l
     }
     if ((activity.pendingInputRequestIds?.length ?? 0) > 0) {
         return { kind: "awaiting_input", label: "Waiting for an answer" };
+    }
+    if (activity.wait !== undefined) {
+        return {
+            kind: "waiting",
+            label: `Waiting until ${new Date(activity.wait.dueAt).toLocaleString()}`,
+        };
     }
     const toolCalls = activity.toolCalls ?? [];
     if (toolCalls.length === 1) {

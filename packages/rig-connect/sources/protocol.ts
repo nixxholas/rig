@@ -17,6 +17,7 @@ export type SessionActivityKind =
     | "generating_message"
     | "generating_tool_call"
     | "executing_tool_call"
+    | "waiting"
     | "awaiting_input"
     | "compacting"
     | "retrying"
@@ -42,6 +43,12 @@ export interface SessionActivityRetry {
     reason: string;
 }
 
+export interface SessionActivityWait {
+    dueAt: number;
+    startedAt: number;
+    toolCallId: string;
+}
+
 export interface SessionActivity {
     label: string;
     kind: SessionActivityKind;
@@ -50,6 +57,7 @@ export interface SessionActivity {
     compaction?: SessionActivityCompaction;
     pendingInputRequestIds?: readonly string[];
     retry?: SessionActivityRetry;
+    wait?: SessionActivityWait;
     toolCalls?: readonly SessionActivityToolCall[];
 }
 
@@ -703,6 +711,20 @@ export interface ProtocolSession {
     externalTools?: readonly ExternalToolDefinition[];
     skills?: readonly DurableSkillDefinition[];
     pendingExternalToolCalls?: readonly ExternalToolCall[];
+    scheduledMessages?: readonly ScheduledMessage[];
+}
+
+export interface ScheduledMessage {
+    createdAt: number;
+    dueAt: number;
+    id: string;
+    message: string;
+    senderSessionId: string;
+    status: "pending" | "delivered" | "undelivered" | "cancelled";
+    targetAgentId: string;
+    updatedAt: number;
+    deliveredAt?: number;
+    failure?: string;
 }
 
 export interface SessionPartialMessage {
@@ -779,6 +801,7 @@ export interface SessionStreamCurrentState {
     sessionTokenCount?: SessionTokenCount;
     sessionSecretIds?: readonly string[];
     skills?: readonly DurableSkillDefinition[];
+    scheduledMessages?: readonly ScheduledMessage[];
     titleError?: string;
     titleStatus?: "error" | "generating" | "idle" | "ready";
     workflows?: readonly WorkflowRun[];
@@ -852,6 +875,11 @@ export type InterpretedSessionEvent =
     | BaseSessionEvent<"workflow_changed", { update: WorkflowRunUpdate }>
     | BaseSessionEvent<"external_tool_call_requested", { call: ExternalToolCall }>
     | BaseSessionEvent<"external_tool_call_resolved", { call: ExternalToolCall }>
+    | BaseSessionEvent<
+          "scheduled_message_changed",
+          { message: ScheduledMessage; mutationId?: MutationId }
+      >
+    | BaseSessionEvent<"scheduled_messages_pruned", { messageIds: readonly string[] }>
     | BaseSessionEvent<"tasks_changed", { tasks: readonly SessionTask[] }>
     | BaseSessionEvent<"goal_changed", { goal: SessionGoal | null; mutationId?: MutationId }>
     | BaseSessionEvent<"subagent_changed", { subagent: SubagentSummary }>

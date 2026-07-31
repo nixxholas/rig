@@ -4,8 +4,9 @@ import type { SessionDatabase } from "./openSessionDatabase.js";
 import { init } from "./migrations/01-init.js";
 import { delegatedSessions } from "./migrations/02-delegated-sessions.js";
 import { timelineIndex } from "./migrations/03-timeline-index.js";
+import { scheduling } from "./migrations/04-scheduling.js";
 
-const migrations = [init, delegatedSessions, timelineIndex] as const;
+const migrations = [init, delegatedSessions, timelineIndex, scheduling] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 
 export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;

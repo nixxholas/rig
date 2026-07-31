@@ -39,6 +39,7 @@ const expectedTables = [
     "durable_global_event_state",
     "durable_global_events",
     "durable_user_inputs",
+    "durable_waits",
     "external_tool_calls",
     "happy_outbox",
     "happy_sessions",
@@ -47,6 +48,7 @@ const expectedTables = [
     "project_workspaces",
     "projects",
     "queued_runs",
+    "scheduled_messages",
     "secret_environment_variables",
     "secret_registrations",
     "session_context_messages",
@@ -81,7 +83,7 @@ if (actualTables.includes("session_database_migrations")) {
 }
 
 const version = database.prepare("PRAGMA user_version").get().user_version;
-if (version !== 1) throw new Error("Expected schema version 1, received " + String(version));
+if (version !== 4) throw new Error("Expected schema version 4, received " + String(version));
 database.close();
 `;
 

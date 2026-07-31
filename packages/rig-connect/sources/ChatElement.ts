@@ -14,6 +14,7 @@ import type {
     SessionExecutionEnvironment,
     SessionGoal,
     SessionInterruption,
+    ScheduledMessage,
     SessionStatus,
     SessionTask,
     SessionTokenCount,
@@ -284,6 +285,7 @@ export interface SessionState {
     externalTools: readonly ExternalToolDefinition[];
     skills: readonly DurableSkillDefinition[];
     pendingExternalToolCalls: readonly ExternalToolCall[];
+    scheduledMessages: readonly ScheduledMessage[];
     permissionReviews: readonly PermissionReviewState[];
     git?: GitChangeSnapshot;
     tokens?: SessionTokenCount;
@@ -337,6 +339,7 @@ export type MutationAction =
     | "stop_background_process"
     | "stop_background_processes"
     | "resolve_external_tool_call"
+    | "cancel_scheduled_message"
     | "record_activity"
     | "stop_workflow"
     | "set_session_archived"

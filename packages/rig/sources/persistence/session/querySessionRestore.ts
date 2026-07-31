@@ -33,6 +33,8 @@ import { queryExternalToolCallsForSession } from "./queryExternalToolCallsForSes
 import { querySessionHasEarlierStoredMessage } from "./querySessionHasEarlierStoredMessage.js";
 import { querySessionPartialMessages } from "./querySessionPartialMessages.js";
 import { querySessionTranscriptPage } from "./querySessionTranscriptPage.js";
+import { queryDurableWaits } from "../scheduling/queryDurableWaits.js";
+import { queryScheduledMessages } from "../scheduling/queryScheduledMessages.js";
 
 export interface SessionRestore {
     lastEventId?: string;
@@ -134,6 +136,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         ...(lastMessageAt !== undefined ? { lastMessageAt } : {}),
         messages,
         durableUserInputs: [...queryDurableUserInputs(tx, sessionId)],
+        durableWaits: [...queryDurableWaits(tx, sessionId)],
         externalToolCalls: [...queryExternalToolCallsForSession(tx, sessionId)],
         externalTools: JSON.parse(
             readString(row, "external_tools_json"),
@@ -148,6 +151,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         ...(workspaceId === undefined ? {} : { workspaceId }),
         secretIds: secretIdsJson === undefined ? [] : (JSON.parse(secretIdsJson) as string[]),
         queuedRuns: queryQueuedRuns(tx, sessionId),
+        scheduledMessages: [...queryScheduledMessages(tx, sessionId)],
         status: readString(row, "status") as PersistedSessionState["status"],
         tasks: JSON.parse(readString(row, "tasks_json")) as PersistedSessionState["tasks"],
         workflows: JSON.parse(readString(row, "workflows_json")) as PersistedWorkflowRun[],

@@ -556,6 +556,11 @@ export class RemoteAgent implements CodingAssistantAgentBackend {
 
         this.#session = { ...this.#session, lastEventId: event.id };
 
+        if (event.type === "session_activity_changed") {
+            this.#session = { ...this.#session, activity: event.data.activity };
+            return;
+        }
+
         if (event.type === "session_archived") {
             this.#session = { ...this.#session, archived: event.data.archived };
             return;
@@ -906,6 +911,9 @@ function appendUniqueMessage(
 }
 
 function isRunEvent(event: SessionEvent, runId: string): boolean {
+    if (event.type === "session_activity_changed") {
+        return event.data.activity.runId === runId;
+    }
     if (
         event.type !== "agent_event" &&
         event.type !== "agent_message" &&

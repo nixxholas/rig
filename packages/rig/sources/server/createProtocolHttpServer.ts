@@ -13,6 +13,7 @@ import type {
     ChangePermissionModeRequest,
     ChangeServiceTierRequest,
     ChangeSessionGoalStatusRequest,
+    CancelScheduledMessageResponse,
     CompactSessionResponse,
     CreateSessionRequest,
     CreateSessionResponse,
@@ -1681,6 +1682,17 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "POST" && route.name === "scheduled-message-cancel") {
+        const mutationId = requestMutationId(request);
+        const result = session.cancelScheduledMessage(route.scheduledMessageId, mutationId);
+        if (result.message === undefined) {
+            sendJson(response, 404, { error: "Scheduled message not found." });
+            return;
+        }
+        sendJson<CancelScheduledMessageResponse>(response, 200, result);
+        return;
+    }
+
     if (request.method === "POST" && route.name === "activity") {
         session.recordUserActivity();
         sendJson<RecordSessionActivityResponse>(response, 200, { recorded: true });
@@ -2330,6 +2342,7 @@ function matchRoute(pathname: string):
       }
     | { name: "user-input"; requestId: string; sessionId: string }
     | { name: "external-tool-call"; externalToolCallId: string; sessionId: string }
+    | { name: "scheduled-message-cancel"; scheduledMessageId: string; sessionId: string }
     | { name: "secret"; secretId: string; sessionId: string }
     | { name: "background-process"; processSessionId: number; sessionId: string }
     | { name: "workflow-stop"; sessionId: string; workflowRunId: string }
@@ -2474,6 +2487,18 @@ function matchRoute(pathname: string):
     }
     if (
         parts.length === 5 &&
+        parts[2] === "scheduled-messages" &&
+        parts[3] !== undefined &&
+        parts[4] === "cancel"
+    ) {
+        return {
+            name: "scheduled-message-cancel",
+            scheduledMessageId: decodeURIComponent(parts[3]),
+            sessionId,
+        };
+    }
+    if (
+        parts.length === 5 &&
         parts[2] === "workflows" &&
         parts[3] !== undefined &&
         parts[4] === "stop"
@@ -2550,6 +2575,7 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "reorder",
                 "reset",
                 "rewind",
+                "scheduled-message-cancel",
                 "secrets",
                 "shell",
                 "steer",
@@ -2987,6 +3013,9 @@ function sessionStreamHello(
                       ...(currentSession.skills === undefined
                           ? {}
                           : { skills: currentSession.skills }),
+                      ...(currentSession.scheduledMessages === undefined
+                          ? {}
+                          : { scheduledMessages: currentSession.scheduledMessages }),
                       ...(currentSession.sessionTokenCount === undefined
                           ? {}
                           : { sessionTokenCount: currentSession.sessionTokenCount }),

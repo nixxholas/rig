@@ -51,6 +51,7 @@ import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
+import type { DurableWait, ScheduledMessage } from "../scheduling/index.js";
 import type { GitCommandRunner } from "../git/types.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
@@ -94,6 +95,11 @@ import { sessionRewind } from "../persistence/session/sessionRewind.js";
 import { sessionSave } from "../persistence/session/sessionSave.js";
 import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js";
 import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRun.js";
+import { durableWaitSave } from "../persistence/scheduling/durableWaitSave.js";
+import { durableWaitPrune } from "../persistence/scheduling/durableWaitPrune.js";
+import { scheduledMessageSave } from "../persistence/scheduling/scheduledMessageSave.js";
+import { scheduledMessagePrune } from "../persistence/scheduling/scheduledMessagePrune.js";
+import { queryNextPendingScheduledMessage } from "../persistence/scheduling/queryScheduledMessages.js";
 import { queryExternalToolCalls } from "../persistence/session/queryExternalToolCalls.js";
 import { queryFirstRootSessionIdForWorkspace } from "../persistence/session/queryFirstRootSessionIdForWorkspace.js";
 import { queryInterruptedSessionCandidates } from "../persistence/session/queryInterruptedSessionCandidates.js";
@@ -125,6 +131,7 @@ import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
+const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
 
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -165,6 +172,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #secrets: SecretRegistry;
     readonly #workspaceFeatures: WorkspaceFeatures;
     #sessions = new Map<string, WeakRef<InMemorySession>>();
+    #scheduledMessageTimer: ReturnType<typeof setTimeout> | undefined;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
         reference: WeakRef<InMemorySession>;
@@ -263,6 +271,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         this.#repairInterruptedTitleGenerations();
         this.repairInterruptedSessions("crash");
+        this.#armScheduledMessageTimer();
         const recover = () => this.#recoverProjectWorkspaces();
         const recovery = this.#taskDrain?.run(recover) ?? recover();
         void recovery.catch((error: unknown) => {
@@ -343,6 +352,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     close(): void {
+        if (this.#scheduledMessageTimer !== undefined) {
+            clearTimeout(this.#scheduledMessageTimer);
+            this.#scheduledMessageTimer = undefined;
+        }
         void this.remoteTerminals.close();
         this.#projects.close();
         this.liveEvents.close();
@@ -431,6 +444,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 emitCreatedEvent: false,
                 ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
                 modelCatalog: this.#modelCatalog,
+                now: this.#now,
                 onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
@@ -521,6 +535,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 deferEventNotification: (notify) => this.#afterTransactionCommit(notify),
                 emitCreatedEvent: false,
                 modelCatalog: this.#modelCatalog,
+                now: this.#now,
                 onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
                 ...(this.#mcpToolProvider !== undefined
                     ? { mcpToolProvider: this.#mcpToolProvider }
@@ -974,6 +989,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     async prepareForShutdown(reason: SessionInterruption["reason"]): Promise<void> {
         this.#taskDrain?.beginClose();
+        if (this.#scheduledMessageTimer !== undefined) {
+            clearTimeout(this.#scheduledMessageTimer);
+            this.#scheduledMessageTimer = undefined;
+        }
         const closingSessions = new Set(this.#cachedSessions());
         const cleanup = [
             ...[...closingSessions].map((session) => session.beginShutdown()),
@@ -1074,12 +1093,60 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         durableUserInputSave(this.#tx(), call);
     }
 
+    upsertDurableWait(wait: DurableWait): void {
+        durableWaitSave(this.#tx(), wait);
+    }
+
+    upsertScheduledMessage(message: ScheduledMessage): void {
+        scheduledMessageSave(this.#tx(), message);
+    }
+
+    scheduledMessageChanged(): void {
+        this.#afterTransactionCommit(() => this.#armScheduledMessageTimer());
+    }
+
     pruneExternalToolCalls(sessionId: string, retain: number): void {
         externalToolCallPrune(this.#tx(), sessionId, retain);
     }
 
     pruneDurableUserInputs(sessionId: string, retain: number): void {
         durableUserInputPrune(this.#tx(), sessionId, retain);
+    }
+
+    pruneDurableWaits(sessionId: string, retain: number): void {
+        durableWaitPrune(this.#tx(), sessionId, retain);
+    }
+
+    pruneScheduledMessages(sessionId: string, retain: number): readonly string[] {
+        return scheduledMessagePrune(this.#tx(), sessionId, retain);
+    }
+
+    #armScheduledMessageTimer(): void {
+        if (!this.#client.open) return;
+        if (this.#scheduledMessageTimer !== undefined) clearTimeout(this.#scheduledMessageTimer);
+        const next = queryNextPendingScheduledMessage(this.#tx());
+        if (next === undefined) {
+            this.#scheduledMessageTimer = undefined;
+            return;
+        }
+        const delay = Math.min(MAX_SCHEDULE_TIMER_DELAY_MS, Math.max(0, next.dueAt - this.#now()));
+        this.#scheduledMessageTimer = setTimeout(() => {
+            this.#scheduledMessageTimer = undefined;
+            this.#deliverDueScheduledMessages();
+        }, delay);
+    }
+
+    #deliverDueScheduledMessages(): void {
+        for (;;) {
+            const next = queryNextPendingScheduledMessage(this.#tx());
+            if (next === undefined || next.dueAt > this.#now()) break;
+            const sender = this.get(next.senderSessionId);
+            if (sender === undefined) {
+                throw new Error("The sender of a scheduled message no longer exists.");
+            }
+            sender.deliverScheduledMessage(next.id);
+        }
+        this.#armScheduledMessageTimer();
     }
 
     #appendEvent(event: SessionEvent): void {
@@ -1207,6 +1274,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             events: querySessionEvents(this.#tx(), sessionId, RESTORED_SESSION_EVENT_LIMIT),
             ...(loaded.lastEventId === undefined ? {} : { lastEventId: loaded.lastEventId }),
             modelCatalog: this.#modelCatalog,
+            now: this.#now,
             onInitialTitle: (metadata) => this.#inheritWorkspaceTitle(metadata),
             ...(this.#mcpToolProvider === undefined
                 ? {}

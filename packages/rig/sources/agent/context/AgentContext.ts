@@ -11,6 +11,7 @@ import type { WorkflowContext } from "../../workflows/index.js";
 import type { SessionSecretContext } from "../../secrets/index.js";
 import type { AgentCommunicationContext } from "./AgentCommunicationContext.js";
 import type { WorkspaceContext } from "./WorkspaceContext.js";
+import type { SchedulingContext } from "../../scheduling/index.js";
 
 export interface AgentContext {
     agentCommunication?: AgentCommunicationContext;
@@ -20,6 +21,7 @@ export interface AgentContext {
     fileReads?: FileReadState;
     goals?: GoalContext;
     permissions?: PermissionContext;
+    scheduling?: SchedulingContext;
     secrets?: SessionSecretContext;
     subagents?: SubagentContext;
     tasks?: TaskContext;

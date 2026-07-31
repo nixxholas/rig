@@ -178,9 +178,19 @@ import { createToolResultBlock } from "../agent/createToolResultBlock.js";
 import type { AgentMessage, ErrorMessage, ToolResultBlock } from "../agent/types.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
 import { createDurableSkillTool, type DurableSkillDefinition } from "../external-skills/index.js";
+import type {
+    DurableWait,
+    DurableWaitRequest,
+    ScheduledMessage,
+    ScheduleMessageRequest,
+    WaitResult,
+} from "../scheduling/index.js";
 
 const MAX_RETAINED_EXTERNAL_TOOL_CALLS = 1_000;
 const MAX_RETAINED_DURABLE_USER_INPUTS = 1_000;
+const MAX_RETAINED_DURABLE_WAITS = 1_000;
+const MAX_RETAINED_SETTLED_SCHEDULED_MESSAGES = 1_000;
+const MAX_TIMER_DELAY_MS = 2_147_000_000;
 
 export interface PersistedSessionMessage {
     isPartial: boolean;
@@ -272,6 +282,8 @@ export interface PersistedSessionState {
     tools: readonly string[];
     externalToolCalls?: readonly ExternalToolCall[];
     durableUserInputs?: readonly DurableUserInputCall[];
+    durableWaits?: readonly DurableWait[];
+    scheduledMessages?: readonly ScheduledMessage[];
     externalTools?: readonly ExternalToolDefinition[];
     skills?: readonly DurableSkillDefinition[];
     systemPrompt?: string;
@@ -310,11 +322,16 @@ export interface InMemorySessionPersistence {
     ): SessionTranscriptWindow | undefined;
     pruneExternalToolCalls?(sessionId: string, retain: number): void;
     pruneDurableUserInputs?(sessionId: string, retain: number): void;
+    pruneDurableWaits?(sessionId: string, retain: number): void;
+    pruneScheduledMessages?(sessionId: string, retain: number): readonly string[];
     saveSession(state: PersistedSessionState): void;
     transaction?<T>(body: () => T): T;
     upsertMessage(sessionId: string, message: PersistedSessionMessage): void;
     upsertExternalToolCall?(call: ExternalToolCall): void;
     upsertDurableUserInput?(call: DurableUserInputCall): void;
+    upsertDurableWait?(wait: DurableWait): void;
+    upsertScheduledMessage?(message: ScheduledMessage): void;
+    scheduledMessageChanged?(): void;
 }
 
 export interface InMemorySessionOptions {
@@ -376,6 +393,11 @@ interface MetadataGenerationTarget {
 interface ExternalToolWaiter {
     reject: (error: Error) => void;
     resolve: (resolution: ExternalToolCallResolution) => void;
+}
+
+interface DurableWaitWaiter {
+    reject: (error: Error) => void;
+    resolve: (result: WaitResult) => void;
 }
 
 interface InternalWorkflowRun {
@@ -463,6 +485,9 @@ export class InMemorySession {
     #goal: SessionGoal | undefined;
     #externalToolCalls = new Map<string, ExternalToolCall>();
     #durableUserInputs = new Map<string, DurableUserInputCall>();
+    #durableWaits = new Map<string, DurableWait>();
+    #durableWaitTimers = new Map<string, ReturnType<typeof setTimeout>>();
+    #durableWaitWaiters = new Map<string, DurableWaitWaiter>();
     #resumingDurableToolRun = false;
     #resumeDurableToolRunAgain = false;
     #externalToolDefinitions: readonly ExternalToolDefinition[] = [];
@@ -527,6 +552,7 @@ export class InMemorySession {
     #runtime: CodingAssistantRuntime | undefined;
     #executor: Executor | undefined;
     #secrets: SessionSecretContext;
+    #scheduledMessages = new Map<string, ScheduledMessage>();
     #status: SessionStatus = "idle";
     #activity: SessionActivity = IDLE_SESSION_ACTIVITY;
     #reportingActivity = false;
@@ -651,6 +677,12 @@ export class InMemorySession {
         for (const call of options.restore?.durableUserInputs ?? []) {
             this.#durableUserInputs.set(call.request.requestId, structuredClone(call));
         }
+        for (const wait of options.restore?.durableWaits ?? []) {
+            this.#durableWaits.set(wait.id, structuredClone(wait));
+        }
+        for (const message of options.restore?.scheduledMessages ?? []) {
+            this.#scheduledMessages.set(message.id, structuredClone(message));
+        }
         const requestedEffort = options.restore?.effort ?? options.request.effort;
         this.#effort =
             requestedEffort !== undefined &&
@@ -766,6 +798,8 @@ export class InMemorySession {
         for (const review of options.restore?.permissionReviews ?? []) {
             this.#permissionReviews.set(review.toolCallId, { ...review });
         }
+        this.#restoreDurableWaitTimers();
+        this.#refreshWaitActivity(false);
         for (const event of this.events.all()) {
             this.#recordRunFacts(event);
             this.#recordPermissionReview(event);
@@ -951,6 +985,7 @@ export class InMemorySession {
             if (runId !== undefined && this.hasDurableToolRun()) {
                 this.#cancelExternalToolCalls(runId);
                 this.#cancelDurableUserInputs(runId);
+                this.#cancelDurableWaits(runId);
                 this.#restoredActiveRunId = undefined;
                 this.#status = "aborted";
                 const event = this.#append("abort_requested", { runId });
@@ -983,6 +1018,7 @@ export class InMemorySession {
         if (runId !== undefined) {
             this.#cancelExternalToolCalls(runId);
             this.#cancelDurableUserInputs(runId);
+            this.#cancelDurableWaits(runId);
         }
         this.#activeRun?.controller.abort();
         this.#restoredActiveRunId = undefined;
@@ -1651,6 +1687,8 @@ export class InMemorySession {
             metadataRunId: _metadataRunId,
             metadataUpdatedAt: _metadataUpdatedAt,
             recap: _recap,
+            durableWaits: _durableWaits,
+            scheduledMessages: _scheduledMessages,
             workflows: _workflows,
             ...rest
         } = state;
@@ -1949,6 +1987,105 @@ export class InMemorySession {
 
     goal(): SessionGoal | undefined {
         return this.#goal === undefined ? undefined : { ...this.#goal };
+    }
+
+    scheduledMessages(): readonly ScheduledMessage[] {
+        return [...this.#scheduledMessages.values()]
+            .sort((left, right) => left.createdAt - right.createdAt)
+            .map((message) => structuredClone(message));
+    }
+
+    scheduleMessage(request: ScheduleMessageRequest): ScheduledMessage {
+        if (this.isSubagent()) {
+            throw new Error("Subagents cannot schedule messages.");
+        }
+        if (!Number.isFinite(request.dueAt)) {
+            throw new Error("The scheduled date must be finite.");
+        }
+        if (request.targetAgentId.trim().length === 0) {
+            throw new Error("Provide the target Agent ID.");
+        }
+        if (request.message.trim().length === 0) {
+            throw new Error("Provide a message to schedule.");
+        }
+        const now = this.#now();
+        const scheduled: ScheduledMessage = {
+            createdAt: now,
+            dueAt: Math.max(now, request.dueAt),
+            id: createId(),
+            message: request.message,
+            senderSessionId: this.id,
+            status: "pending",
+            targetAgentId: request.targetAgentId,
+            updatedAt: now,
+        };
+        this.#persistence?.upsertScheduledMessage?.(scheduled);
+        this.#scheduledMessages.set(scheduled.id, scheduled);
+        this.#append("scheduled_message_changed", {
+            message: structuredClone(scheduled),
+        });
+        this.#pruneScheduledMessages();
+        this.#persistence?.scheduledMessageChanged?.();
+        return structuredClone(scheduled);
+    }
+
+    cancelScheduledMessage(
+        messageId: string,
+        mutationId?: string,
+    ): { cancelled: boolean; message?: ScheduledMessage } {
+        const current = this.#scheduledMessages.get(messageId);
+        if (current === undefined) return { cancelled: false };
+        if (current.status !== "pending") {
+            return { cancelled: false, message: structuredClone(current) };
+        }
+        const next: ScheduledMessage = {
+            ...current,
+            status: "cancelled",
+            updatedAt: this.#now(),
+        };
+        this.#persistence?.upsertScheduledMessage?.(next);
+        this.#scheduledMessages.set(next.id, next);
+        this.#append("scheduled_message_changed", {
+            message: structuredClone(next),
+            ...(mutationId === undefined ? {} : { mutationId }),
+        });
+        this.#pruneScheduledMessages();
+        this.#persistence?.scheduledMessageChanged?.();
+        return { cancelled: true, message: structuredClone(next) };
+    }
+
+    deliverScheduledMessage(messageId: string): ScheduledMessage | undefined {
+        const current = this.#scheduledMessages.get(messageId);
+        if (current === undefined || current.status !== "pending") {
+            return current === undefined ? undefined : structuredClone(current);
+        }
+        let delivered = false;
+        let failure: string | undefined;
+        try {
+            this.#agentManager?.sendScheduledMessage(
+                this.id,
+                current.targetAgentId,
+                current.message,
+                current.id,
+            );
+            delivered = this.#agentManager !== undefined;
+            if (!delivered) failure = "Cross-agent messaging is unavailable in this session.";
+        } catch (error) {
+            failure = errorToMessage(error);
+        }
+        const now = this.#now();
+        const next: ScheduledMessage = {
+            ...current,
+            ...(delivered ? { deliveredAt: now } : { failure: failure ?? "Delivery failed." }),
+            status: delivered ? "delivered" : "undelivered",
+            updatedAt: now,
+        };
+        this.#persistence?.upsertScheduledMessage?.(next);
+        this.#scheduledMessages.set(next.id, next);
+        this.#append("scheduled_message_changed", { message: structuredClone(next) });
+        this.#pruneScheduledMessages();
+        this.#persistence?.scheduledMessageChanged?.();
+        return structuredClone(next);
     }
 
     requestUserInput(
@@ -2367,6 +2504,8 @@ export class InMemorySession {
     beginShutdown(): Promise<void> {
         if (this.#shutdownCleanup !== undefined) return this.#shutdownCleanup;
         this.#closing = true;
+        for (const timer of this.#durableWaitTimers.values()) clearTimeout(timer);
+        this.#durableWaitTimers.clear();
         this.#releaseMcpToolLease();
         this.#clearMetadataSettlement();
         for (const workflow of this.#workflowRuns.values()) {
@@ -2398,6 +2537,7 @@ export class InMemorySession {
         for (const runId of runIds) {
             this.#cancelExternalToolCalls(runId);
             this.#cancelDurableUserInputs(runId);
+            this.#cancelDurableWaits(runId);
         }
         for (const run of this.#queue) this.#persistence?.deleteQueuedRun(this.id, run.runId);
         this.#queue = [];
@@ -3080,6 +3220,7 @@ export class InMemorySession {
             externalTools: this.#externalToolDefinitions.map((definition) => ({ ...definition })),
             skills: this.#durableSkillDefinitions.map((definition) => ({ ...definition })),
             pendingExternalToolCalls: this.externalToolCalls({ status: "pending" }),
+            scheduledMessages: this.scheduledMessages(),
             ...(this.#systemPrompt !== undefined ? { systemPrompt: this.#systemPrompt } : {}),
             ...(this.#goal !== undefined ? { goal: { ...this.#goal } } : {}),
             ...(snapshot.effort !== undefined ? { effort: snapshot.effort } : {}),
@@ -3210,6 +3351,8 @@ export class InMemorySession {
             durableUserInputs: [...this.#durableUserInputs.values()].map((call) =>
                 structuredClone(call),
             ),
+            durableWaits: [...this.#durableWaits.values()].map((wait) => structuredClone(wait)),
+            scheduledMessages: this.scheduledMessages(),
             externalTools: this.#externalToolDefinitions.map((definition) => ({ ...definition })),
             skills: this.#durableSkillDefinitions.map((definition) => ({ ...definition })),
             ...(this.#systemPrompt !== undefined ? { systemPrompt: this.#systemPrompt } : {}),
@@ -3267,6 +3410,7 @@ export class InMemorySession {
                 };
             }
         }
+        this.#interruptDurableWaits();
         if (options.source === undefined && request.provenance !== "agent") {
             this.setArchived(false);
         }
@@ -3411,6 +3555,7 @@ export class InMemorySession {
         ) {
             return { ...this.submit(request), delivery: "run" };
         }
+        this.#interruptDurableWaits();
         // Presence alone decides this, not whether the value differs from the current one, so the
         // rule does not quietly depend on what the session happens to be set to right now.
         if (
@@ -3501,6 +3646,7 @@ export class InMemorySession {
         request: SubmitMessageRequest,
     ): SubmitMessageResponse | SteerMessageResponse {
         this.#assertAcceptingWork();
+        this.#interruptDurableWaits();
         if (this.#activeRun === undefined) {
             return this.submit(request, { source: "notification" });
         }
@@ -3557,6 +3703,8 @@ export class InMemorySession {
 
     deliverAgentMessage(message: UserMessage): void {
         this.#assertAcceptingWork();
+        if (this.events.messageSubmission(message.id) !== undefined) return;
+        this.#interruptDurableWaits();
         const agent = this.#ensureRuntime().agent;
         const activeRun = this.#activeRun;
         const displayText = message.blocks
@@ -3674,6 +3822,67 @@ export class InMemorySession {
             .map(cloneExternalToolCall);
     }
 
+    async waitDurably(request: DurableWaitRequest, signal?: AbortSignal): Promise<WaitResult> {
+        const runId = this.#activeRun?.runId;
+        if (runId === undefined) throw new Error("The durable wait has no active run.");
+        const existing = [...this.#durableWaits.values()].find(
+            (wait) =>
+                wait.runId === runId &&
+                wait.batchId === request.batchId &&
+                wait.toolCallId === request.toolCallId,
+        );
+        if (existing?.result !== undefined) return structuredClone(existing.result);
+        const wait: DurableWait = existing ?? {
+            arguments: structuredClone(request.arguments),
+            batchId: request.batchId,
+            consumed: false,
+            createdAt: this.#now(),
+            dueAt: request.dueAt,
+            id: createId(),
+            kind: request.kind,
+            ...(request.providerToolCallId === undefined
+                ? {}
+                : { providerToolCallId: request.providerToolCallId }),
+            runId,
+            sessionId: this.id,
+            status: "waiting",
+            toolCallId: request.toolCallId,
+            toolCallIndex: request.toolCallIndex,
+            toolName: request.toolName,
+        };
+        if (existing === undefined) {
+            this.#persistence?.upsertDurableWait?.(wait);
+            this.#durableWaits.set(wait.id, wait);
+            this.#armDurableWait(wait);
+            this.#refreshWaitActivity();
+        }
+        if (wait.dueAt <= this.#now()) {
+            const settled = this.#settleDurableWait(wait, false);
+            if (settled !== undefined) return settled;
+        }
+        return new Promise<WaitResult>((resolve, reject) => {
+            let waiter: DurableWaitWaiter;
+            const abort = () => {
+                if (this.#durableWaitWaiters.get(wait.id) !== waiter) return;
+                this.#durableWaitWaiters.delete(wait.id);
+                reject(new Error("The durable wait was interrupted."));
+            };
+            waiter = {
+                reject: (error) => {
+                    signal?.removeEventListener("abort", abort);
+                    reject(error);
+                },
+                resolve: (result) => {
+                    signal?.removeEventListener("abort", abort);
+                    resolve(structuredClone(result));
+                },
+            };
+            this.#durableWaitWaiters.set(wait.id, waiter);
+            signal?.addEventListener("abort", abort, { once: true });
+            if (signal?.aborted === true) abort();
+        });
+    }
+
     hasDurableToolRun(): boolean {
         const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
         if (runId === undefined) return false;
@@ -3684,6 +3893,9 @@ export class InMemorySession {
             ...[...this.#durableUserInputs.values()]
                 .filter((call) => call.runId === runId && call.status !== "cancelled")
                 .map((call) => ({ consumed: call.consumed, toolCallId: call.toolCallId })),
+            ...[...this.#durableWaits.values()]
+                .filter((wait) => wait.runId === runId && wait.status !== "cancelled")
+                .map((wait) => ({ consumed: wait.consumed, toolCallId: wait.toolCallId })),
         ];
         if (calls.length === 0) return false;
         if (calls.some((call) => !call.consumed)) return true;
@@ -3718,7 +3930,14 @@ export class InMemorySession {
             .catch(rethrowDatabaseFailure)
             .finally(() => {
                 this.#resumingDurableToolRun = false;
-                if (this.#resumeDurableToolRunAgain) this.resumeDurableToolRun();
+                if (this.#resumeDurableToolRunAgain) {
+                    this.resumeDurableToolRun();
+                } else if (
+                    this.#queue.length > 0 &&
+                    (this.#restoredActiveRunId === undefined || !this.hasDurableToolRun())
+                ) {
+                    this.#startDrainQueue();
+                }
             });
     }
 
@@ -3728,6 +3947,7 @@ export class InMemorySession {
         if (runId === undefined || !this.hasDurableToolRun()) return;
         this.#reconcileExternalToolConsumption(runId);
         this.#reconcileDurableUserInputConsumption(runId);
+        this.#reconcileDurableWaitConsumption(runId);
         while (true) {
             const call = [...this.#durableUserInputs.values()].find(
                 (candidate) =>
@@ -3775,6 +3995,18 @@ export class InMemorySession {
                     pending: call.status !== "completed",
                     toolCallIndex: call.toolCallIndex,
                 })),
+            ...[...this.#durableWaits.values()]
+                .filter(
+                    (wait) => wait.runId === runId && !wait.consumed && wait.status !== "cancelled",
+                )
+                .map((wait) => ({
+                    batchId: wait.batchId,
+                    call: wait,
+                    createdAt: wait.createdAt,
+                    kind: "wait" as const,
+                    pending: wait.status === "waiting",
+                    toolCallIndex: wait.toolCallIndex,
+                })),
         ].sort(
             (left, right) =>
                 left.createdAt - right.createdAt || left.toolCallIndex - right.toolCallIndex,
@@ -3790,6 +4022,12 @@ export class InMemorySession {
                         if (entry.kind === "external") {
                             return this.#externalToolResultBlock(entry.call);
                         }
+                        if (entry.kind === "wait") {
+                            if (entry.call.resultBlock === undefined) {
+                                throw new Error("A durable wait has no tool result.");
+                            }
+                            return structuredClone(entry.call.resultBlock);
+                        }
                         if (entry.call.result === undefined) {
                             throw new Error("A durable user input has no tool result.");
                         }
@@ -3803,12 +4041,15 @@ export class InMemorySession {
                 entry.call.consumed = true;
                 if (entry.kind === "external") {
                     this.#persistence?.upsertExternalToolCall?.(entry.call);
-                } else {
+                } else if (entry.kind === "user_input") {
                     this.#persistence?.upsertDurableUserInput?.(entry.call);
+                } else {
+                    this.#persistence?.upsertDurableWait?.(entry.call);
                 }
             }
             this.#pruneExternalToolCalls();
             this.#pruneDurableUserInputs();
+            this.#pruneDurableWaits();
             this.#append("agent_message", { message: resultMessage, runId });
         }
         this.#contextMessages = undefined;
@@ -4039,6 +4280,31 @@ export class InMemorySession {
         this.#pruneDurableUserInputs();
     }
 
+    #reconcileDurableWaitConsumption(runId: string): void {
+        const consumedToolCallIds = new Set(
+            this.#messages.flatMap((entry) =>
+                entry.message.role !== "agent"
+                    ? []
+                    : entry.message.blocks.flatMap((block) =>
+                          block.type === "tool_result" ? [block.toolCallId] : [],
+                      ),
+            ),
+        );
+        for (const current of this.#durableWaits.values()) {
+            if (
+                current.runId !== runId ||
+                current.consumed ||
+                !consumedToolCallIds.has(current.toolCallId)
+            ) {
+                continue;
+            }
+            const next = { ...current, consumed: true };
+            this.#persistence?.upsertDurableWait?.(next);
+            this.#durableWaits.set(next.id, next);
+        }
+        this.#pruneDurableWaits();
+    }
+
     #cancelDurableUserInput(call: DurableUserInputCall): void {
         if (call.status === "cancelled" || call.consumed) return;
         call.status = "cancelled";
@@ -4057,6 +4323,135 @@ export class InMemorySession {
         this.#pruneDurableUserInputs();
     }
 
+    #restoreDurableWaitTimers(): void {
+        for (const wait of this.#durableWaits.values()) {
+            if (wait.status === "waiting") this.#armDurableWait(wait);
+        }
+    }
+
+    #armDurableWait(wait: DurableWait): void {
+        const previous = this.#durableWaitTimers.get(wait.id);
+        if (previous !== undefined) clearTimeout(previous);
+        const delay = Math.min(MAX_TIMER_DELAY_MS, Math.max(0, wait.dueAt - this.#now()));
+        const timer = setTimeout(() => {
+            if (this.#durableWaitTimers.get(wait.id) !== timer) return;
+            this.#durableWaitTimers.delete(wait.id);
+            const current = this.#durableWaits.get(wait.id);
+            if (current === undefined || current.status !== "waiting") return;
+            if (current.dueAt > this.#now()) {
+                this.#armDurableWait(current);
+                return;
+            }
+            this.#settleDurableWait(current, false);
+        }, delay);
+        this.#durableWaitTimers.set(wait.id, timer);
+    }
+
+    #settleDurableWait(wait: DurableWait, interrupted: boolean): WaitResult | undefined {
+        const current = this.#durableWaits.get(wait.id);
+        if (current === undefined || current.status !== "waiting") return current?.result;
+        const endedAt = this.#now();
+        const result: WaitResult = {
+            dueAt: current.dueAt,
+            elapsedSeconds: Math.max(0, endedAt - current.createdAt) / 1_000,
+            endedAt,
+            interrupted,
+            reason: interrupted ? "message_received" : "completed",
+            startedAt: current.createdAt,
+        };
+        const next: DurableWait = {
+            ...current,
+            result,
+            resultBlock: durableWaitResultBlock(current, result),
+            status: interrupted ? "interrupted" : "completed",
+        };
+        this.#persistence?.upsertDurableWait?.(next);
+        this.#durableWaits.set(next.id, next);
+        const timer = this.#durableWaitTimers.get(next.id);
+        if (timer !== undefined) clearTimeout(timer);
+        this.#durableWaitTimers.delete(next.id);
+        this.#refreshWaitActivity();
+        const waiter = this.#durableWaitWaiters.get(next.id);
+        if (waiter === undefined) {
+            this.resumeDurableToolRun();
+        } else {
+            this.#durableWaitWaiters.delete(next.id);
+            waiter.resolve(result);
+        }
+        return result;
+    }
+
+    #interruptDurableWaits(): void {
+        const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
+        if (runId === undefined) return;
+        for (const wait of this.#durableWaits.values()) {
+            if (wait.runId === runId && wait.status === "waiting") {
+                this.#settleDurableWait(wait, true);
+            }
+        }
+    }
+
+    #cancelDurableWaits(runId: string): void {
+        for (const current of this.#durableWaits.values()) {
+            if (current.runId !== runId || current.status !== "waiting") continue;
+            const next: DurableWait = { ...current, status: "cancelled" };
+            this.#persistence?.upsertDurableWait?.(next);
+            this.#durableWaits.set(next.id, next);
+            const timer = this.#durableWaitTimers.get(next.id);
+            if (timer !== undefined) clearTimeout(timer);
+            this.#durableWaitTimers.delete(next.id);
+            const waiter = this.#durableWaitWaiters.get(next.id);
+            if (waiter !== undefined) {
+                this.#durableWaitWaiters.delete(next.id);
+                waiter.reject(new Error("The durable wait was cancelled."));
+            }
+        }
+        this.#refreshWaitActivity();
+        this.#pruneDurableWaits();
+    }
+
+    #refreshWaitActivity(publish = true): void {
+        const runId = this.#activeRun?.runId ?? this.#restoredActiveRunId;
+        const waiting = [...this.#durableWaits.values()]
+            .filter((wait) => wait.runId === runId && wait.status === "waiting")
+            .sort((left, right) => left.dueAt - right.dueAt)[0];
+        if (waiting === undefined && this.#activity.wait === undefined) return;
+        const { wait: _previousWait, ...base } = this.#activity;
+        const next: SessionActivity =
+            waiting === undefined
+                ? (base.toolCalls?.length ?? 0) > 0
+                    ? {
+                          ...base,
+                          kind: "executing_tool_call",
+                          label:
+                              base.toolCalls?.length === 1
+                                  ? `Running ${base.toolCalls[0]?.toolName ?? "tool"}`
+                                  : `Running ${String(base.toolCalls?.length ?? 0)} tools`,
+                          since: this.#now(),
+                      }
+                    : { ...base, kind: "thinking", label: "Thinking", since: this.#now() }
+                : {
+                      ...base,
+                      kind: "waiting",
+                      label: `Waiting until ${new Date(waiting.dueAt).toLocaleString()}`,
+                      runId: waiting.runId,
+                      since: waiting.createdAt,
+                      wait: {
+                          dueAt: waiting.dueAt,
+                          startedAt: waiting.createdAt,
+                          toolCallId: waiting.toolCallId,
+                      },
+                  };
+        this.#activity = next;
+        if (!publish) return;
+        this.#reportingActivity = true;
+        try {
+            this.#append("session_activity_changed", { activity: next });
+        } finally {
+            this.#reportingActivity = false;
+        }
+    }
+
     #pruneDurableUserInputs(): void {
         const eligible = [...this.#durableUserInputs.values()]
             .filter((call) => call.status === "cancelled" || call.consumed)
@@ -4069,6 +4464,52 @@ export class InMemorySession {
             this.#durableUserInputs.delete(call.request.requestId);
         }
         this.#persistence?.pruneDurableUserInputs?.(this.id, MAX_RETAINED_DURABLE_USER_INPUTS);
+    }
+
+    #pruneDurableWaits(): void {
+        const eligible = [...this.#durableWaits.values()]
+            .filter((wait) => wait.status === "cancelled" || wait.consumed)
+            .sort(
+                (left, right) =>
+                    (right.result?.endedAt ?? right.createdAt) -
+                        (left.result?.endedAt ?? left.createdAt) ||
+                    right.toolCallIndex - left.toolCallIndex,
+            );
+        this.#persistence?.pruneDurableWaits?.(this.id, MAX_RETAINED_DURABLE_WAITS);
+        for (const wait of eligible.slice(MAX_RETAINED_DURABLE_WAITS)) {
+            this.#durableWaits.delete(wait.id);
+        }
+    }
+
+    #pruneScheduledMessages(): void {
+        const prune = (): void => {
+            const removed =
+                this.#persistence?.pruneScheduledMessages?.(
+                    this.id,
+                    MAX_RETAINED_SETTLED_SCHEDULED_MESSAGES,
+                ) ??
+                [...this.#scheduledMessages.values()]
+                    .filter(
+                        (message) =>
+                            message.status === "cancelled" || message.status === "delivered",
+                    )
+                    .sort(
+                        (left, right) =>
+                            right.updatedAt - left.updatedAt ||
+                            right.createdAt - left.createdAt ||
+                            right.id.localeCompare(left.id),
+                    )
+                    .slice(MAX_RETAINED_SETTLED_SCHEDULED_MESSAGES)
+                    .map((message) => message.id);
+            if (removed.length === 0) return;
+            for (const messageId of removed) this.#scheduledMessages.delete(messageId);
+            this.#append("scheduled_messages_pruned", { messageIds: removed });
+        };
+        if (this.#persistence?.transaction === undefined) {
+            prune();
+            return;
+        }
+        this.#persistence.transaction(prune);
     }
 
     #cancelExternalToolCalls(runId: string): void {
@@ -4771,8 +5212,25 @@ export class InMemorySession {
                 call.resolvedAt ??= this.#now();
                 this.#persistence?.upsertDurableUserInput?.(call);
             }
+            for (const current of this.#durableWaits.values()) {
+                if (current.runId !== runId || !resultIds.has(current.toolCallId)) continue;
+                const resultBlock = message.blocks.find(
+                    (block): block is ToolResultBlock =>
+                        block.type === "tool_result" && block.toolCallId === current.toolCallId,
+                );
+                const next: DurableWait = {
+                    ...current,
+                    consumed: true,
+                    ...(resultBlock === undefined
+                        ? {}
+                        : { resultBlock: structuredClone(resultBlock) }),
+                };
+                this.#persistence?.upsertDurableWait?.(next);
+                this.#durableWaits.set(next.id, next);
+            }
             this.#pruneExternalToolCalls();
             this.#pruneDurableUserInputs();
+            this.#pruneDurableWaits();
         }
         if (partialPosition !== undefined) {
             this.#activePartial = undefined;
@@ -4977,10 +5435,16 @@ export class InMemorySession {
                       },
                   }),
             messages: this.#contextMessages ?? this.#committedMessages(),
+            isSubagent: this.isSubagent(),
             modelId: this.#modelId,
             permissionMode: this.#permissionMode,
             providerId: this.#providerId,
             secrets: this.#secrets,
+            scheduling: {
+                now: () => this.#now(),
+                scheduleMessage: (request) => this.scheduleMessage(request),
+                wait: (request, signal) => this.waitDurably(request, signal),
+            },
             userInput: {
                 markExecuting: (requestId) => this.markUserInputExecuting(requestId),
                 request: (request, requestOptions) =>
@@ -5730,7 +6194,9 @@ export class InMemorySession {
     }
 
     #startDrainQueue(): void {
-        if (this.#draining !== undefined) {
+        if (this.#draining !== undefined || this.#resumingDurableToolRun) return;
+        if (this.#restoredActiveRunId !== undefined && this.hasDurableToolRun()) {
+            this.resumeDurableToolRun();
             return;
         }
 
@@ -6130,6 +6596,31 @@ function cloneExternalResolution(
         ...(Object.prototype.hasOwnProperty.call(resolution, "output")
             ? { output: resolution.output }
             : {}),
+    };
+}
+
+function durableWaitResultBlock(wait: DurableWait, result: WaitResult): ToolResultBlock {
+    const elapsed = Number.isInteger(result.elapsedSeconds)
+        ? String(result.elapsedSeconds)
+        : result.elapsedSeconds.toFixed(3).replace(/0+$/u, "");
+    return {
+        display: result.interrupted
+            ? `Wait interrupted after ${elapsed} seconds`
+            : `Waited ${elapsed} seconds`,
+        rendered: [
+            {
+                type: "text",
+                text: result.interrupted
+                    ? `The wait ended early because a new message arrived after ${elapsed} seconds.`
+                    : `The wait completed after ${elapsed} seconds.`,
+            },
+        ],
+        ...(wait.providerToolCallId === undefined
+            ? {}
+            : { providerToolCallId: wait.providerToolCallId }),
+        toolCallId: wait.toolCallId,
+        toolName: wait.toolName,
+        type: "tool_result",
     };
 }
 

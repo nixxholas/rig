@@ -863,6 +863,25 @@ export class CodingAssistantApp implements Component, Focusable {
             return;
         }
 
+        if (event.type === "session_activity_changed") {
+            const activity = event.data.activity;
+            if (
+                activity.runId !== undefined &&
+                this.#activeSessionRunId !== undefined &&
+                activity.runId !== this.#activeSessionRunId
+            ) {
+                return;
+            }
+            if (this.#running) {
+                this.#statusText =
+                    activity.kind === "idle" || activity.kind === "stopped"
+                        ? "Idle"
+                        : activity.label;
+                this.#requestRender();
+            }
+            return;
+        }
+
         if (event.type === "agent_event") {
             this.#applyAgentEvent(event.data.event, event.createdAt);
             return;
@@ -3317,6 +3336,9 @@ export class CodingAssistantApp implements Component, Focusable {
     }
 
     #sessionEventRunId(event: SessionEvent): string | undefined {
+        if (event.type === "session_activity_changed") {
+            return event.data.activity.runId;
+        }
         const runId = (event.data as { runId?: unknown }).runId;
         return typeof runId === "string" ? runId : undefined;
     }

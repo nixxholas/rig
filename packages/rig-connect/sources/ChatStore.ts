@@ -15,6 +15,7 @@ import type {
     PermissionReviewState,
     ProtocolSession,
     SessionActivity,
+    ScheduledMessage,
     SessionGoal,
     SessionStatus,
     SessionEvent,
@@ -157,6 +158,7 @@ export class ChatStore {
             projectSecretIds: [],
             providerId: "",
             secretIds: [],
+            scheduledMessages: [],
             sessionSecretIds: [],
             skills: [],
             loadingMore: false,
@@ -501,6 +503,7 @@ export class ChatStore {
             projectSecretIds: session.projectSecretIds ?? [],
             providerId: session.providerId,
             secretIds: session.secretIds ?? [],
+            scheduledMessages: session.scheduledMessages ?? [],
             sessionSecretIds: session.sessionSecretIds ?? [],
             sessionId: session.id,
             shellCommands: session.shellCommands ?? [],
@@ -595,6 +598,7 @@ export class ChatStore {
                     current.pendingExternalToolCalls ?? this.#session.pendingExternalToolCalls,
                 projectSecretIds: current.projectSecretIds ?? this.#session.projectSecretIds,
                 secretIds: current.secretIds ?? this.#session.secretIds,
+                scheduledMessages: current.scheduledMessages ?? this.#session.scheduledMessages,
                 sessionSecretIds: current.sessionSecretIds ?? this.#session.sessionSecretIds,
                 skills: current.skills ?? this.#session.skills,
                 titleStatus: current.titleStatus ?? this.#session.titleStatus,
@@ -697,6 +701,33 @@ export class ChatStore {
             case "session_activity_changed":
                 this.#setActivity((event.data as { activity: SessionActivity }).activity, deltas);
                 break;
+            case "scheduled_message_changed": {
+                const message = (event.data as { message: ScheduledMessage }).message;
+                const existing = this.#session.scheduledMessages;
+                const index = existing.findIndex((candidate) => candidate.id === message.id);
+                const scheduledMessages =
+                    index === -1
+                        ? [...existing, message].sort(
+                              (left, right) => left.createdAt - right.createdAt,
+                          )
+                        : existing.map((candidate, candidateIndex) =>
+                              candidateIndex === index ? message : candidate,
+                          );
+                this.#session = { ...this.#session, scheduledMessages };
+                break;
+            }
+            case "scheduled_messages_pruned": {
+                const messageIds = new Set(
+                    (event.data as { messageIds: readonly string[] }).messageIds,
+                );
+                this.#session = {
+                    ...this.#session,
+                    scheduledMessages: this.#session.scheduledMessages.filter(
+                        (message) => !messageIds.has(message.id),
+                    ),
+                };
+                break;
+            }
             case "session_git_changed":
                 this.#setGit((event.data as { git: GitChangeSnapshot }).git);
                 break;
@@ -1236,6 +1267,7 @@ export class ChatStore {
             projectSecretIds: session.projectSecretIds ?? [],
             providerId: session.providerId,
             secretIds: session.secretIds ?? [],
+            scheduledMessages: session.scheduledMessages ?? [],
             sessionSecretIds: session.sessionSecretIds ?? [],
             sessionId: session.id,
             shellCommands: session.shellCommands ?? [],
