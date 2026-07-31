@@ -16,7 +16,8 @@ describe("codex exec_command tool", () => {
         }
         expect(executorTool.parameters.properties).not.toHaveProperty("login");
         expect(executorTool.parameters.properties).not.toHaveProperty("prefix_rule");
-        expect(executorTool.parameters.properties).not.toHaveProperty("tty");
+        // A pseudo-terminal is offered because Rig now runs one on request.
+        expect(executorTool.parameters.properties).toHaveProperty("tty");
     });
 
     it("runs a command through the agent context bash", async () => {

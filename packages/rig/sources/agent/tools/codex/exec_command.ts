@@ -46,6 +46,12 @@ export const codexExecCommandTool = defineTool({
                             "Shell binary to launch. Defaults to the user's default shell.",
                     }),
                 ),
+                tty: Type.Optional(
+                    Type.Boolean({
+                        description:
+                            "Run the command under a PTY. Defaults to false, which uses pipes.",
+                    }),
+                ),
                 workdir: Type.Optional(
                     Type.String({
                         description: "Working directory for the command. Defaults to the turn cwd.",
@@ -91,6 +97,12 @@ export const codexExecCommandTool = defineTool({
                 description: "Shell binary to launch. Defaults to the system login shell.",
             }),
         ),
+        tty: Type.Optional(
+            Type.Boolean({
+                description:
+                    "Run the command under a PTY, for programs that behave differently without a terminal. Defaults to false, which uses pipes.",
+            }),
+        ),
         sandbox_permissions: Type.Optional(
             Type.Union([Type.Literal("use_default"), Type.Literal("require_escalated")], {
                 description:
@@ -119,7 +131,7 @@ export const codexExecCommandTool = defineTool({
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
     execute: async (
-        { cmd, max_output_tokens, secrets, shell, workdir, yield_time_ms },
+        { cmd, max_output_tokens, secrets, shell, tty, workdir, yield_time_ms },
         context,
         execution,
     ) => {
@@ -131,6 +143,7 @@ export const codexExecCommandTool = defineTool({
         if (workdir !== undefined) startOptions.cwd = workdir;
         if (secrets !== undefined) startOptions.secrets = secrets;
         if (shell !== undefined) startOptions.shell = shell;
+        if (tty !== undefined) startOptions.tty = tty;
         const sessionId = await context.bash.startSession(startOptions);
         const snapshot = await readSessionWithProgress({
             bash: context.bash,

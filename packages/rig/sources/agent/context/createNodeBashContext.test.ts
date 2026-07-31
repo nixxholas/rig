@@ -412,6 +412,38 @@ describe("createNodeBashContext", () => {
         15_000,
     );
 
+    it.runIf(process.platform !== "win32")(
+        "runs a command under a terminal when it asks for one",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+
+            const withTerminal = await context.startSession({
+                command: 'test -t 1 && printf HAS_TTY; printf %s "$TERM"',
+                cwd,
+                tty: true,
+            });
+            const withoutTerminal = await context.startSession({
+                command: "test -t 1 && printf HAS_TTY; printf NO_TTY",
+                cwd,
+            });
+
+            const terminal = await context.readSession(withTerminal, { waitMs: 5_000 });
+            const pipes = await context.readSession(withoutTerminal, { waitMs: 5_000 });
+
+            expect(terminal?.stdout).toContain("HAS_TTY");
+            // Terminal-shaped output is discouraged, the way Codex does it.
+            expect(terminal?.stdout).toContain("dumb");
+            expect(pipes?.stdout).toContain("NO_TTY");
+            expect(pipes?.stdout).not.toContain("HAS_TTY");
+        },
+        15_000,
+    );
+
     it("observes background process completion only once across repeated polls", async () => {
         const cwd = await makeTempDir();
         let resolveCompletion!: (result: ProcessRunResult) => void;

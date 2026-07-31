@@ -1,10 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { basename } from "node:path";
 
 import { killProcessTree } from "./killProcessTree.js";
 import { ProcessGroupReaper } from "./ProcessGroupReaper.js";
-import { resolveSystemShell } from "./resolveSystemShell.js";
+import { startProcessTransport, type ProcessTransport } from "./startProcessTransport.js";
 import type {
     ManagedProcessStatus,
     ProcessKillOptions,
@@ -144,7 +142,7 @@ export class ManagedProcess {
     /** The agent left this running on purpose; an interrupted turn spares it. */
     detached = false;
 
-    readonly #child: ChildProcess;
+    readonly #transport: ProcessTransport;
     readonly #maxOutputBytes: number;
     readonly #hooks: ManagedProcessHooks;
     readonly #waitPromise: Promise<ProcessRunResult>;
@@ -171,18 +169,11 @@ export class ManagedProcess {
             this.#resolveWait = resolve;
         });
 
-        const executable =
-            options.args === undefined ? (options.shell ?? resolveSystemShell()) : options.command;
-        const args =
-            options.args === undefined ? shellArgs(executable, options.command) : [...options.args];
-        this.#child = spawn(executable, args, {
-            cwd: options.cwd,
-            detached: process.platform !== "win32",
-            env: options.env ?? process.env,
-            stdio: ["pipe", "pipe", "pipe"],
-            windowsHide: true,
-        });
-        this.pid = this.#child.pid ?? null;
+        this.#transport = startProcessTransport(options);
+        // A terminal merges the two streams, so nothing will ever arrive on
+        // stderr and waiting for it to close would hang.
+        this.#stderrEnded = !this.#transport.separatesStderr;
+        this.pid = this.#transport.pid;
         this.#attachListeners();
     }
 
@@ -231,17 +222,12 @@ export class ManagedProcess {
     }
 
     writeStdin(data: string | Uint8Array): boolean {
-        if (this.#status !== "running" || this.#child.stdin === null) {
-            return false;
-        }
-        return this.#child.stdin.write(data);
+        if (this.#status !== "running") return false;
+        return this.#transport.write(data);
     }
 
     endStdin(data?: string | Uint8Array): void {
-        if (this.#child.stdin === null || this.#child.stdin.destroyed) {
-            return;
-        }
-        this.#child.stdin.end(data);
+        this.#transport.endInput(data);
     }
 
     interrupt(): boolean {
@@ -298,14 +284,11 @@ export class ManagedProcess {
     }
 
     #attachListeners(): void {
-        this.#child.stdout?.on("data", this.#onStdoutData);
-        this.#child.stderr?.on("data", this.#onStderrData);
-        this.#child.stdout?.once("end", this.#onStdoutEnd);
-        this.#child.stderr?.once("end", this.#onStderrEnd);
-        this.#child.once("error", this.#onError);
-        this.#child.once("exit", this.#onExit);
-        this.#child.once("close", this.#onClose);
-        this.#child.stdin?.on("error", () => undefined);
+        this.#transport.onStdout(this.#onStdoutData);
+        this.#transport.onStderr(this.#onStderrData);
+        this.#transport.onOutputEnd(this.#onOutputEnd);
+        this.#transport.onError(this.#onError);
+        this.#transport.onExit(this.#onExit);
     }
 
     #onStdoutData = (chunk: Buffer): void => {
@@ -324,12 +307,8 @@ export class ManagedProcess {
         }
     };
 
-    #onStdoutEnd = (): void => {
+    #onOutputEnd = (): void => {
         this.#stdoutEnded = true;
-        this.#maybeFinalizeAfterExit();
-    };
-
-    #onStderrEnd = (): void => {
         this.#stderrEnded = true;
         this.#maybeFinalizeAfterExit();
     };
@@ -344,13 +323,6 @@ export class ManagedProcess {
     #onExit = (code: number | null, signal: NodeJS.Signals | null): void => {
         this.#exitCode = code;
         this.#exitSignal = signal;
-        this.#maybeFinalizeAfterExit();
-        if (!this.#settled) {
-            this.#armPostExitTimer();
-        }
-    };
-
-    #onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
         this.#finalize(code, signal);
     };
 
@@ -385,9 +357,7 @@ export class ManagedProcess {
         }
 
         this.#cleanupListeners();
-        this.#child.stdout?.destroy();
-        this.#child.stderr?.destroy();
-        this.#child.stdin?.destroy();
+        this.#transport.release();
 
         // Anything the command left running keeps running. Its process group
         // stays registered with the manager, which reaps it at shutdown.
@@ -407,25 +377,7 @@ export class ManagedProcess {
             clearTimeout(this.#postExitTimer);
             this.#postExitTimer = undefined;
         }
-        this.#child.stdout?.removeListener("data", this.#onStdoutData);
-        this.#child.stderr?.removeListener("data", this.#onStderrData);
-        this.#child.stdout?.removeListener("end", this.#onStdoutEnd);
-        this.#child.stderr?.removeListener("end", this.#onStderrEnd);
-        this.#child.removeListener("error", this.#onError);
-        this.#child.removeListener("exit", this.#onExit);
-        this.#child.removeListener("close", this.#onClose);
     }
-}
-
-function shellArgs(shell: string, command: string): string[] {
-    if (process.platform === "win32") {
-        const shellName = basename(shell).toLowerCase();
-        if (shellName === "cmd.exe" || shellName === "cmd") {
-            return ["/d", "/s", "/c", command];
-        }
-        return ["-c", command];
-    }
-    return ["-lc", command];
 }
 
 function appendCapped(

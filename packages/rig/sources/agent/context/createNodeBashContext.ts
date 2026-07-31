@@ -344,6 +344,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                         networkPolicy,
                     ),
                     maxOutputBytes: runOptions.maxOutputBytes ?? 512_000,
+                    ...(runOptions.tty === undefined ? {} : { tty: runOptions.tty }),
                 };
                 if (sandboxedCommand.args !== undefined) {
                     processStartOptions.args = sandboxedCommand.args;

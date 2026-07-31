@@ -42,6 +42,12 @@ Usage notes:
                     "IDs of attached secret bundles to inject for this command. Use an empty array for none.",
             }),
         ),
+        tty: Type.Optional(
+            Type.Boolean({
+                description:
+                    "Run the command under a terminal, for programs that behave differently without one. Defaults to false.",
+            }),
+        ),
         background: Type.Boolean({
             description:
                 "Set true for a long-running command. Returns a task_id while the command continues in the background.",
@@ -66,9 +72,10 @@ Usage notes:
         sandbox_permissions === "require_escalated",
     shouldRunInFullAccessInAutoMode: ({ sandbox_permissions }) =>
         sandbox_permissions === "require_escalated",
-    execute: async ({ background, command, secrets, timeout }, context, execution) => {
+    execute: async ({ background, command, secrets, timeout, tty }, context, execution) => {
         const options: Parameters<typeof runShellCommand>[1] = { maxOutputBytes: 512_000 };
         if (secrets !== undefined) options.secrets = secrets;
+        if (tty !== undefined) options.tty = tty;
         options.timeoutMs = background
             ? BACKGROUND_START_GRACE_MS
             : timeout === undefined || timeout === 0

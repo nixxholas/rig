@@ -57,6 +57,12 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
                     description: "Set to true to run this command in the background.",
                 }),
             ),
+            tty: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Run the command under a terminal, for programs that behave differently without one. Defaults to false.",
+                }),
+            ),
             secrets: Type.Optional(
                 Type.Array(Type.String(), {
                     description:
@@ -81,11 +87,12 @@ Output is truncated to the last ${SHELL_OUTPUT_MAX_LINES} lines or ${SHELL_OUTPU
     shouldReviewInAutoMode: ({ dangerouslyDisableSandbox }) => dangerouslyDisableSandbox === true,
     shouldRunInFullAccessInAutoMode: ({ dangerouslyDisableSandbox }) =>
         dangerouslyDisableSandbox === true,
-    execute: async ({ command, run_in_background, secrets, timeout }, context, execution) => {
+    execute: async ({ command, run_in_background, secrets, timeout, tty }, context, execution) => {
         const options: Parameters<typeof runShellCommand>[1] = {
             maxOutputBytes: SHELL_CAPTURE_MAX_BYTES,
         };
         if (secrets !== undefined) options.secrets = secrets;
+        if (tty !== undefined) options.tty = tty;
         if (run_in_background === true) options.timeoutMs = BACKGROUND_START_GRACE_MS;
         else if (timeout !== undefined) options.timeoutMs = timeout;
         if (execution.onProgress !== undefined) options.onProgress = execution.onProgress;
