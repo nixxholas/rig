@@ -426,6 +426,27 @@ describe("ChatStore", () => {
         expect(store.session().activeGroup).toBeUndefined();
     });
 
+    it("keeps a group open across the technical abort used to continue steering", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "message-1", type: "inference_iteration_start" }),
+        );
+        store.apply(
+            event("abort_requested", {
+                continuePendingSteering: true,
+                runId: "run-1",
+            }),
+        );
+
+        expect(store.elements().some((element) => element.kind === "group_end")).toBe(false);
+        expect(store.session().activeGroup).toMatchObject({
+            groupId: "group:message-1",
+            runId: "run-1",
+        });
+    });
+
     it("keeps authoritative active turn timing through steering and activity changes", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());

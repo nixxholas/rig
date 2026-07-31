@@ -1712,13 +1712,14 @@ async function handleRequest(
                 : session.events
                       .since(undefined)
                       ?.find(
-                          (event) =>
+                          (event): event is Extract<SessionEvent, { type: "abort_requested" }> =>
                               event.type === "abort_requested" &&
                               event.data.mutationId === mutationId,
                       );
         if (completed !== undefined) {
             sendJson<AbortRunResponse>(response, 200, {
                 aborted: true,
+                ...(completed.data.continuePendingSteering === true ? { continued: true } : {}),
                 eventId: completed.id,
             });
             return;

@@ -412,6 +412,7 @@ interface PendingSteeringMessage {
 
 interface PendingSteeringContinuation {
     cancelled: boolean;
+    messageIds: string[];
     ready: Promise<void>;
     resolveReady: () => void;
 }
@@ -922,7 +923,15 @@ export class InMemorySession {
                 const ready = new Promise<void>((resolve) => {
                     resolveReady = resolve;
                 });
-                continuation = { cancelled: false, ready, resolveReady };
+                continuation = {
+                    cancelled: false,
+                    messageIds: continuationMessageIds.filter(
+                        (messageId) =>
+                            this.#pendingSteeringMessages.get(messageId)?.runId === runId,
+                    ),
+                    ready,
+                    resolveReady,
+                };
                 this.#pendingSteeringContinuations.set(runId, continuation);
             }
         } else if (runId !== undefined) {
@@ -978,6 +987,7 @@ export class InMemorySession {
         this.#activeRun?.controller.abort();
         this.#restoredActiveRunId = undefined;
         const event = this.#append("abort_requested", {
+            ...(shouldContinuePendingSteering ? { continuePendingSteering: true as const } : {}),
             ...(runId === undefined ? {} : { runId }),
             ...(options.mutationId === undefined ? {} : { mutationId: options.mutationId }),
         });
@@ -3441,10 +3451,7 @@ export class InMemorySession {
                 runId: activeRun.runId,
                 ...(request.mutationId === undefined ? {} : { mutationId: request.mutationId }),
             });
-            this.#append("steering_applied", {
-                messageIds: [userMessage.id],
-                runId: activeRun.runId,
-            });
+            this.#rememberSteeringContinuationMessage(continuation, userMessage.id);
             this.#restartMetadataSettlement();
             this.#reportUserInterventionToDelegator(displayText);
             return {
@@ -4627,13 +4634,24 @@ export class InMemorySession {
         }
 
         if (event.type === "steering_applied") {
+            const visibleMessageIds: string[] = [];
             for (const messageId of event.messageIds) {
                 const pending = this.#pendingSteeringMessages.get(messageId);
                 if (pending === undefined || pending.runId !== runId) continue;
                 this.#storeMessage(this.#nextMessagePosition(), pending.message, false, runId);
                 this.#pendingSteeringMessages.delete(messageId);
+                visibleMessageIds.push(messageId);
             }
-            this.#append("steering_applied", { messageIds: event.messageIds, runId });
+            if (visibleMessageIds.length > 0) {
+                const continuation = this.#pendingSteeringContinuations.get(runId);
+                if (continuation === undefined) {
+                    this.#append("steering_applied", { messageIds: visibleMessageIds, runId });
+                } else if (!continuation.cancelled) {
+                    for (const messageId of visibleMessageIds) {
+                        this.#rememberSteeringContinuationMessage(continuation, messageId);
+                    }
+                }
+            }
             return;
         }
 
@@ -5588,6 +5606,12 @@ export class InMemorySession {
                         this.#pendingSteeringContinuations.get(queued.runId) === continuation &&
                         this.#activeRun?.runId === queued.runId
                     ) {
+                        if (continuation.messageIds.length > 0) {
+                            this.#append("steering_applied", {
+                                messageIds: [...continuation.messageIds],
+                                runId: queued.runId,
+                            });
+                        }
                         this.#pendingSteeringContinuations.delete(queued.runId);
                         controller = new AbortController();
                         this.#activeRun = {
@@ -5668,6 +5692,15 @@ export class InMemorySession {
             }
             this.#saveSession();
             await this.#closeDebugLog(queued);
+        }
+    }
+
+    #rememberSteeringContinuationMessage(
+        continuation: PendingSteeringContinuation,
+        messageId: string,
+    ): void {
+        if (!continuation.messageIds.includes(messageId)) {
+            continuation.messageIds.push(messageId);
         }
     }
 

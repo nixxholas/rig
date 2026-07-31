@@ -884,7 +884,10 @@ export type InterpretedSessionEvent =
           }
       >
     | BaseSessionEvent<"run_started", { runId: string; kind?: "compaction" }>
-    | BaseSessionEvent<"abort_requested", { mutationId?: MutationId; runId?: string }>
+    | BaseSessionEvent<
+          "abort_requested",
+          { continuePendingSteering?: true; mutationId?: MutationId; runId?: string }
+      >
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
     | BaseSessionEvent<

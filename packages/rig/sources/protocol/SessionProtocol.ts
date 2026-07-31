@@ -1061,6 +1061,7 @@ export type RunErrorEvent = BaseSessionEvent<
 export type AbortRequestedEvent = BaseSessionEvent<
     "abort_requested",
     {
+        continuePendingSteering?: true;
         mutationId?: string;
         runId?: string;
     }

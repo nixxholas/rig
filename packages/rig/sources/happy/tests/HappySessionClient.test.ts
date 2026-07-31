@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import tweetnacl from "tweetnacl";
 
 import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
+import type { AbortRunOptions } from "../../protocol/index.js";
 import type { InMemorySession } from "../../session/InMemorySession.js";
 import { decryptHappyPayload, encryptHappyPayload } from "../happyEncryption.js";
 import { HappySessionClient } from "../HappySessionClient.js";
@@ -407,14 +408,56 @@ describe("HappySessionClient", () => {
         ]);
         expect(repository.getSession("session-1")?.lastRemoteSeq).toBe(2);
 
+        harness.snapshot.status = "running";
+        harness.snapshot.activeTurn = { runId: "run-1", startedAt: 1 };
+        harness.snapshot.pendingSteeringMessages = [
+            {
+                createdAt: 2,
+                message: {
+                    blocks: [{ text: "Apply this direction now.", type: "text" }],
+                    id: "happy:pending-direction",
+                    role: "user",
+                },
+                runId: "run-1",
+            },
+        ];
         const rpcResponse = await socket.requestRpc({
             method: "remote-1:abort",
             params: encodeRemote(sessionKey, { reason: "Stop" }),
         });
         expect(
             decryptHappyPayload(sessionKey, "dataKey", Buffer.from(rpcResponse, "base64")),
-        ).toEqual({ aborted: true });
+        ).toEqual({ aborted: true, continued: true });
         expect(harness.abortCalls).toBe(1);
+        expect(harness.abortRequests).toEqual([
+            {
+                continuePendingSteering: true,
+                expectedRunId: "run-1",
+                steeringMessageIds: ["happy:pending-direction"],
+            },
+        ]);
+
+        harness.snapshot.pendingSteeringMessages = [
+            {
+                createdAt: 3,
+                message: {
+                    blocks: [{ text: "Background work completed.", type: "text" }],
+                    id: "notification-1",
+                    provenance: "agent",
+                    role: "user",
+                },
+                runId: "run-1",
+            },
+        ];
+        const hardStopResponse = await socket.requestRpc({
+            method: "remote-1:abort",
+            params: encodeRemote(sessionKey, { reason: "Stop" }),
+        });
+        expect(
+            decryptHappyPayload(sessionKey, "dataKey", Buffer.from(hardStopResponse, "base64")),
+        ).toEqual({ aborted: true });
+        expect(harness.abortCalls).toBe(2);
+        expect(harness.abortRequests.at(-1)).toBeUndefined();
 
         await client.close();
         repository.close();
@@ -763,6 +806,7 @@ class FakeSocket {
 function fakeSession(submitted: unknown[]): {
     activity: any;
     abortCalls: number;
+    abortRequests: (AbortRunOptions | undefined)[];
     answeredUserInputs: { requestId: string; response: unknown }[];
     changedModels: unknown[];
     changedPermissionModes: string[];
@@ -773,6 +817,7 @@ function fakeSession(submitted: unknown[]): {
     const submittedIds = new Set<string>();
     const changedModels: unknown[] = [];
     const changedPermissionModes: string[] = [];
+    const abortRequests: (AbortRunOptions | undefined)[] = [];
     let abortCalls = 0;
     const activity: any = { kind: "idle", label: "Idle", since: 0 };
     const snapshot: any = {
@@ -805,16 +850,21 @@ function fakeSession(submitted: unknown[]): {
         get abortCalls() {
             return abortCalls;
         },
+        abortRequests,
         activity,
         answeredUserInputs,
         changedModels,
         changedPermissionModes,
         session: {
             activity: () => structuredClone(activity),
-            abort: async () => {
+            abort: async (options?: AbortRunOptions) => {
                 abortCalls += 1;
+                abortRequests.push(options);
                 snapshot.pendingUserInputs = [];
-                return { aborted: true };
+                return {
+                    aborted: true,
+                    ...(options?.continuePendingSteering === true ? { continued: true } : {}),
+                };
             },
             changeEffort: ({ effort }: { effort: string }) => {
                 snapshot.effort = effort;

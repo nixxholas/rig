@@ -43,7 +43,9 @@ export function sessionActivityAfterEvent(
         case "run_error":
             return { kind: "error", label: "Failed", since: event.createdAt };
         case "abort_requested":
-            return { kind: "stopped", label: "Stopped", since: event.createdAt };
+            return event.data.continuePendingSteering === true
+                ? previous
+                : { kind: "stopped", label: "Stopped", since: event.createdAt };
         case "session_reset":
         case "session_rewound":
             return { ...IDLE_SESSION_ACTIVITY, since: event.createdAt };

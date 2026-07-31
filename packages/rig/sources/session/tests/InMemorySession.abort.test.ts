@@ -425,8 +425,72 @@ describe("InMemorySession abort", () => {
                 (event) => event.type === "message_submitted" && event.data.delivery === "steer",
             ),
         ).toMatchObject({ data: { message: { id: "client-pending-steering" } } });
+        expect(events.find((event) => event.type === "abort_requested")).toMatchObject({
+            data: {
+                continuePendingSteering: true,
+                runId: submitted.runId,
+            },
+        });
         expect(events.filter((event) => event.type === "steering_applied")).toHaveLength(1);
         expect(events.filter((event) => event.type === "run_finished")).toHaveLength(1);
+    });
+
+    it("does not expose internal system steering as a user steering boundary", async () => {
+        const started = deferred<void>();
+        let runtime: CodingAssistantRuntime | undefined;
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/internal-system-steering",
+            name: "Internal system steering",
+            thinkingLevels: ["off"],
+        });
+        const provider = defineProvider({
+            id: "test",
+            models: [model],
+            stream(_model, _context, options) {
+                if (options?.sessionId?.endsWith(":title")) return metadataResponseStream();
+                return abortableStream(options?.signal, started.resolve);
+            },
+        });
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            createRuntime: (options) => {
+                runtime = createRuntime(options, provider);
+                return runtime;
+            },
+            modelCatalog: {
+                defaultModelId: model.id,
+                defaultProviderId: provider.id,
+                models: [model],
+                providers: [{ models: [model], providerId: provider.id }],
+            },
+            request: { cwd: "/tmp/rig-internal-system-steering", modelId: model.id },
+        });
+
+        const submitted = session.submit({ text: "Keep working until the background task ends." });
+        await started.promise;
+        runtime?.agent.steerMessage({
+            blocks: [{ text: "Background command 1 finished successfully.", type: "text" }],
+            id: "background-process-notification",
+            internal: true,
+            role: "system",
+        });
+
+        await expect(session.abort()).resolves.toMatchObject({ aborted: true });
+        await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+            status: "aborted",
+        });
+
+        const events = session.events.since(undefined) ?? [];
+        expect(events.filter((event) => event.type === "abort_requested")).toHaveLength(1);
+        expect(events.filter((event) => event.type === "steering_applied")).toHaveLength(0);
+        expect(session.state().contextMessages).toContainEqual(
+            expect.objectContaining({
+                id: "background-process-notification",
+                internal: true,
+                role: "system",
+            }),
+        );
     });
 
     it("continues from already-applied steering without storing or applying it again", async () => {
@@ -624,7 +688,10 @@ describe("InMemorySession abort", () => {
 
         const submitted = session.submit({ text: "Start waiting." });
         await started.promise;
-        session.steer({ text: "First pending direction." });
+        session.steer({
+            clientSubmissionId: "first-pending-direction",
+            text: "First pending direction.",
+        });
 
         const firstAbort = session.abort({ continuePendingSteering: true });
         const secondAbort = session.abort({ continuePendingSteering: true });
@@ -633,7 +700,10 @@ describe("InMemorySession abort", () => {
         await expect(
             session.abort({ continuePendingSteering: true, stopDescendants: false }),
         ).rejects.toThrow("An abort request with different options is already in progress.");
-        session.steer({ text: "Submitted while interrupt settles." });
+        session.steer({
+            clientSubmissionId: "submitted-during-interrupt",
+            text: "Submitted while interrupt settles.",
+        });
         releaseDescendants.resolve(1);
 
         await expect(Promise.all([firstAbort, secondAbort])).resolves.toEqual([
@@ -660,11 +730,12 @@ describe("InMemorySession abort", () => {
         expect(events.filter((event) => event.type === "abort_requested")).toHaveLength(1);
         expect(events.filter((event) => event.type === "subagents_suspended")).toHaveLength(0);
         expect(events.filter((event) => event.type === "run_finished")).toHaveLength(1);
-        const appliedIds = events.flatMap((event) =>
-            event.type === "steering_applied" ? event.data.messageIds : [],
+        const steeringBatches = events.flatMap((event) =>
+            event.type === "steering_applied" ? [event.data.messageIds] : [],
         );
-        expect(new Set(appliedIds).size).toBe(2);
-        expect(appliedIds).toHaveLength(2);
+        expect(steeringBatches).toEqual([
+            ["first-pending-direction", "submitted-during-interrupt"],
+        ]);
     });
 
     it("lets a hard abort override an in-flight steering continuation", async () => {

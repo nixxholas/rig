@@ -220,6 +220,19 @@ describe("sessionActivityAfterEvent", () => {
         ).toBe("error");
     });
 
+    it("stays active across the technical abort used to continue steering", () => {
+        const before = apply([event("run_started", { runId: "run-1" })]);
+        const after = sessionActivityAfterEvent(
+            before,
+            event("abort_requested", {
+                continuePendingSteering: true,
+                runId: "run-1",
+            }),
+        );
+
+        expect(after).toBe(before);
+    });
+
     it("returns the same activity when an event says nothing about current work", () => {
         const before = apply([event("run_started", { runId: "run-1" })]);
         const after = sessionActivityAfterEvent(

@@ -980,7 +980,9 @@ export class CodingAssistantApp implements Component, Focusable {
         }
 
         if (event.type === "run_finished") {
-            this.#finishLocalSteeringRun(event.data.runId);
+            this.#finishLocalSteeringRun(event.data.runId, {
+                restoreUnapplied: event.data.stopReason !== "aborted",
+            });
             const turnElapsedMs =
                 event.data.stopReason === "stop"
                     ? this.#elapsedSinceLastUserInput(event.createdAt)
@@ -3241,7 +3243,8 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#syncAutocompleteState();
     }
 
-    #finishLocalSteeringRun(runId: string): void {
+    #finishLocalSteeringRun(runId: string, options: { restoreUnapplied?: boolean } = {}): void {
+        const restoreUnapplied = options.restoreUnapplied !== false;
         for (const submission of [
             ...this.#inFlightSteeringSubmissions.values(),
             ...this.#acceptedSteeringSubmissions,
@@ -3256,18 +3259,31 @@ export class CodingAssistantApp implements Component, Focusable {
             }
         }
         for (const submission of this.#inFlightSteeringSubmissions.values()) {
-            if (submission.runId === runId) submission.runEnded = true;
+            if (submission.runId !== runId) continue;
+            if (restoreUnapplied) submission.runEnded = true;
+            else submission.invalidated = true;
         }
         for (const submission of this.#acceptedSteeringSubmissions) {
-            if (submission.runId === runId && !submission.applied) {
+            if (restoreUnapplied && submission.runId === runId && !submission.applied) {
                 this.#rejectedSteeringSubmissions.set(submission.id, submission);
                 this.#removePendingSteeringMessage(submission.messageId);
+            }
+        }
+        if (!restoreUnapplied) {
+            this.#pendingSteeringMessages = this.#pendingSteeringMessages.filter(
+                (pending) => pending.runId !== runId,
+            );
+            for (const [submissionId, submission] of this.#rejectedSteeringSubmissions) {
+                if (submission.runId === runId) {
+                    this.#rejectedSteeringSubmissions.delete(submissionId);
+                }
             }
         }
         this.#acceptedSteeringSubmissions = this.#acceptedSteeringSubmissions.filter(
             (submission) => submission.runId !== runId,
         );
         if (
+            restoreUnapplied &&
             ![...this.#inFlightSteeringSubmissions.values()].some(
                 (submission) => submission.runId === runId,
             )

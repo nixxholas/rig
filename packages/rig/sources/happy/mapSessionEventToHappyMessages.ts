@@ -91,6 +91,7 @@ export class HappyMessageMapper {
             return output;
         }
         if (event.type === "abort_requested" && event.data.runId !== undefined) {
+            if (event.data.continuePendingSteering === true) return [];
             const output = this.#close(event, event.data.runId, "abort", "cancelled");
             this.#markRunTerminal(event.data.runId);
             return output;

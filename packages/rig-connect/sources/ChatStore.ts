@@ -983,7 +983,12 @@ export class ChatStore {
                 }
                 break;
             case "abort_requested": {
-                const runId = (event.data as { runId?: string }).runId;
+                const data = event.data as {
+                    continuePendingSteering?: true;
+                    runId?: string;
+                };
+                if (data.continuePendingSteering === true) break;
+                const runId = data.runId;
                 if (runId === undefined || runId === this.#groupRunId) {
                     this.#endGroup("abort", "stopped", event.createdAt, deltas);
                 }

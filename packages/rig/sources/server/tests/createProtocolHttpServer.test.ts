@@ -1801,6 +1801,47 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("preserves steering continuation in an idempotent abort response", async () => {
+        const { client, close, socketPath, store } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
+            const session = store.get(created.session.id);
+            if (session === undefined) throw new Error("Expected the created session.");
+            const event = session.events.append({
+                createdAt: 1,
+                data: {
+                    continuePendingSteering: true,
+                    mutationId: "soft-abort-mutation",
+                    runId: "run-1",
+                },
+                id: createEventIdFactory()(),
+                sessionId: session.id,
+                type: "abort_requested",
+            });
+            const abort = vi.spyOn(session, "abort");
+
+            const response = await requestRawJson(
+                socketPath,
+                `/sessions/${encodeURIComponent(session.id)}/abort`,
+                {
+                    body: "",
+                    headers: { "x-rig-mutation-id": "soft-abort-mutation" },
+                    method: "POST",
+                },
+            );
+
+            expect(response.statusCode).toBe(200);
+            expect(JSON.parse(response.body)).toEqual({
+                aborted: true,
+                continued: true,
+                eventId: event.id,
+            });
+            expect(abort).not.toHaveBeenCalled();
+        } finally {
+            await close();
+        }
+    });
+
     it("updates and clears a persisted goal through dedicated endpoints", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         store.saveSession(pausedGoalState());
@@ -2760,7 +2801,7 @@ function openDurableEventStream(
 async function requestRawJson(
     socketPath: string,
     path: string,
-    options: { body: string; method: string },
+    options: { body: string; headers?: Record<string, string>; method: string },
 ): Promise<{ body: string; statusCode: number | undefined }> {
     return new Promise((resolve, reject) => {
         const request = httpRequest(
@@ -2768,6 +2809,7 @@ async function requestRawJson(
                 headers: {
                     authorization: "Bearer secret",
                     "content-type": "application/json",
+                    ...options.headers,
                 },
                 method: options.method,
                 path,

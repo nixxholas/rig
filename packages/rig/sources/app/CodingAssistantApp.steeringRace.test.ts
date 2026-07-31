@@ -411,6 +411,55 @@ describe("CodingAssistantApp steering submit and Escape race", () => {
         expect(abort).not.toHaveBeenCalled();
     });
 
+    it("discards accepted but unapplied steering after a hard abort", async () => {
+        const acceptance = deferred<{
+            eventId: string;
+            runId: string;
+            sessionId: string;
+        }>();
+        const steer = vi.fn(() => acceptance.promise);
+        const abort = vi.fn(async () => ({ aborted: true }));
+        const { app } = createRaceApp({ abort, steer });
+        const text = "Discard this aborted direction.";
+
+        submit(app, text);
+        const messageId = steeringMessageId(steer);
+        app.applySessionEvent({
+            createdAt: 2,
+            data: {
+                delivery: "steer",
+                displayText: text,
+                message: {
+                    blocks: [{ text, type: "text" }],
+                    id: messageId,
+                    role: "user",
+                },
+                runId: "run-1",
+            },
+            id: "steering-submitted",
+            sessionId: "session-1",
+            type: "message_submitted",
+        });
+        app.applySessionEvent({
+            createdAt: 3,
+            data: { modelLocked: true, runId: "run-1", stopReason: "aborted" },
+            id: "run-finished",
+            sessionId: "session-1",
+            type: "run_finished",
+        });
+        acceptance.resolve({
+            eventId: "steering-submitted",
+            runId: "run-1",
+            sessionId: "session-1",
+        });
+
+        await app.waitForIdle();
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("› Ask Rig to do anything");
+        expect(rendered).not.toContain(`› ${text}`);
+        expect(rendered).not.toContain("Messages to be submitted after next tool call");
+    });
+
     it("continues accepted B after only concurrent A is applied", async () => {
         const firstAcceptance = deferred<{
             eventId: string;

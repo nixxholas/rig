@@ -636,7 +636,46 @@ describe("HappyMessageMapper", () => {
         });
     });
 
-    it("does not emit a second end when run completion follows abort", () => {
+    it("does not stop a group for the technical abort that continues steering", () => {
+        const mapper = new HappyMessageMapper();
+        mapper.map(
+            sessionEvent(
+                "agent_event",
+                {
+                    event: {
+                        iteration: 1,
+                        messageId: "agent-1",
+                        type: "inference_iteration_start",
+                    },
+                    runId: "run-1",
+                },
+                100,
+            ),
+        );
+
+        expect(
+            mapper.map(
+                sessionEvent(
+                    "abort_requested",
+                    { continuePendingSteering: true, runId: "run-1" },
+                    120,
+                ),
+            ),
+        ).toEqual([]);
+        expect(
+            mapper
+                .map(
+                    sessionEvent(
+                        "steering_applied",
+                        { messageIds: ["steer-1"], runId: "run-1" },
+                        130,
+                    ),
+                )
+                .map((message) => message.content.ev),
+        ).toEqual([expect.objectContaining({ reason: "steering", t: "turn-end" })]);
+    });
+
+    it("does not emit a second end when hard run completion follows abort", () => {
         const mapper = new HappyMessageMapper();
         mapper.map(
             sessionEvent(
@@ -661,7 +700,9 @@ describe("HappyMessageMapper", () => {
             ),
         );
 
-        expect(aborted.map((message) => message.content.ev.t)).toEqual(["turn-end"]);
+        expect(aborted.map((message) => message.content.ev)).toEqual([
+            expect.objectContaining({ reason: "abort", status: "cancelled", t: "turn-end" }),
+        ]);
         expect(finished).toEqual([]);
     });
 });

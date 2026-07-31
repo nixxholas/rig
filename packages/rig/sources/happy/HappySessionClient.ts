@@ -2,6 +2,7 @@ import { io, type Socket } from "socket.io-client";
 
 import type { ImageBlock } from "../agent/types.js";
 import type {
+    AbortRunResponse,
     ModelCatalog,
     Project,
     ProjectWorkspace,
@@ -463,7 +464,7 @@ export class HappySessionClient {
                     response = { error: "Invalid request" };
                 } else {
                     response = await handleHappySessionRpc({
-                        abort: () => this.#session.abort(),
+                        abort: () => this.#abortFromHappy(),
                         answerQuestion: (requestId, answers) =>
                             this.#answerQuestion(requestId, answers),
                         cancelQuestion: (requestId) => this.#cancelQuestion(requestId),
@@ -478,6 +479,26 @@ export class HappySessionClient {
             response = { error: error instanceof Error ? error.message : "Abort failed" };
         }
         callback(encodePayload(state, response));
+    }
+
+    #abortFromHappy(): Promise<AbortRunResponse> {
+        const snapshot = this.#session.snapshot();
+        const runId = snapshot.activeTurn?.runId;
+        const steeringMessageIds =
+            runId === undefined
+                ? []
+                : (snapshot.pendingSteeringMessages ?? []).flatMap((pending) =>
+                      pending.runId === runId && pending.message.provenance !== "agent"
+                          ? [pending.message.id]
+                          : [],
+                  );
+        return runId !== undefined && steeringMessageIds.length > 0
+            ? this.#session.abort({
+                  continuePendingSteering: true,
+                  expectedRunId: runId,
+                  steeringMessageIds,
+              })
+            : this.#session.abort();
     }
 
     async #syncMetadata(state: HappySessionState): Promise<void> {
