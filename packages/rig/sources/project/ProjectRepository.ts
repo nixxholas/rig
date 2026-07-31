@@ -40,6 +40,7 @@ import { queryProjectAvatarGarbageCandidates } from "../persistence/project/quer
 import { queryProjectByPath } from "../persistence/project/queryProjectByPath.js";
 import { queryProjects } from "../persistence/project/queryProjects.js";
 import { queryWorkspace } from "../persistence/project/queryWorkspace.js";
+import { queryOwnedWorkspace } from "../persistence/project/queryOwnedWorkspace.js";
 import { queryWorkspaceByPath } from "../persistence/project/queryWorkspaceByPath.js";
 import { queryWorkspaceByRequest } from "../persistence/project/queryWorkspaceByRequest.js";
 import { queryWorkspaces } from "../persistence/project/queryWorkspaces.js";
@@ -520,6 +521,7 @@ export class ProjectRepository {
     async createWorkspace(
         projectId: string,
         request: CreateProjectWorkspaceRequest,
+        creatorSessionId?: string,
     ): Promise<ProjectWorkspace | undefined> {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
@@ -560,6 +562,7 @@ export class ProjectRepository {
                 baseCommit: commit,
                 baseRef,
                 clientRequestId,
+                ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 gitCommonDir,
                 id: createId(),
                 name,
@@ -584,6 +587,14 @@ export class ProjectRepository {
             });
         }
         return workspace;
+    }
+
+    getOwnedWorkspace(
+        creatorSessionId: string,
+        projectId: string,
+        workspaceId: string,
+    ): ProjectWorkspace | undefined {
+        return queryOwnedWorkspace(this.#database, creatorSessionId, projectId, workspaceId);
     }
 
     renameWorkspace(

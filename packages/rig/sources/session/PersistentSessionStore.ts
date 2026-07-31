@@ -224,11 +224,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         this.#agentManager = new AgentSessionManager({
             repository: {
+                archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
+                    this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
+                    undefined
+                        ? undefined
+                        : this.#archiveWorkspace(projectId, workspaceId),
+                createOwnedWorkspace: (ownerSessionId, projectId, request) =>
+                    this.#projects.createWorkspace(projectId, request, ownerSessionId),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
                 findByAgentId: (agentId) => this.findByAgentId(agentId),
                 get: (sessionId) => this.get(sessionId),
                 listByRoot: (rootSessionId) => this.#listSubagentSessionsByRoot(rootSessionId),
+                ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
+                    this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
             },
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });

@@ -10,6 +10,7 @@ import type { PermissionContext } from "../../permissions/index.js";
 import type { WorkflowContext } from "../../workflows/index.js";
 import type { SessionSecretContext } from "../../secrets/index.js";
 import type { AgentCommunicationContext } from "./AgentCommunicationContext.js";
+import type { WorkspaceContext } from "./WorkspaceContext.js";
 
 export interface AgentContext {
     agentCommunication?: AgentCommunicationContext;
@@ -24,4 +25,5 @@ export interface AgentContext {
     tasks?: TaskContext;
     userInput?: UserInputContext;
     workflows?: WorkflowContext;
+    workspaces?: WorkspaceContext;
 }

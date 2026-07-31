@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { CreateSessionRequest, SessionAgentMetadata } from "../../protocol/index.js";
+import type {
+    CreateSessionRequest,
+    ProjectWorkspace,
+    SessionAgentMetadata,
+} from "../../protocol/index.js";
 import { AgentSessionManager } from "../AgentSessionManager.js";
 import type { InMemorySession } from "../InMemorySession.js";
 
@@ -1684,6 +1688,83 @@ describe("AgentSessionManager", () => {
 
         expect(manager.taskSession("subagent-1")).toBe(root);
         expect(manager.taskSession("session-1")).toBe(root);
+    });
+
+    it("starts a sidebar-hidden subagent in an owned ready workspace", async () => {
+        const child = {
+            agentMetadata: () => ({
+                depth: 1,
+                description: "Fix parser",
+                parentSessionId: "root-1",
+                rootSessionId: "root-1",
+                taskName: "fix_parser",
+                type: "subagent" as const,
+            }),
+            id: "child-1",
+            isSubagent: () => true,
+            subagentSummary: () => ({ status: "running" }),
+            submit: vi.fn(() => ({ runId: "child-run" })),
+        } as unknown as InMemorySession;
+        const parent = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            id: "root-1",
+            isSubagent: () => false,
+            recordSubagentChanged: vi.fn(),
+            requestForSubagent: () => ({
+                cwd: "/project",
+                modelId: "openai/gpt-5.6-sol",
+                permissionMode: "auto",
+                providerId: "codex",
+            }),
+            snapshot: () => ({ projectId: "project-1" }),
+        } as unknown as InMemorySession;
+        const createSubagent = vi.fn(() => child);
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent,
+                get: (id) => (id === parent.id ? parent : undefined),
+                listByRoot: () => [],
+                ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
+                    ownerSessionId === parent.id &&
+                    projectId === "project-1" &&
+                    workspaceId === "workspace-1"
+                        ? ({
+                              id: workspaceId,
+                              name: "Parser",
+                              path: "/workspaces/parser",
+                              projectId,
+                              status: "ready",
+                          } as ProjectWorkspace)
+                        : undefined,
+            },
+        });
+
+        await manager.spawnInWorkspace(parent.id, {
+            background: true,
+            description: "Fix parser",
+            prompt: "Repair the parser.",
+            taskName: "fix_parser",
+            workspaceId: "workspace-1",
+        });
+
+        expect(createSubagent).toHaveBeenCalledWith(
+            expect.objectContaining({
+                cwd: "/workspaces/parser",
+                workspaceId: "workspace-1",
+            }),
+            expect.objectContaining({
+                parentSessionId: parent.id,
+                type: "subagent",
+            }),
+        );
+        await expect(
+            manager.spawnInWorkspace(parent.id, {
+                description: "Invade",
+                prompt: "Do not run.",
+                workspaceId: "workspace-owned-by-someone-else",
+            }),
+        ).rejects.toThrow("not created by the current session");
+        expect(createSubagent).toHaveBeenCalledOnce();
     });
 });
 

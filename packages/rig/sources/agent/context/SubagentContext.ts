@@ -40,6 +40,9 @@ export interface SpawnSubagentRequest {
     prompt: string;
     taskName?: string;
     waitForSlot?: boolean;
+    /** Rig-owned location override used by managed workspace agents. */
+    cwd?: string;
+    workspaceId?: string;
 }
 
 export interface SpawnSubagentResult {

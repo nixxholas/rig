@@ -4943,6 +4943,27 @@ export class InMemorySession {
                 spawn: (request, signal) => agentManager.spawn(this.id, request, signal),
                 wait: (timeoutMs, signal) => agentManager.wait(this.id, timeoutMs, signal),
             };
+            if (!this.isSubagent()) {
+                const workspaceResult = (workspace: {
+                    id: string;
+                    name: string;
+                    path: string;
+                    status: "initializing" | "ready" | "failed" | "archiving" | "archived";
+                }) => ({
+                    id: workspace.id,
+                    name: workspace.name,
+                    path: workspace.path,
+                    status: workspace.status,
+                });
+                options.workspaces = {
+                    archive: async (workspaceId) =>
+                        workspaceResult(await agentManager.archiveWorkspace(this.id, workspaceId)),
+                    create: async (input) =>
+                        workspaceResult(await agentManager.createWorkspace(this.id, input)),
+                    spawn: (request, signal) =>
+                        agentManager.spawnInWorkspace(this.id, request, signal),
+                };
+            }
         }
         const runtime = this.#createRuntime(options);
         if (runtime.context.subagents !== undefined) {

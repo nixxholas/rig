@@ -41,6 +41,8 @@ import { readAgentHistoryTool } from "../tools/read_agent_history.js";
 import { selectCollaborationToolsForModel } from "./selectCollaborationToolsForModel.js";
 import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
+import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
+import { workspaceTools } from "../tools/workspaces/workspaceTools.js";
 
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
@@ -75,6 +77,7 @@ export interface CreateCodingAssistantAgentOptions {
     userInput?: UserInputContext;
     workflows?: WorkflowContext;
     workflowsEnabled?: boolean;
+    workspaces?: WorkspaceContext;
     sessionId?: string;
 }
 
@@ -123,6 +126,9 @@ export function createCodingAssistantAgent(
     }
     if (options.subagents !== undefined) {
         context.subagents = options.subagents;
+    }
+    if (options.workspaces !== undefined) {
+        context.workspaces = options.workspaces;
     }
     const modelId = options.modelId ?? modelOpenaiGpt56Sol.id;
     const providerId =
@@ -242,6 +248,7 @@ export function createCodingAssistantAgent(
                 );
     const toolsWithoutGoals = [
         ...baseTools,
+        ...(options.workspaces === undefined ? [] : workspaceTools),
         ...agentCommunicationTools,
         ...(options.chatHistory === undefined ? [] : [readAgentHistoryTool]),
         ...availableCollaborationTools,

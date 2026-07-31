@@ -56,6 +56,7 @@ const statements = [
         git_common_dir TEXT NOT NULL,
         error TEXT,
         client_request_id TEXT,
+        creator_session_id TEXT,
         presence TEXT NOT NULL,
         git_branch TEXT,
         git_head TEXT,

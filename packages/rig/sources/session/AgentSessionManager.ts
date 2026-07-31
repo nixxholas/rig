@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import {
     createSubagentInstructions,
     findLastAgentResponseText,
@@ -14,7 +16,12 @@ import {
 } from "../agent/index.js";
 import { DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS } from "../agent/context/subagentWaitTimeouts.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
-import type { CreateSessionRequest, SessionAgentMetadata } from "../protocol/index.js";
+import type {
+    CreateProjectWorkspaceRequest,
+    CreateSessionRequest,
+    ProjectWorkspace,
+    SessionAgentMetadata,
+} from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import type { PermissionMode } from "../permissions/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
@@ -28,6 +35,16 @@ export const DEFAULT_MAX_ACTIVE_SUBAGENTS = 8;
 export const DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS = 3;
 
 export interface AgentSessionRepository {
+    archiveOwnedWorkspace?(
+        ownerSessionId: string,
+        projectId: string,
+        workspaceId: string,
+    ): Promise<ProjectWorkspace | undefined>;
+    createOwnedWorkspace?(
+        ownerSessionId: string,
+        projectId: string,
+        request: CreateProjectWorkspaceRequest,
+    ): Promise<ProjectWorkspace | undefined>;
     createSubagent(
         request: CreateSessionRequest,
         metadata: SessionAgentMetadata,
@@ -36,6 +53,11 @@ export interface AgentSessionRepository {
     findByAgentId?(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
+    ownedWorkspace?(
+        ownerSessionId: string,
+        projectId: string,
+        workspaceId: string,
+    ): ProjectWorkspace | undefined;
 }
 
 export interface AgentSessionManagerOptions {
@@ -89,6 +111,101 @@ export class AgentSessionManager {
     recordSuccessfulProvider(modelId: string, providerId: string): void {
         this.#lastSuccessfulModelByProvider.set(providerId, modelId);
         this.#lastSuccessfulProviderByModel.set(modelId, providerId);
+    }
+
+    async createWorkspace(
+        ownerSessionId: string,
+        input: { baseRef: string; name: string },
+    ): Promise<ProjectWorkspace> {
+        const owner = this.#repository.get(ownerSessionId);
+        const create = this.#repository.createOwnedWorkspace;
+        if (owner === undefined || create === undefined) {
+            throw new Error("This session cannot create managed workspaces.");
+        }
+        if (owner.isSubagent()) {
+            throw new Error("Only a primary session can create a managed workspace.");
+        }
+        const workspace = await create(ownerSessionId, owner.snapshot().projectId, {
+            ...input,
+            clientRequestId: `agent:${ownerSessionId}:${randomUUID()}`,
+        });
+        if (workspace === undefined) throw new Error("The workspace could not be created.");
+        return workspace;
+    }
+
+    async archiveWorkspace(ownerSessionId: string, workspaceId: string): Promise<ProjectWorkspace> {
+        const owner = this.#repository.get(ownerSessionId);
+        const archive = this.#repository.archiveOwnedWorkspace;
+        if (owner === undefined || archive === undefined) {
+            throw new Error("This session cannot archive managed workspaces.");
+        }
+        const workspace = await archive(ownerSessionId, owner.snapshot().projectId, workspaceId);
+        if (workspace === undefined) {
+            throw new Error("This workspace was not created by the current session.");
+        }
+        return workspace;
+    }
+
+    async spawnInWorkspace(
+        parentSessionId: string,
+        request: Omit<SpawnSubagentRequest, "cwd" | "workspaceId"> & { workspaceId: string },
+        signal?: AbortSignal,
+    ): Promise<SpawnSubagentResult> {
+        const parent = this.#repository.get(parentSessionId);
+        const resolveWorkspace = this.#repository.ownedWorkspace;
+        if (parent === undefined || resolveWorkspace === undefined) {
+            throw new Error("This session cannot start workspace agents.");
+        }
+        const workspace = await this.#waitForOwnedWorkspace(
+            resolveWorkspace,
+            parentSessionId,
+            parent.snapshot().projectId,
+            request.workspaceId,
+            signal,
+        );
+        if (workspace === undefined) {
+            throw new Error("This workspace was not created by the current session.");
+        }
+        if (workspace.status !== "ready") {
+            throw new Error(`The workspace is ${workspace.status} and cannot start an agent yet.`);
+        }
+        return this.spawn(
+            parentSessionId,
+            { ...request, cwd: workspace.path, workspaceId: workspace.id },
+            signal,
+        );
+    }
+
+    async #waitForOwnedWorkspace(
+        resolveWorkspace: NonNullable<AgentSessionRepository["ownedWorkspace"]>,
+        ownerSessionId: string,
+        projectId: string,
+        workspaceId: string,
+        signal?: AbortSignal,
+    ): Promise<ProjectWorkspace | undefined> {
+        const deadline = Date.now() + 120_000;
+        for (;;) {
+            signal?.throwIfAborted();
+            const workspace = resolveWorkspace(ownerSessionId, projectId, workspaceId);
+            if (
+                workspace === undefined ||
+                workspace.status !== "initializing" ||
+                Date.now() >= deadline
+            ) {
+                return workspace;
+            }
+            await new Promise<void>((resolve, reject) => {
+                const onAbort = () => {
+                    clearTimeout(timer);
+                    reject(signal?.reason);
+                };
+                const timer = setTimeout(() => {
+                    signal?.removeEventListener("abort", onAbort);
+                    resolve();
+                }, 100);
+                signal?.addEventListener("abort", onAbort, { once: true });
+            });
+        }
     }
 
     communicationContext(sessionId: string): AgentCommunicationContext {
@@ -509,6 +626,8 @@ export class AgentSessionManager {
             };
             const childRequest = {
                 ...parentRequest,
+                ...(request.cwd === undefined ? {} : { cwd: request.cwd }),
+                ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
                 instructions: createSubagentInstructions(
                     parentRequest.instructions,
                     depth,

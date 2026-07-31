@@ -10,6 +10,7 @@ export interface WorkspaceReserveInput {
     baseCommit: string;
     baseRef: string;
     clientRequestId: string;
+    creatorSessionId?: string;
     gitCommonDir: string;
     id: string;
     name: string;
@@ -84,6 +85,7 @@ export function workspaceReserve(
                 baseCommit: input.baseCommit,
                 baseRef: input.baseRef,
                 clientRequestId: input.clientRequestId,
+                creatorSessionId: input.creatorSessionId,
                 createdAtMs: input.now,
                 gitAhead: 0,
                 gitBehind: 0,

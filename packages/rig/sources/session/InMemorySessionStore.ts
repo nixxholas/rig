@@ -119,6 +119,13 @@ export class InMemorySessionStore implements SessionStore {
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#agentManager = new AgentSessionManager({
             repository: {
+                archiveOwnedWorkspace: async (ownerSessionId, projectId, workspaceId) =>
+                    this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId) ===
+                    undefined
+                        ? undefined
+                        : this.archiveWorkspace(projectId, workspaceId),
+                createOwnedWorkspace: (ownerSessionId, projectId, request) =>
+                    this.#projects.createWorkspace(projectId, request, ownerSessionId),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
                 findByAgentId: (agentId) => this.findByAgentId(agentId),
@@ -129,6 +136,8 @@ export class InMemorySessionStore implements SessionStore {
                             session.agentMetadata().rootSessionId === rootSessionId &&
                             session.isSubagent(),
                     ),
+                ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
+                    this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
             },
         });
     }

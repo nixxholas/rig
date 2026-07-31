@@ -67,6 +67,7 @@ export const projectWorkspaces = sqliteTable(
         gitCommonDir: text("git_common_dir").notNull(),
         error: text("error"),
         clientRequestId: text("client_request_id"),
+        creatorSessionId: text("creator_session_id"),
         presence: text("presence").notNull(),
         gitBranch: text("git_branch"),
         gitHead: text("git_head"),
