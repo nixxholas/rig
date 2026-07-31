@@ -718,7 +718,9 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#tui.stop();
 
         try {
-            await this.#processManager.killAll({ forceAfterMs: 500 });
+            // We are leaving for good, so background work goes with us:
+            // nothing Rig started outlives Rig.
+            await this.#processManager.killAll({ forceAfterMs: 500, includeDetached: true });
             await this.#onExit?.();
         } finally {
             this.#exitResolve?.(reason);

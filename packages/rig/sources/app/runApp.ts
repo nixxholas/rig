@@ -502,7 +502,8 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             process.off("SIGTERM", stop);
             followController.abort();
             terminal.write("\x1b[?1004l");
-            await processManager.killAll({ forceAfterMs: 500 });
+            // Nothing Rig started outlives Rig, background work included.
+            await processManager.killAll({ forceAfterMs: 500, includeDetached: true });
             if (exitReason !== "reload") {
                 console.error("");
                 console.error(`Session: ${session.session.id}`);
