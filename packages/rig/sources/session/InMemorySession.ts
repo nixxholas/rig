@@ -2513,6 +2513,10 @@ export class InMemorySession {
         }
         await Promise.all(workflowRuns.map((run) => run.completion));
         this.#workflowRuns.clear();
+        // Aborting spares background work, but a reset throws away the
+        // conversation that knew its task ids. Nothing would ever read or stop
+        // those commands again, so they go with the history that started them.
+        await this.#killRuntimeProcesses({ includeBackground: true });
         await this.#ensureRuntime().agent.reset();
         this.#status = "idle";
         this.#interruption = undefined;

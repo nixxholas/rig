@@ -5,16 +5,26 @@ import { createJustBashBashContext } from "./createJustBashBashContext.js";
 import { MAX_ACTIVE_BASH_SESSIONS } from "./bashSessionLimits.js";
 
 describe("createJustBashBashContext", () => {
-    it("rejects background work beyond the active session limit", async () => {
-        const exec = () => new Promise<never>(() => {});
+    it("evicts the oldest background command instead of refusing a new one", async () => {
+        const aborts: (AbortSignal | undefined)[] = [];
+        const exec = (_command: string, options?: { signal?: AbortSignal }) => {
+            aborts.push(options?.signal);
+            return new Promise<never>(() => {});
+        };
         const context = createJustBashBashContext({ exec } as unknown as Bash, "/workspace");
         for (let index = 0; index < MAX_ACTIVE_BASH_SESSIONS; index += 1) {
             await context.startSession({ command: `pending-${String(index)}` });
         }
 
-        await expect(context.startSession({ command: "one-too-many" })).rejects.toThrow(
-            `No more than ${String(MAX_ACTIVE_BASH_SESSIONS)} background commands can run at once.`,
+        // Running out of slots is ours to solve, not the model's: the oldest
+        // command makes way and the new one starts.
+        await expect(context.startSession({ command: "one-too-many" })).resolves.toBe(
+            MAX_ACTIVE_BASH_SESSIONS + 1,
         );
+        expect(aborts[0]?.aborted).toBe(true);
+        // The evicted session stays readable: a model still holding its task id
+        // deserves to learn what became of it.
+        await expect(context.readSession(1)).resolves.toMatchObject({ command: "pending-0" });
     });
 
     it("retains a bounded set of completed background sessions", async () => {

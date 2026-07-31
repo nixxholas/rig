@@ -13,6 +13,10 @@ import type {
 } from "../agent/context/BashContext.js";
 import { assertCanUseCustomShell } from "../agent/context/assertCanUseCustomShell.js";
 import {
+    MAX_ACTIVE_BASH_SESSIONS,
+    MAX_RETAINED_BASH_SESSIONS,
+} from "../agent/context/bashSessionLimits.js";
+import {
     type ManagedNetworkBlockedRequest,
     type ManagedNetworkProxyHandle,
     shouldApplyManagedNetworkPolicy,
@@ -50,6 +54,8 @@ interface DockerBashSession {
     command: string;
     completion: Promise<void>;
     cwd: string;
+    /** Stopped to make room for a newer command, but still readable. */
+    evicted?: true;
     exec: Dockerode.Exec;
     exitCode: number | null;
     finished: boolean;
@@ -79,7 +85,6 @@ interface DockerManagedNetwork {
     proxy: ManagedNetworkProxyHandle;
 }
 
-const MAX_RETAINED_SESSIONS = 64;
 const DEFAULT_RUN_TIMEOUT_MS = 120_000;
 const DOCKER_EXEC_INSPECT_TIMEOUT_MS = 10_000;
 const DOCKER_EXEC_START_GATE = "rig-start\n";
@@ -106,7 +111,7 @@ export function createDockerBashContext(
     let canonicalWorkspace: Promise<string> | undefined;
     let sandboxRuntime: Promise<PreparedDockerSandbox> | undefined;
     const activeSessionCount = () =>
-        [...sessions.values()].filter((session) => !session.finished).length;
+        [...sessions.values()].filter((session) => !session.finished && !session.evicted).length;
 
     const start = async (options: Omit<BashRunOptions, "signal">): Promise<DockerBashSession> => {
         const permissionMode = permissions.mode;
@@ -435,7 +440,7 @@ export function createDockerBashContext(
             }, options.timeoutMs);
             session.timeout.unref();
         }
-        if (sessions.size > MAX_RETAINED_SESSIONS) {
+        if (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
             const completed = [...sessions.values()].find((candidate) => candidate.finished);
             if (completed !== undefined) sessions.delete(completed.sessionId);
         }
@@ -526,6 +531,27 @@ export function createDockerBashContext(
             session.pidFile,
         ]);
         return result.exitCode === 0;
+    };
+
+    /**
+     * Makes room for one more background command. Running out of slots is our
+     * problem, not the model's, so the oldest command is evicted to free one.
+     *
+     * The evicted session stays readable: it is stopped, not forgotten, and it
+     * frees its slot the moment it is asked to stop, so a command that takes
+     * its time going away cannot hold up the next one.
+     */
+    const makeRoomForSession = (): void => {
+        for (;;) {
+            const active = [...sessions.values()].filter(
+                (session) => !session.finished && !session.evicted,
+            );
+            if (active.length < MAX_ACTIVE_BASH_SESSIONS) return;
+            const oldest = active.sort((left, right) => left.sessionId - right.sessionId)[0];
+            if (oldest === undefined) return;
+            oldest.evicted = true;
+            requestKill(oldest);
+        }
     };
 
     const requestKill = (session: DockerBashSession): void => {
@@ -640,6 +666,7 @@ export function createDockerBashContext(
             listener?.(activeSessionCount());
         },
         async startSession(options) {
+            makeRoomForSession();
             return (await start(options)).sessionId;
         },
         supportsSessionInput: true,

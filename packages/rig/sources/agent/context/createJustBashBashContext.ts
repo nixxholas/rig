@@ -10,6 +10,8 @@ interface JustBashSession {
     completion: Promise<BashRunResult>;
     controller: AbortController;
     cwd: string;
+    /** Stopped to make room for a newer command, but still readable. */
+    evicted?: true;
     killed: boolean;
     maxOutputBytes?: number;
     result?: BashRunResult;
@@ -30,6 +32,28 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
             );
             if (completed === undefined) return;
             sessions.delete(completed.sessionId);
+        }
+    };
+    /**
+     * Makes room for one more command. Running out of slots is our problem, not
+     * the model's, so the oldest command is evicted to free one.
+     *
+     * The evicted session stays readable: it is stopped, not forgotten, so a
+     * model still holding its task ID learns what became of it.
+     */
+    const makeRoomForSession = () => {
+        // An evicted command frees its slot the moment it is asked to stop, so
+        // one that takes its time going away cannot hold up the next one.
+        for (;;) {
+            const active = [...sessions.values()].filter(
+                (session) => session.result === undefined && !session.evicted,
+            );
+            if (active.length < MAX_ACTIVE_BASH_SESSIONS) return;
+            const oldest = active.sort((left, right) => left.sessionId - right.sessionId)[0];
+            if (oldest === undefined) return;
+            oldest.evicted = true;
+            oldest.killed = true;
+            oldest.controller.abort();
         }
     };
     const readSession = async (
@@ -117,15 +141,8 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
             }
         },
         async startSession(runOptions) {
-            const active = [...sessions.values()].filter(
-                (session) => session.result === undefined,
-            ).length;
-            if (active >= MAX_ACTIVE_BASH_SESSIONS) {
-                throw new Error(
-                    `No more than ${String(MAX_ACTIVE_BASH_SESSIONS)} background commands can run at once.`,
-                );
-            }
             assertNoSecrets(runOptions.secrets);
+            makeRoomForSession();
             const controller = new AbortController();
             const sessionId = nextSessionId;
             nextSessionId += 1;
