@@ -174,9 +174,14 @@ describe("rig-connect groups against a live daemon", () => {
                     const snapshot = connection
                         .projects()
                         .find((project) => project.id === session.snapshot().projectId)?.git;
-                    return snapshot?.changedFiles === 0 && snapshot.files?.length === 0;
+                    return (
+                        snapshot?.changedFiles === 1 &&
+                        snapshot.files?.some(
+                            (file) => file.path === "changed.txt" && file.status === "added",
+                        ) === true
+                    );
                 },
-                "the committed file to leave the changed-file list",
+                "the committed branch change to arrive",
                 15_000,
             );
         });
@@ -462,6 +467,7 @@ async function createRepository(): Promise<string> {
     await writeFile(join(root, "seed.txt"), "seed\n");
     await git(root, ["add", "--all"]);
     await git(root, ["commit", "--quiet", "--message", "seed"]);
+    await git(root, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
     return root;
 }
 
