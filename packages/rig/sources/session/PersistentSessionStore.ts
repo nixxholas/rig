@@ -73,6 +73,7 @@ import { migrateSessionDatabase } from "../persistence/database/migrateSessionDa
 import { durablePermissionHandoff } from "../persistence/session/durablePermissionHandoff.js";
 import { durableUserInputPrune } from "../persistence/session/durableUserInputPrune.js";
 import { durableUserInputSave } from "../persistence/session/durableUserInputSave.js";
+import { queryDurableUserInputs } from "../persistence/session/queryDurableUserInputs.js";
 import { externalToolCallPrune } from "../persistence/session/externalToolCallPrune.js";
 import { externalToolCallSave } from "../persistence/session/externalToolCallSave.js";
 import { projectSecretAttach } from "../persistence/session/projectSecretAttach.js";
@@ -592,6 +593,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         options: { limit?: number; status?: ExternalToolCall["status"] } = {},
     ): readonly ExternalToolCall[] {
         return queryExternalToolCalls(this.#tx(), options);
+    }
+
+    listDurableUserInputs(): readonly DurableUserInputCall[] {
+        return queryDurableUserInputs(this.#tx());
     }
 
     listSubagents(parentSessionId: string): readonly SubagentSummary[] {

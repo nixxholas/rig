@@ -10,6 +10,8 @@ export type {
     RigConnection,
     RigGroupsConnection,
     RigGroupsSubscriptionOptions,
+    RigInboxConnection,
+    RigInboxSubscriptionOptions,
     RigSessionConnection,
     RigSessionSubscriptionOptions,
     SendMessageInput,
@@ -19,6 +21,8 @@ export type {
     TerminalPresence,
     UserInputAnswers,
 } from "./connectRig.js";
+export { InboxStore } from "./InboxStore.js";
+export type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
 export { ChatStore } from "./ChatStore.js";
 export { GroupStore } from "./GroupStore.js";
 export { groupToolCalls } from "./groupToolCalls.js";
@@ -86,6 +90,7 @@ export type {
     GlobalEvent,
     GlobalStreamHello,
     InterpretedSessionEvent,
+    InboxUserInput,
     ModelSummary,
     McpServerSummary,
     ModelCatalog,

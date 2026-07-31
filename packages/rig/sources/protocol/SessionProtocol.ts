@@ -515,6 +515,14 @@ export interface SessionSummary {
     /** Ordered identity of the newest session mutation/state event. */
     lastEventId?: EventId;
     interruption?: SessionInterruption;
+    inboxItems?: readonly {
+        answers?: Readonly<Record<string, readonly string[]>>;
+        createdAt: number;
+        questions: UserInputRequest["questions"];
+        requestId: string;
+        resolvedAt?: number;
+        status: "pending" | "answered";
+    }[];
 }
 
 export interface CreateSessionRequest {

@@ -42,6 +42,7 @@ import {
     type ProjectRemoteTerminalContext,
     type RemoteTerminalScope,
 } from "../terminal/index.js";
+import type { DurableUserInputCall } from "../user-input/index.js";
 import {
     openSessionDatabase,
     type SessionDatabase,
@@ -420,6 +421,12 @@ export class InMemorySessionStore implements SessionStore {
             )
             .sort((left, right) => left.createdAt - right.createdAt)
             .slice(0, options.limit ?? 100);
+    }
+
+    listDurableUserInputs(): readonly DurableUserInputCall[] {
+        return [...this.#sessions.values()].flatMap(
+            (session) => session.state().durableUserInputs ?? [],
+        );
     }
 
     listSubagents(parentSessionId: string): readonly SubagentSummary[] {

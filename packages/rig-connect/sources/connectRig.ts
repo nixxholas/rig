@@ -8,6 +8,8 @@ import type {
 import { ChatStore } from "./ChatStore.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
 import { GroupStore } from "./GroupStore.js";
+import type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
+import { InboxStore } from "./InboxStore.js";
 import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
 import { createCuid2 } from "./createCuid2.js";
 import { orderedUuidV7, type RandomValues } from "./orderedUuidV7.js";
@@ -98,6 +100,12 @@ export interface RigGroupsSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+export interface RigInboxSubscriptionOptions {
+    onChange: (items: readonly InboxItem[], state: InboxState) => void;
+    onDelta?: (delta: InboxDelta) => void;
+    onError?: (error: unknown) => void;
+}
+
 export interface RigSessionConnection {
     elements: () => readonly ChatElement[];
     session: () => SessionState;
@@ -109,6 +117,12 @@ export interface RigGroupsConnection {
     projects: () => readonly ProjectGroup[];
     remoteTerminals: () => readonly RemoteTerminalGroupState[];
     state: () => GroupsState;
+    close: () => void;
+}
+
+export interface RigInboxConnection {
+    items: () => readonly InboxItem[];
+    state: () => InboxState;
     close: () => void;
 }
 
@@ -191,6 +205,7 @@ export interface RigConnection {
     compatibility: () => ServerCompatibility;
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
+    connectInbox: (options: RigInboxSubscriptionOptions) => RigInboxConnection;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -258,6 +273,15 @@ interface SessionSubscriber extends RigSessionSubscriptionOptions {
 
 interface GroupSubscriber extends RigGroupsSubscriptionOptions {
     closed: boolean;
+}
+
+interface InboxSubscriber extends RigInboxSubscriptionOptions {
+    closed: boolean;
+}
+
+interface InboxEntry {
+    store: InboxStore;
+    subscribers: Set<InboxSubscriber>;
 }
 
 interface BufferedSessionEvent {
@@ -358,6 +382,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const knownGroupVersions = new Map<string, number>();
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
+    let inboxEntry: InboxEntry | undefined;
     let liveStreamStarted = false;
     let liveStreamOpen = false;
     let compatibility = CHECKING_SERVER_COMPATIBILITY;
@@ -381,6 +406,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         for (const subscriber of [...entry.subscribers]) {
             if (subscriber.closed) continue;
             subscriber.onChange(entry.store.projects(), entry.store.state());
+            for (const delta of deltas) subscriber.onDelta?.(delta);
+        }
+    };
+
+    const publishInbox = (deltas: readonly InboxDelta[]): void => {
+        if (closed || deltas.length === 0 || inboxEntry === undefined) return;
+        for (const subscriber of [...inboxEntry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
             for (const delta of deltas) subscriber.onDelta?.(delta);
         }
     };
@@ -1081,6 +1115,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 ],
             }),
         );
+        if (inboxEntry !== undefined) {
+            publishInbox([
+                ...inboxEntry.store.setConnection("live"),
+                ...inboxEntry.store.applyHello(hello),
+            ]);
+        }
         queueGitWatchSync();
     };
 
@@ -1093,6 +1133,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             if (closed || entry.controller.signal.aborted) return;
             publishGroups(entry, entry.store.setConnection("closed"));
             for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+            if (inboxEntry !== undefined) {
+                publishInbox(inboxEntry.store.setConnection("closed"));
+                for (const subscriber of [...inboxEntry.subscribers]) {
+                    subscriber.onError?.(error);
+                }
+            }
         });
     };
 
@@ -1136,6 +1182,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (hello.resumed && !hello.gap) {
                     if (groupsEntry !== undefined) {
                         publishGroups(groupsEntry, groupsEntry.store.setConnection("live"));
+                    }
+                    if (inboxEntry !== undefined) {
+                        publishInbox(inboxEntry.store.setConnection("live"));
                     }
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
@@ -1220,6 +1269,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                               }),
                     }),
                 );
+                if (inboxEntry !== undefined) publishInbox(inboxEntry.store.apply(event));
                 if (sessionId !== undefined) reportFinished(sessionId, unreadBefore);
                 if (
                     event.type === "project_created" ||
@@ -1234,6 +1284,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 liveStreamOpen = false;
                 if (groupsEntry !== undefined) {
                     publishGroups(groupsEntry, groupsEntry.store.setConnection("reconnecting"));
+                }
+                if (inboxEntry !== undefined) {
+                    publishInbox(inboxEntry.store.setConnection("reconnecting"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     if (entry.started) {
@@ -1250,6 +1303,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         subscriber.onError?.(error);
                     }
                 }
+                if (inboxEntry !== undefined) {
+                    publishInbox(inboxEntry.store.setConnection("closed"));
+                    for (const subscriber of [...inboxEntry.subscribers]) {
+                        subscriber.onError?.(error);
+                    }
+                }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
@@ -1259,6 +1318,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (closed || rootController.signal.aborted) return;
                 if (groupsEntry !== undefined) {
                     publishGroups(groupsEntry, groupsEntry.store.setConnection("closed"));
+                }
+                if (inboxEntry !== undefined) {
+                    publishInbox(inboxEntry.store.setConnection("closed"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
@@ -1456,6 +1518,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             // the chat's project and whether it is tracked at all are known, so
             // asking for them keeps it loaded with no view open.
             options.onSessionFinished === undefined &&
+            inboxEntry === undefined &&
             pendingOverlays.length === 0 &&
             queues.size === 0
         ) {
@@ -1527,6 +1590,26 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (subscriber.closed) return;
                 subscriber.closed = true;
                 entry.subscribers.delete(subscriber);
+                releaseUnusedEntries();
+            },
+        };
+    };
+
+    const connectInbox = (subscription: RigInboxSubscriptionOptions): RigInboxConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        inboxEntry ??= { store: new InboxStore(), subscribers: new Set() };
+        const subscriber: InboxSubscriber = { ...subscription, closed: false };
+        inboxEntry.subscribers.add(subscriber);
+        subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
+        startGroupEntry(createGroupEntry());
+        return {
+            items: () => inboxEntry?.store.items() ?? [],
+            state: () => inboxEntry?.store.state() ?? { connection: "closed" },
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                inboxEntry?.subscribers.delete(subscriber);
+                if (inboxEntry?.subscribers.size === 0) inboxEntry = undefined;
                 releaseUnusedEntries();
             },
         };
@@ -2461,12 +2544,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 groupsEntry.subscribers.clear();
                 groupsEntry = undefined;
             }
+            inboxEntry?.subscribers.clear();
+            inboxEntry = undefined;
         },
         answerUserInput,
         attachSecret,
         clearGoal,
         compactSession,
         connectGroups,
+        connectInbox,
         connectSession,
         connectTerminalPresence,
         createWorkspace,

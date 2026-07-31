@@ -3101,6 +3101,21 @@ export class InMemorySession {
             ...(this.#title !== undefined ? { title: this.#title } : {}),
             ...(this.#titleError !== undefined ? { titleError: this.#titleError } : {}),
             ...(this.#interruption !== undefined ? { interruption: this.#interruption } : {}),
+            inboxItems: [...this.#durableUserInputs.values()]
+                .filter(
+                    (call) =>
+                        call.kind === "question" &&
+                        (call.status === "pending" || call.response !== undefined),
+                )
+                .map((call) => ({
+                    ...(call.response === undefined ? {} : { answers: call.response.answers }),
+                    createdAt: call.createdAt,
+                    questions: call.request.questions,
+                    requestId: call.request.requestId,
+                    ...(call.resolvedAt === undefined ? {} : { resolvedAt: call.resolvedAt }),
+                    status:
+                        call.response === undefined ? ("pending" as const) : ("answered" as const),
+                })),
         };
     }
 

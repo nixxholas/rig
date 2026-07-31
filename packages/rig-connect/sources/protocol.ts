@@ -396,6 +396,15 @@ export interface UserInputRequest {
     requestId: string;
 }
 
+export interface InboxUserInput {
+    answers?: Readonly<Record<string, readonly string[]>>;
+    createdAt: number;
+    questions: readonly UserInputQuestion[];
+    requestId: string;
+    resolvedAt?: number;
+    status: "pending" | "answered";
+}
+
 export interface SessionTask {
     activeForm?: string;
     blockedBy: readonly string[];
@@ -1089,6 +1098,7 @@ export interface SessionSummary {
     /** Whether the daemon keeps unread state for this chat at all. */
     trackUnread?: boolean;
     unread?: SessionUnreadState;
+    inboxItems?: readonly InboxUserInput[];
 }
 
 export interface RemoteTerminalSummary {

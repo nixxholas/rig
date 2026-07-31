@@ -2833,8 +2833,29 @@ function buildGroupCatalog(
     identity: DaemonIdentity,
     sessionTerminals: SessionTerminalTracker,
 ): Omit<GlobalStreamHello, "cursor"> {
+    const inboxItems = new Map<string, ReturnType<SessionStore["listDurableUserInputs"]>>();
+    for (const call of store.listDurableUserInputs()) {
+        if (
+            call.kind !== "question" ||
+            (call.status !== "pending" && call.response === undefined)
+        ) {
+            continue;
+        }
+        inboxItems.set(call.sessionId, [...(inboxItems.get(call.sessionId) ?? []), call]);
+    }
     const sessions = store
         .listActive()
+        .map((summary) => ({
+            ...summary,
+            inboxItems: (inboxItems.get(summary.id) ?? []).map((call) => ({
+                ...(call.response === undefined ? {} : { answers: call.response.answers }),
+                createdAt: call.createdAt,
+                questions: call.request.questions,
+                requestId: call.request.requestId,
+                ...(call.resolvedAt === undefined ? {} : { resolvedAt: call.resolvedAt }),
+                status: call.response === undefined ? ("pending" as const) : ("answered" as const),
+            })),
+        }))
         .map((summary) => sessionSummaryWithTerminalPresence(summary, sessionTerminals))
         .filter((summary) => !summary.archived);
     const projects = store.listProjects().filter((project) => project.archivedAt === undefined);

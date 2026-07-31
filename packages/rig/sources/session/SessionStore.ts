@@ -20,6 +20,7 @@ import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
 import type { ProjectAvatarAsset } from "../project/ProjectRepository.js";
 import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
+import type { DurableUserInputCall } from "../user-input/index.js";
 
 export interface SessionStore {
     readonly globalEventQueue: GlobalEventQueue;
@@ -62,6 +63,7 @@ export interface SessionStore {
         limit?: number;
         status?: ExternalToolCall["status"];
     }): readonly ExternalToolCall[];
+    listDurableUserInputs(): readonly DurableUserInputCall[];
     listSubagents(parentSessionId: string): readonly SubagentSummary[];
     listSecrets(): readonly SecretSummary[];
     applyGitFacts(

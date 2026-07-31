@@ -9,12 +9,15 @@ import {
     readString,
 } from "./impl/sqliteRow.js";
 
-export function queryDurableUserInputs(tx: TX, sessionId: string): readonly DurableUserInputCall[] {
+export function queryDurableUserInputs(
+    tx: TX,
+    sessionId?: string,
+): readonly DurableUserInputCall[] {
     return tx
         .all<Record<string, unknown>>(sql`
             SELECT *
             FROM durable_user_inputs
-            WHERE session_id = ${sessionId}
+            ${sessionId === undefined ? sql`` : sql`WHERE session_id = ${sessionId}`}
             ORDER BY created_at_ms ASC, tool_call_index ASC
         `)
         .map((row) => {
