@@ -6325,8 +6325,9 @@ export class CodingAssistantApp implements Component, Focusable {
         sessionId: number,
         waitMs: number,
     ): Promise<BashSessionSnapshot | undefined> {
+        // Watching a command must not consume output the agent has not read.
         return this.#agent.readBackgroundProcess === undefined
-            ? this.#agent.context.bash.readSession(sessionId, { waitMs })
+            ? this.#agent.context.bash.readSession(sessionId, { peek: true, waitMs })
             : this.#agent.readBackgroundProcess(sessionId, { waitMs });
     }
 

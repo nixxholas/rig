@@ -9,12 +9,15 @@ export interface GrokTaskResult {
 
 export async function readGrokTask(options: {
     context: AgentContext;
+    /** Check on a task without collecting output the model has not seen. */
+    peek?: boolean;
     taskId: string;
     timeoutMs?: number;
 }): Promise<GrokTaskResult> {
     const terminalId = Number(options.taskId);
     if (Number.isInteger(terminalId) && terminalId >= 0) {
         const snapshot = await options.context.bash.readSession(terminalId, {
+            ...(options.peek === true ? { peek: true } : {}),
             waitMs: Math.max(0, options.timeoutMs ?? 0),
         });
         if (snapshot === undefined) {

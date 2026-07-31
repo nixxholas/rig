@@ -29,7 +29,11 @@ import {
 } from "./createProtectedPathMonitor.js";
 import { createToolEnvironment } from "./createToolEnvironment.js";
 import { waitForBashSessionCompletion } from "./waitForBashSessionCompletion.js";
-import { MAX_ACTIVE_BASH_SESSIONS, MAX_RETAINED_BASH_SESSIONS } from "./bashSessionLimits.js";
+import {
+    BASH_SESSION_STOP_GRACE_MS,
+    MAX_ACTIVE_BASH_SESSIONS,
+    MAX_RETAINED_BASH_SESSIONS,
+} from "./bashSessionLimits.js";
 import { createCommandEnvironment, type SessionSecretContext } from "../../secrets/index.js";
 import { errorToMessage } from "../../errorToMessage.js";
 import { runCleanupSteps } from "./runCleanupSteps.js";
@@ -48,7 +52,16 @@ interface NodeBashSession {
     command: string;
     completionStderrDelta?: string;
     completionWaiters: Set<() => void>;
+    /**
+     * Readers waiting for the end who will also report it.
+     *
+     * An observer that only peeks waits the same way but consumes nothing, so
+     * it must not be mistaken for someone about to tell the model the news.
+     */
+    consumingWaiters: number;
     cwd: string;
+    /** Stopped to make room for a newer command, but still readable. */
+    evicted?: true;
     /** A read has already returned this session's final status. */
     exitObserved: boolean;
     process: ManagedProcess;
@@ -67,10 +80,11 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
     let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
     const activeSessionCount = () =>
-        [...sessions.values()].filter((session) => session.result === undefined).length;
+        [...sessions.values()].filter((session) => session.result === undefined && !session.evicted)
+            .length;
     const activeSessions = () =>
         [...sessions.values()]
-            .filter((session) => session.result === undefined)
+            .filter((session) => session.result === undefined && !session.evicted)
             .map((session) => ({
                 command: session.command,
                 cwd: session.cwd,
@@ -81,22 +95,23 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
      * Makes room for one more command. Running out of slots is our problem, not
      * the model's, so the oldest command is evicted to free one.
      *
-     * Eviction takes effect immediately: the session is dropped here rather
-     * than when its process finally dies, so a command that ignores the signal
-     * cannot keep the next one from starting.
+     * The evicted session stays readable: it is stopped, not forgotten, so a
+     * model still holding its task ID learns what became of it. Only its slot
+     * is released, and immediately, so a command that ignores the signal cannot
+     * keep the next one from starting.
      */
     const reserveSessionStart = () => {
         while (activeSessionCount() + pendingSessionStarts >= MAX_ACTIVE_BASH_SESSIONS) {
             const oldest = [...sessions.values()]
-                .filter((session) => session.result === undefined)
+                .filter((session) => session.result === undefined && !session.evicted)
                 .sort((left, right) => left.sessionId - right.sessionId)[0];
             if (oldest === undefined) {
                 throw new Error(
                     `No more than ${String(MAX_ACTIVE_BASH_SESSIONS)} background commands can run at once.`,
                 );
             }
-            sessions.delete(oldest.sessionId);
-            void oldest.process.kill("SIGTERM", { forceAfterMs: 500 });
+            oldest.evicted = true;
+            void oldest.process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS });
         }
         pendingSessionStarts += 1;
         let released = false;
@@ -119,19 +134,24 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         const session = sessions.get(sessionId);
         if (session === undefined) return undefined;
         const waitMs = Math.max(0, readOptions.waitMs ?? 0);
+        const peeking = readOptions.peek === true;
         if (session.result === undefined && waitMs > 0 && !readOptions.signal?.aborted) {
-            await waitForBashSessionCompletion(
-                session.completionWaiters,
-                waitMs,
-                readOptions.signal,
-            );
+            if (!peeking) session.consumingWaiters += 1;
+            try {
+                await waitForBashSessionCompletion(
+                    session.completionWaiters,
+                    waitMs,
+                    readOptions.signal,
+                );
+            } finally {
+                if (!peeking) session.consumingWaiters -= 1;
+            }
         }
 
         const processSnapshot = session.process.readOutput(
             session.stdoutOffset,
             session.stderrOffset,
         );
-        const peeking = readOptions.peek === true;
         const completionStderrDelta = session.completionStderrDelta ?? "";
         if (!peeking) {
             delete session.completionStderrDelta;
@@ -173,22 +193,33 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         },
         async killAllSessions() {
             const active = [...sessions.values()].filter((session) => session.result === undefined);
+            // Everything is being taken down at once, by us. Telling the model
+            // about each casualty afterwards would say nothing it does not know.
+            for (const session of active) session.exitObserved = true;
             await Promise.all(
-                active.map((session) => session.process.kill("SIGTERM", { forceAfterMs: 500 })),
+                active.map((session) =>
+                    session.process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS }),
+                ),
             );
             return active.length;
         },
         async killSession(sessionId) {
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
-            await session.process.kill("SIGTERM", { forceAfterMs: 500 });
+            // Whoever stopped the command is told how it ended by this very
+            // call, so claim the outcome before the exit continuation can run
+            // and announce it a second time.
+            session.exitObserved = true;
+            await session.process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS });
             // The process is gone, but this session records the outcome from a
             // separate continuation. Wait for that before reporting status,
             // otherwise a just-killed command still reads as running.
             if (session.result === undefined) {
                 await waitForBashSessionCompletion(session.completionWaiters, 5_000);
             }
-            return readSession(sessionId);
+            // Stopping a command reports its status; it must not swallow output
+            // the model has not read yet.
+            return readSession(sessionId, { peek: true });
         },
         readSession,
         async run(runOptions) {
@@ -298,11 +329,13 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
             };
         },
         async startSession(runOptions) {
+            // Validate before making room: a command that is never going to
+            // start must not cost the user a running one.
+            const permissionMode = options.permissions.mode;
+            assertCanUseCustomShell(permissionMode, runOptions.shell);
             const releaseSessionStart = reserveSessionStart();
             try {
-                const permissionMode = options.permissions.mode;
                 const permissionRevision = options.permissions.revision;
-                assertCanUseCustomShell(permissionMode, runOptions.shell);
                 const cwd = runCwd(runOptions.cwd);
                 const shell = runOptions.shell ?? resolveSystemShell();
                 const toolEnvironment = await createToolEnvironment(
@@ -382,6 +415,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 const session: NodeBashSession = {
                     command: runOptions.command,
                     completionWaiters: new Set(),
+                    consumingWaiters: 0,
                     cwd,
                     exitObserved: false,
                     process,
@@ -395,7 +429,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                 const stopObservingNetworkDenials = managedNetwork?.proxy?.onBlockedRequest(
                     (request) => {
                         networkDenial ??= request;
-                        void process.kill("SIGTERM", { forceAfterMs: 500 });
+                        void process.kill("SIGTERM", { forceAfterMs: BASH_SESSION_STOP_GRACE_MS });
                     },
                 );
                 sessions.set(sessionId, session);
@@ -430,7 +464,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                         killed: networkDenial === undefined ? result.killed : false,
                         stderr: `${result.stderr}${completionStderrDelta}`,
                     };
-                    const awaited = session.completionWaiters.size > 0;
+                    const awaited = session.consumingWaiters > 0;
                     for (const finish of session.completionWaiters) finish();
                     onActiveSessionCountChange?.(activeSessionCount());
                     // Nobody was waiting on this command, so nobody is about to

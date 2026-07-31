@@ -24,6 +24,7 @@ import type {
 } from "../agent/index.js";
 import type { Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { BashSessionExit } from "../agent/context/BashContext.js";
+import { BASH_SESSION_STOP_GRACE_MS } from "../agent/context/bashSessionLimits.js";
 import type { BashContext } from "../agent/context/BashContext.js";
 import {
     createGoalContinuationPrompt,
@@ -1756,7 +1757,7 @@ export class InMemorySession {
             runtime?.context.permissions?.setMode(previousPermissionMode);
             throw error;
         }
-        const running = this.#activeProcessCount();
+        const running = this.#reapableProcessCount();
         const descendantChange =
             !this.isSubagent() && options.updateSubagents !== false
                 ? (this.#agentManager?.changeSubagentPermissionModes(this.id, permissionMode) ??
@@ -3752,6 +3753,9 @@ export class InMemorySession {
             this.#append("agent_message", { message: resultMessage, runId });
         }
         this.#contextMessages = undefined;
+        // The runtime is being discarded, so nothing could ever read or stop
+        // its background commands again.
+        void this.#killRuntimeProcesses({ includeBackground: true });
         void this.#runtime?.agent.close();
         this.#runtime = undefined;
         const continuation = () => this.#continueDurableToolRun(runId);
@@ -5030,6 +5034,9 @@ export class InMemorySession {
             this.#restartMetadataSettlement();
         });
         runtime.context.bash.setSessionExitListener?.((exit) => {
+            // A replaced runtime keeps its own bash context alive long enough
+            // to finish dying. Its leftovers are not this session's news.
+            if (this.#runtime !== runtime) return;
             this.#notifyBackgroundProcessExit(exit);
         });
         const snapshot = runtime.agent.snapshot();
@@ -5126,6 +5133,18 @@ export class InMemorySession {
     }
 
     /**
+     * Everything a shutdown would still have to take down.
+     *
+     * A command like `nohup server &` settles the moment its launcher exits,
+     * so counting live commands alone reports nothing while the server it
+     * started is very much still running under a process group we retained.
+     */
+    #reapableProcessCount(): number {
+        const groups = this.#runtime?.processManager.pendingProcessGroups().length ?? 0;
+        return this.#activeProcessCount() + groups;
+    }
+
+    /**
      * Stops the session's processes.
      *
      * Work the agent deliberately left running in the background is spared
@@ -5136,7 +5155,7 @@ export class InMemorySession {
     ): Promise<void> {
         const runtime = this.#runtime;
         if (runtime === undefined) return;
-        const forceAfterMs = options.forceAfterMs ?? 500;
+        const forceAfterMs = options.forceAfterMs ?? BASH_SESSION_STOP_GRACE_MS;
         const includeBackground = options.includeBackground ?? false;
         await runtime.processManager.killAll({
             forceAfterMs,
@@ -5564,6 +5583,9 @@ export class InMemorySession {
             }
             if (this.#restoredActiveRunId === queued.runId && this.hasDurableToolRun()) {
                 this.#contextMessages = undefined;
+                // Same here: a discarded runtime leaves its commands
+                // unreachable, so they go with it.
+                void this.#killRuntimeProcesses({ includeBackground: true });
                 void this.#runtime?.agent.close();
                 this.#runtime = undefined;
             } else {

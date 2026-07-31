@@ -145,14 +145,27 @@ export const codexExecCommandTool = defineTool({
         if (shell !== undefined) startOptions.shell = shell;
         if (tty !== undefined) startOptions.tty = tty;
         const sessionId = await context.bash.startSession(startOptions);
-        const snapshot = await readSessionWithProgress({
-            bash: context.bash,
-            ...(execution.onProgress === undefined ? {} : { onProgress: execution.onProgress }),
-            sessionId,
-            ...(execution.signal === undefined ? {} : { signal: execution.signal }),
-            waitMs: Math.max(250, Math.min(30_000, yield_time_ms ?? 10_000)),
-        });
+        const abort = () => void context.bash.killSession(sessionId);
+        execution.signal?.addEventListener("abort", abort, { once: true });
+        if (execution.signal?.aborted) abort();
+        let snapshot;
+        try {
+            snapshot = await readSessionWithProgress({
+                bash: context.bash,
+                ...(execution.onProgress === undefined ? {} : { onProgress: execution.onProgress }),
+                sessionId,
+                ...(execution.signal === undefined ? {} : { signal: execution.signal }),
+                waitMs: Math.max(250, Math.min(30_000, yield_time_ms ?? 10_000)),
+            });
+        } finally {
+            execution.signal?.removeEventListener("abort", abort);
+        }
         if (snapshot === undefined) throw new Error("The shell session could not be started.");
+        // Handing the session ID back means the command is meant to keep
+        // running, so an interrupted turn must no longer take it down.
+        if (snapshot.status === "running" && execution.signal?.aborted !== true) {
+            context.bash.detachSession?.(sessionId);
+        }
         return createUnifiedExecOutput(
             snapshot,
             (Date.now() - startedAt) / 1_000,

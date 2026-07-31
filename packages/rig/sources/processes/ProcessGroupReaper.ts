@@ -4,14 +4,18 @@ import { killProcessTree } from "./killProcessTree.js";
  * Remembers the process groups we started so shutdown can take them down.
  *
  * A background command outlives the shell that launched it, so a group has to
- * stay reapable long after its leader is gone. Groups are pruned lazily; a
- * process group is alive while any member is.
+ * stay reapable long after its leader is gone.
+ *
+ * A group is identified by the number the operating system gave it, and that
+ * number is reused once the group is gone. Every group is therefore dropped as
+ * soon as it dies, and checked again immediately before it is signalled, so a
+ * recycled identifier cannot be mistaken for ours.
  */
 export class ProcessGroupReaper {
     readonly #groups = new Set<number>();
 
     retain(processGroupId: number): void {
-        if (!Number.isSafeInteger(processGroupId) || processGroupId <= 0) return;
+        if (!isUsableProcessGroupId(processGroupId)) return;
         this.#prune();
         this.#groups.add(processGroupId);
     }
@@ -26,35 +30,69 @@ export class ProcessGroupReaper {
         return [...this.#groups];
     }
 
-    /** Asks every remaining group to stop, then forces the ones that did not. */
+    /** Asks every surviving group to stop, then forces the ones that did not. */
     async terminateAll(forceAfterMs: number): Promise<void> {
+        this.#prune();
         const groups = [...this.#groups];
         this.#groups.clear();
         if (groups.length === 0) return;
-        for (const processGroupId of groups) killProcessTree(processGroupId, "SIGTERM");
+        for (const processGroupId of groups) killProcessGroup(processGroupId, "SIGTERM");
         if (forceAfterMs > 0) {
             await new Promise((resolve) => {
                 setTimeout(resolve, forceAfterMs).unref();
             });
         }
         for (const processGroupId of groups) {
-            if (isProcessGroupAlive(processGroupId)) killProcessTree(processGroupId, "SIGKILL");
+            if (isProcessGroupAlive(processGroupId)) killProcessGroup(processGroupId, "SIGKILL");
         }
     }
 
     #prune(): void {
-        if (process.platform === "win32") return;
         for (const processGroupId of this.#groups) {
             if (!isProcessGroupAlive(processGroupId)) this.#groups.delete(processGroupId);
         }
     }
 }
 
-function isProcessGroupAlive(processGroupId: number): boolean {
+/**
+ * Signals a whole process group and nothing else.
+ *
+ * Unlike killing a process tree, there is deliberately no fall back to the bare
+ * identifier: if the group is gone, the number may now belong to an unrelated
+ * process, and signalling it would be someone else's problem.
+ */
+function killProcessGroup(processGroupId: number, signal: NodeJS.Signals): void {
+    if (process.platform === "win32") {
+        killProcessTree(processGroupId, signal);
+        return;
+    }
     try {
-        process.kill(-processGroupId, 0);
+        process.kill(-processGroupId, signal);
+    } catch {
+        // The group is already gone.
+    }
+}
+
+function isUsableProcessGroupId(processGroupId: number): boolean {
+    // A group led by process 1 is not ours to reap.
+    return Number.isSafeInteger(processGroupId) && processGroupId > 1;
+}
+
+export function isProcessGroupAlive(processGroupId: number): boolean {
+    if (process.platform === "win32") {
+        // Windows has no process groups to probe, so liveness is asked of the
+        // leader itself.
+        return isProcessAlive(processGroupId);
+    }
+    return isProcessAlive(-processGroupId);
+}
+
+function isProcessAlive(target: number): boolean {
+    try {
+        process.kill(target, 0);
         return true;
     } catch (error) {
+        // Existing but owned by someone else still counts as existing.
         return (
             typeof error === "object" &&
             error !== null &&

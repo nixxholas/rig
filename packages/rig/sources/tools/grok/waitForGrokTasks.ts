@@ -9,11 +9,16 @@ export async function waitForGrokTasks(options: {
     timeoutMs: number;
 }): Promise<GrokTaskResult[]> {
     const deadline = Date.now() + Math.max(0, options.timeoutMs);
-    let results = await Promise.all(
-        options.taskIds.map((taskId) =>
-            readGrokTask({ context: options.context, taskId, timeoutMs: 0 }),
-        ),
-    );
+    // Polling must not collect output, or the deltas seen while waiting would
+    // be dropped when a later poll replaces them. One consuming read at the
+    // end delivers everything that accumulated.
+    const poll = () =>
+        Promise.all(
+            options.taskIds.map((taskId) =>
+                readGrokTask({ context: options.context, peek: true, taskId, timeoutMs: 0 }),
+            ),
+        );
+    let results = await poll();
     if (results.length === 0) return results;
 
     const isSatisfied = () =>
@@ -37,11 +42,12 @@ export async function waitForGrokTasks(options: {
             options.signal?.addEventListener("abort", onAbort, { once: true });
             if (options.signal?.aborted) onAbort();
         });
-        results = await Promise.all(
-            options.taskIds.map((taskId) =>
-                readGrokTask({ context: options.context, taskId, timeoutMs: 0 }),
-            ),
-        );
+        results = await poll();
     }
-    return results;
+    // Collect what accumulated across the whole wait, in one pass.
+    return Promise.all(
+        options.taskIds.map((taskId) =>
+            readGrokTask({ context: options.context, taskId, timeoutMs: 0 }),
+        ),
+    );
 }

@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { killProcessTree } from "./killProcessTree.js";
-import { ProcessGroupReaper } from "./ProcessGroupReaper.js";
+import { isProcessGroupAlive, ProcessGroupReaper } from "./ProcessGroupReaper.js";
 import { startProcessTransport, type ProcessTransport } from "./startProcessTransport.js";
 import type {
     ManagedProcessStatus,
@@ -253,6 +253,7 @@ export class ManagedProcess {
 
         this.#killed = true;
         this.#status = "killed";
+        const startedAt = Date.now();
         if (this.pid !== null) {
             killProcessTree(this.pid, signal);
         }
@@ -273,10 +274,24 @@ export class ManagedProcess {
         } finally {
             if (force !== undefined) clearTimeout(force);
             if (this.pid !== null) {
-                if (signal !== "SIGKILL") killProcessTree(this.pid, "SIGKILL");
+                // The launcher is gone, but a child of it may still be shutting
+                // down and is entitled to the rest of its grace period.
+                if (signal !== "SIGKILL") await this.#forceGroupAfterGrace(forceAfterMs, startedAt);
                 this.#hooks.onGroupTerminated(this.pid);
             }
         }
+    }
+
+    /** Gives the rest of the group what remains of its grace, then ends it. */
+    async #forceGroupAfterGrace(forceAfterMs: number, startedAt: number): Promise<void> {
+        if (this.pid === null) return;
+        const remainingMs = forceAfterMs - (Date.now() - startedAt);
+        if (remainingMs > 0 && isProcessGroupAlive(this.pid)) {
+            await new Promise((resolve) => {
+                setTimeout(resolve, remainingMs).unref();
+            });
+        }
+        if (isProcessGroupAlive(this.pid)) killProcessTree(this.pid, "SIGKILL");
     }
 
     wait(): Promise<ProcessRunResult> {

@@ -538,11 +538,13 @@ export function createDockerBashContext(
         });
     };
 
-    const snapshot = (session: DockerBashSession): BashSessionSnapshot => {
+    const snapshot = (session: DockerBashSession, peek = false): BashSessionSnapshot => {
         const stdoutDelta = session.stdout.subarray(session.stdoutOffset).toString("utf8");
         const stderrDelta = session.stderr.subarray(session.stderrOffset).toString("utf8");
-        session.stdoutOffset = session.stdout.length;
-        session.stderrOffset = session.stderr.length;
+        if (!peek) {
+            session.stdoutOffset = session.stdout.length;
+            session.stderrOffset = session.stderr.length;
+        }
         return {
             command: session.command,
             cwd: session.cwd,
@@ -587,7 +589,8 @@ export function createDockerBashContext(
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
             await kill(session);
-            return snapshot(session);
+            // Stopping reports status; it must not swallow unread output.
+            return snapshot(session, true);
         },
         async readSession(sessionId, options = {}) {
             const session = sessions.get(sessionId);
@@ -608,7 +611,7 @@ export function createDockerBashContext(
                     void session.completion.then(finish);
                 });
             }
-            return snapshot(session);
+            return snapshot(session, options.peek === true);
         },
         async run(options) {
             const { signal, ...startOptions } = options;

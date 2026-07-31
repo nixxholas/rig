@@ -61,7 +61,7 @@ export const claudeTaskStopTool = defineTool({
             };
         }
         const sessionId = parseBackgroundTaskId(id);
-        const current = await context.bash.readSession(sessionId);
+        const current = await context.bash.readSession(sessionId, { peek: true });
         if (current === undefined) throw new Error("The background task was not found.");
         if (current.status !== "running") {
             throw new Error("The background task is not running.");

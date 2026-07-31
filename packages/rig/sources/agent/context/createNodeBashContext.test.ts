@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeBashContext } from "./createNodeBashContext.js";
-import { MAX_ACTIVE_BASH_SESSIONS } from "./bashSessionLimits.js";
+import { BASH_SESSION_STOP_GRACE_MS, MAX_ACTIVE_BASH_SESSIONS } from "./bashSessionLimits.js";
 import { createPermissionContext } from "../../permissions/index.js";
 import {
     type ManagedNetworkBlockedRequest,
@@ -271,8 +271,15 @@ describe("createNodeBashContext", () => {
 
         expect(evicting).toBe(MAX_ACTIVE_BASH_SESSIONS + 1);
         expect(start).toHaveBeenCalledTimes(MAX_ACTIVE_BASH_SESSIONS + 1);
-        expect(process.kill).toHaveBeenCalledWith("SIGTERM", { forceAfterMs: 500 });
-        expect(await context.readSession(1)).toBeUndefined();
+        expect(process.kill).toHaveBeenCalledWith("SIGTERM", {
+            forceAfterMs: BASH_SESSION_STOP_GRACE_MS,
+        });
+        // The evicted session stays readable: a model still holding its task id
+        // deserves to learn what became of it rather than get nothing back.
+        expect(await context.readSession(1)).toMatchObject({
+            command: "pending-0",
+            sessionId: 1,
+        });
     });
 
     it.runIf(process.platform !== "win32")(
