@@ -266,6 +266,54 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("creates a workspace without a client-chosen ID and resolves sessions from its cwd", async () => {
+        const projectDirectory = await mkdtemp(join(tmpdir(), "rig-workspace-without-id-"));
+        await execFile("git", ["-C", projectDirectory, "init"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.email", "rig@example.test"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.name", "Rig Test"]);
+        await writeFile(join(projectDirectory, "README.md"), "fixture\n");
+        await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
+        await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
+        const { client, close, socketPath } = await startServer();
+        try {
+            const source = await client.createSession({ cwd: projectDirectory });
+            const created = await requestRawJson(
+                socketPath,
+                `/projects/${source.session.projectId}/workspaces`,
+                {
+                    body: JSON.stringify({ baseRef: "HEAD", name: "Without client ID" }),
+                    method: "POST",
+                },
+            );
+            expect(created.statusCode).toBe(202);
+            const createdBody = JSON.parse(created.body) as {
+                workspace: { id: string; path: string; status: string };
+            };
+            let workspace = createdBody.workspace;
+            await vi.waitFor(
+                async () => {
+                    const candidate = (
+                        await client.listProjectWorkspaces(source.session.projectId)
+                    ).workspaces.find((item) => item.id === workspace.id);
+                    if (candidate === undefined) throw new Error("Expected the workspace.");
+                    workspace = candidate;
+                    expect(workspace.status).toBe("ready");
+                },
+                { interval: 20, timeout: 5_000 },
+            );
+
+            const attached = await client.createSession({ cwd: workspace.path });
+
+            expect(attached.session).toMatchObject({
+                projectId: source.session.projectId,
+                workspaceId: workspace.id,
+            });
+        } finally {
+            await close();
+            await rm(projectDirectory, { force: true, recursive: true });
+        }
+    });
+
     it("archives a project with its chats and restores it when the folder is used again", async () => {
         const store = new InMemorySessionStore();
         const { client, close } = await startServer({ store });

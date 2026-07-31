@@ -76,6 +76,7 @@ import type { GitCommandRunner } from "../git/types.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { folderProjectName, validateProjectName } from "./projectIdentity.js";
+import { workspaceStorageKeysInUse } from "./workspaceStorageKeysInUse.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
 const GIT_PROBE_CONCURRENCY = 4;
@@ -570,6 +571,12 @@ export class ProjectRepository {
         if (commit === undefined) {
             throw new Error("The workspace base reference did not resolve to a commit.");
         }
+        const workspaceRoot = join(this.#stateDirectory, "workspaces", project.storageKey);
+        const unavailableStorageKeys = await workspaceStorageKeysInUse({
+            git: this.#git,
+            projectPath: project.path,
+            workspaceRoot,
+        });
 
         const reservation = this.#mutate((tx) => {
             const result = workspaceReserve(tx, {
@@ -578,10 +585,11 @@ export class ProjectRepository {
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 gitCommonDir,
                 id: requestedId ?? createId(),
+                isStorageKeyUnavailable: (storageKey) =>
+                    unavailableStorageKeys.has(storageKey.toLocaleLowerCase("en-US")),
                 name,
                 now: this.#now(),
-                pathForStorageKey: (storageKey) =>
-                    join(this.#stateDirectory, "workspaces", project.storageKey, storageKey),
+                pathForStorageKey: (storageKey) => join(workspaceRoot, storageKey),
                 projectId,
             });
             const workspace = this.getWorkspace(projectId, result.workspaceId);

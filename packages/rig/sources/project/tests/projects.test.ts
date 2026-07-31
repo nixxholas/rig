@@ -239,6 +239,40 @@ describe("projects", () => {
         expect(() => fixture.store.create({ cwd: ready.path })).toThrow("archived");
     });
 
+    it("skips workspace storage keys already occupied on disk or by a Git branch", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "collision-source");
+        const source = fixture.store.create({ cwd: repository });
+        const project = fixture.store.getProject(source.snapshot().projectId);
+        if (project === undefined) throw new Error("Expected a project.");
+        await mkdir(join(fixture.state, "workspaces", project.storageKey, "workspace"), {
+            recursive: true,
+        });
+        await git(repository, ["branch", "worktree/workspace-2"]);
+
+        const created = await fixture.store.createWorkspace(project.id, {
+            baseRef: "HEAD",
+            name: "Workspace",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            project.id,
+            created.id,
+            (value) => value.status === "ready" || value.status === "failed",
+        );
+
+        expect(ready).toMatchObject({
+            status: "ready",
+            storageKey: "workspace-3",
+        });
+        expect(await git(ready.path, ["branch", "--show-current"])).toBe("worktree/workspace-3");
+        expect(fixture.store.create({ cwd: ready.path }).snapshot()).toMatchObject({
+            projectId: project.id,
+            workspaceId: ready.id,
+        });
+    });
+
     it("keeps archival committed when physical workspace cleanup fails", async () => {
         let failRemoval = false;
         const cleanupErrors: unknown[] = [];

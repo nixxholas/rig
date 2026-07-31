@@ -12,6 +12,7 @@ export interface WorkspaceReserveInput {
     creatorSessionId?: string;
     gitCommonDir: string;
     id: string;
+    isStorageKeyUnavailable?: (storageKey: string) => boolean;
     name: string;
     now: number;
     pathForStorageKey: (storageKey: string) => string;
@@ -63,6 +64,7 @@ export function workspaceReserve(
         });
         const storageKey = reserveUniqueKey(projectStorageKey(input.name), (candidate) => {
             return (
+                input.isStorageKeyUnavailable?.(candidate) === true ||
                 tx
                     .select({ id: projectWorkspaces.id })
                     .from(projectWorkspaces)
