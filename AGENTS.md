@@ -58,6 +58,12 @@ Hardcode each provider's supported model catalog in Rig. The daemon must not dis
 
 Use canonical provider keys throughout the product: `claude` for Anthropic models, `codex` for OpenAI and GPT models, and `grok` for xAI and Grok models. SDK, transport, and implementation names must not leak into provider keys.
 
+## Vendor and common tools
+
+Tools are either vendor tools or common tools. Vendor tools are the provider's own surface: Codex, Claude, Pi, and Grok each have their native names, argument schemas, and model guidance. Common tools belong to Rig itself rather than to any vendor — scheduling, working with workspaces, and the rest of the product's own capabilities. A common tool is exactly the same for every vendor.
+
+There must be one simple place where common tools are assembled into every model, so that a model added in the future picks them up without per-provider work. Keep two entry points, one for vendor tools and one for common tools, and route both from configuration, the session, and everything else through that shared path. Never assemble a model's tools by branching on a provider key or a tool-name list.
+
 ## Early-stage compatibility
 
 Rig is an early-stage product. Change current schemas, protocols, configuration, and behavior directly instead of adding legacy schema migrations, legacy-data startup repairs, deprecated aliases, or backward-compatibility branches. Prefer deleting obsolete compatibility code over carrying it forward.
