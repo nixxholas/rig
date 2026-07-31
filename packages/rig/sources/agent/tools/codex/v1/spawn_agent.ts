@@ -1,5 +1,9 @@
 import { Type } from "@sinclair/typebox";
 
+import {
+    SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+    SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+} from "../../../context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../../types.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
 import { collaborationItemsSchema } from "./collaborationItemsSchema.js";
@@ -34,18 +38,12 @@ export const codexV1SpawnAgentTool = defineTool({
                         "True forks the current thread history into the new agent; false or omitted starts with only the initial prompt.",
                 }),
             ),
-            model: Type.Optional(
-                Type.String({
-                    description:
-                        "Model override for the new agent. Omit unless an explicit override is needed.",
-                }),
-            ),
-            reasoning_effort: Type.Optional(
-                Type.String({
-                    description:
-                        "Reasoning effort override for the new agent. Omit to inherit the parent effort.",
-                }),
-            ),
+            model: Type.String({
+                description: SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+            }),
+            reasoning_effort: Type.String({
+                description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+            }),
             service_tier: Type.Optional(
                 Type.Literal("priority", {
                     description:
@@ -76,8 +74,8 @@ export const codexV1SpawnAgentTool = defineTool({
                 args.agent_type === undefined || args.agent_type.trim().length === 0
                     ? "Delegated task"
                     : args.agent_type.trim(),
-            ...(args.reasoning_effort === undefined ? {} : { effort: args.reasoning_effort }),
-            ...(args.model === undefined ? {} : { modelId: args.model }),
+            effort: args.reasoning_effort,
+            modelId: args.model,
             ...(execution.toolCallId === undefined
                 ? {}
                 : { parentToolCallId: execution.toolCallId }),

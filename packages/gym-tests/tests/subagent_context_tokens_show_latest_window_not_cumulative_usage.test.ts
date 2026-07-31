@@ -30,6 +30,8 @@ describe("subagent context token display", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Run one command, then finish.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "context_observer",
                                 },
                                 id: "spawn-context-observer",

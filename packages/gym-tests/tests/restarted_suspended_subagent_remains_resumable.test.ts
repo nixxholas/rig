@@ -44,6 +44,8 @@ describe("restarted suspended subagent", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Audit until explicitly resumed after restart.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "restart_audit",
                                 },
                                 id: "spawn-restart-audit",

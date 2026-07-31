@@ -1,6 +1,10 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import { resolveManagedSubagent } from "../../context/resolveManagedSubagent.js";
+import {
+    DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
+    MAX_SUBAGENT_WAIT_TIMEOUT_MS,
+} from "../../context/subagentWaitTimeouts.js";
 import { waitForManagedSubagent } from "../../context/waitForManagedSubagent.js";
 import { defineTool } from "../../types.js";
 import { readSessionWithProgress } from "../../../tools/utils/readSessionWithProgress.js";
@@ -53,6 +57,9 @@ const agentTaskSchema = Type.Object({
     task_type: Type.Literal("local_agent"),
 });
 
+/** A shell task or workflow can be checked cheaply; only agents get the long default wait. */
+const DEFAULT_TASK_OUTPUT_TIMEOUT_MS = 30_000;
+
 const taskOutputReturnSchema = Type.Object({
     retrieval_status: Type.Union([
         Type.Literal("not_ready"),
@@ -66,7 +73,7 @@ export const claudeTaskOutputTool = defineTool({
     name: "TaskOutput",
     label: "TaskOutput",
     description:
-        "Read output from a running or completed background shell task, agent, or workflow.",
+        "Read output from a running or completed background shell task, agent, or workflow. When the task is an agent, omit timeout so the wait lasts a full hour: a background agent that finishes notifies you anyway, even while you are idle, so repeated short waits only spend another full model turn to learn nothing.",
     arguments: Type.Object({
         task_id: Type.String({ description: "The background task identifier." }),
         block: Type.Optional(
@@ -77,9 +84,8 @@ export const claudeTaskOutputTool = defineTool({
         ),
         timeout: Type.Optional(
             Type.Number({
-                default: 30_000,
-                description: "Maximum wait in milliseconds.",
-                maximum: 600_000,
+                description: `Maximum wait in milliseconds. Defaults to ${DEFAULT_TASK_OUTPUT_TIMEOUT_MS} for shell tasks and workflows, and to ${DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS} (one hour) for agents. Never use it as a polling interval on an agent.`,
+                maximum: MAX_SUBAGENT_WAIT_TIMEOUT_MS,
                 minimum: 0,
             }),
         ),
@@ -89,7 +95,7 @@ export const claudeTaskOutputTool = defineTool({
     shouldReviewInAutoMode: () => false,
     steerable: true,
     execute: async (
-        { block = true, task_id, timeout = 30_000 },
+        { block = true, task_id, timeout },
         context,
         execution,
     ): Promise<Static<typeof taskOutputReturnSchema>> => {
@@ -99,7 +105,7 @@ export const claudeTaskOutputTool = defineTool({
                 ? await waitForManagedSubagent(
                       context.subagents,
                       task_id,
-                      timeout,
+                      timeout ?? DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
                       execution.signal,
                   )
                 : listedAgent;
@@ -124,7 +130,7 @@ export const claudeTaskOutputTool = defineTool({
             let run = context.workflows?.get(runId);
             if (run === undefined) throw new Error("The workflow run was not found.");
             if (block && run.status === "running") {
-                const deadline = Date.now() + timeout;
+                const deadline = Date.now() + (timeout ?? DEFAULT_TASK_OUTPUT_TIMEOUT_MS);
                 while (run.status === "running" && Date.now() < deadline) {
                     if (execution.signal?.aborted)
                         throw new Error("Waiting for the workflow was cancelled.");
@@ -162,7 +168,7 @@ export const claudeTaskOutputTool = defineTool({
             ...(execution.onProgress === undefined ? {} : { onProgress: execution.onProgress }),
             sessionId,
             ...(execution.signal === undefined ? {} : { signal: execution.signal }),
-            waitMs: block ? timeout : 0,
+            waitMs: block ? (timeout ?? DEFAULT_TASK_OUTPUT_TIMEOUT_MS) : 0,
         });
         if (snapshot === undefined) {
             throw new Error("The background task was not found.");

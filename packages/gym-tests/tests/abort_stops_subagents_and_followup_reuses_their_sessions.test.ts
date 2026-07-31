@@ -32,6 +32,8 @@ describe("aborting delegated work and reusing its session", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Start the child process and wait.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "reusable_child",
                                 },
                                 id: "spawn-reusable-child",

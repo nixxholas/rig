@@ -63,6 +63,10 @@ export function createAvailableModelsInstructions(
                     return `- ${model.providerId}: ${model.name} (\`${model.id}\`) — effort levels: ${efforts}`;
                 }),
                 "",
+                "Every subagent you start needs an explicit model and effort; nothing is inherited. Pick both for the task: the model's default effort, or a lower one, is right for research, review, and other bounded work, and xhigh, max, or ultra is only for work the user asked to run at that effort.",
+                "",
+                "A background subagent notifies you when it finishes, even while you are idle, so never poll it. When there is nothing to do but wait, wait once for a long time — an hour is the normal wait — or simply end your turn. Every wait that times out costs another full model turn over your whole context and tells you nothing.",
+                "",
                 "A request that gives you only a bare model or family name—such as Codex, GPT, Opus, or Sonnet—usually means they want you to run that model somehow. When the request can be handled by a subagent, spawn a subagent with the closest available model and provider. This is usually safe to do without asking for confirmation.",
             ].join("\n"),
         );

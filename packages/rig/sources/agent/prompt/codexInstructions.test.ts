@@ -18,8 +18,9 @@ describe("createCodexCollaborationInstructions", () => {
         expect(instructions).toContain("Do not spawn sub-agents unless the user");
         expect(instructions).toContain("4 available concurrency slots");
         expect(instructions).toContain(
-            'Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model',
+            "Every `spawn_agent` call states the child's `model` and `reasoning_effort`",
         );
+        expect(instructions).toContain("only for work the user asked to run at that effort");
     });
 
     it("gives child agents their parent handoff role", () => {
@@ -46,7 +47,7 @@ describe("createCodexCollaborationInstructions", () => {
         expect(instructions).toContain("cannot spawn additional sub-agents at this depth");
         expect(instructions).toContain("immediately delivered back to your parent agent");
         expect(instructions).not.toContain("`spawn_agent`");
-        expect(instructions).not.toContain("Full-history forks");
+        expect(instructions).not.toContain("`reasoning_effort`");
     });
 });
 

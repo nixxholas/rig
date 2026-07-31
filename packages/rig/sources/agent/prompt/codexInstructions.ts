@@ -90,9 +90,11 @@ All agents share the same directory. In detail:
 - All agents use the same current working directory.
 - As a result, edits made by one agent are immediately visible to all other agents.
 
-There are ${options.maxActive} available concurrency slots, meaning that up to ${options.maxActive} agents can be active at once, including you.`;
+There are ${options.maxActive} available concurrency slots, meaning that up to ${options.maxActive} agents can be active at once, including you.
+
+A background agent notifies you when it finishes, even while you are idle, so never poll one. When there is nothing to do but wait, call \`wait_agent\` once without \`timeout_ms\`, which waits an hour, or simply end your turn. Every wait that times out costs another full model turn over your whole context and tells you nothing.`;
     const modelOverrideHint =
-        'Full-history forks (`fork_turns` omitted or `"all"`) inherit the parent model and reasoning effort and do not accept overrides. Only set `model` or `reasoning_effort` when explicitly requested by the user, applicable `AGENTS.md` instructions, or skill instructions; when doing so, set `fork_turns` to `"none"` or a positive integer string.';
+        "Every `spawn_agent` call states the child's `model` and `reasoning_effort`; nothing is inherited. Choose both for the task at hand: the model's default effort, or a lower level, suits research, review, and other bounded work, and `xhigh`, `max`, or `ultra` is only for work the user asked to run at that effort.";
     const policy =
         options.effort === "ultra"
             ? "Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. Use sub-agents when parallel work would materially improve speed or quality. This mode remains active until a later multi-agent mode developer message changes it."

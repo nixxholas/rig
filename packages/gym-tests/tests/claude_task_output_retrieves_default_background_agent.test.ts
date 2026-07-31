@@ -32,6 +32,8 @@ describe("Claude background agent task output", () => {
                             {
                                 arguments: {
                                     description: "Inspect default background behavior",
+                                    effort: "medium",
+                                    model: "anthropic/sonnet-5",
                                     prompt: "Return CLAUDE_BACKGROUND_AGENT_RESULT only.",
                                 },
                                 id: "launch-claude-background-agent",

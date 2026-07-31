@@ -108,6 +108,8 @@ describe("agent message delivery to an idle target", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: `Wake the idle parent using its exact agent ID ${parentAgentId}.`,
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "wake_idle_parent",
                                 },
                                 id: "spawn-wakeup-agent",

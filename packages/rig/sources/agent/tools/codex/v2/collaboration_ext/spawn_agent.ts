@@ -1,5 +1,9 @@
 import { Type } from "@sinclair/typebox";
 
+import {
+    SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+    SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+} from "../../../../context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../../../types.js";
 import { humanizeTaskName } from "../../impl/humanizeTaskName.js";
 import { requireSubagentContext } from "../../impl/requireSubagentContext.js";
@@ -29,7 +33,7 @@ Spawn a background subagent with an explicit provider and model.`,
                 description: "Provider ID for the new agent.",
             }),
             model: Type.String({
-                description: "Model ID for the new agent.",
+                description: SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
             }),
             fork_turns: Type.Optional(
                 Type.String({
@@ -37,12 +41,9 @@ Spawn a background subagent with an explicit provider and model.`,
                         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns.",
                 }),
             ),
-            reasoning_effort: Type.Optional(
-                Type.String({
-                    description:
-                        "Reasoning effort override for the new agent. Omit to use the model default.",
-                }),
-            ),
+            reasoning_effort: Type.String({
+                description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+            }),
             service_tier: Type.Optional(
                 Type.Literal("priority", {
                     description:
@@ -80,7 +81,7 @@ Spawn a background subagent with an explicit provider and model.`,
                     ? { contextMessages: selectCodexForkMessages(parentMessages, fork.lastNTurns) }
                     : {}),
                 description: humanizeTaskName(task_name),
-                ...(reasoning_effort === undefined ? {} : { effort: reasoning_effort }),
+                effort: reasoning_effort,
                 modelId: model,
                 providerId: provider,
                 ...(service_tier === "priority" ? { serviceTier: "fast" as const } : {}),

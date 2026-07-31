@@ -69,6 +69,8 @@ describe("Agent tool", () => {
                 {
                     context: "task",
                     description: "Go deeper",
+                    effort: "medium",
+                    model: "anthropic/sonnet-5",
                     prompt: "Start another agent.",
                 },
                 harness.context,
@@ -77,7 +79,7 @@ describe("Agent tool", () => {
         ).rejects.toThrow("maximum subagent depth");
     });
 
-    it("allows the session manager to infer a model from the provider", async () => {
+    it("forwards the requested provider to the session manager", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
             output: "The subagent is running in the background.",
@@ -101,6 +103,8 @@ describe("Agent tool", () => {
             {
                 context: "task",
                 description: "Inspect the tests",
+                effort: "medium",
+                model: "anthropic/sonnet-5",
                 prompt: "Review the test suite.",
                 provider: "claude",
             },
@@ -138,6 +142,8 @@ describe("Agent tool", () => {
                 {
                     context: "task",
                     description: "Inspect the tests",
+                    effort: "medium",
+                    model: "anthropic/sonnet-5",
                     prompt: "Review the test suite.",
                 },
                 harness.context,
@@ -181,6 +187,8 @@ describe("Agent tool", () => {
                 {
                     context: "task",
                     description: "Run the check",
+                    effort: "medium",
+                    model: "anthropic/sonnet-5",
                     prompt: "Run the delegated check.",
                     run_in_background: false,
                 },

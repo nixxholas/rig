@@ -47,6 +47,8 @@ describe("background subagent completion routes to its parent", () => {
                                     fork_turns: "none",
                                     message:
                                         "Inspect the delegated workflow and return the deterministic child result.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "inspect_workspace",
                                 },
                                 id: "spawn-inspection-agent",

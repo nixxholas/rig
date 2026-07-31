@@ -32,6 +32,8 @@ describe("Escape stops delegated work with the parent", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Audit until the parent continues.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "paused_audit",
                                 },
                                 id: "spawn-paused-audit",

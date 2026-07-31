@@ -33,6 +33,8 @@ describe("Claude SendMessage to a completed agent", () => {
                             {
                                 arguments: {
                                     description: "Reusable completed agent",
+                                    effort: "medium",
+                                    model: "anthropic/sonnet-5",
                                     prompt: "Return FIRST_AGENT_COMPLETION only.",
                                 },
                                 id: "launch-reusable-agent",

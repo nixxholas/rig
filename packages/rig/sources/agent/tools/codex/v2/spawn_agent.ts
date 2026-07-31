@@ -1,5 +1,9 @@
 import { Type } from "@sinclair/typebox";
 
+import {
+    SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+    SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+} from "../../../context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../../types.js";
 import { humanizeTaskName } from "../impl/humanizeTaskName.js";
 import { parseCodexForkTurns } from "./impl/parseCodexForkTurns.js";
@@ -34,18 +38,12 @@ Spawn a background subagent for a concrete, bounded task. The new agent shares t
                         "Optional number of turns to fork. Defaults to `all`. Use `none`, `all`, or a positive integer string such as `3` to fork only the most recent turns.",
                 }),
             ),
-            model: Type.Optional(
-                Type.String({
-                    description:
-                        "Child model ID. The provider is inferred from recent successful use, the current provider, or the first available match.",
-                }),
-            ),
-            reasoning_effort: Type.Optional(
-                Type.String({
-                    description:
-                        "Reasoning effort override for the new agent. Omit to inherit the parent effort.",
-                }),
-            ),
+            model: Type.String({
+                description: `${SUBAGENT_MODEL_ARGUMENT_DESCRIPTION} The provider is inferred from recent successful use, the current provider, or the first available match.`,
+            }),
+            reasoning_effort: Type.String({
+                description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+            }),
         },
         { additionalProperties: false },
     ),
@@ -68,8 +66,8 @@ Spawn a background subagent for a concrete, bounded task. The new agent shares t
                     : {}),
                 description: humanizeTaskName(task_name),
                 ...(subagents.encryptedMessages === true ? { encryptedPrompt: message } : {}),
-                ...(reasoning_effort === undefined ? {} : { effort: reasoning_effort }),
-                ...(model === undefined ? {} : { modelId: model }),
+                effort: reasoning_effort,
+                modelId: model,
                 ...(execution.toolCallId === undefined
                     ? {}
                     : { parentToolCallId: execution.toolCallId }),

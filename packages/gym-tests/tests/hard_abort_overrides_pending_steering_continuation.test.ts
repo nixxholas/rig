@@ -43,6 +43,8 @@ describe("hard abort during pending steering continuation", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Run the blocking child command.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "blocking_child",
                                 },
                                 id: "spawn-blocking-child",

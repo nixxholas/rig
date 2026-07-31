@@ -28,6 +28,8 @@ describe("user steering during a subagent wait", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Stay active until the parent changes direction.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "long_running_child",
                                 },
                                 id: "spawn-long-running-child",

@@ -10,7 +10,7 @@ afterEach(async () => {
 });
 
 describe("subagent tool call model display", () => {
-    it("shows explicit and inherited selected models in live call rows", async () => {
+    it("shows each subagent's selected model in live call rows", async () => {
         const releaseChildren = deferred<void>();
         let parentSessionId: string | undefined;
         const gym = await createGym({
@@ -26,11 +26,12 @@ describe("subagent tool call model display", () => {
                             {
                                 arguments: {
                                     fork_turns: "none",
-                                    message: "Wait, then return EXPLICIT_CHILD_DONE.",
+                                    message: "Wait, then return FIRST_CHILD_DONE.",
                                     model: "openai/gym",
-                                    task_name: "explicit_child",
+                                    reasoning_effort: "medium",
+                                    task_name: "first_child",
                                 },
-                                id: "spawn-explicit-child",
+                                id: "spawn-first-child",
                                 name: "spawn_agent",
                                 namespace: "collaboration",
                                 type: "toolCall",
@@ -38,10 +39,12 @@ describe("subagent tool call model display", () => {
                             {
                                 arguments: {
                                     fork_turns: "none",
-                                    message: "Wait, then return INHERITED_CHILD_DONE.",
-                                    task_name: "inherited_child",
+                                    message: "Wait, then return SECOND_CHILD_DONE.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "low",
+                                    task_name: "second_child",
                                 },
-                                id: "spawn-inherited-child",
+                                id: "spawn-second-child",
                                 name: "spawn_agent",
                                 namespace: "collaboration",
                                 type: "toolCall",
@@ -55,9 +58,9 @@ describe("subagent tool call model display", () => {
                     return {
                         content: [
                             {
-                                text: prompt.includes("EXPLICIT")
-                                    ? "EXPLICIT_CHILD_DONE"
-                                    : "INHERITED_CHILD_DONE",
+                                text: prompt.includes("FIRST")
+                                    ? "FIRST_CHILD_DONE"
+                                    : "SECOND_CHILD_DONE",
                                 type: "text",
                             },
                         ],
@@ -73,7 +76,7 @@ describe("subagent tool call model display", () => {
         });
         running.add(gym);
 
-        gym.terminal.type("Start explicit and inherited model children.");
+        gym.terminal.type("Start two children with selected models.");
         gym.terminal.press("enter");
 
         const spawned = await gym.terminal.waitUntil(
@@ -83,14 +86,14 @@ describe("subagent tool call model display", () => {
             "both model-labelled subagent calls",
             30_000,
         );
-        expect(spawned.text).toContain("Explicit child · Gym");
-        expect(spawned.text).toContain("Inherited child · Gym");
+        expect(spawned.text).toContain("First child · Gym");
+        expect(spawned.text).toContain("Second child · Gym");
 
         releaseChildren.resolve();
         await gym.terminal.waitUntil(
             (snapshot) =>
-                snapshot.text.includes('"Explicit child" completed in') &&
-                snapshot.text.includes('"Inherited child" completed in'),
+                snapshot.text.includes('"First child" completed in') &&
+                snapshot.text.includes('"Second child" completed in'),
             "both children to complete",
             30_000,
         );

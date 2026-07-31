@@ -1,5 +1,9 @@
 import { Type } from "@sinclair/typebox";
 
+import {
+    SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+    SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+} from "../../context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../types.js";
 
 const completedAgentResultSchema = Type.Object({
@@ -37,18 +41,12 @@ export const claudeAgentTool = defineTool({
         prompt: Type.String({
             description: "Complete instructions for the subagent.",
         }),
-        effort: Type.Optional(
-            Type.String({
-                description:
-                    "Child effort level. Must be one of the allowed effort levels shown in the system prompt for the selected model.",
-            }),
-        ),
-        model: Type.Optional(
-            Type.String({
-                description:
-                    "Child model ID. The provider is inferred from recent successful use, the current provider, or the first available match.",
-            }),
-        ),
+        effort: Type.String({
+            description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+        }),
+        model: Type.String({
+            description: `${SUBAGENT_MODEL_ARGUMENT_DESCRIPTION} The provider is inferred from recent successful use, the current provider, or the first available match.`,
+        }),
         provider: Type.Optional(
             Type.String({
                 description:
@@ -83,13 +81,13 @@ export const claudeAgentTool = defineTool({
         const result = await context.subagents.spawn(
             {
                 description,
-                ...(effort === undefined ? {} : { effort }),
+                effort,
                 ...(run_in_background === true ? { background: true } : {}),
                 contextMode,
                 ...(contextMode === "parent" && execution.messages !== undefined
                     ? { contextMessages: execution.messages.slice(0, -1) }
                     : {}),
-                ...(model === undefined ? {} : { modelId: model }),
+                modelId: model,
                 prompt,
                 ...(provider === undefined ? {} : { providerId: provider }),
                 ...(execution.toolCallId !== undefined

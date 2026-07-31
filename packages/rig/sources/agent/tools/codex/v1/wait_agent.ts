@@ -1,5 +1,10 @@
 import { Type } from "@sinclair/typebox";
 
+import {
+    DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
+    MAX_SUBAGENT_WAIT_TIMEOUT_MS,
+    MIN_SUBAGENT_WAIT_TIMEOUT_MS,
+} from "../../../context/subagentWaitTimeouts.js";
 import { defineTool } from "../../../types.js";
 import { codexAgentStatusSchema } from "../impl/codexAgentStatusSchema.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
@@ -12,7 +17,8 @@ export const codexV1WaitAgentTool = defineTool({
         name: "multi_agent_v1",
         description: "Tools for spawning and managing sub-agents.",
     },
-    description: "Wait for any selected agent to reach a final status.",
+    description:
+        "Wait for any selected agent to reach a final status. Omit timeout_ms so the wait lasts a full hour. A background agent that finishes notifies you anyway, even while you are idle, so repeated short waits only spend another full model turn to learn nothing.",
     arguments: Type.Object(
         {
             targets: Type.Array(Type.String(), {
@@ -21,10 +27,9 @@ export const codexV1WaitAgentTool = defineTool({
             }),
             timeout_ms: Type.Optional(
                 Type.Number({
-                    description:
-                        "Timeout in milliseconds. Defaults to 30000, min 10000, max 3600000.",
-                    minimum: 10_000,
-                    maximum: 3_600_000,
+                    description: `Timeout in milliseconds. Defaults to ${DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS} (one hour), which is almost always right; min ${MIN_SUBAGENT_WAIT_TIMEOUT_MS}, max ${MAX_SUBAGENT_WAIT_TIMEOUT_MS}. Never use it as a polling interval.`,
+                    minimum: MIN_SUBAGENT_WAIT_TIMEOUT_MS,
+                    maximum: MAX_SUBAGENT_WAIT_TIMEOUT_MS,
                 }),
             ),
         },
@@ -38,7 +43,7 @@ export const codexV1WaitAgentTool = defineTool({
     execute: async ({ targets, timeout_ms }, context, execution) => {
         const subagents = requireSubagentContext(context);
         const targetSet = new Set(targets);
-        const timeout = timeout_ms ?? 30_000;
+        const timeout = timeout_ms ?? DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS;
         const deadline = Date.now() + timeout;
         while (true) {
             const remaining = Math.max(0, deadline - Date.now());

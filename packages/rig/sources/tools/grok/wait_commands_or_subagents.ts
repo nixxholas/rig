@@ -4,6 +4,7 @@ import { Type } from "@sinclair/typebox";
 import {
     DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS,
     MAX_SUBAGENT_WAIT_TIMEOUT_MS,
+    MIN_SUBAGENT_WAIT_TIMEOUT_MS,
 } from "../../agent/context/subagentWaitTimeouts.js";
 import { defineTool } from "../../agent/types.js";
 import { waitForGrokTasks } from "./waitForGrokTasks.js";
@@ -12,7 +13,7 @@ export const grokWaitCommandsOrSubagentsTool = defineTool({
     name: "wait_commands_or_subagents",
     label: "wait_commands_or_subagents",
     description:
-        "Wait until any or all specified background commands or subagents reach a terminal state.",
+        "Wait until any or all specified background commands or subagents reach a terminal state. Omit timeout_ms so the wait lasts a full hour. A background subagent that finishes notifies you anyway, even while you are idle, so repeated short waits only spend another full model turn to learn nothing. Use get_command_or_subagent_output for a single non-blocking peek.",
     arguments: Type.Object({
         task_ids: Type.Array(Type.String(), {
             description: "Task IDs to wait for.",
@@ -24,9 +25,9 @@ export const grokWaitCommandsOrSubagentsTool = defineTool({
         }),
         timeout_ms: Type.Optional(
             Type.Integer({
-                description: `Maximum wait in milliseconds. Defaults to ${DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS}, max ${MAX_SUBAGENT_WAIT_TIMEOUT_MS}.`,
+                description: `Maximum wait in milliseconds. Defaults to ${DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS} (one hour), which is almost always right; min ${MIN_SUBAGENT_WAIT_TIMEOUT_MS}, max ${MAX_SUBAGENT_WAIT_TIMEOUT_MS}. Never use it as a polling interval.`,
                 maximum: MAX_SUBAGENT_WAIT_TIMEOUT_MS,
-                minimum: 0,
+                minimum: MIN_SUBAGENT_WAIT_TIMEOUT_MS,
             }),
         ),
     }),

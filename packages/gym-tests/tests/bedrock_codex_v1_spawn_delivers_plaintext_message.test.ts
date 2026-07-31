@@ -46,7 +46,11 @@ describe("Bedrock Codex v1 collaboration", () => {
                     return {
                         content: [
                             {
-                                arguments: { message: task },
+                                arguments: {
+                                    message: task,
+                                    model: "openai/gpt-5.6-sol",
+                                    reasoning_effort: "medium",
+                                },
                                 id: "spawn-bedrock-v1-audit",
                                 name: "spawn_agent",
                                 namespace: "multi_agent_v1",

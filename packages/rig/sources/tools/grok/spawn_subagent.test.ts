@@ -17,6 +17,8 @@ describe("grokSpawnSubagentTool", () => {
                 {
                     background: true,
                     description: "Fix the login bug.",
+                    effort: "medium",
+                    model: "xai/grok-build",
                     prompt: "Investigate and fix the login bug.",
                 },
             ),
@@ -31,12 +33,17 @@ describe("grokSpawnSubagentTool", () => {
                     subagent_id: "agent-1",
                     task_name: "delegated_task",
                 },
-                { description: "  ", prompt: "Handle the delegated task." },
+                {
+                    description: "  ",
+                    effort: "medium",
+                    model: "xai/grok-build",
+                    prompt: "Handle the delegated task.",
+                },
             ),
         ).toBe("Started a subagent: Delegated task.");
     });
 
-    it("forwards the requested effort to the managed subagent", async () => {
+    it("forwards the requested model and effort to the managed subagent", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
             output: "Complete.",
@@ -61,6 +68,7 @@ describe("grokSpawnSubagentTool", () => {
                 background: false,
                 description: "Inspect code",
                 effort: "low",
+                model: "xai/grok-build",
                 prompt: "Inspect the implementation.",
             },
             harness.context,
@@ -68,7 +76,11 @@ describe("grokSpawnSubagentTool", () => {
         );
 
         expect(spawn).toHaveBeenCalledWith(
-            expect.objectContaining({ effort: "low", parentToolCallId: "tool-1" }),
+            expect.objectContaining({
+                effort: "low",
+                modelId: "xai/grok-build",
+                parentToolCallId: "tool-1",
+            }),
             undefined,
         );
     });
@@ -97,6 +109,8 @@ describe("grokSpawnSubagentTool", () => {
                 {
                     background: false,
                     description: "Return nothing",
+                    effort: "medium",
+                    model: "xai/grok-build",
                     prompt: "Finish without returning text.",
                 },
                 harness.context,

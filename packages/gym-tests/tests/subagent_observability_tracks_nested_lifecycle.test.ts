@@ -40,6 +40,8 @@ describe("subagent observability across a nested lifecycle", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Spawn the nested observer, then wait for release.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "top_observer",
                                 },
                                 id: "spawn-top-observer",
@@ -60,6 +62,8 @@ describe("subagent observability across a nested lifecycle", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Wait for release, then return NESTED_OBSERVER_DONE.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "nested_observer",
                                 },
                                 id: "spawn-nested-observer",

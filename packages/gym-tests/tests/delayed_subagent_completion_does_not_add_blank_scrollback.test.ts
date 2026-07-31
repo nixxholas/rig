@@ -53,6 +53,8 @@ describe("delayed subagent completion does not add blank scrollback", () => {
                                     fork_turns: "none",
                                     message:
                                         "Wait until released, then report FIRST_CHILD_COMPLETE.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "first_delayed_audit",
                                 },
                                 id: "spawn-first-delayed-audit",
@@ -65,6 +67,8 @@ describe("delayed subagent completion does not add blank scrollback", () => {
                                     fork_turns: "none",
                                     message:
                                         "Wait until released, then report SECOND_CHILD_COMPLETE.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "second_delayed_audit",
                                 },
                                 id: "spawn-second-delayed-audit",

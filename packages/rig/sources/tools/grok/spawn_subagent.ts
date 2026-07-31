@@ -1,6 +1,10 @@
 /* Grok Build tool contract, modified for Rig. Copyright 2023-2026 SpaceXAI; Apache-2.0. */
 import { Type } from "@sinclair/typebox";
 
+import {
+    SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+    SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+} from "../../agent/context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../agent/types.js";
 import { humanizeTaskName } from "../../agent/tools/codex/impl/humanizeTaskName.js";
 import { requireSubagentContext } from "../../agent/tools/codex/impl/requireSubagentContext.js";
@@ -13,12 +17,12 @@ export const grokSpawnSubagentTool = defineTool({
     arguments: Type.Object({
         prompt: Type.String({ description: "The full task prompt for the subagent to execute." }),
         description: Type.String({ description: "Short description of the task in 3-5 words." }),
-        effort: Type.Optional(
-            Type.String({
-                description:
-                    "Child effort level. Must be one of the allowed effort levels shown in the system prompt for the inherited model.",
-            }),
-        ),
+        model: Type.String({
+            description: SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+        }),
+        effort: Type.String({
+            description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+        }),
         subagent_type: Type.Optional(
             Type.String({
                 description:
@@ -39,12 +43,17 @@ export const grokSpawnSubagentTool = defineTool({
         output: Type.Optional(Type.String()),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: async ({ background = true, description, effort, prompt }, context, execution) => {
+    execute: async (
+        { background = true, description, effort, model, prompt },
+        context,
+        execution,
+    ) => {
         const result = await requireSubagentContext(context).spawn(
             {
                 background,
                 description,
-                ...(effort === undefined ? {} : { effort }),
+                effort,
+                modelId: model,
                 prompt,
                 taskName: toTaskName(description),
                 ...(execution.toolCallId === undefined

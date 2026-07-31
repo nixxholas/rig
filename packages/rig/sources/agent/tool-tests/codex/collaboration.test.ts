@@ -168,6 +168,52 @@ describe("Codex collaboration tools", () => {
         expect(codexWaitAgentTool.steerable).toBe(true);
     });
 
+    it("waits an hour by default and refuses a short polling interval", async () => {
+        const harness = createJustBashToolHarness();
+        let requestedTimeout: number | undefined;
+        harness.context.subagents = {
+            canSpawn: true,
+            depth: 0,
+            followUp: vi.fn(),
+            interrupt: vi.fn(),
+            list: vi.fn(() => []),
+            maxDepth: 3,
+            spawn: vi.fn(),
+            wait: vi.fn(async (timeoutMs?: number) => {
+                requestedTimeout = timeoutMs;
+                return { agents: [], timedOut: true };
+            }),
+        };
+
+        await codexWaitAgentTool.execute({}, harness.context, {});
+
+        expect(requestedTimeout).toBe(3_600_000);
+        expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 30_000 })).toBe(false);
+        expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 60_000 })).toBe(true);
+    });
+
+    it("requires an explicit model and reasoning effort for every spawned agent", () => {
+        const spawnArguments = {
+            fork_turns: "none",
+            message: "Inspect the implementation.",
+            task_name: "inspect_code",
+        };
+
+        expect(Value.Check(codexSpawnAgentTool.arguments, spawnArguments)).toBe(false);
+        expect(
+            Value.Check(codexSpawnAgentTool.arguments, {
+                ...spawnArguments,
+                model: "openai/gpt-5.6-sol",
+                reasoning_effort: "medium",
+            }),
+        ).toBe(true);
+        expect(
+            Value.Check(codexV1SpawnAgentTool.arguments, {
+                message: "Inspect the implementation.",
+            }),
+        ).toBe(false);
+    });
+
     it("spawns a plaintext v2 subagent through an explicit non-GPT provider", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async (_request: SpawnSubagentRequest, _signal?: AbortSignal) => ({
@@ -308,6 +354,8 @@ describe("Codex collaboration tools", () => {
             {
                 fork_turns: "none",
                 message: "opaque-spawn-ciphertext",
+                model: "openai/gpt-5.6-sol",
+                reasoning_effort: "medium",
                 task_name: "inspect_code",
             },
             harness.context,
@@ -372,6 +420,8 @@ describe("Codex collaboration tools", () => {
                     agent_type: "worker",
                     fork_context: false,
                     message: "Inspect the Bedrock implementation.",
+                    model: "openai/gpt-5.6-sol",
+                    reasoning_effort: "medium",
                     service_tier: "priority",
                 },
                 harness.context,

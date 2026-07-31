@@ -54,6 +54,8 @@ describe("Codex encrypted collaboration", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: ciphertext,
+                                    model: "openai/gpt-5.6-sol",
+                                    reasoning_effort: "medium",
                                     task_name: "encrypted_audit",
                                 },
                                 id: "spawn-encrypted-audit",

@@ -37,6 +37,7 @@ describe("parent session usage", () => {
                                     message: "Complete the cross-provider audit.",
                                     model: "anthropic/sonnet-5",
                                     provider: "claude",
+                                    reasoning_effort: "medium",
                                     task_name: "usage_heavy_child",
                                 },
                                 id: "spawn-usage-heavy-child",

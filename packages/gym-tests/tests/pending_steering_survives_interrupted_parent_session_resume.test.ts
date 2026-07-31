@@ -51,6 +51,8 @@ describe("pending steering from an aborted parent run across session resume", ()
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Keep auditing until the parent session resumes.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "resume_boundary_audit",
                                 },
                                 id: "spawn-resume-boundary-audit",

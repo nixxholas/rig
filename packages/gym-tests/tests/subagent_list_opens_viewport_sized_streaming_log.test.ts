@@ -34,6 +34,8 @@ describe("subagent live log", () => {
                                 arguments: {
                                     fork_turns: "none",
                                     message: "Stream a long inspection log.",
+                                    model: "openai/gym",
+                                    reasoning_effort: "medium",
                                     task_name: "stream_log",
                                 },
                                 id: "spawn-stream-log",
