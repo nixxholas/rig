@@ -62,6 +62,8 @@ Use canonical provider keys throughout the product: `claude` for Anthropic model
 
 Rig is an early-stage product. Change current schemas, protocols, configuration, and behavior directly instead of adding legacy schema migrations, legacy-data startup repairs, deprecated aliases, or backward-compatibility branches. Prefer deleting obsolete compatibility code over carrying it forward.
 
+Never edit an existing database migration retroactively. Once a migration exists, its contents and version are immutable because a released Rig may already have applied it. Put every subsequent schema change in a new migration. When the early-stage policy calls for discarding the old schema instead of migrating it, advance the database generation and reset it explicitly rather than rewriting an existing migration.
+
 ## Reference sources
 
 Coding-agent source trees are located at `~/Developer/coding-assistant-sources`. Use the Codex and Claude Code sources there as the implementation reference whenever adding, comparing, or updating provider-aligned behavior. Adapt their strongest ideas to rig's simpler product model instead of copying complexity that does not improve the experience.
