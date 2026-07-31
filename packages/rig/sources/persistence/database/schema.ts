@@ -186,6 +186,7 @@ export const sessionEvents = sqliteTable(
     },
     (table) => [
         index("session_events_session_seq").on(table.sessionId, table.seq),
+        index("session_events_session_type_seq").on(table.sessionId, table.type, table.seq),
         index("session_events_run_id").on(table.sessionId, table.runId, table.seq),
         index("session_events_message_id").on(table.sessionId, table.messageId, table.seq),
         index("session_events_tool_call_id").on(table.sessionId, table.toolCallId, table.seq),

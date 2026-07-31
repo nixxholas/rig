@@ -6,6 +6,7 @@ import type {
     ChangeServiceTierRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    GetTimelineRequest,
     GitRepositoryFacts,
     ModelCatalog,
     Project,
@@ -16,6 +17,8 @@ import type {
     SessionAgentMetadata,
     SessionSummary,
     SubagentSummary,
+    TimelineAgent,
+    TimelineScope,
 } from "../protocol/index.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
@@ -47,7 +50,9 @@ import {
     openSessionDatabase,
     type SessionDatabase,
 } from "../persistence/database/openSessionDatabase.js";
+import { buildTimeline, isTimelineEventType } from "../timeline/index.js";
 import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
+import { timelineAgentSource } from "./impl/timelineAgentSource.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -445,6 +450,36 @@ export class InMemorySessionStore implements SessionStore {
 
     listSecrets(): readonly SecretSummary[] {
         return this.#secrets.references();
+    }
+
+    timeline(request: GetTimelineRequest): readonly TimelineAgent[] {
+        const sessions = [...this.#sessions.values()].filter((session) =>
+            this.#inTimelineScope(session, request.scope),
+        );
+        const agents = sessions
+            .map((session) => timelineAgentSource(session))
+            .filter((agent) => (request.includeArchived ?? false) || !agent.archived);
+        const covered = new Set(agents.map((agent) => agent.sessionId));
+        const events = sessions
+            .filter((session) => covered.has(session.id))
+            .flatMap((session) =>
+                session.events.all().filter((event) => isTimelineEventType(event.type)),
+            );
+        return buildTimeline(agents, events, {
+            ...(request.since === undefined ? {} : { since: request.since }),
+        });
+    }
+
+    #inTimelineScope(session: InMemorySession, scope: TimelineScope): boolean {
+        const summary = session.summary();
+        if (scope.kind === "project") return summary.projectId === scope.projectId;
+        if (scope.kind === "workspace") return summary.workspaceId === scope.workspaceId;
+        let candidateId: string | undefined = session.id;
+        while (candidateId !== undefined) {
+            if (candidateId === scope.sessionId) return true;
+            candidateId = this.#sessions.get(candidateId)?.agentMetadata().parentSessionId;
+        }
+        return false;
     }
 
     registerSecret(request: RegisterSecretRequest): SecretSummary {

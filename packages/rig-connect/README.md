@@ -275,6 +275,51 @@ by arrival, so a snapshot racing a live event cannot make the view go backwards.
 session leaves the tree while remaining known, so restoring it puts it back rather than requiring a
 reconnect.
 
+## The timeline
+
+`rig.connectTimeline` answers a different question from the groups: not what exists, but when it
+worked. It gives back the agents in a scope, nested under whoever started them, each with the
+stretches of time it spent working, waiting for the person, or asking them something — the shape a
+Gantt chart is drawn from.
+
+```ts
+const timeline = rig.connectTimeline({
+    scope: { kind: "project", projectId },
+    onChange(agents, state) {
+        render(agents, state); // state.from and state.to bound the whole chart
+    },
+});
+
+for (const agent of timeline.agents()) {
+    agent.label; // the name to draw on the row
+    agent.startedAt; // where its bar begins
+    agent.endedAt; // absent while anything under it is still going
+    agent.spans; // working, waiting, and asking, each with an outcome
+    agent.children; // the agents this one started
+}
+
+timeline.close();
+```
+
+A scope is a project, a worktree, or a single chat. A project reaches every worktree and chat inside
+it; a worktree stops there; a chat covers itself and its subagents at any depth. Pass
+`includeArchived` to keep archived chats, and `since` to drop work that had already finished.
+
+Every boundary is a millisecond timestamp, because that is what Rig records. A chart that reads in
+minutes is the consumer's choice, and nothing is rounded on the way out.
+
+Nothing new is written to make this work. The daemon folds the durable lifecycle events it already
+keeps — messages submitted, runs started and finished, questions asked and answered — into spans at
+load, and this library applies the identical rules to the live stream from then on. A reload
+therefore produces the same chart a client watched being built, and clearing history clears the
+chart with it.
+
+A span stays open while the work behind it is still going, and an open bar is drawn to now. Where
+Rig recorded no ending at all — a daemon that stopped mid-run — the span is reported as
+`interrupted` rather than being quietly completed, because that is what actually happened. After a
+gap in the stream, the chart is rebuilt from the daemon instead of being left to drift, since a
+missed event may have been the one that closed a bar.
+
 ## The protocol
 
 Everything above is reachable through one continuous stream of events. That is the design
@@ -288,7 +333,8 @@ subscription.
 
 Entities load by request-response after the stream is open. `GET /catalog` loads projects,
 worktrees, sessions, and terminals; `GET /sessions/:id/state` loads one conversation and its recent
-transcript. Each answer carries the global cursor at which it was taken. Events that arrive while a
+transcript; `POST /timeline` loads the agents and spans for one scope. Each answer carries the
+global cursor at which it was taken. Events that arrive while a
 load is in flight are held in a bounded buffer and replayed over that answer, so neither a slow
 snapshot nor an out-of-order response can move an entity backwards.
 

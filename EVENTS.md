@@ -169,6 +169,22 @@ cursors beyond the session's last issued event remain invalid and return 409.
 `decision` is `allow` or `ask`. `risk` and `userAuthorization` are each `low`,
 `medium`, or `high`.
 
+## Timelines
+
+`POST /timeline` derives when each agent in a scope worked, waited for the person, or asked them
+something. It writes nothing: the answer is folded from the durable lifecycle events above —
+`message_submitted`, `run_started`, `run_finished`, `run_error`, `user_input_requested`, and
+`user_input_resolved` — narrowed in SQL before any payload is read. Clearing session history
+therefore clears the timeline with it, and no separate span table can disagree with the events.
+
+A scope is a project, a workspace, or a session; a session scope includes its subagents at any
+depth. The response carries the live-stream cursor it reflects, so a client can tell whether a later
+event is already included and then keep the chart current from the same global stream.
+
+Because a run's start and end are durable but its interior is not, a timeline reports run
+granularity rather than individual inference and tool calls. A run with no recorded ending, on a
+session that is no longer working, is reported as `interrupted` rather than `completed`.
+
 ## Source of truth
 
 The TypeScript definitions remain authoritative:
@@ -179,3 +195,5 @@ The TypeScript definitions remain authoritative:
 - Inference message stream events: `packages/rig/sources/providers/types.ts`
 - Durable global queue filter:
   `packages/rig/sources/global-event/shouldPersistGlobalEventType.ts`
+- Timeline scopes, spans, and the fold: `packages/rig/sources/protocol/TimelineProtocol.ts` and
+  `packages/rig/sources/timeline/`

@@ -1129,6 +1129,60 @@ export interface GlobalStreamHello {
     sessionsComplete: boolean;
 }
 
+/** How much of Rig one timeline covers. */
+export type TimelineScope =
+    | { kind: "project"; projectId: string }
+    | { kind: "session"; sessionId: string }
+    | { kind: "workspace"; projectId: string; workspaceId: string };
+
+export type TimelineSpanKind = "asking" | "waiting" | "working";
+
+export type TimelineSpanOutcome =
+    | "aborted"
+    | "answered"
+    | "cancelled"
+    | "completed"
+    | "error"
+    | "interrupted";
+
+export interface TimelineSpan {
+    startedAt: number;
+    endedAt?: number;
+    kind: TimelineSpanKind;
+    outcome?: TimelineSpanOutcome;
+    requestId?: string;
+    runId?: string;
+}
+
+export interface TimelineAgent {
+    agentId: string;
+    createdAt: number;
+    depth: number;
+    label: string;
+    modelId: string;
+    parentSessionId?: string;
+    parentToolCallId?: string;
+    projectId: string;
+    providerId: string;
+    sessionId: string;
+    spans: readonly TimelineSpan[];
+    type: "primary" | "subagent";
+    workspaceId?: string;
+}
+
+export interface GetTimelineRequest {
+    includeArchived?: boolean;
+    scope: TimelineScope;
+    since?: number;
+}
+
+/** The chart snapshot returned by `POST /timeline`. */
+export interface GetTimelineResponse {
+    agents: readonly TimelineAgent[];
+    cursor: string;
+    scope: TimelineScope;
+}
+
 export interface BaseGlobalEvent<TType extends string, TData> {
     createdAt: number;
     data: TData;

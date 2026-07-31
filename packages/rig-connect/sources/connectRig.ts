@@ -11,6 +11,8 @@ import { GroupStore } from "./GroupStore.js";
 import type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
 import { InboxStore } from "./InboxStore.js";
 import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
+import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
+import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
 import { orderedUuidV7, type RandomValues } from "./orderedUuidV7.js";
 import {
@@ -36,7 +38,9 @@ import type {
     SessionUnreadReason,
     SessionUnreadState,
     GlobalStreamHello,
+    GetTimelineResponse,
     SessionStateResponse,
+    TimelineScope,
 } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
 
@@ -106,6 +110,17 @@ export interface RigInboxSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+export interface RigTimelineSubscriptionOptions {
+    /** Leave archived chats out, as the daemon does by default. */
+    includeArchived?: boolean;
+    onChange: (agents: readonly TimelineAgentNode[], state: TimelineState) => void;
+    onDelta?: (delta: TimelineDelta) => void;
+    onError?: (error: unknown) => void;
+    scope: TimelineScope;
+    /** Drop work that had already finished by this moment, in milliseconds. */
+    since?: number;
+}
+
 export interface RigSessionConnection {
     elements: () => readonly ChatElement[];
     session: () => SessionState;
@@ -123,6 +138,12 @@ export interface RigGroupsConnection {
 export interface RigInboxConnection {
     items: () => readonly InboxItem[];
     state: () => InboxState;
+    close: () => void;
+}
+
+export interface RigTimelineConnection {
+    agents: () => readonly TimelineAgentNode[];
+    state: () => TimelineState;
     close: () => void;
 }
 
@@ -206,6 +227,7 @@ export interface RigConnection {
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
     connectInbox: (options: RigInboxSubscriptionOptions) => RigInboxConnection;
+    connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -282,6 +304,23 @@ interface InboxSubscriber extends RigInboxSubscriptionOptions {
 interface InboxEntry {
     store: InboxStore;
     subscribers: Set<InboxSubscriber>;
+}
+
+interface TimelineSubscriber extends RigTimelineSubscriptionOptions {
+    closed: boolean;
+}
+
+interface TimelineEntry {
+    bootstrapVersion: number;
+    controller: AbortController;
+    detachRoot: () => void;
+    includeArchived: boolean;
+    key: string;
+    scope: TimelineScope;
+    since?: number;
+    started: boolean;
+    store: TimelineStore;
+    subscribers: Set<TimelineSubscriber>;
 }
 
 interface BufferedSessionEvent {
@@ -383,6 +422,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
+    const timelineEntries = new Map<string, TimelineEntry>();
     let liveStreamStarted = false;
     let liveStreamOpen = false;
     let compatibility = CHECKING_SERVER_COMPATIBILITY;
@@ -416,6 +456,21 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             if (subscriber.closed) continue;
             subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
             for (const delta of deltas) subscriber.onDelta?.(delta);
+        }
+    };
+
+    const publishTimeline = (entry: TimelineEntry, deltas: readonly TimelineDelta[]): void => {
+        if (closed || deltas.length === 0) return;
+        for (const subscriber of [...entry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(entry.store.agents(), entry.store.state());
+            for (const delta of deltas) subscriber.onDelta?.(delta);
+        }
+    };
+
+    const setTimelineConnection = (connection: TimelineState["connection"]): void => {
+        for (const entry of [...timelineEntries.values()]) {
+            if (entry.started) publishTimeline(entry, entry.store.setConnection(connection));
         }
     };
 
@@ -1142,6 +1197,61 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
+    const createTimelineEntry = (subscription: RigTimelineSubscriptionOptions): TimelineEntry => {
+        const key = timelineKey(subscription);
+        const existing = timelineEntries.get(key);
+        if (existing !== undefined) return existing;
+        const linked = linkedController(rootController.signal);
+        const entry: TimelineEntry = {
+            bootstrapVersion: 0,
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            includeArchived: subscription.includeArchived ?? false,
+            key,
+            scope: subscription.scope,
+            started: false,
+            store: new TimelineStore(subscription.scope),
+            subscribers: new Set(),
+            ...(subscription.since === undefined ? {} : { since: subscription.since }),
+        };
+        timelineEntries.set(key, entry);
+        return entry;
+    };
+
+    const loadTimeline = async (entry: TimelineEntry): Promise<void> => {
+        const version = ++entry.bootstrapVersion;
+        let snapshot: GetTimelineResponse;
+        try {
+            snapshot = await fetchTimeline(
+                options.endpoint,
+                options.token,
+                request,
+                entry,
+                entry.controller.signal,
+            );
+        } catch (error) {
+            if (version !== entry.bootstrapVersion) return;
+            throw error;
+        }
+        if (version !== entry.bootstrapVersion) return;
+        publishTimeline(entry, [
+            ...entry.store.setConnection("live"),
+            ...entry.store.applySnapshot(snapshot),
+        ]);
+    };
+
+    const startTimelineEntry = (entry: TimelineEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (!liveStreamOpen) return;
+        void loadTimeline(entry).catch((error: unknown) => {
+            if (closed || entry.controller.signal.aborted) return;
+            publishTimeline(entry, entry.store.setConnection("closed"));
+            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        });
+    };
+
     /**
      * Opens the one subscription this connection has, if it is not open already.
      *
@@ -1186,6 +1296,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (inboxEntry !== undefined) {
                         publishInbox(inboxEntry.store.setConnection("live"));
                     }
+                    setTimelineConnection("live");
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
                     }
@@ -1206,6 +1317,18 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 for (const entry of [...sessionEntries.values()]) {
                     if (!entry.started) continue;
                     void bootstrapSession(entry).catch((error: unknown) => {
+                        if (closed || entry.controller.signal.aborted) return;
+                        for (const subscriber of [...entry.subscribers]) {
+                            subscriber.onError?.(error);
+                        }
+                    });
+                }
+                // A gap means this chart may have missed the events that closed
+                // a span, so it is rebuilt from the daemon rather than left to
+                // drift. A first open loads it for the first time.
+                for (const entry of [...timelineEntries.values()]) {
+                    if (!entry.started) continue;
+                    void loadTimeline(entry).catch((error: unknown) => {
                         if (closed || entry.controller.signal.aborted) return;
                         for (const subscriber of [...entry.subscribers]) {
                             subscriber.onError?.(error);
@@ -1270,6 +1393,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     }),
                 );
                 if (inboxEntry !== undefined) publishInbox(inboxEntry.store.apply(event));
+                for (const entry of [...timelineEntries.values()]) {
+                    if (entry.started) publishTimeline(entry, entry.store.apply(event));
+                }
                 if (sessionId !== undefined) reportFinished(sessionId, unreadBefore);
                 if (
                     event.type === "project_created" ||
@@ -1288,6 +1414,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (inboxEntry !== undefined) {
                     publishInbox(inboxEntry.store.setConnection("reconnecting"));
                 }
+                setTimelineConnection("reconnecting");
                 for (const entry of [...sessionEntries.values()]) {
                     if (entry.started) {
                         publishSession(entry, entry.store.setConnection("reconnecting"));
@@ -1313,6 +1440,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
                 }
+                for (const entry of [...timelineEntries.values()]) {
+                    publishTimeline(entry, entry.store.setConnection("closed"));
+                    for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                }
             })
             .finally(() => {
                 if (closed || rootController.signal.aborted) return;
@@ -1325,6 +1456,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                 }
+                setTimelineConnection("closed");
             });
     };
 
@@ -1511,6 +1643,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             entry.detachRoot();
             sessionEntries.delete(sessionId);
         }
+        for (const [key, entry] of [...timelineEntries]) {
+            if (entry.subscribers.size > 0) continue;
+            entry.controller.abort();
+            entry.detachRoot();
+            timelineEntries.delete(key);
+        }
         if (
             groupsEntry !== undefined &&
             groupsEntry.subscribers.size === 0 &&
@@ -1610,6 +1748,27 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 subscriber.closed = true;
                 inboxEntry?.subscribers.delete(subscriber);
                 if (inboxEntry?.subscribers.size === 0) inboxEntry = undefined;
+                releaseUnusedEntries();
+            },
+        };
+    };
+
+    const connectTimeline = (
+        subscription: RigTimelineSubscriptionOptions,
+    ): RigTimelineConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createTimelineEntry(subscription);
+        const subscriber: TimelineSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        subscriber.onChange(entry.store.agents(), entry.store.state());
+        startTimelineEntry(entry);
+        return {
+            agents: () => entry.store.agents(),
+            state: () => entry.store.state(),
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
                 releaseUnusedEntries();
             },
         };
@@ -2546,6 +2705,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;
+            for (const entry of timelineEntries.values()) {
+                entry.controller.abort();
+                entry.detachRoot();
+                entry.subscribers.clear();
+            }
+            timelineEntries.clear();
         },
         answerUserInput,
         attachSecret,
@@ -2555,6 +2720,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectInbox,
         connectSession,
         connectTerminalPresence,
+        connectTimeline,
         createWorkspace,
         createSession,
         detachSecret,
@@ -2581,6 +2747,18 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         stopWorkflow,
         switchModel,
     };
+}
+
+/** One chart per scope and filter, so two identical views share a load. */
+function timelineKey(subscription: RigTimelineSubscriptionOptions): string {
+    const scope = subscription.scope;
+    const target =
+        scope.kind === "project"
+            ? `project:${scope.projectId}`
+            : scope.kind === "workspace"
+              ? `workspace:${scope.projectId}:${scope.workspaceId}`
+              : `session:${scope.sessionId}`;
+    return `timeline:${target}:${String(subscription.includeArchived ?? false)}:${String(subscription.since ?? "")}`;
 }
 
 function sessionKey(sessionId: string): string {
@@ -2756,6 +2934,33 @@ function defaultWait(ms: number, signal: AbortSignal): Promise<void> {
  * safe to rebase: anything that changes while it is in flight arrives on the
  * stream carrying a cursor.
  */
+async function fetchTimeline(
+    endpoint: string,
+    token: string,
+    request: typeof fetch,
+    entry: { includeArchived: boolean; scope: TimelineScope; since?: number },
+    signal: AbortSignal,
+): Promise<GetTimelineResponse> {
+    const response = await request(endpointUrl(endpoint, "/timeline"), {
+        body: JSON.stringify({
+            includeArchived: entry.includeArchived,
+            scope: entry.scope,
+            ...(entry.since === undefined ? {} : { since: entry.since }),
+        }),
+        headers: {
+            accept: "application/json",
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+        },
+        method: "POST",
+        signal,
+    });
+    if (!response.ok) {
+        throw new Error(`Rig could not load the timeline (${String(response.status)}).`);
+    }
+    return (await readResponseBody(response)) as GetTimelineResponse;
+}
+
 async function fetchCatalog(
     endpoint: string,
     token: string,

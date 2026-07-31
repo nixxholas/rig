@@ -14,6 +14,8 @@ export type {
     RigInboxSubscriptionOptions,
     RigSessionConnection,
     RigSessionSubscriptionOptions,
+    RigTimelineConnection,
+    RigTimelineSubscriptionOptions,
     SendMessageInput,
     SessionFinished,
     SecretAttachmentScope,
@@ -25,6 +27,8 @@ export { InboxStore } from "./InboxStore.js";
 export type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
 export { ChatStore } from "./ChatStore.js";
 export { GroupStore } from "./GroupStore.js";
+export { TimelineStore } from "./TimelineStore.js";
+export type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 export { groupToolCalls } from "./groupToolCalls.js";
 export { projectToolPresentation } from "./ToolPresentation.js";
 export type {
@@ -121,6 +125,11 @@ export type {
     SessionUsageGroup,
     ShellCommandState,
     SubagentSummary,
+    TimelineAgent,
+    TimelineScope,
+    TimelineSpan,
+    TimelineSpanKind,
+    TimelineSpanOutcome,
     FileDiff,
     FileDiffHunk,
     FileDiffLine,

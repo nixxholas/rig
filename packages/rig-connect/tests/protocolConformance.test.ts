@@ -83,6 +83,15 @@ type _Project = Assignable<local.Project, daemon.Project>;
 type _Workspace = Assignable<local.ProjectWorkspace, daemon.ProjectWorkspace>;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
+type _TimelineScope = Assignable<local.TimelineScope, daemon.TimelineScope>;
+type _TimelineSpan = Assignable<local.TimelineSpan, daemon.TimelineSpan>;
+type _TimelineSpanKind = Assignable<local.TimelineSpanKind, daemon.TimelineSpanKind>;
+type _TimelineSpanOutcome = Assignable<local.TimelineSpanOutcome, daemon.TimelineSpanOutcome>;
+type _TimelineAgent = Assignable<local.TimelineAgent, daemon.TimelineAgent>;
+type _TimelineResponse = Assignable<local.GetTimelineResponse, daemon.GetTimelineResponse>;
+// The other direction too: a request this library sends must be one the daemon
+// accepts, or a chart would ask for something that cannot be answered.
+type _TimelineRequest = Assignable<daemon.GetTimelineRequest, local.GetTimelineRequest>;
 type _CallPresentation = Assignable<local.ToolCallPresentation, daemonAgent.ToolCallPresentation>;
 type _ResultPresentation = Assignable<
     local.ToolResultPresentation,

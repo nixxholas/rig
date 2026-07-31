@@ -62,6 +62,15 @@ export type { GoalStatus, SessionGoal } from "../goals/index.js";
 export type { DurableSkillDefinition } from "../external-skills/index.js";
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
+export type {
+    GetTimelineRequest,
+    GetTimelineResponse,
+    TimelineAgent,
+    TimelineScope,
+    TimelineSpan,
+    TimelineSpanKind,
+    TimelineSpanOutcome,
+} from "./TimelineProtocol.js";
 export {
     createEventIdFactory,
     eventIdsShareScope,

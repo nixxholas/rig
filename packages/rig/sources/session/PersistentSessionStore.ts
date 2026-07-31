@@ -9,6 +9,7 @@ import type {
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
     EventId,
+    GetTimelineRequest,
     GitChangeSnapshot,
     GitRepositoryFacts,
     ModelCatalog,
@@ -24,6 +25,7 @@ import type {
     SessionSummary,
     SessionTranscriptWindow,
     SubagentSummary,
+    TimelineAgent,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import {
@@ -113,6 +115,9 @@ import { querySessionTranscriptPage } from "../persistence/session/querySessionT
 import { querySessionTranscriptSince } from "../persistence/session/querySessionTranscriptSince.js";
 import { querySubagentSessionIdsByRoot } from "../persistence/session/querySubagentSessionIdsByRoot.js";
 import { querySubagentSummaries } from "../persistence/session/querySubagentSummaries.js";
+import { queryTimelineAgents } from "../persistence/timeline/queryTimelineAgents.js";
+import { queryTimelineEvents } from "../persistence/timeline/queryTimelineEvents.js";
+import { buildTimeline } from "../timeline/index.js";
 import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 import { queryTerminalRunEvent } from "../persistence/session/queryTerminalRunEvent.js";
 import { inTx } from "../persistence/inTx.js";
@@ -616,6 +621,22 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     listSubagents(parentSessionId: string): readonly SubagentSummary[] {
         return querySubagentSummaries(this.#tx(), parentSessionId);
+    }
+
+    timeline(request: GetTimelineRequest): readonly TimelineAgent[] {
+        // One consistent read: the agents and their events must describe the
+        // same moment, or a run that ended between the two queries would be
+        // charted as though it never stopped.
+        return inTx(this.#tx(), (tx) => {
+            const agents = queryTimelineAgents(tx, request.scope, request.includeArchived ?? false);
+            const events = queryTimelineEvents(
+                tx,
+                agents.map((agent) => agent.sessionId),
+            );
+            return buildTimeline(agents, events, {
+                ...(request.since === undefined ? {} : { since: request.since }),
+            });
+        });
     }
 
     listSecrets(): readonly SecretSummary[] {

@@ -23,6 +23,7 @@ import type {
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
     GetSessionUsageResponse,
+    GetTimelineResponse,
     SessionStateResponse,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
@@ -105,6 +106,7 @@ import { parseGlobalEventCursor } from "../global-event/parseGlobalEventCursor.j
 import { parseGlobalEventLimit } from "./parseGlobalEventLimit.js";
 import { selectRecentSessionEvents } from "../session/selectRecentSessionEvents.js";
 import { SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
+import { parseTimelineRequest } from "./parseTimelineRequest.js";
 import { sendJson } from "./sendJson.js";
 import { streamGlobalEvents } from "./streamGlobalEvents.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
@@ -979,6 +981,23 @@ async function handleRequest(
         sendJson<GlobalStreamHello>(response, 200, {
             cursor: store.liveEvents.cursor(),
             ...buildGroupCatalog(store, modelCatalog, identity, sessionTerminals),
+        });
+        return;
+    }
+
+    if (request.method === "POST" && route.name === "timeline") {
+        const parsed = parseTimelineRequest(await readJson<unknown>(request));
+        if ("error" in parsed) {
+            sendJson(response, 400, { error: parsed.error });
+            return;
+        }
+        // Same ordering as the catalog: the stream position is read before the
+        // agents, so a client can tell whether a later event is already included.
+        const cursor = store.liveEvents.cursor();
+        sendJson<GetTimelineResponse>(response, 200, {
+            agents: store.timeline(parsed.request),
+            cursor,
+            scope: parsed.request.scope,
         });
         return;
     }
@@ -2226,7 +2245,8 @@ function matchRoute(pathname: string):
               | "projects"
               | "secret-registrations"
               | "sessions"
-              | "shutdown";
+              | "shutdown"
+              | "timeline";
           sessionId?: undefined;
       }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
@@ -2321,6 +2341,7 @@ function matchRoute(pathname: string):
     if (pathname === "/events/stream") return { name: "global-events-stream" };
     if (pathname === "/events/live") return { name: "live-events-stream" };
     if (pathname === "/catalog") return { name: "catalog" };
+    if (pathname === "/timeline") return { name: "timeline" };
     if (pathname === "/events/trim") return { name: "global-events-trim" };
     if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };

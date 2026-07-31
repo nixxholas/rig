@@ -4,6 +4,7 @@ import type {
     ChangeServiceTierRequest,
     CreateProjectWorkspaceRequest,
     CreateSessionRequest,
+    GetTimelineRequest,
     GitRepositoryFacts,
     Project,
     ProjectWorkspace,
@@ -12,6 +13,7 @@ import type {
     SecretSummary,
     SubagentSummary,
     SessionSummary,
+    TimelineAgent,
 } from "../protocol/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
@@ -112,5 +114,7 @@ export interface SessionStore {
     ): Promise<Project | undefined>;
     clearProjectAvatar(projectId: string): Project | undefined;
     registerSecret(request: RegisterSecretRequest): SecretSummary;
+    /** The agents a scope covers and when each of them worked, waited, or asked. */
+    timeline(request: GetTimelineRequest): readonly TimelineAgent[];
     unregisterSecret(secretId: string): boolean;
 }
