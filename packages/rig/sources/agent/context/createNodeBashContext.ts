@@ -127,6 +127,21 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         options.loadManagedNetworkPolicy ?? loadProjectManagedNetworkPolicy;
     const startManagedNetwork = options.startManagedNetwork ?? startCommandManagedNetwork;
 
+    /**
+     * Forgets the oldest finished commands once too many have piled up.
+     *
+     * Runs whenever a command starts or ends, so a session that only ever
+     * finishes work still lets go of what it is holding.
+     */
+    const trimFinishedSessions = () => {
+        while (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
+            const finished = [...sessions.values()]
+                .filter((candidate) => candidate.result !== undefined)
+                .sort((left, right) => left.sessionId - right.sessionId)[0];
+            if (finished === undefined) return;
+            sessions.delete(finished.sessionId);
+        }
+    };
     const readSession = async (
         sessionId: number,
         readOptions: Parameters<BashContext["readSession"]>[1] = {},
@@ -467,6 +482,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                     const awaited = session.consumingWaiters > 0;
                     for (const finish of session.completionWaiters) finish();
                     onActiveSessionCountChange?.(activeSessionCount());
+                    trimFinishedSessions();
                     // Nobody was waiting on this command, so nobody is about to
                     // learn that it ended. Say so, without the output.
                     if (!awaited && !session.exitObserved) {
@@ -478,12 +494,7 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
                         });
                     }
                 });
-                if (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
-                    const completed = [...sessions.values()].find(
-                        (candidate) => candidate.result !== undefined,
-                    );
-                    if (completed !== undefined) sessions.delete(completed.sessionId);
-                }
+                trimFinishedSessions();
                 return sessionId;
             } finally {
                 releaseSessionStart();

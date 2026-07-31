@@ -418,6 +418,7 @@ export function createDockerBashContext(
                 session.finished = true;
                 if (session.timeout !== undefined) clearTimeout(session.timeout);
                 onActiveSessionCountChange?.(activeSessionCount());
+                trimFinishedSessions();
                 resolve();
             };
             stream.once("error", (error) => void finish(error));
@@ -440,10 +441,7 @@ export function createDockerBashContext(
             }, options.timeoutMs);
             session.timeout.unref();
         }
-        if (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
-            const completed = [...sessions.values()].find((candidate) => candidate.finished);
-            if (completed !== undefined) sessions.delete(completed.sessionId);
-        }
+        trimFinishedSessions();
         return session;
     };
 
@@ -531,6 +529,22 @@ export function createDockerBashContext(
             session.pidFile,
         ]);
         return result.exitCode === 0;
+    };
+
+    /**
+     * Forgets the oldest finished commands once too many have piled up.
+     *
+     * Runs whenever a command starts or ends, so a session that only ever
+     * finishes work still lets go of what it is holding.
+     */
+    const trimFinishedSessions = (): void => {
+        while (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
+            const finished = [...sessions.values()]
+                .filter((candidate) => candidate.finished)
+                .sort((left, right) => left.sessionId - right.sessionId)[0];
+            if (finished === undefined) return;
+            sessions.delete(finished.sessionId);
+        }
     };
 
     /**

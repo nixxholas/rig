@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { killProcessTree } from "./killProcessTree.js";
-import { isProcessGroupAlive, ProcessGroupReaper } from "./ProcessGroupReaper.js";
+import { isProcessGroupAlive, killProcessGroup, ProcessGroupReaper } from "./ProcessGroupReaper.js";
 import { startProcessTransport, type ProcessTransport } from "./startProcessTransport.js";
 import type {
     ManagedProcessStatus,
@@ -123,6 +123,26 @@ export class NativeProcessManager {
     /** Process groups that a shutdown would still have to take down. */
     pendingProcessGroups(): readonly number[] {
         return this.#groups.pending();
+    }
+
+    /**
+     * How much running work a shutdown would still find.
+     *
+     * A live command and the group it leads are one thing, so the group of an
+     * active process is not counted twice. What this adds are the groups that
+     * outlived the command that started them: `nohup server &` leaves nothing
+     * running under our watch, but the server is very much still there.
+     */
+    reapableCount(): number {
+        const led = new Set(
+            [...this.#processes.values()].flatMap((process) =>
+                process.pid === null ? [] : [process.pid],
+            ),
+        );
+        const orphaned = this.#groups
+            .pending()
+            .filter((processGroupId) => !led.has(processGroupId)).length;
+        return this.activeCount() + orphaned;
     }
 }
 
@@ -291,7 +311,9 @@ export class ManagedProcess {
                 setTimeout(resolve, remainingMs).unref();
             });
         }
-        if (isProcessGroupAlive(this.pid)) killProcessTree(this.pid, "SIGKILL");
+        // Group only, never the bare number: the launcher is already gone, so
+        // its process id may now belong to a stranger.
+        if (isProcessGroupAlive(this.pid)) killProcessGroup(this.pid, "SIGKILL");
     }
 
     wait(): Promise<ProcessRunResult> {

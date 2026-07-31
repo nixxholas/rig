@@ -338,6 +338,51 @@ describe("createNodeBashContext", () => {
     );
 
     it.runIf(process.platform !== "win32")(
+        "stays quiet about commands it stopped itself",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+            const exits: unknown[] = [];
+            context.setSessionExitListener?.((exit) => exits.push(exit));
+            await context.startSession({ command: "sleep 30", cwd });
+
+            // Taking everything down is our doing, and the model is being told
+            // about it by whoever asked. It must not also receive a death
+            // notice per casualty, including ones that take a moment to go.
+            await context.killAllSessions?.();
+            await delay(500);
+
+            expect(exits).toEqual([]);
+        },
+        15_000,
+    );
+
+    it.runIf(process.platform !== "win32")(
+        "tells the listener about a background command nobody was waiting for",
+        async () => {
+            const cwd = await makeTempDir();
+            const context = createNodeBashContext({
+                cwd,
+                permissions: createPermissionContext("full_access"),
+                processManager: new NativeProcessManager(),
+            });
+            const exits: { sessionId: number; status: string }[] = [];
+            context.setSessionExitListener?.((exit) => exits.push(exit));
+            const sessionId = await context.startSession({ command: "sleep 0.2", cwd });
+            await delay(1_500);
+
+            expect(exits).toEqual([
+                expect.objectContaining({ sessionId, status: "completed" as const }),
+            ]);
+        },
+        15_000,
+    );
+
+    it.runIf(process.platform !== "win32")(
         "keeps a background command running past its wait and reports it as still running",
         async () => {
             const cwd = await makeTempDir();

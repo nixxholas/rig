@@ -1049,6 +1049,9 @@ export class InMemorySession {
             return { ...result, eventId: event.id, status: "finished" };
         }
 
+        // The user ran this, not a turn. Interrupting the agent must not reach
+        // in and kill a command the user is watching.
+        bash.detachSession?.(sessionId);
         const event = this.#append("shell_command_started", {
             command,
             commandId: request.commandId,
@@ -5144,8 +5147,11 @@ export class InMemorySession {
      * started is very much still running under a process group we retained.
      */
     #reapableProcessCount(): number {
-        const groups = this.#runtime?.processManager.pendingProcessGroups().length ?? 0;
-        return this.#activeProcessCount() + groups;
+        const runtime = this.#runtime;
+        const nativeProcesses = runtime?.processManager.reapableCount() ?? 0;
+        return this.#request.docker === undefined
+            ? nativeProcesses
+            : nativeProcesses + (runtime?.context.bash.activeSessionCount?.() ?? 0);
     }
 
     /**
@@ -5161,11 +5167,20 @@ export class InMemorySession {
         if (runtime === undefined) return;
         const forceAfterMs = options.forceAfterMs ?? BASH_SESSION_STOP_GRACE_MS;
         const includeBackground = options.includeBackground ?? false;
-        await runtime.processManager.killAll({
-            forceAfterMs,
-            includeDetached: includeBackground,
-        });
-        if (includeBackground) await runtime.context.bash.killAllSessions?.();
+        // The bash context is asked first, and on purpose. Asking it claims the
+        // outcome of every command it holds, so a command that dies during the
+        // process manager's grace period cannot announce its own death to a
+        // model we are in the middle of tearing down.
+        const sessions = includeBackground
+            ? (runtime.context.bash.killAllSessions?.() ?? Promise.resolve(0))
+            : Promise.resolve(0);
+        await Promise.all([
+            runtime.processManager.killAll({
+                forceAfterMs,
+                includeDetached: includeBackground,
+            }),
+            sessions,
+        ]);
     }
 
     async #drainQueue(): Promise<void> {

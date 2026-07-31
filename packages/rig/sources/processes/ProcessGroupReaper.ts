@@ -8,8 +8,10 @@ import { killProcessTree } from "./killProcessTree.js";
  *
  * A group is identified by the number the operating system gave it, and that
  * number is reused once the group is gone. Every group is therefore dropped as
- * soon as it dies, and checked again immediately before it is signalled, so a
- * recycled identifier cannot be mistaken for ours.
+ * soon as it dies, and checked again immediately before it is signalled, which
+ * narrows the window in which a recycled identifier could be mistaken for ours
+ * to the gap between that check and the signal. Closing it entirely would take
+ * a kernel handle on the group, which the platforms we support do not offer.
  */
 export class ProcessGroupReaper {
     readonly #groups = new Set<number>();
@@ -61,7 +63,7 @@ export class ProcessGroupReaper {
  * identifier: if the group is gone, the number may now belong to an unrelated
  * process, and signalling it would be someone else's problem.
  */
-function killProcessGroup(processGroupId: number, signal: NodeJS.Signals): void {
+export function killProcessGroup(processGroupId: number, signal: NodeJS.Signals): void {
     if (process.platform === "win32") {
         killProcessTree(processGroupId, signal);
         return;
