@@ -138,12 +138,9 @@ export interface ProjectWorkspace {
 
 export interface CreateProjectWorkspaceRequest {
     baseRef: string;
-    clientRequestId: string;
+    /** Client-chosen cuid2 identity. Repeating it returns the same workspace. */
+    id?: string;
     name: string;
-}
-
-export interface ArchiveProjectWorkspaceRequest {
-    clientRequestId: string;
 }
 
 export interface RenameProjectRequest {

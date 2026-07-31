@@ -66,7 +66,6 @@ export const projectWorkspaces = sqliteTable(
         baseCommit: text("base_commit"),
         gitCommonDir: text("git_common_dir").notNull(),
         error: text("error"),
-        clientRequestId: text("client_request_id"),
         creatorSessionId: text("creator_session_id"),
         presence: text("presence").notNull(),
         gitBranch: text("git_branch"),
@@ -83,7 +82,6 @@ export const projectWorkspaces = sqliteTable(
     (table) => [
         unique().on(table.projectId, table.storageKey),
         unique().on(table.projectId, table.nameKey),
-        unique().on(table.projectId, table.clientRequestId),
         index("project_workspaces_project_updated").on(table.projectId, desc(table.updatedAtMs)),
         index("project_workspaces_project_order").on(table.projectId, table.orderKey),
     ],

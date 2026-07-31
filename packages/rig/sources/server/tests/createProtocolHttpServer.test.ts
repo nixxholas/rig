@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
 
+import { createId } from "@paralleldrive/cuid2";
 import { describe, expect, it, vi } from "vitest";
 import sharp from "sharp";
 
@@ -104,6 +105,74 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("accepts identities a client chose and refuses the ones it may not choose", async () => {
+        const projectDirectory = await mkdtemp(join(tmpdir(), "rig-client-identity-"));
+        await execFile("git", ["-C", projectDirectory, "init"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.email", "rig@example.test"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.name", "Rig Test"]);
+        await writeFile(join(projectDirectory, "README.md"), "fixture\n");
+        await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
+        await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
+        const { client, close, socketPath } = await startServer();
+        const sessionId = createId();
+        const projectId = createId();
+        const workspaceId = createId();
+        const workspacesPath = `/projects/${encodeURIComponent(projectId)}/workspaces`;
+        try {
+            const created = await client.createSession({
+                cwd: projectDirectory,
+                id: sessionId,
+                projectId,
+            });
+            expect(created.session.id).toBe(sessionId);
+            expect(created.session.projectId).toBe(projectId);
+
+            const workspace = await client.createProjectWorkspace(projectId, {
+                baseRef: "HEAD",
+                id: workspaceId,
+                name: "Named By The Client",
+            });
+            expect(workspace.workspace.id).toBe(workspaceId);
+
+            // Repeating a create is answered with the entity it already made.
+            await expect(
+                client.createProjectWorkspace(projectId, {
+                    baseRef: "HEAD",
+                    id: workspaceId,
+                    name: "Named By The Client",
+                }),
+            ).resolves.toMatchObject({ workspace: { id: workspaceId } });
+
+            await expect(
+                requestRawJson(socketPath, "/sessions", {
+                    body: JSON.stringify({ cwd: projectDirectory, id: "Not A Cuid2" }),
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 400 });
+            await expect(
+                requestRawJson(socketPath, workspacesPath, {
+                    body: JSON.stringify({ baseRef: "HEAD", id: "Not A Cuid2", name: "Invalid" }),
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 400 });
+            // The identity already names a workspace built on another base, so
+            // this create describes something else and is a conflict.
+            await expect(
+                requestRawJson(socketPath, workspacesPath, {
+                    body: JSON.stringify({
+                        baseRef: "HEAD~0",
+                        id: workspaceId,
+                        name: "Conflicting",
+                    }),
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 409 });
+        } finally {
+            await close();
+            await rm(projectDirectory, { force: true, recursive: true });
+        }
+    });
+
     it("requires an entity version for workspace mutations", async () => {
         const projectDirectory = await mkdtemp(join(tmpdir(), "rig-workspace-version-"));
         await execFile("git", ["-C", projectDirectory, "init"]);
@@ -117,7 +186,6 @@ describe("createProtocolHttpServer", () => {
             const created = await client.createSession({ cwd: projectDirectory });
             const response = await client.createProjectWorkspace(created.session.projectId, {
                 baseRef: "HEAD",
-                clientRequestId: "workspace-version-test",
                 name: "Versioned workspace",
             });
             const workspacePath = `/projects/${encodeURIComponent(

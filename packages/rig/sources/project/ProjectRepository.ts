@@ -19,6 +19,7 @@ import {
     type ReorderRequest,
 } from "../protocol/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { clientChosenId } from "../utils/clientChosenId.js";
 import { projectAvatarCollectGarbage } from "../persistence/project/projectAvatarCollectGarbage.js";
 import { projectCreate } from "../persistence/project/projectCreate.js";
 import { projectClearAvatar } from "../persistence/project/projectClearAvatar.js";
@@ -42,7 +43,7 @@ import { queryProjects } from "../persistence/project/queryProjects.js";
 import { queryWorkspace } from "../persistence/project/queryWorkspace.js";
 import { queryOwnedWorkspace } from "../persistence/project/queryOwnedWorkspace.js";
 import { queryWorkspaceByPath } from "../persistence/project/queryWorkspaceByPath.js";
-import { queryWorkspaceByRequest } from "../persistence/project/queryWorkspaceByRequest.js";
+import { queryWorkspaceById } from "../persistence/project/queryWorkspaceById.js";
 import { queryWorkspaces } from "../persistence/project/queryWorkspaces.js";
 import { workspaceReserve } from "../persistence/project/workspaceReserve.js";
 import { workspaceApplyGitFacts } from "../persistence/project/workspaceApplyGitFacts.js";
@@ -74,7 +75,7 @@ import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
 import type { GitCommandRunner } from "../git/types.js";
 import type { SessionDatabase } from "../persistence/database/openSessionDatabase.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
-import { folderProjectName, projectNameKey, validateProjectName } from "./projectIdentity.js";
+import { folderProjectName, validateProjectName } from "./projectIdentity.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
 const GIT_PROBE_CONCURRENCY = 4;
@@ -181,7 +182,19 @@ export class ProjectRepository {
         }
     }
 
-    resolve(cwd: string, assertedWorkspaceId?: string): ResolvedProjectOwnership {
+    /**
+     * Finds what owns a directory, importing the directory as a project if it is new.
+     *
+     * `requestedProjectId` names that import. A project is a folder, so a folder
+     * Rig already knows keeps the identity it already has and the request is
+     * simply answered with it; the identity only takes effect for a folder that
+     * becomes a project now.
+     */
+    resolve(
+        cwd: string,
+        assertedWorkspaceId?: string,
+        requestedProjectId?: string,
+    ): ResolvedProjectOwnership {
         const path = normalizeProjectCwd(cwd);
         const workspace = queryWorkspaceByPath(this.#database, path);
         if (workspace !== undefined) {
@@ -201,19 +214,27 @@ export class ProjectRepository {
             throw new Error("The workspace ID does not match the session directory.");
         }
 
+        const importedId =
+            requestedProjectId === undefined
+                ? undefined
+                : clientChosenId(requestedProjectId, "project");
         const existing = queryProjectByPath(this.#database, path);
         if (existing !== undefined) {
             /*
              * A project is only a folder, so working in it again is what brings it back: starting a
              * session restores an archived project instead of asking the user to unarchive it.
              */
+            if (importedId !== undefined && importedId !== existing.id) {
+                this.#assertUnusedProjectId(importedId, path);
+            }
             return { project: this.unarchiveProject(existing.id) ?? existing };
         }
+        if (importedId !== undefined) this.#assertUnusedProjectId(importedId, path);
 
         const kind = path === this.#homeDirectory ? "home" : "regular";
         const baseName = kind === "home" ? "Home" : folderProjectName(path);
         const now = this.#now();
-        const id = createId();
+        const id = importedId ?? createId();
         const project = this.#mutate((tx) => {
             projectCreate(tx, { baseName, id, kind, now, path });
             const created = this.getProject(id);
@@ -526,10 +547,8 @@ export class ProjectRepository {
         const project = this.getProject(projectId);
         if (project === undefined) return undefined;
         const name = validateProjectName(request.name);
-        const clientRequestId = request.clientRequestId.trim();
-        if (clientRequestId.length === 0 || clientRequestId.length > 200) {
-            throw new Error("A workspace request ID is required.");
-        }
+        const requestedId =
+            request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
         const baseRef = request.baseRef.trim();
         if (
             baseRef.length === 0 ||
@@ -539,13 +558,8 @@ export class ProjectRepository {
         ) {
             throw new Error("The workspace base reference is invalid.");
         }
-        const retry = queryWorkspaceByRequest(this.#database, projectId, clientRequestId);
-        if (retry !== undefined) {
-            if (projectNameKey(retry.name) !== projectNameKey(name) || retry.baseRef !== baseRef) {
-                throw new Error("The workspace request ID was already used with other settings.");
-            }
-            return retry;
-        }
+        const retry = this.#retriedWorkspace(projectId, requestedId, baseRef);
+        if (retry !== undefined) return retry;
 
         const gitTopLevel = await readGitTopLevel(this.#git, project.path);
         if (gitTopLevel !== project.path) {
@@ -561,10 +575,9 @@ export class ProjectRepository {
             const result = workspaceReserve(tx, {
                 baseCommit: commit,
                 baseRef,
-                clientRequestId,
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 gitCommonDir,
-                id: createId(),
+                id: requestedId ?? createId(),
                 name,
                 now: this.#now(),
                 pathForStorageKey: (storageKey) =>
@@ -574,7 +587,7 @@ export class ProjectRepository {
             const workspace = this.getWorkspace(projectId, result.workspaceId);
             if (workspace === undefined) throw new Error("The workspace could not be reserved.");
             if (result.created) {
-                this.#publishWorkspace("workspace_created", workspace, clientRequestId);
+                this.#publishWorkspace("workspace_created", workspace, requestedId);
             }
             return { created: result.created, workspace };
         });
@@ -595,6 +608,40 @@ export class ProjectRepository {
         workspaceId: string,
     ): ProjectWorkspace | undefined {
         return queryOwnedWorkspace(this.#database, creatorSessionId, projectId, workspaceId);
+    }
+
+    /** Refuses a client-chosen project identity that already names another folder. */
+    #assertUnusedProjectId(id: string, path: string): void {
+        const known = queryProject(this.#database, id);
+        if (known !== undefined && known.path !== path) {
+            throw new Error("That project ID already names another folder.");
+        }
+    }
+
+    /**
+     * The workspace a repeated create already made, if this is a repeat.
+     *
+     * The identity is the client's, so the same identity means the same
+     * workspace and the request is simply answered again. An identity that
+     * names a workspace somewhere else, or one built on another base, is a
+     * different workspace wearing this one's name, and that is an error rather
+     * than something to reconcile.
+     */
+    #retriedWorkspace(
+        projectId: string,
+        requestedId: string | undefined,
+        baseRef: string,
+    ): ProjectWorkspace | undefined {
+        if (requestedId === undefined) return undefined;
+        const workspace = queryWorkspaceById(this.#database, requestedId);
+        if (workspace === undefined) return undefined;
+        if (workspace.projectId !== projectId) {
+            throw new Error("That workspace ID already names a workspace in another project.");
+        }
+        if (workspace.baseRef !== baseRef) {
+            throw new Error("That workspace ID already names a workspace with a different base.");
+        }
+        return workspace;
     }
 
     renameWorkspace(

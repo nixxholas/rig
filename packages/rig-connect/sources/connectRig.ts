@@ -9,6 +9,7 @@ import { ChatStore } from "./ChatStore.js";
 import type { GroupDelta, GroupsState, ProjectGroup } from "./GroupElement.js";
 import { GroupStore } from "./GroupStore.js";
 import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
+import { createCuid2 } from "./createCuid2.js";
 import { orderedUuidV7, type RandomValues } from "./orderedUuidV7.js";
 import {
     CHECKING_SERVER_COMPATIBILITY,
@@ -124,6 +125,13 @@ export interface CreateSessionInput {
     local?: boolean;
     modelId?: string;
     permissionMode?: string;
+    /**
+     * Identity to give the project if this directory is not one yet.
+     *
+     * A directory that Rig already knows keeps the identity it has, so this
+     * names an import rather than asserting which project the session lands in.
+     */
+    projectId?: string;
     providerId?: string;
     secretIds?: readonly string[];
     serviceTier?: string;
@@ -160,8 +168,10 @@ export interface RigConnection {
     compatibility: () => ServerCompatibility;
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
+    /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
+    /** Returns the session's own identity, which is also this action's identity. */
     createSession: (input: CreateSessionInput) => MutationId;
     forkSession: (sessionId: string) => MutationId;
     sendMessage: (sessionId: string, message: string | SendMessageInput) => MutationId;
@@ -310,6 +320,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const wait = options.wait ?? defaultWait;
     const now = options.now ?? Date.now;
     const nextMutationId = orderedUuidV7(now, options.randomValues);
+    // What the client creates, the client names. The identity is a cuid2, the
+    // same kind the daemon would have minted, and it doubles as the mutation
+    // identity so one create is one entity however its echo arrives.
+    const nextEntityId = createCuid2(now, options.randomValues);
     const rootController = new AbortController();
     const sessionEntries = new Map<string, SessionEntry>();
     const queues = new Map<string, PendingMutation[]>();
@@ -1542,7 +1556,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     const createSession = (input: CreateSessionInput): MutationId => {
-        const id = nextMutationId();
+        const id = nextEntityId();
         return enqueue({
             acknowledged: false,
             action: "create_session",
@@ -1550,7 +1564,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             entityKey: sessionKey(id),
             id,
             prepare: () => ({
-                body: { ...input, clientSessionId: id },
+                body: { ...input, id },
                 headers: { "x-rig-mutation-id": id },
                 method: "POST",
                 url: endpointUrl(options.endpoint, "sessions"),
@@ -1561,14 +1575,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     const createWorkspace = (input: CreateWorkspaceInput): MutationId => {
-        const id = nextMutationId();
-        const optimisticId = `pending:${id}`;
-        const key = `workspace-create:${input.projectId}:${id}`;
+        const id = nextEntityId();
+        const key = workspaceKey(input.projectId, id);
         const createdAt = now();
         const optimistic: ProjectWorkspace = {
             baseRef: input.baseRef,
             createdAt,
-            id: optimisticId,
+            id,
             kind: "git_worktree",
             name: input.name,
             orderKey: "",
@@ -1590,18 +1603,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             entityKey: key,
             id,
-            matchesAuthoritative: (data) => {
-                const workspace = responseEntity(data, "workspace");
-                return (
-                    workspace?.projectId === input.projectId &&
-                    workspace.baseRef === input.baseRef &&
-                    workspace.name === input.name
-                );
-            },
+            matchesAuthoritative: (data) => responseEntity(data, "workspace")?.id === id,
             prepare: () => ({
                 body: {
                     baseRef: input.baseRef,
-                    clientRequestId: id,
+                    id,
                     name: input.name,
                 },
                 headers: { "x-rig-mutation-id": id },

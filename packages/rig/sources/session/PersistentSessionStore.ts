@@ -38,6 +38,7 @@ import { AgentSessionManager } from "./AgentSessionManager.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import { PersistentGlobalEventQueue } from "../global-event/PersistentGlobalEventQueue.js";
+import { retriedSession } from "./retriedSession.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
@@ -335,10 +336,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return this.#createSession(request);
     }
 
+    /**
+     * Creates a session under an identity its caller chose.
+     *
+     * The identity is only checked for shape where a client supplies it, at the
+     * protocol boundary. Rig's own integrations derive identities of their own,
+     * and they reach this method directly.
+     */
     createWithId(id: string, request: CreateSessionRequest): InMemorySession {
         this.#assertAcceptingMutations();
         const existing = this.get(id);
-        return existing ?? this.#createSession(request, undefined, undefined, id);
+        if (existing !== undefined) return retriedSession(existing, request);
+        return this.#createSession(request, undefined, undefined, id);
     }
 
     detachSecret(
@@ -467,7 +476,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             }
             const ownership = (() => {
                 if (inherited === undefined) {
-                    return this.#projects.resolve(request.cwd, request.workspaceId);
+                    return this.#projects.resolve(
+                        request.cwd,
+                        request.workspaceId,
+                        request.projectId,
+                    );
                 }
                 const project = this.#projects.getProject(inherited.projectId);
                 if (project === undefined) {

@@ -55,7 +55,6 @@ const statements = [
         base_commit TEXT,
         git_common_dir TEXT NOT NULL,
         error TEXT,
-        client_request_id TEXT,
         creator_session_id TEXT,
         presence TEXT NOT NULL,
         git_branch TEXT,
@@ -69,8 +68,7 @@ const statements = [
         updated_at_ms INTEGER NOT NULL,
         archived_at_ms INTEGER,
         UNIQUE (project_id, storage_key),
-        UNIQUE (project_id, name_key),
-        UNIQUE (project_id, client_request_id)
+        UNIQUE (project_id, name_key)
     )`,
     `CREATE TABLE sessions (
         id TEXT NOT NULL PRIMARY KEY,

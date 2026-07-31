@@ -20,6 +20,7 @@ import type {
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
+import { retriedSession } from "./retriedSession.js";
 import type { SessionStore } from "./SessionStore.js";
 import type { McpToolProvider } from "../mcp/index.js";
 import { SecretRegistry, type SecretRegistration } from "../secrets/index.js";
@@ -200,7 +201,9 @@ export class InMemorySessionStore implements SessionStore {
     }
 
     createWithId(id: string, request: CreateSessionRequest): InMemorySession {
-        return this.get(id) ?? this.#createSession(request, undefined, undefined, id);
+        const existing = this.get(id);
+        if (existing !== undefined) return retriedSession(existing, request);
+        return this.#createSession(request, undefined, undefined, id);
     }
 
     detachSecret(
@@ -313,7 +316,7 @@ export class InMemorySessionStore implements SessionStore {
         }
         const ownership = (() => {
             if (inherited === undefined) {
-                return this.#projects.resolve(request.cwd, request.workspaceId);
+                return this.#projects.resolve(request.cwd, request.workspaceId, request.projectId);
             }
             const project = this.#projects.getProject(inherited.projectId);
             if (project === undefined) {

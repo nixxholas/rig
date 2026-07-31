@@ -533,8 +533,10 @@ export interface CreateSessionRequest {
     docker?: DockerExecutionConfig;
     local?: boolean;
     workspaceId?: string;
-    /** Client-selected UUID used to make optimistic creation retry-safe. */
-    clientSessionId?: string;
+    /** Client-chosen cuid2 identity for the session. Repeating it returns the same session. */
+    id?: string;
+    /** Identity to give the project when this directory is not one yet. */
+    projectId?: string;
 }
 
 export interface UpdateSessionRequest {

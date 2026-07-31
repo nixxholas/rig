@@ -141,7 +141,6 @@ describe("remote terminal WebSocket protocol", () => {
             rootSession.session.projectId,
             {
                 baseRef: "HEAD",
-                clientRequestId: "remote-terminal-workspace",
                 name: "Terminal workspace",
             },
         );

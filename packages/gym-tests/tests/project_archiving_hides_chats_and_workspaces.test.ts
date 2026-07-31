@@ -129,7 +129,6 @@ const created = await requestJson(
     "/projects/" + encodeURIComponent(project.id) + "/workspaces",
     {
         baseRef: "HEAD",
-        clientRequestId: "gym-project-archive",
         name: "Gym Worktree",
     },
 );

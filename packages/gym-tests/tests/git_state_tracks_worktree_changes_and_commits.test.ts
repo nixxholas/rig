@@ -219,7 +219,7 @@ if (project === undefined) throw new Error("The workspace project is missing.");
 const created = await requestJson(
     "POST",
     "/projects/" + encodeURIComponent(project.id) + "/workspaces",
-    { baseRef: "HEAD", clientRequestId: "gym-git-state", name: "Gym Work" },
+    { baseRef: "HEAD", name: "Gym Work" },
 );
 let workspace = created.workspace;
 const readyBy = Date.now() + 20000;

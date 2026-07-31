@@ -1,5 +1,3 @@
-import { randomUUID } from "node:crypto";
-
 import {
     createSubagentInstructions,
     findLastAgentResponseText,
@@ -125,10 +123,7 @@ export class AgentSessionManager {
         if (owner.isSubagent()) {
             throw new Error("Only a primary session can create a managed workspace.");
         }
-        const workspace = await create(ownerSessionId, owner.snapshot().projectId, {
-            ...input,
-            clientRequestId: `agent:${ownerSessionId}:${randomUUID()}`,
-        });
+        const workspace = await create(ownerSessionId, owner.snapshot().projectId, input);
         if (workspace === undefined) throw new Error("The workspace could not be created.");
         return workspace;
     }

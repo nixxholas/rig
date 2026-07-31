@@ -9,7 +9,6 @@ import type { TX } from "../Transaction.js";
 export interface WorkspaceReserveInput {
     baseCommit: string;
     baseRef: string;
-    clientRequestId: string;
     creatorSessionId?: string;
     gitCommonDir: string;
     id: string;
@@ -24,23 +23,26 @@ export function workspaceReserve(
     input: WorkspaceReserveInput,
 ): { created: boolean; workspaceId: string } {
     return inTx(tx, (tx) => {
+        // The identity may already name this workspace, because a create is
+        // repeated until it is known to have landed. It is the same workspace
+        // only if it describes the same one.
         const retry = tx
             .select({
                 baseRef: projectWorkspaces.baseRef,
                 id: projectWorkspaces.id,
-                nameKey: projectWorkspaces.nameKey,
+                projectId: projectWorkspaces.projectId,
             })
             .from(projectWorkspaces)
-            .where(
-                and(
-                    eq(projectWorkspaces.projectId, input.projectId),
-                    eq(projectWorkspaces.clientRequestId, input.clientRequestId),
-                ),
-            )
+            .where(eq(projectWorkspaces.id, input.id))
             .get();
         if (retry !== undefined) {
-            if (retry.nameKey !== projectNameKey(input.name) || retry.baseRef !== input.baseRef) {
-                throw new Error("The workspace request ID was already used with other settings.");
+            if (retry.projectId !== input.projectId) {
+                throw new Error("That workspace ID already names a workspace in another project.");
+            }
+            if (retry.baseRef !== input.baseRef) {
+                throw new Error(
+                    "That workspace ID already names a workspace with a different base.",
+                );
             }
             return { created: false, workspaceId: retry.id };
         }
@@ -84,7 +86,6 @@ export function workspaceReserve(
             .values({
                 baseCommit: input.baseCommit,
                 baseRef: input.baseRef,
-                clientRequestId: input.clientRequestId,
                 creatorSessionId: input.creatorSessionId,
                 createdAtMs: input.now,
                 gitAhead: 0,

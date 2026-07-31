@@ -1,6 +1,5 @@
 export type { EventId } from "./EventId.js";
 export type {
-    ArchiveProjectWorkspaceRequest,
     BaseProjectEvent,
     BaseProjectWorkspaceEvent,
     CreateProjectWorkspaceRequest,

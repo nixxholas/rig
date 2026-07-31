@@ -81,6 +81,7 @@ session/
     configureSessionRequest.ts      validates and resolves a create request
     generateSessionMetadata.ts      titles and summaries for a session
     isLiveOnlySessionEvent.ts       events that are never persisted
+    retriedSession.ts               answers a create whose identity already exists
     selectRecentSessionEvents.ts    trims an event list to recent messages
     sessionActivityAfterEvent.ts    status and activity derived from an event
     sessionSummaryWithTerminalPresence.ts  presence applied to a summary

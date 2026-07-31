@@ -137,6 +137,24 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
     };
 }
 
+/** What the daemon reports back for a workspace the client named itself. */
+function daemonWorkspace(id: string) {
+    return {
+        baseRef: "main",
+        createdAt: 2,
+        id,
+        kind: "git_worktree" as const,
+        name: "Feature",
+        orderKey: "a",
+        path: "/work/feature",
+        presence: "present" as const,
+        projectId: "project-1",
+        status: "ready" as const,
+        updatedAt: 2,
+        version: 1,
+    };
+}
+
 /** The light hello the live stream opens with: a position, and nothing else. */
 function liveHello(
     cursor = "01900000-0000-7000-8000-000000000001",
@@ -374,9 +392,11 @@ describe("connectRig mutations", () => {
             const createCall = calls.find(
                 (call) => call.url.pathname === "/sessions" && call.init?.method === "POST",
             );
+            // The client names the session it creates, and that name is a cuid2.
+            expect(createdId).toMatch(/^[a-z][0-9a-z]{23}$/u);
             expect(JSON.parse(String(createCall?.init?.body))).toMatchObject({
-                clientSessionId: createdId,
                 cwd: "/new-work",
+                id: createdId,
             });
             const forkCall = calls.find((call) => call.url.pathname.endsWith("/fork"));
             expect(forkCall?.init?.headers).toMatchObject({
@@ -1327,20 +1347,6 @@ describe("connectRig mutations", () => {
 
     it("shows one workspace for one creation, and never brings an archived one back", async () => {
         const stream = streamResponse();
-        const created = {
-            baseRef: "main",
-            createdAt: 2,
-            id: "workspace-1",
-            kind: "git_worktree" as const,
-            name: "Feature",
-            orderKey: "a",
-            path: "/work/feature",
-            presence: "present" as const,
-            projectId: "project-1",
-            status: "ready" as const,
-            updatedAt: 2,
-            version: 1,
-        };
         let catalogWorkspaces: unknown[] = [];
         const createResponse = deferred<Response>();
         const rig = connectRig({
@@ -1380,8 +1386,10 @@ describe("connectRig mutations", () => {
                 name: "Feature",
                 projectId: "project-1",
             });
-            // One row appears at once, before the daemon has answered anything.
-            expect(workspaceIds()).toHaveLength(1);
+            // One row appears at once, before the daemon has answered anything,
+            // and it already carries the identity the daemon will report.
+            expect(workspaceIds()).toEqual([mutationId]);
+            const created = daemonWorkspace(mutationId);
 
             await settle();
             stream.write(
@@ -1423,6 +1431,75 @@ describe("connectRig mutations", () => {
             stream.write(liveHello("01900000-0000-7000-8000-000000000005", { gap: true }));
             await settle();
             expect(workspaceIds()).toEqual([]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("keeps one workspace when a snapshot answers a create the response has not", async () => {
+        const stream = streamResponse();
+        let catalogWorkspaces: unknown[] = [];
+        const createResponse = deferred<Response>();
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...groupsCatalog(),
+                                workspaces: catalogWorkspaces,
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname === "/projects/project-1/workspaces") {
+                    return createResponse.promise;
+                }
+                return Promise.resolve(new Response("{}", { status: 200 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        const frames: string[][] = [];
+        const connection = rig.connectGroups({
+            onChange: (projects) => {
+                frames.push(projects[0]?.workspaces.map((item) => item.id) ?? []);
+            },
+        });
+        const workspaceIds = () => connection.projects()[0]?.workspaces.map((item) => item.id);
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const workspaceId = rig.createWorkspace({
+                baseRef: "main",
+                name: "Feature",
+                projectId: "project-1",
+            });
+            const created = daemonWorkspace(workspaceId);
+            await settle();
+            expect(workspaceIds()).toEqual([workspaceId]);
+
+            // The daemon has created it and a reconnect snapshot now names it,
+            // while the create request is still waiting for its answer. A
+            // snapshot names no mutation, so the identity is the only thing that
+            // ties the prediction and the answer together.
+            catalogWorkspaces = [created];
+            stream.write(liveHello("01900000-0000-7000-8000-000000000005", { gap: true }));
+            await settle();
+            expect(workspaceIds()).toEqual([workspaceId]);
+
+            createResponse.resolve(
+                new Response(JSON.stringify({ workspace: created }), { status: 200 }),
+            );
+            await settle();
+            expect(workspaceIds()).toEqual([workspaceId]);
+            expect(frames.every((frame) => frame.length <= 1)).toBe(true);
         } finally {
             connection.close();
             rig.close();

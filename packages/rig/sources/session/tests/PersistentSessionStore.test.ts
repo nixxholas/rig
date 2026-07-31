@@ -251,13 +251,16 @@ describe("PersistentSessionStore", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         try {
             const first = store.createWithId("happy-rig-request-1", { cwd: "/tmp/rig-happy" });
-            const second = store.createWithId("happy-rig-request-1", {
-                cwd: "/tmp/ignored-retry-directory",
-            });
+            const second = store.createWithId("happy-rig-request-1", { cwd: "/tmp/rig-happy" });
 
             expect(first.id).toBe("happy-rig-request-1");
             expect(second).toBe(first);
             expect(second.snapshot().cwd).toBe("/tmp/rig-happy");
+            // The same identity describing a different session is a mistake, not
+            // a retry, so it is refused rather than quietly answered.
+            expect(() =>
+                store.createWithId("happy-rig-request-1", { cwd: "/tmp/rig-elsewhere" }),
+            ).toThrow("another directory");
         } finally {
             store.close();
         }

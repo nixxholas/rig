@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
+import { isCuid } from "@paralleldrive/cuid2";
+
 import type {
     AbortRunResponse,
     BroadcastMessageRequest,
@@ -688,10 +690,10 @@ async function handleRequest(
         if (request.method === "POST") {
             const body = await readJson<unknown>(request);
             if (
-                !hasOnlyObjectKeys(body, ["baseRef", "clientRequestId", "name"]) ||
+                !hasNoUnknownObjectKeys(body, ["baseRef", "id", "name"]) ||
                 typeof body.name !== "string" ||
                 typeof body.baseRef !== "string" ||
-                typeof body.clientRequestId !== "string"
+                (body.id !== undefined && typeof body.id !== "string")
             ) {
                 sendJson(response, 400, { error: "Workspace settings are invalid." });
                 return;
@@ -699,7 +701,7 @@ async function handleRequest(
             try {
                 const workspace = await store.createWorkspace(route.projectId, {
                     baseRef: body.baseRef,
-                    clientRequestId: body.clientRequestId,
+                    ...(body.id === undefined ? {} : { id: body.id }),
                     name: body.name,
                 });
                 if (workspace === undefined) {
@@ -710,7 +712,7 @@ async function handleRequest(
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
                 const message = errorToMessage(error);
-                sendJson(response, message.includes("already used") ? 409 : 400, {
+                sendJson(response, message.includes("already names") ? 409 : 400, {
                     error: message,
                 });
             }
@@ -1131,21 +1133,20 @@ async function handleRequest(
             });
             return;
         }
-        if (
-            body.clientSessionId !== undefined &&
-            (typeof body.clientSessionId !== "string" ||
-                body.clientSessionId.length === 0 ||
-                body.clientSessionId.length > 256)
-        ) {
-            sendJson(response, 400, { error: "The client session ID is invalid." });
+        if (body.id !== undefined && !isCuid(body.id)) {
+            sendJson(response, 400, { error: "The session ID must be a cuid2 identity." });
+            return;
+        }
+        if (body.projectId !== undefined && !isCuid(body.projectId)) {
+            sendJson(response, 400, { error: "The project ID must be a cuid2 identity." });
             return;
         }
         try {
             const sessionRequest = configureSessionRequest(body, defaultDocker);
             const session =
-                body.clientSessionId === undefined
+                body.id === undefined
                     ? store.create(sessionRequest)
-                    : store.createWithId(body.clientSessionId, sessionRequest);
+                    : store.createWithId(body.id, sessionRequest);
             sendJson<CreateSessionResponse>(response, 201, { session: session.snapshot() });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -2574,6 +2575,15 @@ function hasOnlyObjectKeys(
     if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
     const keys = Object.keys(value);
     return keys.length === expectedKeys.length && keys.every((key) => expectedKeys.includes(key));
+}
+
+/** Like `hasOnlyObjectKeys`, for a body where some of those keys are optional. */
+function hasNoUnknownObjectKeys(
+    value: unknown,
+    allowedKeys: readonly string[],
+): value is Record<string, unknown> {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+    return Object.keys(value).every((key) => allowedKeys.includes(key));
 }
 
 function isReorderRequest(value: unknown): value is ReorderRequest {

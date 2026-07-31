@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { createId } from "@paralleldrive/cuid2";
 import sharp from "sharp";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
@@ -185,7 +186,6 @@ describe("projects", () => {
         const sourceSession = fixture.store.create({ cwd: repository });
         const workspace = await fixture.store.createWorkspace(sourceSession.snapshot().projectId, {
             baseRef: "HEAD",
-            clientRequestId: "request-1",
             name: "Feature Work",
         });
         if (workspace === undefined) throw new Error("Expected a workspace.");
@@ -255,7 +255,6 @@ describe("projects", () => {
         const source = fixture.store.create({ cwd: repository });
         const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
             baseRef: "HEAD",
-            clientRequestId: "cleanup-failure",
             name: "Cleanup Failure",
         });
         if (created === undefined) throw new Error("Expected a workspace.");
@@ -302,7 +301,6 @@ describe("projects", () => {
         const source = fixture.store.create({ cwd: repository });
         const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
             baseRef: "HEAD",
-            clientRequestId: "database-failure",
             name: "Database Failure",
         });
         if (created === undefined) throw new Error("Expected a workspace.");
@@ -338,12 +336,10 @@ describe("projects", () => {
         const source = fixture.store.create({ cwd: repository });
         const first = await fixture.store.createWorkspace(source.snapshot().projectId, {
             baseRef: "HEAD",
-            clientRequestId: "recover-create",
             name: "Recovered Create",
         });
         const second = await fixture.store.createWorkspace(source.snapshot().projectId, {
             baseRef: "HEAD",
-            clientRequestId: "recover-archive",
             name: "Recovered Archive",
         });
         if (first === undefined || second === undefined) {
@@ -455,7 +451,6 @@ describe("projects", () => {
         const source = fixture.store.create({ cwd: repository });
         const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
             baseRef: "HEAD",
-            clientRequestId: "archive-during-create",
             name: "Archive During Create",
         });
         if (workspace === undefined) throw new Error("Expected a workspace.");
@@ -513,7 +508,6 @@ describe("projects", () => {
         const projectId = root.snapshot().projectId;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
-            clientRequestId: "archive-project",
             name: "Feature",
         });
         if (created === undefined) throw new Error("Expected a workspace.");
@@ -642,7 +636,6 @@ describe("projects", () => {
 
         const workspace = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
-            clientRequestId: "base-commit",
             name: "Based",
         });
 
@@ -677,7 +670,6 @@ describe("projects", () => {
 
         const workspace = await fixture.store.createWorkspace(projectId, {
             baseRef: "HEAD",
-            clientRequestId: "fresh-origin",
             name: "Fresh Origin",
         });
         if (workspace === undefined) throw new Error("Expected a workspace.");
@@ -706,7 +698,6 @@ describe("projects", () => {
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
         const created = await fixture.store.createWorkspace(projectId, {
             baseRef: "main",
-            clientRequestId: "workspace-title",
             name: "Workspace Branch",
         });
         if (created === undefined) throw new Error("Expected a workspace.");
@@ -737,6 +728,85 @@ describe("projects", () => {
             projects.close();
             opened.client.close();
         }
+    });
+
+    it("lets a client name what it creates, and refuses a name that means something else", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "client-named");
+        const other = await createRepository(fixture.root, "client-named-other");
+        const projectId = createId();
+        const workspaceId = createId();
+
+        const session = fixture.store.createWithId(createId(), { cwd: repository, projectId });
+        expect(session.snapshot().projectId).toBe(projectId);
+
+        const created = await fixture.store.createWorkspace(projectId, {
+            baseRef: "HEAD",
+            id: workspaceId,
+            name: "Client Named",
+        });
+        expect(created?.id).toBe(workspaceId);
+
+        // The request is answered again rather than creating a second workspace,
+        // which is what makes a retry safe.
+        const repeated = await fixture.store.createWorkspace(projectId, {
+            baseRef: "HEAD",
+            id: workspaceId,
+            name: "Client Named",
+        });
+        expect(repeated?.id).toBe(workspaceId);
+        expect(fixture.store.listWorkspaces(projectId)).toHaveLength(1);
+
+        const otherProjectId = fixture.store.create({ cwd: other }).snapshot().projectId;
+        await expect(
+            fixture.store.createWorkspace(otherProjectId, {
+                baseRef: "HEAD",
+                id: workspaceId,
+                name: "Elsewhere",
+            }),
+        ).rejects.toThrow("another project");
+        await expect(
+            fixture.store.createWorkspace(projectId, {
+                baseRef: "HEAD~0",
+                id: workspaceId,
+                name: "Rebased",
+            }),
+        ).rejects.toThrow("different base");
+        await expect(
+            fixture.store.createWorkspace(projectId, {
+                baseRef: "HEAD",
+                id: "Not A Cuid2",
+                name: "Invalid",
+            }),
+        ).rejects.toThrow("cuid2");
+
+        // A directory Rig already knows keeps the identity it has, so importing
+        // it again is answered rather than renamed, and reusing that identity
+        // for a different folder is refused.
+        const reimported = fixture.store.createWithId(createId(), {
+            cwd: repository,
+            projectId: createId(),
+        });
+        expect(reimported.snapshot().projectId).toBe(projectId);
+        expect(() => fixture.store.createWithId(createId(), { cwd: other, projectId })).toThrow(
+            "another folder",
+        );
+    });
+
+    it("answers a repeated session create instead of creating a second session", async () => {
+        const fixture = await createFixture();
+        const directory = join(fixture.root, "retried-session");
+        await mkdir(directory, { recursive: true });
+        const sessionId = createId();
+
+        const created = fixture.store.createWithId(sessionId, { cwd: directory });
+        const repeated = fixture.store.createWithId(sessionId, { cwd: directory });
+
+        expect(repeated.id).toBe(created.id);
+        expect(fixture.store.list().filter((session) => session.cwd === directory)).toHaveLength(1);
+        expect(() => fixture.store.createWithId(sessionId, { cwd: fixture.root })).toThrow(
+            "another directory",
+        );
     });
 });
 

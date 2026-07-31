@@ -43,7 +43,6 @@ describe("project persistence", () => {
                 workspaceReserve(tx, {
                     baseCommit: "a".repeat(40),
                     baseRef: "main",
-                    clientRequestId: "request-1",
                     gitCommonDir: "/workspace/.git",
                     id: "workspace-1",
                     name: "Feature",
