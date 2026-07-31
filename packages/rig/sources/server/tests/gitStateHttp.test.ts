@@ -301,6 +301,7 @@ async function createRepository(root: string): Promise<string> {
     await writeFile(join(repository, "seed.txt"), "seed\n");
     await git(repository, ["add", "--all"]);
     await git(repository, ["commit", "--quiet", "--message", "seed"]);
+    await git(repository, ["update-ref", "refs/remotes/origin/main", "HEAD"]);
     return repository;
 }
 
