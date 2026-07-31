@@ -4,15 +4,31 @@ import { isAbsolute, join, relative } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createLinuxBubblewrapCommand } from "./createLinuxBubblewrapCommand.js";
+import { createLinuxBubblewrapCommand as createCommand } from "./createLinuxBubblewrapCommand.js";
 
 const temporaryDirectories: string[] = [];
+const projectConfigPlaceholders: NonNullable<
+    Awaited<ReturnType<typeof createCommand>>["projectConfigPlaceholder"]
+>[] = [];
 
 afterEach(async () => {
+    await Promise.all(
+        projectConfigPlaceholders.splice(0).map((placeholder) => placeholder.close()),
+    );
     await Promise.all(
         temporaryDirectories.splice(0).map((path) => rm(path, { force: true, recursive: true })),
     );
 });
+
+async function createLinuxBubblewrapCommand(
+    options: Parameters<typeof createCommand>[0],
+): ReturnType<typeof createCommand> {
+    const result = await createCommand(options);
+    if (result.projectConfigPlaceholder !== undefined) {
+        projectConfigPlaceholders.push(result.projectConfigPlaceholder);
+    }
+    return result;
+}
 
 describe("createLinuxBubblewrapCommand", () => {
     it("bridges only managed proxy and loopback ports into the isolated network", async () => {
