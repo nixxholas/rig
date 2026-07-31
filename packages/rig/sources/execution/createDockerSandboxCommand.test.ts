@@ -112,7 +112,7 @@ describe("createDockerSandboxCommand", () => {
             command: "printf compromised > rig.toml",
             commandCwd: "/workspace",
             mode: "workspace_write",
-            projectConfigReady: true,
+            readyProjectConfigNames: ["rig.toml"],
             runtime,
             shell: "/bin/sh",
             workspaceCwd: "/workspace",
@@ -120,6 +120,9 @@ describe("createDockerSandboxCommand", () => {
 
         expect(
             mountIndex(command, "--ro-bind", "/workspace/rig.toml", "/workspace/rig.toml"),
+        ).toBeGreaterThan(lastBindIndex(command, "/workspace"));
+        expect(
+            mountIndex(command, "--ro-bind-try", "/workspace/happy.toml", "/workspace/happy.toml"),
         ).toBeGreaterThan(lastBindIndex(command, "/workspace"));
         expect(
             mountIndex(command, "--ro-bind-try", "/workspace/rig.toml", "/workspace/rig.toml"),

@@ -50,4 +50,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         success: "green",
         warning: "yellow",
     },
+    workspace: {
+        setupCommands: [],
+    },
 };

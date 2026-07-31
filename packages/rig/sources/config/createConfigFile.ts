@@ -46,6 +46,13 @@ export async function createConfigFile(
             },
             providers: serializeProviders(config.providers, config.providerDefaultEnable),
             theme: config.theme,
+            ...(config.workspace.setupCommands.length === 0
+                ? {}
+                : {
+                      workspace: {
+                          setup_commands: config.workspace.setupCommands,
+                      },
+                  }),
             ...(config.docker === undefined
                 ? {}
                 : {

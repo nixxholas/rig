@@ -53,6 +53,9 @@ describe("createMacOsSeatbeltCommand", () => {
             await realpath(join(cwd, ".git")),
         );
         expect(definedPaths(result.args, "PROTECTED_WRITE")).not.toContain(join(cwd, ".git"));
+        expect(definedPaths(result.args, "PROTECTED_WRITE")).toEqual(
+            expect.arrayContaining([join(cwd, "rig.toml"), join(cwd, "happy.toml")]),
+        );
     });
 
     it("allows outbound network only to the managed proxy port", async () => {

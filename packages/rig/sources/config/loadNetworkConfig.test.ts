@@ -16,6 +16,29 @@ afterEach(async () => {
 });
 
 describe("loadNetworkConfig", () => {
+    it("falls back to happy.toml but prefers rig.toml", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-network-fallback-"));
+        temporaryDirectories.push(root);
+        const workspace = join(root, "workspace");
+        await mkdir(workspace, { recursive: true });
+        await writeFile(
+            join(workspace, "happy.toml"),
+            '[network]\nallowed_domains = ["happy.example"]\n',
+        );
+
+        await expect(loadNetworkConfig({ cwd: workspace, homeDirectory: root })).resolves.toEqual({
+            allowedDomains: ["happy.example"],
+        });
+
+        await writeFile(
+            join(workspace, "rig.toml"),
+            '[network]\nallowed_domains = ["rig.example"]\n',
+        );
+        await expect(loadNetworkConfig({ cwd: workspace, homeDirectory: root })).resolves.toEqual({
+            allowedDomains: ["rig.example"],
+        });
+    });
+
     it("uses project policy over global policy and ignores runtime settings", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-network-config-"));
         temporaryDirectories.push(root);

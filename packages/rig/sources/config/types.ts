@@ -56,6 +56,14 @@ export interface PartialConfigFeatures {
     workspaces?: boolean;
 }
 
+export interface ConfigWorkspace {
+    setupCommands: readonly string[];
+}
+
+export interface PartialConfigWorkspace {
+    setupCommands?: readonly string[];
+}
+
 interface ConfigProviderBase {
     enabled: boolean;
     excludeModels?: readonly string[];
@@ -135,6 +143,7 @@ export interface RigConfig {
     providers: ConfigProviders;
     settings: ConfigSettings;
     theme: ConfigTheme;
+    workspace: ConfigWorkspace;
 }
 
 export interface PartialRigConfig {
@@ -147,6 +156,7 @@ export interface PartialRigConfig {
     providers?: PartialConfigProviders;
     settings?: PartialConfigSettings;
     theme?: PartialConfigTheme;
+    workspace?: PartialConfigWorkspace;
 }
 
 export interface ConfigPaths {

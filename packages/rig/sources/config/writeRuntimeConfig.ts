@@ -10,6 +10,7 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
     const settings = config.settings;
     const providers = config.providers;
     const theme = config.theme;
+    const workspace = config.workspace;
     const document: {
         defaults?: {
             effort?: string;
@@ -31,6 +32,9 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
             show_usage?: boolean;
         };
         providers?: Record<string, unknown>;
+        workspace?: {
+            setup_commands?: readonly string[];
+        };
     } = {};
 
     if (defaults !== undefined) {
@@ -87,6 +91,13 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
 
     if (theme !== undefined) {
         document.theme = { ...theme };
+    }
+
+    if (workspace !== undefined) {
+        document.workspace = {};
+        if (workspace.setupCommands !== undefined) {
+            document.workspace.setup_commands = workspace.setupCommands;
+        }
     }
 
     await mkdir(dirname(path), { recursive: true });

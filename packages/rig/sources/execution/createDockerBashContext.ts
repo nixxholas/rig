@@ -241,7 +241,12 @@ export function createDockerBashContext(
                                         socks: managedNetwork.containerSocksSocketPath,
                                     },
                                 }),
-                          ...(networkPolicyState === undefined ? {} : { projectConfigReady: true }),
+                          ...(networkPolicyState === undefined
+                              ? {}
+                              : {
+                                    readyProjectConfigNames:
+                                        networkPolicyState.readyProjectConfigNames,
+                                }),
                           runtime: runtime!,
                           shell,
                           workspaceCwd: workspaceCwd ?? cwd,
@@ -258,7 +263,15 @@ export function createDockerBashContext(
         const protectedCreatePaths =
             workspaceCwd === undefined || permissionMode === "read_only"
                 ? []
-                : [".agents", ".codex", ".git"].map((name) => posix.join(workspaceCwd, name));
+                : [
+                      ".agents",
+                      ".codex",
+                      ".git",
+                      ...(networkPolicyState?.absentProjectConfigNames ?? [
+                          "rig.toml",
+                          "happy.toml",
+                      ]),
+                  ].map((name) => posix.join(workspaceCwd, name));
         let exec: Dockerode.Exec;
         try {
             const payloadCommand =

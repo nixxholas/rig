@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -239,6 +239,99 @@ describe("projects", () => {
         expect(() => fixture.store.create({ cwd: ready.path })).toThrow("archived");
     });
 
+    it("runs configured workspace setup commands in order before becoming ready", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "setup-source");
+        await writeFile(
+            join(repository, "rig.toml"),
+            [
+                "[workspace]",
+                "setup_commands = [",
+                '    "printf first > workspace-setup-order.txt",',
+                '    "test \\"$(cat workspace-setup-order.txt)\\" = first && printf -- \\"\\\\nsecond\\\\n\\" >> workspace-setup-order.txt",',
+                "]",
+                "",
+            ].join("\n"),
+        );
+        await git(repository, ["add", "rig.toml"]);
+        await git(repository, ["commit", "-m", "Configure workspace setup"]);
+        const source = fixture.store.create({ cwd: repository });
+
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            name: "Configured Setup",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const initialized = await waitForWorkspace(
+            fixture.store,
+            created.projectId,
+            created.id,
+            (workspace) => workspace.status === "ready" || workspace.status === "failed",
+        );
+
+        expect(initialized.status).toBe("ready");
+        await expect(
+            readFile(join(initialized.path, "workspace-setup-order.txt"), "utf8"),
+        ).resolves.toBe("first\nsecond\n");
+        expect(
+            fixture.store
+                .create({
+                    cwd: initialized.path,
+                    workspaceId: initialized.id,
+                })
+                .snapshot(),
+        ).toMatchObject({
+            workspaceId: initialized.id,
+        });
+    });
+
+    it("fails workspace initialization on the first failed setup command", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "failed-setup-source");
+        await writeFile(
+            join(repository, "rig.toml"),
+            [
+                "[workspace]",
+                "setup_commands = [",
+                '    "printf before > setup-before.txt",',
+                '    "printf setup-failed >&2; exit 7",',
+                '    "printf after > setup-after.txt",',
+                "]",
+                "",
+            ].join("\n"),
+        );
+        await git(repository, ["add", "rig.toml"]);
+        await git(repository, ["commit", "-m", "Configure failing workspace setup"]);
+        const source = fixture.store.create({ cwd: repository });
+
+        const created = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            name: "Failed Setup",
+        });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const initialized = await waitForWorkspace(
+            fixture.store,
+            created.projectId,
+            created.id,
+            (workspace) => workspace.status === "ready" || workspace.status === "failed",
+        );
+
+        expect(initialized).toMatchObject({
+            error: expect.stringContaining("setup-failed"),
+            status: "failed",
+        });
+        await expect(readFile(join(initialized.path, "setup-before.txt"), "utf8")).resolves.toBe(
+            "before",
+        );
+        await expect(readFile(join(initialized.path, "setup-after.txt"), "utf8")).rejects.toThrow();
+        expect(() =>
+            fixture.store.create({
+                cwd: initialized.path,
+                workspaceId: initialized.id,
+            }),
+        ).toThrow("failed");
+    });
+
     it("skips workspace storage keys already occupied on disk or by a Git branch", async () => {
         const fixture = await createFixture();
         const repository = await createRepository(fixture.root, "collision-source");
@@ -364,7 +457,11 @@ describe("projects", () => {
         await git(repository, ["config", "user.email", "rig@example.test"]);
         await git(repository, ["config", "user.name", "Rig Test"]);
         await writeFile(join(repository, "README.md"), "fixture\n");
-        await git(repository, ["add", "README.md"]);
+        await writeFile(
+            join(repository, "rig.toml"),
+            '[workspace]\nsetup_commands = ["printf recovered > workspace-setup-recovered.txt"]\n',
+        );
+        await git(repository, ["add", "README.md", "rig.toml"]);
         await git(repository, ["commit", "-m", "Initial"]);
 
         const source = fixture.store.create({ cwd: repository });
@@ -414,6 +511,7 @@ describe("projects", () => {
             workspaceId: readySecond.id,
         });
         fixture.store.close();
+        await rm(join(readyFirst.path, "workspace-setup-recovered.txt"));
 
         const opened = openSessionDatabase(fixture.databasePath);
         opened.database
@@ -444,6 +542,9 @@ describe("projects", () => {
                     )
                 ).status,
             ).toBe("ready");
+            await expect(
+                readFile(join(readyFirst.path, "workspace-setup-recovered.txt"), "utf8"),
+            ).resolves.toBe("recovered");
             expect(
                 (
                     await waitForWorkspace(
@@ -525,6 +626,54 @@ describe("projects", () => {
         expect(observedStates).toContain("archiving");
         expect(observedStates).toContain("archived");
         expect(observedStates).not.toContain("ready");
+    });
+
+    it("stops a running setup command when the workspace is archived", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "archive-during-setup");
+        await writeFile(
+            join(repository, "rig.toml"),
+            [
+                "[workspace]",
+                'setup_commands = ["printf started > setup-started.txt; sleep 30; printf finished > setup-finished.txt"]',
+                "",
+            ].join("\n"),
+        );
+        await git(repository, ["add", "rig.toml"]);
+        await git(repository, ["commit", "-m", "Configure long workspace setup"]);
+        const source = fixture.store.create({ cwd: repository });
+        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            name: "Archive During Setup",
+        });
+        if (workspace === undefined) throw new Error("Expected a workspace.");
+        await waitForPath(join(workspace.path, "setup-started.txt"));
+
+        const archiving = await fixture.store.archiveWorkspace(
+            workspace.projectId,
+            workspace.id,
+            workspace.version,
+        );
+        expect(archiving?.status).toBe("archiving");
+        await waitForWorkspace(
+            fixture.store,
+            workspace.projectId,
+            workspace.id,
+            (value) => value.status === "archived",
+        );
+
+        await expect(access(workspace.path)).rejects.toThrow();
+        expect(
+            fixture.store.globalEventQueue
+                .list()
+                ?.some(
+                    (entry) =>
+                        (entry.event.type === "workspace_created" ||
+                            entry.event.type === "workspace_updated") &&
+                        entry.event.data.workspace.status === "ready" &&
+                        entry.event.data.workspace.id === workspace.id,
+                ),
+        ).toBe(false);
     });
 
     it("archives its chats and workspaces, and returns when the folder is used again", async () => {
@@ -990,5 +1139,18 @@ async function waitFor<T>(read: () => T | undefined, predicate: (value: T) => bo
         if (value !== undefined && predicate(value)) return value;
         if (Date.now() >= deadline) throw new Error("Timed out waiting for project state.");
         await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+}
+
+async function waitForPath(path: string): Promise<void> {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+        try {
+            await access(path);
+            return;
+        } catch {
+            if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${path}.`);
+            await new Promise<void>((resolve) => setTimeout(resolve, 20));
+        }
     }
 }

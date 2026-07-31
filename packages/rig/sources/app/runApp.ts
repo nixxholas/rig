@@ -74,6 +74,7 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
     ]);
     const projectConfigNotice = createProjectConfigSecurityNotice(
         loadedConfig.sources.local.values,
+        basename(loadedConfig.sources.local.path),
     );
     const projectMcpNotice = createProjectMcpSecurityNotice(mcpConfigEntries);
     const agentOptions: CreateSessionRequest = {

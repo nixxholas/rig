@@ -1,6 +1,7 @@
 import { DEFAULT_RIG_CONFIG } from "./defaultConfig.js";
 import { mergeConfigValues } from "./mergeConfigValues.js";
 import { readConfigFile } from "./readConfigFile.js";
+import { readProjectConfigFile } from "./readProjectConfigFile.js";
 import { resolveConfigPaths } from "./resolveConfigPaths.js";
 import type { ConfigNetwork, LoadConfigOptions, PartialRigConfig } from "./types.js";
 import { withoutProjectMachineSettings } from "./withoutProjectMachineSettings.js";
@@ -11,7 +12,7 @@ export async function loadNetworkConfig(
     const paths = resolveConfigPaths(options);
     const [globalSource, localSource] = await Promise.all([
         readConfigFile(paths.global),
-        readConfigFile(paths.local),
+        readProjectConfigFile(paths.local),
     ]);
     return mergeNetworkConfig(globalSource.values, localSource.values);
 }

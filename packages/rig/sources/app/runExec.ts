@@ -1,3 +1,5 @@
+import { basename } from "node:path";
+
 import { findLastAgentResponseText } from "../agent/findLastAgentResponseText.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { ensureLocalProtocolServer } from "../client/index.js";
@@ -50,6 +52,7 @@ async function run(
     ]);
     const projectConfigNotice = createProjectConfigSecurityNotice(
         loadedConfig.sources.local.values,
+        basename(loadedConfig.sources.local.path),
     );
     const projectMcpNotice = createProjectMcpSecurityNotice(mcpConfigEntries);
     if (projectConfigNotice !== undefined) {

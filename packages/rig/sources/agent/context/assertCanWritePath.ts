@@ -1,4 +1,4 @@
-import { isAbsolute, resolve } from "node:path";
+import { basename, isAbsolute, resolve } from "node:path";
 
 import { isPathInsideWorkspace } from "./isPathInsideWorkspace.js";
 import { isProtectedGitControlPath } from "./isProtectedGitControlPath.js";
@@ -29,7 +29,9 @@ export async function assertCanWritePath(
         isProtectedProjectConfigPath(cwd, absoluteTarget) ||
         isProtectedProjectConfigPath(canonicalCwd, canonicalTarget)
     ) {
-        throw new Error("Workspace write mode cannot modify the project rig.toml file.");
+        throw new Error(
+            `Workspace write mode cannot modify the project ${basename(absoluteTarget)} file.`,
+        );
     }
     if (isProtectedGitControlPath(absoluteTarget) || isProtectedGitControlPath(canonicalTarget)) {
         throw new Error(

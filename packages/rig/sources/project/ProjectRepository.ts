@@ -77,6 +77,8 @@ import type { SessionDatabase } from "../persistence/database/openSessionDatabas
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import { folderProjectName, validateProjectName } from "./projectIdentity.js";
 import { workspaceStorageKeysInUse } from "./workspaceStorageKeysInUse.js";
+import { loadConfig } from "../config/loadConfig.js";
+import { runWorkspaceSetupCommands } from "./runWorkspaceSetupCommands.js";
 
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
 const GIT_PROBE_CONCURRENCY = 4;
@@ -144,6 +146,7 @@ export class ProjectRepository {
     readonly #taskDrain: TaskDrain | undefined;
     readonly #transactionRunner: (<T>(body: (tx: TX) => T) => T) | undefined;
     readonly #workspaceLifecycle = new Map<string, Promise<void>>();
+    readonly #workspaceSetupControllers = new Map<string, AbortController>();
     #activeInitializations = 0;
     #closed = false;
 
@@ -250,6 +253,10 @@ export class ProjectRepository {
     close(): void {
         this.#closed = true;
         this.#pendingInitializations.length = 0;
+        for (const controller of this.#workspaceSetupControllers.values()) {
+            controller.abort(new Error("Workspace setup stopped because Rig is closing."));
+        }
+        this.#workspaceSetupControllers.clear();
     }
 
     getProject(projectId: string): Project | undefined {
@@ -772,12 +779,13 @@ export class ProjectRepository {
         const workspace = this.getWorkspace(projectId, workspaceId);
         if (workspace === undefined) return undefined;
         if (workspace.status === "archived" || workspace.status === "archiving") {
+            this.#stopWorkspaceSetup(workspaceId);
             return workspace;
         }
         if (expectedVersion !== undefined && expectedVersion !== workspace.version) {
             throw new Error("The workspace changed before it could be archived.");
         }
-        return this.#mutate((tx) => {
+        const archived = this.#mutate((tx) => {
             const changed = workspaceBeginArchive(
                 tx,
                 projectId,
@@ -793,6 +801,8 @@ export class ProjectRepository {
             }
             return this.#publishedWorkspace(projectId, workspaceId);
         });
+        if (archived?.status === "archiving") this.#stopWorkspaceSetup(workspaceId);
+        return archived;
     }
 
     async removeArchivedWorkspace(
@@ -1106,6 +1116,8 @@ export class ProjectRepository {
                     path: workspace.path,
                 });
                 if (adoptable) {
+                    await this.#setupWorkspace(workspace);
+                    if (this.#closed) return;
                     this.#markWorkspaceReady(workspace);
                     return;
                 }
@@ -1209,12 +1221,38 @@ export class ProjectRepository {
                 workspacePath: workspace.path,
             });
             if (this.#closed) return;
+            await this.#setupWorkspace(workspace);
+            if (this.#closed) return;
             this.#markWorkspaceReady(workspace);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (this.#closed) return;
             this.#markWorkspaceInitializationFailed(workspace, errorToMessage(error));
         }
+    }
+
+    async #setupWorkspace(workspace: ProjectWorkspace): Promise<void> {
+        const controller = new AbortController();
+        this.#workspaceSetupControllers.set(workspace.id, controller);
+        try {
+            if (this.getWorkspace(workspace.projectId, workspace.id)?.status !== "initializing") {
+                return;
+            }
+            const loaded = await loadConfig({ cwd: workspace.path });
+            await runWorkspaceSetupCommands(workspace.path, loaded.config.workspace.setupCommands, {
+                signal: controller.signal,
+            });
+        } finally {
+            if (this.#workspaceSetupControllers.get(workspace.id) === controller) {
+                this.#workspaceSetupControllers.delete(workspace.id);
+            }
+        }
+    }
+
+    #stopWorkspaceSetup(workspaceId: string): void {
+        this.#workspaceSetupControllers
+            .get(workspaceId)
+            ?.abort(new Error("Workspace setup stopped because the workspace was archived."));
     }
 
     #markWorkspaceReady(workspace: ProjectWorkspace): void {

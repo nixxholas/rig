@@ -16,10 +16,14 @@ afterEach(async () => {
 });
 
 describe("direct filesystem project configuration protection", () => {
-    it("blocks changes to the root rig.toml in restricted write modes", async () => {
+    it("blocks changes to root project config files in restricted write modes", async () => {
         const workspace = await mkdtemp(join(tmpdir(), "rig-project-config-security-"));
         temporaryDirectories.push(workspace);
-        await writeFile(join(workspace, "rig.toml"), "[network]\nallowed_ports = [443]\n");
+        await Promise.all(
+            ["rig.toml", "happy.toml"].map((name) =>
+                writeFile(join(workspace, name), "[network]\nallowed_ports = [443]\n"),
+            ),
+        );
         let mode: PermissionMode = "workspace_write";
         const context = createNodeFileSystemContext(workspace, {
             permissionMode: () => mode,
@@ -27,17 +31,19 @@ describe("direct filesystem project configuration protection", () => {
 
         for (const restrictedMode of ["workspace_write", "auto"] as const) {
             mode = restrictedMode;
-            await expect(context.writeFile("rig.toml", "compromised\n")).rejects.toThrow(
-                "cannot modify the project rig.toml",
-            );
-            await expect(context.rm("rig.toml")).rejects.toThrow(
-                "cannot modify the project rig.toml",
-            );
+            for (const name of ["rig.toml", "happy.toml"]) {
+                await expect(context.writeFile(name, "compromised\n")).rejects.toThrow(
+                    `cannot modify the project ${name}`,
+                );
+                await expect(context.rm(name)).rejects.toThrow(`cannot modify the project ${name}`);
+            }
         }
 
-        await expect(readFile(join(workspace, "rig.toml"), "utf8")).resolves.toBe(
-            "[network]\nallowed_ports = [443]\n",
-        );
+        for (const name of ["rig.toml", "happy.toml"]) {
+            await expect(readFile(join(workspace, name), "utf8")).resolves.toBe(
+                "[network]\nallowed_ports = [443]\n",
+            );
+        }
     });
 
     it("allows explicit Full access to change the root rig.toml", async () => {

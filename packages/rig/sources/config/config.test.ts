@@ -14,6 +14,76 @@ import { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
 import { writeDaemonSettings } from "./writeDaemonSettings.js";
 
 describe("config", () => {
+    it("falls back to happy.toml when rig.toml is absent", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-happy-config-"));
+        try {
+            const happyPath = join(root, "happy.toml");
+            await writeFile(happyPath, '[workspace]\nsetup_commands = ["printf happy"]\n', "utf8");
+
+            const loaded = await loadConfig({
+                cwd: root,
+                env: { RIG_HOME: join(root, "config-home") } as NodeJS.ProcessEnv,
+            });
+
+            expect(loaded.config.workspace.setupCommands).toEqual(["printf happy"]);
+            expect(loaded.sources.local).toMatchObject({ exists: true, path: happyPath });
+            expect(loaded.paths.local).toBe(join(root, "rig.toml"));
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("prefers rig.toml to happy.toml when both are present", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-preferred-config-"));
+        try {
+            await Promise.all([
+                writeFile(
+                    join(root, "rig.toml"),
+                    '[workspace]\nsetup_commands = ["printf rig"]\n',
+                    "utf8",
+                ),
+                writeFile(
+                    join(root, "happy.toml"),
+                    '[workspace]\nsetup_commands = ["printf happy"]\n',
+                    "utf8",
+                ),
+            ]);
+
+            const loaded = await loadConfig({
+                cwd: root,
+                env: { RIG_HOME: join(root, "config-home") } as NodeJS.ProcessEnv,
+            });
+
+            expect(loaded.config.workspace.setupCommands).toEqual(["printf rig"]);
+            expect(loaded.sources.local.path).toBe(join(root, "rig.toml"));
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("does not hide an invalid rig.toml behind a valid happy.toml", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-invalid-preferred-config-"));
+        try {
+            await Promise.all([
+                writeFile(join(root, "rig.toml"), "invalid = true\n", "utf8"),
+                writeFile(
+                    join(root, "happy.toml"),
+                    '[workspace]\nsetup_commands = ["printf happy"]\n',
+                    "utf8",
+                ),
+            ]);
+
+            await expect(
+                loadConfig({
+                    cwd: root,
+                    env: { RIG_HOME: join(root, "config-home") } as NodeJS.ProcessEnv,
+                }),
+            ).rejects.toThrow("Unknown invalid setting.");
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
     it("parses a provider default without treating it as a provider", () => {
         expect(
             parseConfigToml(`
@@ -95,6 +165,22 @@ enabled = true
     it("parses a standalone theme table", () => {
         expect(parseConfigToml('[theme]\nprimary = "#123456"\n')).toEqual({
             theme: { primary: "#123456" },
+        });
+    });
+
+    it("parses ordered workspace setup commands", () => {
+        expect(
+            parseConfigToml(`
+[workspace]
+setup_commands = [
+    "pnpm install --frozen-lockfile",
+    "pnpm build",
+]
+`),
+        ).toEqual({
+            workspace: {
+                setupCommands: ["pnpm install --frozen-lockfile", "pnpm build"],
+            },
         });
     });
 
@@ -347,6 +433,10 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
         ['[features]\nworkflows = "yes"\n', "features.workflows must be a boolean."],
         ['[features]\nworkspaces = "yes"\n', "features.workspaces must be a boolean."],
         ['[features]\ncross_workspace = "yes"\n', "features.cross_workspace must be a boolean."],
+        [
+            '[workspace]\nsetup_commands = "pnpm install"\n',
+            "workspace.setup_commands must be an array of strings.",
+        ],
         ['[defaults]\nmodle = "openai/gpt-5.6"\n', "Unknown defaults.modle setting."],
         ["[settings]\nshow_useage = true\n", "Unknown settings.show_useage setting."],
         ['[theme]\nprimari = "bright_white"\n', "Unknown theme.primari setting."],
@@ -401,6 +491,12 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
             }),
         ).toContain("kept the Happy integration under your machine-level control");
         expect(
+            createProjectConfigSecurityNotice(
+                { defaults: { permissionMode: "full_access" } },
+                "happy.toml",
+            ),
+        ).toContain("This project's happy.toml requested a permission mode");
+        expect(
             createProjectConfigSecurityNoticeTitle({
                 settings: { happyIntegration: true },
             }),
@@ -435,6 +531,8 @@ workflows = false
 [docker]
 container = "trusted-development-container"
 workdir = "/repo"
+[workspace]
+setup_commands = ["printf global"]
 `,
                 "utf8",
             );
@@ -466,6 +564,8 @@ enabled = false
 enabled = true
 [docker]
 image = "attacker/image"
+[workspace]
+setup_commands = ["printf project"]
 `,
                 "utf8",
             );
@@ -515,6 +615,7 @@ codex_stream_max_retries = 8
                 container: "trusted-development-container",
                 workingDirectory: "/repo",
             });
+            expect(loaded.config.workspace.setupCommands).toEqual(["printf project"]);
             expect(createProjectConfigSecurityNotice(loaded.sources.local.values)).toBe(
                 "This project's rig.toml requested machine-level settings. Rig applied the other project preferences but kept permissions, container execution, provider availability, Codex reconnect attempts, daemon heap snapshots, the durable event queue, and the Happy integration under your machine-level control.",
             );
@@ -537,6 +638,7 @@ codex_stream_max_retries = 8
             });
             expect(defaultLoaded.config.features.workflows).toBe(true);
             expect(defaultLoaded.config.defaults.permissionMode).toBe("workspace_write");
+            expect(defaultLoaded.config.workspace.setupCommands).toEqual([]);
             expect(loaded.paths.global).toBe(globalPath);
             expect(loaded.paths.local).toBe(localPath);
             expect(loaded.paths.runtime).toBe(runtimePath);
@@ -581,6 +683,9 @@ codex_stream_max_retries = 8
                     bedrock: { enabled: true, type: "bedrock" },
                 },
                 theme: DEFAULT_RIG_CONFIG.theme,
+                workspace: {
+                    setupCommands: ["pnpm install --frozen-lockfile"],
+                },
             });
             await writeRuntimeConfigDefaults(runtimePath, {
                 modelId: "openai/gpt-5.5",
@@ -649,6 +754,9 @@ codex_stream_max_retries = 8
                     'secondary = "dim"',
                     'success = "green"',
                     'warning = "yellow"',
+                    "",
+                    "[workspace]",
+                    'setup_commands = [ "pnpm install --frozen-lockfile" ]',
                     "",
                 ].join("\n"),
             );

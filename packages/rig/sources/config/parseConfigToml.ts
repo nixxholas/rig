@@ -32,6 +32,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         "providers",
         "settings",
         "theme",
+        "workspace",
     ]);
     const docker = readDockerConfig(table.docker);
     const network = readNetworkConfig(table.network);
@@ -189,6 +190,19 @@ export function parseConfigToml(source: string): PartialRigConfig {
         );
         if (crossWorkspace !== undefined) features.crossWorkspace = crossWorkspace;
     }
+    const workspaceTable = readTable(table.workspace, "workspace");
+    const workspace =
+        workspaceTable === undefined
+            ? undefined
+            : (() => {
+                  assertKnownKeys(workspaceTable, "workspace", ["setup_commands"]);
+                  return readOptionalStringArray(
+                      workspaceTable,
+                      "setup_commands",
+                      "setupCommands",
+                      "workspace.setup_commands",
+                  );
+              })();
 
     return {
         ...(docker !== undefined ? { docker } : {}),
@@ -204,6 +218,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
             : {}),
         ...(Object.keys(settings).length > 0 ? { settings } : {}),
         ...(Object.keys(theme).length > 0 ? { theme } : {}),
+        ...(workspace !== undefined && Object.keys(workspace).length > 0 ? { workspace } : {}),
     };
 }
 

@@ -92,7 +92,7 @@ not appear as mobile machines or mirror test sessions. Set
 force the integration off with `RIG_DISABLE_HAPPY_SYNC=1`; this overrides the
 configuration file.
 
-Repository `rig.toml` files cannot enable or disable this machine-level
+Repository `rig.toml` files (or fallback `happy.toml` files) cannot enable or disable this machine-level
 integration. When enabled, Rig automatically imports newer credentials from
 `~/.happy` when its daemon starts. To authenticate directly from Rig instead,
 run:
@@ -383,7 +383,8 @@ permission_mode = "workspace_write"
 ## Configuration
 
 Rig reads user-wide settings from `~/.rig/config.toml` and repository
-settings from `rig.toml`. Repository values win where both are allowed. MCP
+settings from `rig.toml`. If it is absent, Rig reads `happy.toml`; when both
+files exist, `rig.toml` wins. Repository values win where both are allowed. MCP
 servers use these same Rig-owned configuration layers; provider configuration
 files are not imported.
 
@@ -408,11 +409,35 @@ brand = "ansi:202"
 accent = "cyan"
 ```
 
+### Managed workspace setup
+
+A repository can prepare every managed workspace before Rig starts an agent in
+it. Add ordered shell commands to the repository's protected `rig.toml` (or
+`happy.toml` when `rig.toml` is absent):
+
+```toml
+[workspace]
+setup_commands = [
+  "pnpm install --frozen-lockfile",
+  "pnpm build",
+]
+```
+
+Rig creates the Git worktree, runs each command in order from the workspace
+directory with the system login shell, and marks the workspace ready only after
+all commands succeed. A failed or timed-out command leaves the workspace failed,
+skips the remaining commands, and prevents sessions and inference from starting
+there. These commands are trusted project lifecycle code and run with full
+filesystem and network access. Each command has a 30-minute limit.
+The same setting can provide a user-wide default in `~/.rig/config.toml`; a
+repository list replaces that default for its workspaces.
+
 ### Managed network access
 
 Auto and Workspace write shell commands have no general network access. To let
 those commands use a specific external service, add a managed network policy to
-the global `~/.rig/config.toml` or the repository's root `rig.toml`. Read only
+the global `~/.rig/config.toml` or the repository's root `rig.toml` (falling
+back to `happy.toml`). Read only
 always keeps shell networking disabled, even when a policy exists. Full access
 is unrestricted and ignores the managed policy. The policy is
 configuration-owned: it is not exposed as a shell-tool argument, so an agent
@@ -488,7 +513,7 @@ write shell command. Project policy replaces global policy.
 `denied_domains` is the exception: global and project denies are combined, so a
 repository cannot remove a machine-wide global denial. Runtime settings and
 session state cannot define network policy. Changing a network policy therefore
-does not require restarting Rig. The root project `rig.toml` is protected from
+does not require restarting Rig. Root project `rig.toml` and `happy.toml` files are protected from
 agent writes in Auto, Workspace write, and Read only modes; explicit Full access
 can still modify it. If the file does not yet exist, Rig atomically creates an
 empty temporary placeholder before starting each writable restricted command,

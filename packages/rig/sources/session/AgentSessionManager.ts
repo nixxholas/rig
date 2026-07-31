@@ -406,15 +406,10 @@ export class AgentSessionManager {
         resolveWorkspace: () => ProjectWorkspace | undefined,
         signal?: AbortSignal,
     ): Promise<ProjectWorkspace | undefined> {
-        const deadline = Date.now() + 120_000;
         for (;;) {
             signal?.throwIfAborted();
             const workspace = resolveWorkspace();
-            if (
-                workspace === undefined ||
-                workspace.status !== "initializing" ||
-                Date.now() >= deadline
-            ) {
+            if (workspace === undefined || workspace.status !== "initializing") {
                 return workspace;
             }
             await new Promise<void>((resolve, reject) => {

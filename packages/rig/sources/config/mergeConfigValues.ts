@@ -19,6 +19,7 @@ export function mergeConfigValues(
     const providerEnabledOverrides = new Map<string, boolean>();
     const settings = { ...baseDefaults.settings };
     const theme = { ...baseDefaults.theme };
+    const workspace = { ...baseDefaults.workspace };
 
     for (const config of configs) {
         if (config.docker !== undefined) docker = config.docker;
@@ -92,6 +93,9 @@ export function mergeConfigValues(
             Object.assign(mcpServers, config.mcpServers);
         }
         if (config.network !== undefined) network = config.network;
+        if (config.workspace?.setupCommands !== undefined) {
+            workspace.setupCommands = config.workspace.setupCommands;
+        }
     }
 
     return {
@@ -111,6 +115,7 @@ export function mergeConfigValues(
         ),
         settings,
         theme,
+        workspace,
         ...(docker === undefined ? {} : { docker }),
     };
 }

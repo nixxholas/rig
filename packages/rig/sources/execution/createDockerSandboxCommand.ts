@@ -1,6 +1,7 @@
 import { posix } from "node:path";
 
 import { MANAGED_NETWORK_SOCAT_PREFLIGHT } from "../agent/context/managedNetworkSocatPreflight.js";
+import { PROJECT_CONFIG_FILE_NAMES } from "../config/projectConfigFileNames.js";
 import type { PermissionMode } from "../permissions/index.js";
 import type { PreparedDockerSandbox } from "./prepareDockerSandbox.js";
 
@@ -15,7 +16,7 @@ export function createDockerSandboxCommand(options: {
         loopback?: readonly { path: string; port: number }[];
         socks: string;
     };
-    projectConfigReady?: boolean;
+    readyProjectConfigNames?: readonly ("happy.toml" | "rig.toml")[];
     runtime: PreparedDockerSandbox;
     shell: string;
     workspaceCwd: string;
@@ -50,12 +51,16 @@ export function createDockerSandboxCommand(options: {
             `${options.workspaceCwd}/${name}`,
             `${options.workspaceCwd}/${name}`,
         );
-    const projectConfigPath = `${options.workspaceCwd}/rig.toml`;
-    command.push(
-        options.projectConfigReady === true ? "--ro-bind" : "--ro-bind-try",
-        projectConfigPath,
-        projectConfigPath,
-    );
+    for (const name of PROJECT_CONFIG_FILE_NAMES) {
+        const projectConfigPath = `${options.workspaceCwd}/${name}`;
+        command.push(
+            options.readyProjectConfigNames?.includes(name) === true
+                ? "--ro-bind"
+                : "--ro-bind-try",
+            projectConfigPath,
+            projectConfigPath,
+        );
+    }
     const userCommand =
         options.networkUnixProxySockets === undefined
             ? options.command

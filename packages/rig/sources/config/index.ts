@@ -11,6 +11,7 @@ export { loadDaemonSettings } from "./loadDaemonSettings.js";
 export { mergeConfigValues } from "./mergeConfigValues.js";
 export { loadNetworkConfig, loadNetworkConfigForProject } from "./loadNetworkConfig.js";
 export { parseConfigToml } from "./parseConfigToml.js";
+export { PROJECT_CONFIG_FILE_NAMES } from "./projectConfigFileNames.js";
 export { resolveConfigPaths } from "./resolveConfigPaths.js";
 export { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 export { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
@@ -29,6 +30,7 @@ export type {
     ConfigSettings,
     ConfigSource,
     ConfigTheme,
+    ConfigWorkspace,
     ConfigNetwork,
     LoadedConfig,
     LoadConfigOptions,
@@ -38,5 +40,6 @@ export type {
     PartialConfigProviders,
     PartialConfigSettings,
     PartialConfigTheme,
+    PartialConfigWorkspace,
     PartialRigConfig,
 } from "./types.js";

@@ -1,6 +1,7 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { PROJECT_CONFIG_FILE_NAMES } from "../../config/projectConfigFileNames.js";
 import type { PermissionMode } from "../../permissions/index.js";
 import { findGitWritablePaths } from "./findGitWritablePaths.js";
 import { MACOS_SEATBELT_BASE_POLICY } from "./macOsSeatbeltBasePolicy.js";
@@ -8,7 +9,7 @@ import { quoteShellArgument } from "./quoteShellArgument.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
 
 const MACOS_SEATBELT_EXECUTABLE = "/usr/bin/sandbox-exec";
-const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", "rig.toml"] as const;
+const PROTECTED_WORKSPACE_NAMES = [".agents", ".codex", ...PROJECT_CONFIG_FILE_NAMES] as const;
 
 export async function createMacOsSeatbeltCommand(options: {
     /**

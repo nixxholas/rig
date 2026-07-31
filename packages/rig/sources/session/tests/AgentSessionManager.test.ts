@@ -1909,6 +1909,68 @@ describe("AgentSessionManager", () => {
             ),
         ).toEqual([]);
     });
+
+    it("waits for owned workspace initialization before starting its agent", async () => {
+        const child = {
+            agentMetadata: () => ({
+                depth: 1,
+                description: "Wait for setup",
+                parentSessionId: "root-1",
+                rootSessionId: "root-1",
+                taskName: "wait_for_setup",
+                type: "subagent" as const,
+            }),
+            id: "child-1",
+            isSubagent: () => true,
+            subagentSummary: () => ({ status: "running" }),
+            submit: vi.fn(() => ({ runId: "child-run" })),
+        } as unknown as InMemorySession;
+        const parent = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            id: "root-1",
+            isSubagent: () => false,
+            recordSubagentChanged: vi.fn(),
+            requestForSubagent: () => ({
+                cwd: "/project",
+                modelId: "openai/gpt-5.6-sol",
+                permissionMode: "auto",
+                providerId: "codex",
+            }),
+            snapshot: () => ({ projectId: "project-1" }),
+        } as unknown as InMemorySession;
+        let workspaceStatus: ProjectWorkspace["status"] = "initializing";
+        const createSubagent = vi.fn(() => child);
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent,
+                get: (id) => (id === parent.id ? parent : undefined),
+                listByRoot: () => [],
+                ownedWorkspace: () =>
+                    ({
+                        id: "workspace-1",
+                        name: "Setup",
+                        path: "/workspaces/setup",
+                        projectId: "project-1",
+                        status: workspaceStatus,
+                    }) as ProjectWorkspace,
+            },
+        });
+
+        const spawning = manager.spawnInWorkspace(parent.id, {
+            background: true,
+            description: "Wait for setup",
+            prompt: "Start only when setup finishes.",
+            taskName: "wait_for_setup",
+            workspaceId: "workspace-1",
+        });
+        await Promise.resolve();
+        expect(createSubagent).not.toHaveBeenCalled();
+
+        workspaceStatus = "ready";
+
+        await expect(spawning).resolves.toMatchObject({ status: "running" });
+        expect(createSubagent).toHaveBeenCalledOnce();
+    });
 });
 
 function delegatorSession(overrides: Partial<InMemorySession> = {}): InMemorySession {
