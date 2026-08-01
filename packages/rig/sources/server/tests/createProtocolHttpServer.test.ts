@@ -25,6 +25,7 @@ import type { SessionStore } from "../../session/SessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import type { FileSearchServiceContract } from "../../file-search/FileSearchService.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
+import { CONTAINER_DOCS_PATH, getBundledDocsRoot } from "../../execution/getBundledDocsRoot.js";
 import type { GlobalEventQueue } from "../../global-event/GlobalEventQueue.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
@@ -1004,7 +1005,10 @@ describe("createProtocolHttpServer", () => {
 
             expect(store.get(configured.session.id)?.requestForSubagent().docker).toEqual({
                 image: "default:local",
-                mounts: [{ source: "/tmp/default-project", target: "/workspace" }],
+                mounts: [
+                    { source: "/tmp/default-project", target: "/workspace" },
+                    { readOnly: true, source: getBundledDocsRoot(), target: CONTAINER_DOCS_PATH },
+                ],
                 name: `rig-${configured.session.id}`,
                 workingDirectory: "/workspace",
             });

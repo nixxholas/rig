@@ -2,6 +2,7 @@ import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
 import { createCodexCollaborationInstructions } from "./codexInstructions.js";
 import {
     createAvailableModelsInstructions,
+    createBundledDocsInstructions,
     createParentDelegationInstructions,
     createPermissionInstructions,
     createWorkspaceInstructions,
@@ -86,6 +87,10 @@ export async function createSystemPrompt(
 
     if (options.context.workspaces !== undefined) {
         parts.push(createWorkspaceInstructions());
+    }
+
+    if (options.context.docsPath !== undefined) {
+        parts.push(createBundledDocsInstructions(options.context.docsPath));
     }
 
     if (options.tools?.some((tool) => tool.namespace?.name === "rig") === true) {

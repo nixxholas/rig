@@ -13,6 +13,7 @@ import {
     type PermissionMode,
 } from "../../permissions/index.js";
 import type { SessionSecretContext } from "../../secrets/index.js";
+import { getBundledDocsRoot } from "../../execution/getBundledDocsRoot.js";
 
 export interface CreateNodeAgentContextOptions {
     cwd: string;
@@ -37,6 +38,7 @@ export function createNodeAgentContext(options: CreateNodeAgentContextOptions): 
             permissions,
             ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
         }),
+        docsPath: getBundledDocsRoot(),
         fileReads: createFileReadState(),
         permissions,
     };

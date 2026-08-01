@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
     createAvailableModelsInstructions,
+    createBundledDocsInstructions,
     createParentDelegationInstructions,
     createPermissionInstructions,
     createSubagentInstructions,
@@ -38,6 +39,18 @@ describe("createWorkspaceInstructions", () => {
             "A workspace created by another session is not yours to move into",
         );
         expect(instructions).toContain("ask the user first");
+    });
+});
+
+describe("createBundledDocsInstructions", () => {
+    it("points at the bundled docs path and scopes reading to questions about Rig and Happy", () => {
+        const instructions = createBundledDocsInstructions("/happy/docs");
+
+        expect(instructions).toContain("# Rig and Happy documentation");
+        expect(instructions).toContain("`/happy/docs`");
+        expect(instructions).toContain("read-only");
+        expect(instructions).toContain("only when the user asks about Rig or Happy themselves");
+        expect(instructions).toContain("not the current working directory");
     });
 });
 

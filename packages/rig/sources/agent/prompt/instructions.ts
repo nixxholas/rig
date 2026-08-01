@@ -122,6 +122,12 @@ export function createAvailableModelsInstructions(
     return sections.join("\n\n");
 }
 
+export function createBundledDocsInstructions(docsPath: string): string {
+    return `# Rig and Happy documentation
+
+Rig ships documentation about Rig and Happy as a read-only folder at \`${docsPath}\`. Read it only when the user asks about Rig or Happy themselves — their features, configuration, tools, or behavior — or when you need to explain or troubleshoot them. Resolve paths inside it against \`${docsPath}\`, not the current working directory. It is reference material, not project context, and never a place to write.`;
+}
+
 export function createParentDelegationInstructions(): string {
     return `# Delegation role
 

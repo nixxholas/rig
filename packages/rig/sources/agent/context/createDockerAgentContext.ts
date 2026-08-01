@@ -10,6 +10,7 @@ import {
     type PermissionMode,
 } from "../../permissions/index.js";
 import {
+    CONTAINER_DOCS_PATH,
     createDockerBashContext,
     createDockerFileSystemContext,
     DockerEnvironment,
@@ -33,6 +34,7 @@ export function createDockerAgentContext(options: CreateDockerAgentContextOption
     const environment = new DockerEnvironment(options.docker, options.sessionId);
     const context: AgentContext = {
         bash: createDockerBashContext(environment, permissions, options.secrets),
+        docsPath: CONTAINER_DOCS_PATH,
         fileReads: createFileReadState(),
         fs: createDockerFileSystemContext(environment, permissions),
         permissions,

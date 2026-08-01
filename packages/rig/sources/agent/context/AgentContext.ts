@@ -22,6 +22,8 @@ export interface AgentContext {
     fs: FileSystemContext;
     bash: BashContext;
     chatHistory?: ChatHistoryContext;
+    /** Absolute path to Rig's bundled read-only documentation in this execution environment. */
+    docsPath?: string;
     fileReads?: FileReadState;
     goals?: GoalContext;
     permissions?: PermissionContext;
