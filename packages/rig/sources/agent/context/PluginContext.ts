@@ -1,4 +1,4 @@
-import type { PluginSummary } from "../../protocol/index.js";
+import type { PluginLogSnapshot, PluginSummary } from "../../protocol/index.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 
 export interface InstalledPluginSummary {
@@ -29,5 +29,6 @@ export interface PluginContext {
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];
     }>;
+    readLog(name: string): Promise<PluginLogSnapshot>;
     uninstall(options: { fs: FileSystemContext; name: string }): Promise<UninstalledPluginSummary>;
 }

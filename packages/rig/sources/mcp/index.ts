@@ -1,4 +1,5 @@
 export { McpClientManager } from "./McpClientManager.js";
+export { CompositeMcpToolProvider } from "./CompositeMcpToolProvider.js";
 export { McpTrustStore } from "./McpTrustStore.js";
 export { fingerprintMcpServer } from "./fingerprintMcpServer.js";
 export { getDefaultMcpTrustPath } from "./getDefaultMcpTrustPath.js";

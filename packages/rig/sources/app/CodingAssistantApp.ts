@@ -2016,6 +2016,20 @@ export class CodingAssistantApp implements Component, Focusable {
             return true;
         }
 
+        if (prompt === "/plugins" || prompt.startsWith("/plugins ")) {
+            void this.#showPlugins(prompt.slice("/plugins".length).trim()).catch(
+                (error: unknown) => {
+                    this.#appendEntry({
+                        role: "error",
+                        title: "Plugins",
+                        text: errorToMessage(error),
+                    });
+                    this.#requestRender();
+                },
+            );
+            return true;
+        }
+
         if (prompt === "/secrets") {
             this.#secretMenu.open();
             return true;
@@ -2343,6 +2357,48 @@ export class CodingAssistantApp implements Component, Focusable {
             })
             .join("\n");
         this.#appendEntry({ role: "event", title: "MCP servers", text });
+    }
+
+    async #showPlugins(name: string): Promise<void> {
+        const plugins = this.#agent.context.plugins;
+        if (plugins === undefined) throw new Error("Plugins are unavailable in this session.");
+        if (name.length > 0) {
+            const log = await plugins.readLog(name);
+            const text = `${log.truncated ? "[Earlier plugin output omitted.]\n" : ""}${log.text}`;
+            const displayText =
+                log.error !== undefined && log.error !== log.text
+                    ? `${log.error}${text.length === 0 ? "" : `\n\n${text}`}`
+                    : text;
+            this.#appendEntry({
+                role: "event",
+                title: `${log.name} · ${log.status.replace("_", " ")}`,
+                text:
+                    displayText.length === 0
+                        ? "This plugin has not written any output."
+                        : displayText,
+            });
+            this.#requestRender();
+            return;
+        }
+        const result = await plugins.list();
+        const lines = [
+            ...result.plugins.map(
+                (plugin) =>
+                    `${plugin.name}: ${plugin.status.replace("_", " ")}${plugin.error === undefined ? "" : ` — ${plugin.error}`}`,
+            ),
+            ...result.failures.map(
+                (failure) => `${failure.folder}: could not register — ${failure.error}`,
+            ),
+        ];
+        this.#appendEntry({
+            role: "event",
+            title: "Plugins",
+            text:
+                lines.length === 0
+                    ? "No plugins are installed."
+                    : `${lines.join("\n")}\n\nUse /plugins <name> to read the bounded current log.`,
+        });
+        this.#requestRender();
     }
 
     #showUsageSummary(): void {

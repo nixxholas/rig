@@ -13,6 +13,7 @@ import { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
 import { createPluginApiServer } from "./createPluginApiServer.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
+import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 
 const STOP_GRACE_MS = 2_000;
@@ -30,6 +31,7 @@ export interface StartPluginOptions extends BuildPluginOptions {
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
+    mcpRegistry?: PluginMcpRegistry;
     store: SessionStore;
 }
 
@@ -49,11 +51,20 @@ export async function startPlugin(
     await mkdir(dataDirectory, { mode: 0o755, recursive: true });
     await mkdir(runtimeSocketDirectory, { mode: 0o700, recursive: true });
     await chmod(runtimeSocketDirectory, 0o700);
-    await Promise.all([rm(logPath, { force: true }), rm(socketPath, { force: true })]);
+    await Promise.all([
+        rm(logPath, { force: true }),
+        rm(`${logPath}.next`, { force: true }),
+        rm(socketPath, { force: true }),
+    ]);
 
     const token = randomBytes(32).toString("base64url");
+    const mcp = options.mcpRegistry?.createConnection({
+        folder: plugin.folderName,
+        name: plugin.manifest.name,
+    });
     const server = createPluginApiServer({
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
+        ...(mcp === undefined ? {} : { mcp }),
         pluginName: plugin.manifest.name,
         store: options.store,
         token,
@@ -68,6 +79,7 @@ export async function startPlugin(
         });
         await restrictSocketAccess(socketPath);
     } catch (error) {
+        mcp?.close();
         await closeServer(server);
         await rm(socketPath, { force: true });
         throw error;
@@ -97,6 +109,7 @@ export async function startPlugin(
             stdio: ["ignore", "pipe", "pipe"],
         });
     } catch (error) {
+        mcp?.close();
         await Promise.allSettled([closeServer(server), log.close()]);
         await rm(socketPath, { force: true });
         throw error;
@@ -110,7 +123,9 @@ export async function startPlugin(
             closeServer(server),
             log.close(),
             rm(socketPath, { force: true }),
-        ]).then(() => undefined));
+        ]).then(() => {
+            mcp?.close();
+        }));
     const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
         (resolve, reject) => {
             child.once("error", (error) => {

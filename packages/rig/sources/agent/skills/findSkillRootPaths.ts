@@ -5,6 +5,7 @@ import type { FileSystemContext } from "../context/FileSystemContext.js";
 import { createUserSkillRootPaths } from "../context/createUserSkillRootPaths.js";
 import { findProjectRoot } from "../findProjectRoot.js";
 import { isDirectoryAtPath } from "./isDirectoryAtPath.js";
+import { getBuiltinSkillRoot } from "./getBuiltinSkillRoot.js";
 
 // Match Codex discovery roots only. Rig intentionally does not interpret Claude or Pi skill trees.
 const PROJECT_SKILL_DIRS = [".agents/skills"] as const;
@@ -14,6 +15,8 @@ export async function findSkillRootPaths(fs: FileSystemContext): Promise<readonl
     const projectRoot = await findProjectRoot(fs);
     const dirs = projectRoot === undefined ? [cwd] : buildAncestorDirs(projectRoot, cwd);
     const paths: string[] = [];
+    const builtin = getBuiltinSkillRoot();
+    if (await isDirectoryAtPath(fs, builtin)) paths.push(builtin);
 
     if (fs.home !== undefined) {
         for (const candidate of createUserSkillRootPaths(resolve(fs.home))) {

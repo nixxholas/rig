@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { PluginContext } from "../../agent/context/PluginContext.js";
-import { pluginInstallTool, pluginListTool, pluginUninstallTool } from "./pluginTools.js";
+import {
+    pluginInstallTool,
+    pluginListTool,
+    pluginLogsTool,
+    pluginUninstallTool,
+} from "./pluginTools.js";
 
 describe("plugin tools", () => {
     it("reviews every plugin action and elevates only the two that change the installation", () => {
@@ -80,19 +85,38 @@ describe("plugin tools", () => {
                         description: "A small clock.",
                         directory: "/home/steve/.happy/rig/plugins/clock",
                         folder: "clock",
+                        logAvailable: true,
                         name: "Clock",
-                        running: true,
+                        status: "running",
                     },
                 ],
             }),
         });
 
         const result = await pluginListTool.execute({}, context, {});
-        expect(result.plugins).toMatchObject([{ name: "Clock", running: true }]);
+        expect(result.plugins).toMatchObject([{ name: "Clock", status: "running" }]);
         expect(result.failures).toEqual([
             { error: "happy.plugin.json is invalid.", folder: "broken" },
         ]);
         expect(pluginListTool.toUI(result, {})).toBe("Found 1 installed plugin.");
+    });
+
+    it("reads bounded current logs through the plugin context", async () => {
+        const context = createContext({
+            readLog: async () => ({
+                folder: "clock",
+                name: "Clock",
+                source: "current_run",
+                status: "stopped",
+                text: "[stdout] tick\n",
+                truncated: false,
+                updatedAt: 42,
+            }),
+        });
+
+        await expect(pluginLogsTool.execute({ name: "Clock" }, context, {})).resolves.toMatchObject(
+            { status: "stopped", text: "[stdout] tick\n" },
+        );
     });
 
     it("says so when a session cannot manage plugins", async () => {
@@ -112,6 +136,9 @@ function createContext(plugins: Partial<PluginContext> = {}): AgentContext {
                 throw new Error("unexpected install");
             },
             list: async () => ({ failures: [], plugins: [] }),
+            readLog: async () => {
+                throw new Error("unexpected log read");
+            },
             uninstall: async () => {
                 throw new Error("unexpected uninstall");
             },

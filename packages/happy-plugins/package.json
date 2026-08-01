@@ -8,6 +8,9 @@
         "url": "git+https://github.com/slopus/rig.git",
         "directory": "packages/happy-plugins"
     },
+    "bin": {
+        "happy-plugin": "./dist/developmentRunner.js"
+    },
     "files": [
         "dist",
         "README.md"
@@ -37,6 +40,6 @@
         "vitest": "^3.2.4"
     },
     "engines": {
-        "node": ">=20"
+        "node": ">=22.6.0"
     }
 }

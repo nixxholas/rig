@@ -1175,8 +1175,30 @@ export interface PluginSummary {
     /** Where Rig installed the plugin's code. */
     directory: string;
     folder: string;
+    error?: string;
+    logAvailable: boolean;
     name: string;
-    running: boolean;
+    status: "build_failed" | "running" | "stopped";
+}
+
+export interface PluginLogSnapshot {
+    error?: string;
+    folder: string;
+    name: string;
+    source: "build" | "current_run";
+    status: PluginSummary["status"];
+    text: string;
+    truncated: boolean;
+    updatedAt: number;
+}
+
+export interface ListPluginsResponse {
+    failures: readonly { error: string; folder: string }[];
+    plugins: readonly PluginSummary[];
+}
+
+export interface PluginLogResponse {
+    log: PluginLogSnapshot;
 }
 
 /** The catalog snapshot returned by `GET /catalog`. */

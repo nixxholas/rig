@@ -2,7 +2,7 @@
 
 `happy-plugins` is the public TypeScript SDK for writing local Happy plugins.
 
-An plugin imports one ready-to-use client:
+A plugin imports one ready-to-use client:
 
 ```ts
 import { happy } from "happy-plugins";
@@ -16,8 +16,8 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 
 ## Status
 
-The SDK is an early preview. The current surface covers projects, workspaces, sessions, and messages
-to agents. MCP and embedded UI plugin points are planned but are not part of this package yet.
+The SDK is an early preview. The current surface covers projects, workspaces, sessions, messages
+to agents, and MCP tool contributions. Embedded UI plugin points come later.
 
 ## How authoring and runtime versions work
 
@@ -29,7 +29,7 @@ pnpm add --save-dev happy-plugins typescript@^7.0.2 @types/node
 
 This installation is an authoring dependency. At runtime, Happy compiles the plugin with
 TypeScript 7 and substitutes the copy of `happy-plugins` shipped with that Happy installation. The
-daemon's build is the final compatibility check. An plugin cannot accidentally run against a
+daemon's build is the final compatibility check. A plugin cannot accidentally run against a
 different SDK from the one its daemon implements.
 
 Happy itself does not require a plugin to have a `package.json` or its own SDK installation. A
@@ -97,6 +97,66 @@ Ask an agent to install the folder and Happy validates the manifest, compiles th
 starts the plugin right away. Uninstalling stops it and keeps the folder it writes to. Happy also
 loads every installed plugin when the daemon starts.
 
+## Develop without Docker
+
+`happy-plugins` includes the same TypeBox schemas and Unix-socket client used by Rig plus an
+in-memory fake Happy host. The one-command runner starts a TypeScript source plugin with that host,
+prints every request and registration, lists its MCP tools, and can call one:
+
+```sh
+pnpm happy-plugin dev ./index.ts \
+  --seed ./happy.plugin.dev.json \
+  --list-tools \
+  --call "Project tools/list_projects" \
+  --arguments '{}'
+```
+
+The runner uses Node's native TypeScript stripping and requires Node 22.6 or newer. It does not
+install, start, or require Docker. Its short-lived socket, writable plugin directory, and other
+host state live below the operating-system temporary directory, not beside the plugin source. The
+runner removes that root on normal exit and on `SIGINT` or `SIGTERM`.
+
+A seed file uses the SDK's exported project, workspace, and session schemas:
+
+```json
+{
+    "projects": [
+        {
+            "id": "project-1",
+            "name": "Rig",
+            "path": "/workspace/rig"
+        }
+    ],
+    "workspaces": [],
+    "sessions": []
+}
+```
+
+For tests that need direct control, use the same host programmatically:
+
+```ts
+import { createHappyPluginTestHost } from "happy-plugins";
+
+const host = await createHappyPluginTestHost({
+    projects: [{ id: "project-1", name: "Rig", path: "/workspace/rig" }],
+});
+
+try {
+    const projects = await host.client.projects.list();
+    console.log(projects, host.requests, host.mcp.listTools());
+} finally {
+    await host.close();
+}
+```
+
+`host.mcp.waitForTools()`, `host.mcp.listTools()`, and `host.mcp.callTool()` let a test observe and
+exercise the plugin contribution without reaching into Rig internals. The host creates
+`host.environment.HAPPY_PLUGIN_DIRECTORY` before the plugin starts, so tests can use it for
+persistent state exactly as they use the production directory. `host.rootDirectory` identifies the
+temporary root and `host.close()` removes it. Pass `{ temporaryDirectory }` as the second argument
+when a test sandbox requires a writable temporary parent; the host still creates and cleans its own
+child root there.
+
 ## Runtime model
 
 Each plugin runs in its own process under Happy's existing command sandbox, and every plugin owns
@@ -122,8 +182,14 @@ Normal plugin code should use the exported `happy` client and does not need to r
 token directly.
 
 Happy captures stdout and stderr for the current run in `.build/plugin.log` inside the installed
-plugin folder. The log is bounded to 1 MiB. Generated runtime state below `.build/` and `.runtime/`
-should not be edited or distributed.
+plugin folder. That file retains the most recent 1 MiB rather than freezing at its earliest output,
+and it resets when a new plugin process starts. Generated runtime state below `.build/` and
+`.runtime/` should not be edited or distributed.
+
+Rig exposes the newest useful 16 KiB snapshot through `/plugins <name>`, the `plugin_logs` agent
+tool, the local protocol, and `rig-connect`, with `truncated` set when older retained output was
+omitted. A plugin is reported explicitly as running, stopped, or failed to build; logs are
+snapshots, not an unbounded stream or polling API.
 
 ## API
 
@@ -313,6 +379,47 @@ happy.agents.sendMessage(input: {
 }>
 ```
 
+### MCP tools
+
+No MCP server package or other author dependency is needed. Reuse the `Type` export from
+`happy-plugins` so tool input types and runtime validation stay together:
+
+```ts
+import { defineMcpTool, happy, Type } from "happy-plugins";
+
+await happy.mcp.startServer({
+    name: "Project tools",
+    tools: [
+        defineMcpTool({
+            name: "list_projects",
+            description: "List the projects visible to this plugin.",
+            inputSchema: Type.Object({}, { additionalProperties: false }),
+            async execute(_input, { signal }) {
+                signal.throwIfAborted();
+                const projects = await happy.projects.list();
+                return {
+                    content: [{ type: "text", text: JSON.stringify(projects) }],
+                };
+            },
+        }),
+    ],
+});
+```
+
+Rig gives the tool a stable name derived from the plugin, server, and tool names and offers it in
+ordinary projects everywhere. Calls use the same MCP permission path as configured MCP servers:
+they require Auto or Full access and every Auto call is reviewed because a plugin may act outside
+Rig's filesystem sandbox. Cancellation reaches the handler's `AbortSignal`; disconnected,
+replaced, restarted, and uninstalled plugin generations are retired immediately.
+
+`createHappyMcpToolName(pluginName, serverName, toolName)` returns that exact stable agent-facing
+name for tests, diagnostics, or documentation.
+
+The handle returned by `happy.mcp.startServer()` reports `status` as `connected`, `reconnecting`,
+or `closed`, exposes the most recent reconnect `failure`, and has a `registrationId` that changes
+after successful re-registration. An unexpected event-stream end aborts active calls and
+re-registers with bounded exponential backoff; `close()` stops that recovery permanently.
+
 ## Runtime schemas
 
 The public value types are derived from exported TypeBox schemas. Plugins may reuse the same
@@ -333,6 +440,9 @@ The primary schema exports are:
 - `createWorkspaceInputSchema`, `renameWorkspaceInputSchema`, and `archiveWorkspaceInputSchema`
 - `createSessionInputSchema`
 - `sendAgentMessageInputSchema` and `agentMessageDeliverySchema`
+- `happyMcpServerRegistrationSchema`, `happyMcpEventSchema`,
+  `happyMcpCallCompletionSchema`, and `happyMcpToolResultSchema`
+- `happyPluginTestSeedSchema` and `happyPluginTestRequestSchema`
 
 Request-body and response-envelope schemas are also exported for test harnesses implementing the
 same boundary.

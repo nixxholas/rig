@@ -83,9 +83,15 @@ export const pluginListTool = defineTool({
                 dataDirectory: Type.String(),
                 description: Type.String(),
                 directory: Type.String(),
+                error: Type.Optional(Type.String()),
                 folder: Type.String(),
+                logAvailable: Type.Boolean(),
                 name: Type.String(),
-                running: Type.Boolean(),
+                status: Type.Union([
+                    Type.Literal("build_failed"),
+                    Type.Literal("running"),
+                    Type.Literal("stopped"),
+                ]),
             }),
         ),
     }),
@@ -107,7 +113,43 @@ export const pluginListTool = defineTool({
     locks: [],
 });
 
-export const pluginTools = [pluginInstallTool, pluginUninstallTool, pluginListTool];
+export const pluginLogsTool = defineTool({
+    name: "plugin_logs",
+    label: "Read plugin logs",
+    description:
+        "Read the bounded current log for one installed plugin, including whether it is running, stopped, or failed to build.",
+    arguments: Type.Object(
+        { name: Type.String({ description: "Installed plugin name or folder name." }) },
+        { additionalProperties: false },
+    ),
+    returnType: Type.Object(
+        {
+            error: Type.Optional(Type.String()),
+            folder: Type.String(),
+            name: Type.String(),
+            source: Type.Union([Type.Literal("build"), Type.Literal("current_run")]),
+            status: Type.Union([
+                Type.Literal("build_failed"),
+                Type.Literal("running"),
+                Type.Literal("stopped"),
+            ]),
+            text: Type.String(),
+            truncated: Type.Boolean(),
+            updatedAt: Type.Number(),
+        },
+        { additionalProperties: false },
+    ),
+    shouldReviewInAutoMode: () => true,
+    describeAutoPermissionAction: ({ name }) =>
+        `read the bounded current log for ${quoteVisibleExact(name)} under ${quoteVisibleExact(getPluginsDirectory())}. ${OUTSIDE_WORKSPACE}`,
+    execute: ({ name }, context) => requirePlugins(context).readLog(name),
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+    toUI: (result) =>
+        `Read the ${result.status === "build_failed" ? "build diagnostics" : "current log"} for ${result.name}.`,
+    locks: [],
+});
+
+export const pluginTools = [pluginInstallTool, pluginUninstallTool, pluginListTool, pluginLogsTool];
 
 function requirePlugins(context: AgentContext): PluginContext {
     if (context.plugins === undefined) {

@@ -12,6 +12,8 @@ import {
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
+    happyMcpCallCompletionSchema,
+    happyMcpServerRegistrationSchema,
     listWorkspacesInputSchema,
     renameWorkspaceBodySchema,
     sendAgentMessageBodySchema,
@@ -25,11 +27,13 @@ import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
+import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
     defaultDocker?: DockerExecutionConfig;
+    mcp?: PluginMcpConnection;
     pluginName: string;
     store: SessionStore;
     token: string;
@@ -91,6 +95,79 @@ async function handleRequest(
     }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (request.method === "POST" && url.pathname === "/mcp/servers") {
+        const mcp = requireMcp(options);
+        const registration = await readJson(
+            request,
+            happyMcpServerRegistrationSchema,
+            "MCP server registration",
+        );
+        sendJson(response, 201, { registrationId: mcp.register(registration) });
+        return;
+    }
+    if (
+        parts.length === 4 &&
+        parts[0] === "mcp" &&
+        parts[1] === "servers" &&
+        parts[2] !== undefined &&
+        parts[3] === "events" &&
+        request.method === "GET"
+    ) {
+        const mcp = requireMcp(options);
+        let detach = () => {};
+        detach = mcp.attach(parts[2], (event) => {
+            if (response.destroyed || response.writableEnded) return false;
+            response.write(`${JSON.stringify(event)}\n`);
+            return true;
+        });
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        response.once("close", detach);
+        return;
+    }
+    if (
+        parts.length === 5 &&
+        parts[0] === "mcp" &&
+        parts[1] === "servers" &&
+        parts[2] !== undefined &&
+        parts[3] === "calls" &&
+        parts[4] !== undefined &&
+        request.method === "POST"
+    ) {
+        const mcp = requireMcp(options);
+        let completion;
+        try {
+            completion = await readJson(request, happyMcpCallCompletionSchema, "MCP tool result");
+        } catch (error) {
+            // A malformed or oversized completion must settle the model call now. Leaving it
+            // pending would turn a precise boundary error into an unrelated timeout.
+            try {
+                mcp.complete(parts[2], parts[4], {
+                    error: `Rig rejected the plugin MCP result: ${errorToMessage(error)}`,
+                });
+            } catch {
+                // The call may already have been cancelled or retired; preserve the request error.
+            }
+            throw error;
+        }
+        mcp.complete(parts[2], parts[4], completion);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length === 3 &&
+        parts[0] === "mcp" &&
+        parts[1] === "servers" &&
+        parts[2] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        requireMcp(options).unregister(parts[2]);
+        sendJson(response, 200, {});
+        return;
+    }
     if (
         request.method === "POST" &&
         parts.length === 3 &&
@@ -283,4 +360,11 @@ class PluginApiRequestError extends Error {
         super(message);
         this.name = "PluginApiRequestError";
     }
+}
+
+function requireMcp(options: CreatePluginApiServerOptions): PluginMcpConnection {
+    if (options.mcp === undefined) {
+        throw new PluginApiRequestError("This plugin runtime does not provide MCP registration.");
+    }
+    return options.mcp;
 }

@@ -21,6 +21,7 @@ import { createUserSkillRootPaths } from "./createUserSkillRootPaths.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 import { toFileSystemStat } from "./toFileSystemStat.js";
 import type { PermissionMode } from "../../permissions/index.js";
+import { getBuiltinSkillRoot } from "../skills/getBuiltinSkillRoot.js";
 
 export interface CreateNodeFileSystemContextOptions {
     home?: string;
@@ -36,7 +37,7 @@ export function createNodeFileSystemContext(
     const resolvePath = (path: string) => (isAbsolute(path) ? path : resolve(cwd, path));
     const home = options.home ?? homedir();
     const readPathOptions = {
-        allowedPaths: createUserSkillRootPaths(home),
+        allowedPaths: [getBuiltinSkillRoot(), ...createUserSkillRootPaths(home)],
         homeDirectory: home,
         ...(options.platform === undefined ? {} : { platform: options.platform }),
     };

@@ -7,6 +7,7 @@ import { createUserSkillRootPaths } from "./createUserSkillRootPaths.js";
 import { findExecutableSearchPaths } from "./findExecutableSearchPaths.js";
 import { findGitWritablePaths } from "./findGitWritablePaths.js";
 import { resolvePotentialPath } from "./resolvePotentialPath.js";
+import { getBuiltinSkillRoot } from "../skills/getBuiltinSkillRoot.js";
 
 export async function createSandboxFilesystemConfig(options: {
     cwd: string;
@@ -65,6 +66,7 @@ export async function createSandboxFilesystemConfig(options: {
         denyRead,
         allowRead: [
             options.cwd,
+            getBuiltinSkillRoot(),
             ...createUserSkillRootPaths(homeDirectory),
             ...readableHomeToolPaths,
         ],

@@ -1,4 +1,4 @@
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
 const exact = { additionalProperties: false } as const;
 const nonEmptyText = Type.String({ minLength: 1 });
@@ -146,6 +146,151 @@ export const listSessionsResponseSchema = Type.Object(
 );
 export const sessionResponseSchema = Type.Object({ session: happySessionSchema }, exact);
 
+export const happyMcpTextContentSchema = Type.Object(
+    { text: Type.String(), type: Type.Literal("text") },
+    exact,
+);
+export const happyMcpImageContentSchema = Type.Object(
+    {
+        data: Type.String(),
+        mimeType: Type.String({ pattern: "^image/" }),
+        type: Type.Literal("image"),
+    },
+    exact,
+);
+export const happyMcpContentSchema = Type.Union([
+    happyMcpTextContentSchema,
+    happyMcpImageContentSchema,
+]);
+export type HappyMcpContent = Static<typeof happyMcpContentSchema>;
+
+export const happyMcpToolResultSchema = Type.Object(
+    {
+        content: Type.Array(happyMcpContentSchema, { maxItems: 128 }),
+        isError: Type.Optional(Type.Boolean()),
+        structuredContent: Type.Optional(Type.Unknown()),
+    },
+    exact,
+);
+export type HappyMcpToolResult = Static<typeof happyMcpToolResultSchema>;
+
+/**
+ * The JSON Schema subset accepted at the plugin socket boundary.
+ *
+ * `defineMcpTool` additionally checks the complete in-process value with TypeBox's schema guard
+ * before this serializable form crosses the socket.
+ */
+export const happyMcpInputSchemaSchema = Type.Object(
+    {
+        additionalProperties: Type.Optional(Type.Union([Type.Boolean(), Type.Unknown()])),
+        properties: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        required: Type.Optional(Type.Array(Type.String(), { uniqueItems: true })),
+        type: Type.Literal("object"),
+    },
+    { additionalProperties: true },
+);
+export type HappyMcpInputSchema = Static<typeof happyMcpInputSchemaSchema>;
+
+export const happyMcpToolRegistrationSchema = Type.Object(
+    {
+        description: Type.String({ minLength: 1 }),
+        inputSchema: happyMcpInputSchemaSchema,
+        name: nonEmptyText,
+    },
+    exact,
+);
+export type HappyMcpToolRegistration = Static<typeof happyMcpToolRegistrationSchema>;
+
+export const happyMcpServerRegistrationSchema = Type.Object(
+    {
+        name: nonEmptyText,
+        tools: Type.Array(happyMcpToolRegistrationSchema, { maxItems: 64, minItems: 1 }),
+        version: Type.Optional(nonEmptyText),
+    },
+    exact,
+);
+export type HappyMcpServerRegistration = Static<typeof happyMcpServerRegistrationSchema>;
+
+export const registerHappyMcpServerResponseSchema = Type.Object(
+    { registrationId: nonEmptyText },
+    exact,
+);
+export type RegisterHappyMcpServerResponse = Static<typeof registerHappyMcpServerResponseSchema>;
+
+export const happyMcpCallEventSchema = Type.Object(
+    {
+        arguments: Type.Unknown(),
+        callId: nonEmptyText,
+        tool: nonEmptyText,
+        type: Type.Literal("call"),
+    },
+    exact,
+);
+export const happyMcpCancelEventSchema = Type.Object(
+    { callId: nonEmptyText, type: Type.Literal("cancel") },
+    exact,
+);
+export const happyMcpEventSchema = Type.Union([happyMcpCallEventSchema, happyMcpCancelEventSchema]);
+export type HappyMcpEvent = Static<typeof happyMcpEventSchema>;
+
+export const happyMcpCallCompletionSchema = Type.Union([
+    Type.Object({ result: happyMcpToolResultSchema }, exact),
+    Type.Object({ error: nonEmptyText }, exact),
+]);
+export type HappyMcpCallCompletion = Static<typeof happyMcpCallCompletionSchema>;
+
+export interface HappyMcpToolContext {
+    /** Aborted when Rig cancels the model call, times it out, or retires this plugin generation. */
+    readonly signal: AbortSignal;
+}
+
+export interface HappyMcpTool<TInputSchema extends TSchema = TSchema> {
+    readonly description: string;
+    readonly inputSchema: TInputSchema;
+    readonly name: string;
+    execute(
+        input: Static<TInputSchema>,
+        context: HappyMcpToolContext,
+    ): HappyMcpToolResult | Promise<HappyMcpToolResult>;
+}
+
+export interface StartHappyMcpServerOptions {
+    name: string;
+    tools: readonly HappyMcpTool[];
+    version?: string;
+}
+
+export interface HappyMcpServer {
+    /** Most recent connection failure while Happy is restoring this server. */
+    readonly failure: string | undefined;
+    readonly name: string;
+    /** The current registration. It changes when an interrupted stream is restored. */
+    readonly registrationId: string;
+    readonly status: HappyMcpServerStatus;
+    close(): Promise<void>;
+}
+export type HappyMcpServerStatus = "closed" | "connected" | "reconnecting";
+
+export const happyPluginTestSeedSchema = Type.Object(
+    {
+        projects: Type.Optional(Type.Array(happyProjectSchema)),
+        sessions: Type.Optional(Type.Array(happySessionSchema)),
+        workspaces: Type.Optional(Type.Array(happyWorkspaceSchema)),
+    },
+    exact,
+);
+export type HappyPluginTestSeed = Static<typeof happyPluginTestSeedSchema>;
+
+export const happyPluginTestRequestSchema = Type.Object(
+    {
+        body: Type.Optional(Type.Unknown()),
+        method: nonEmptyText,
+        path: nonEmptyText,
+    },
+    exact,
+);
+export type HappyPluginTestRequest = Static<typeof happyPluginTestRequestSchema>;
+
 export const createHappyPluginClientOptionsSchema = Type.Object(
     {
         socketPath: Type.Optional(Type.String()),
@@ -169,6 +314,10 @@ export interface HappyPluginClient {
     /** Inspect projects known to the local Happy daemon. */
     readonly projects: {
         list(): Promise<readonly HappyProject[]>;
+    };
+    /** Contribute MCP tools to ordinary Happy agent sessions. */
+    readonly mcp: {
+        startServer(options: StartHappyMcpServerOptions): Promise<HappyMcpServer>;
     };
     /** Inspect existing sessions or create a new agent session. */
     readonly sessions: {

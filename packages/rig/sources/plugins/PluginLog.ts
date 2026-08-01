@@ -1,58 +1,94 @@
-import { createWriteStream, type WriteStream } from "node:fs";
+import { rename, writeFile } from "node:fs/promises";
 
-const DEFAULT_MAX_PLUGIN_LOG_BYTES = 1024 * 1024;
-const TRUNCATION_NOTICE = Buffer.from(
-    "\n[Rig stopped recording this plugin after 1 MiB of output.]\n",
-);
+export const MAXIMUM_PLUGIN_LOG_STORAGE_BYTES = 1024 * 1024;
+const TRUNCATION_NOTICE = Buffer.from("[Earlier plugin output omitted.]\n");
 
+/**
+ * Keeps one coalesced, bounded tail of the current plugin process.
+ *
+ * Appends only mark the latest snapshot dirty while one atomic flush is active, so a noisy plugin
+ * cannot create an unbounded promise chain or freeze the log at its earliest output.
+ */
 export class PluginLog {
     readonly path: string;
 
     readonly #maximumBytes: number;
-    readonly #stream: WriteStream;
-    #bytesWritten = 0;
+    readonly #temporaryPath: string;
+    readonly #truncationNotice: Buffer;
+    #closed = false;
+    #dirty = false;
     #failed = false;
+    #flushing: Promise<void> | undefined;
+    #lastSource: "stderr" | "stdout" | undefined;
+    #tail: Buffer = Buffer.alloc(0);
     #truncated = false;
 
     constructor(options: { maximumBytes?: number; path: string }) {
         this.path = options.path;
-        this.#maximumBytes = options.maximumBytes ?? DEFAULT_MAX_PLUGIN_LOG_BYTES;
-        this.#stream = createWriteStream(options.path, { flags: "wx", mode: 0o600 });
-        this.#stream.on("error", () => {
-            this.#failed = true;
-        });
+        this.#temporaryPath = `${options.path}.next`;
+        this.#maximumBytes = options.maximumBytes ?? MAXIMUM_PLUGIN_LOG_STORAGE_BYTES;
+        this.#truncationNotice = TRUNCATION_NOTICE.subarray(
+            0,
+            Math.min(TRUNCATION_NOTICE.length, this.#maximumBytes),
+        );
+        this.#scheduleFlush();
     }
 
     append(source: "stderr" | "stdout", chunk: Buffer): void {
-        if (this.#failed || this.#truncated || chunk.length === 0) return;
-        const prefix = Buffer.from(`[${source}] `);
-        const available = this.#maximumBytes - this.#bytesWritten;
-        if (available <= prefix.length) {
-            this.#truncate();
-            return;
+        if (this.#closed || this.#failed || chunk.length === 0) return;
+        const prefix =
+            this.#lastSource === source
+                ? Buffer.alloc(0)
+                : Buffer.from(`${this.#lastSource === undefined ? "" : "\n"}[${source}] `);
+        this.#lastSource = source;
+        const combined = Buffer.concat([this.#tail, prefix, chunk]);
+        if (!this.#truncated && combined.length <= this.#maximumBytes) {
+            this.#tail = combined;
+        } else {
+            this.#truncated = true;
+            const tailLimit = this.#maximumBytes - this.#truncationNotice.length;
+            this.#tail = takeRecentCompleteUtf8(combined, tailLimit);
         }
-        const content = chunk.subarray(0, Math.max(0, available - prefix.length));
-        const output = Buffer.concat([prefix, content]);
-        this.#bytesWritten += output.length;
-        this.#stream.write(output);
-        if (content.length < chunk.length) this.#truncate();
+        this.#scheduleFlush();
     }
 
-    close(): Promise<void> {
-        if (this.#stream.closed || this.#stream.destroyed) return Promise.resolve();
-        return new Promise<void>((resolve) => {
-            this.#stream.once("close", resolve);
-            this.#stream.end(resolve);
+    async close(): Promise<void> {
+        if (this.#closed) return;
+        this.#closed = true;
+        this.#scheduleFlush();
+        while (this.#flushing !== undefined) await this.#flushing;
+    }
+
+    #scheduleFlush(): void {
+        if (this.#failed) return;
+        this.#dirty = true;
+        if (this.#flushing !== undefined) return;
+        const task = this.#flushLoop().finally(() => {
+            if (this.#flushing === task) this.#flushing = undefined;
+            if (this.#dirty && !this.#failed) this.#scheduleFlush();
         });
+        this.#flushing = task;
     }
 
-    #truncate(): void {
-        if (this.#truncated) return;
-        this.#truncated = true;
-        const available = this.#maximumBytes - this.#bytesWritten;
-        if (available <= 0) return;
-        const notice = TRUNCATION_NOTICE.subarray(0, available);
-        this.#bytesWritten += notice.length;
-        this.#stream.write(notice);
+    async #flushLoop(): Promise<void> {
+        while (this.#dirty && !this.#failed) {
+            this.#dirty = false;
+            const snapshot = this.#truncated
+                ? Buffer.concat([this.#truncationNotice, this.#tail])
+                : Buffer.from(this.#tail);
+            try {
+                await writeFile(this.#temporaryPath, snapshot, { mode: 0o600 });
+                await rename(this.#temporaryPath, this.path);
+            } catch {
+                this.#failed = true;
+            }
+        }
     }
+}
+
+function takeRecentCompleteUtf8(buffer: Buffer, maximumBytes: number): Buffer {
+    if (maximumBytes === 0) return Buffer.alloc(0);
+    let start = Math.max(0, buffer.length - maximumBytes);
+    while (start < buffer.length && (buffer[start]! & 0xc0) === 0x80) start += 1;
+    return Buffer.from(buffer.subarray(start));
 }

@@ -147,6 +147,7 @@ import type {
     RemoteTerminalResponse,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
+import type { PluginContext } from "../agent/context/PluginContext.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
@@ -178,6 +179,7 @@ export interface ProtocolHttpServerOptions {
     onShutdown?: () => void;
     onReloadHappy?: () => boolean | Promise<boolean>;
     onStartInspector?: () => StartInspectorResponse | Promise<StartInspectorResponse>;
+    plugins?: Pick<PluginContext, "list" | "readLog">;
     store?: SessionStore;
     taskDrain?: TaskDrain;
     secrets?: readonly SecretRegistration[];
@@ -206,6 +208,7 @@ export function createProtocolHttpServer(
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
+        plugins: options.plugins,
     };
     // The persistent store caches sessions weakly; each open SSE stream needs its own strong lease.
     const sessionEventStreamLeases = new Set<SessionEventStreamLease>();
@@ -279,6 +282,7 @@ interface ProtocolServerRuntimeConfig {
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
+    plugins: Pick<PluginContext, "list" | "readLog"> | undefined;
 }
 
 interface AppliedDaemonSettings {
@@ -330,6 +334,23 @@ async function handleRequest(
             shuttingDown: true,
         });
         setImmediate(() => onShutdown?.());
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "plugins") {
+        if (runtimeConfig.plugins === undefined) {
+            sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
+            return;
+        }
+        sendJson(response, 200, await runtimeConfig.plugins.list());
+        return;
+    }
+    if (request.method === "GET" && route.name === "plugin-log") {
+        if (runtimeConfig.plugins === undefined) {
+            sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
+            return;
+        }
+        sendJson(response, 200, { log: await runtimeConfig.plugins.readLog(route.pluginName) });
         return;
     }
 
@@ -2348,6 +2369,7 @@ function matchRoute(pathname: string):
               | "messages"
               | "models"
               | "presence"
+              | "plugins"
               | "projects"
               | "provider-usage"
               | "secret-registrations"
@@ -2357,6 +2379,7 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
       }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
+    | { name: "plugin-log"; pluginName: string; sessionId?: undefined }
     | {
           name:
               | "project"
@@ -2457,6 +2480,7 @@ function matchRoute(pathname: string):
     if (pathname === "/messages") return { name: "messages" };
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/presence") return { name: "presence" };
+    if (pathname === "/plugins") return { name: "plugins" };
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
@@ -2464,6 +2488,14 @@ function matchRoute(pathname: string):
     if (pathname === "/shutdown") return { name: "shutdown" };
 
     const globalParts = pathname.split("/").filter(Boolean);
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "plugins" &&
+        globalParts[1] !== undefined &&
+        globalParts[2] === "log"
+    ) {
+        return { name: "plugin-log", pluginName: decodeURIComponent(globalParts[1]) };
+    }
     if (
         globalParts.length === 2 &&
         globalParts[0] === "project-assets" &&

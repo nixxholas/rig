@@ -9,7 +9,9 @@ import type { LiveGlobalEventEntry } from "../../global-event/LiveGlobalEventQue
 import type { PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { PluginBuildError } from "../PluginBuildError.js";
 import { PluginManager } from "../PluginManager.js";
+import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
 
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -41,13 +43,19 @@ describe("plugin registration", () => {
                 description: "A small clock.",
                 directory: installed.directory,
                 folder: "clock",
+                logAvailable: true,
                 name: "Clock",
-                running: true,
+                status: "running",
             },
         ]);
         expect(lastPlugins(harness.events)).toEqual(afterInstall.plugins);
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
+        await expect(harness.manager.readLog("Clock")).resolves.toMatchObject({
+            source: "current_run",
+            status: "running",
+            text: "[stdout] ready\n",
+        });
 
         const uninstalled = await harness.manager.uninstall({ fs: harness.fs, name: "Clock" });
         expect(uninstalled).toEqual({
@@ -96,7 +104,7 @@ describe("plugin registration", () => {
         ).rejects.toThrow(/could not build/iu);
 
         const listed = await harness.manager.list();
-        expect(listed.plugins).toMatchObject([{ name: "Clock", running: true }]);
+        expect(listed.plugins).toMatchObject([{ name: "Clock", status: "running" }]);
         expect(harness.stopped).toEqual([]);
     });
 
@@ -118,13 +126,60 @@ describe("plugin registration", () => {
             harness.manager.install({ fs: harness.fs, sourceDirectory: harness.workspace }),
         ).rejects.toThrow("shutting down");
     });
+
+    it("exposes bounded build diagnostics as an explicit plugin state", async () => {
+        const diagnostics = `${"x".repeat(
+            MAXIMUM_PLUGIN_LOG_READ_BYTES,
+        )}\nTypeScript: value is not assignable.`;
+        const harness = await createHarness({
+            startError: new PluginBuildError("Broken", diagnostics),
+        });
+        await createPluginSource(join(harness.manager.directory, "broken"));
+
+        await harness.manager.start();
+
+        expect(await harness.manager.list()).toMatchObject({
+            plugins: [
+                {
+                    error: expect.stringContaining("TypeScript: value is not assignable."),
+                    logAvailable: true,
+                    status: "build_failed",
+                },
+            ],
+        });
+        const log = await harness.manager.readLog("Broken");
+        expect(log).toMatchObject({
+            source: "build",
+            status: "build_failed",
+            text: expect.stringContaining("TypeScript: value is not assignable."),
+            truncated: true,
+        });
+        expect(Buffer.byteLength(log.text)).toBe(MAXIMUM_PLUGIN_LOG_READ_BYTES);
+    });
+
+    it("reports non-build startup failures as stopped", async () => {
+        const harness = await createHarness({
+            startError: new Error("The sandbox did not start."),
+        });
+        await createPluginSource(join(harness.manager.directory, "broken"));
+
+        await harness.manager.start();
+
+        expect(await harness.manager.list()).toMatchObject({
+            plugins: [{ error: "The sandbox did not start.", status: "stopped" }],
+        });
+        await expect(harness.manager.readLog("Broken")).resolves.toMatchObject({
+            error: "The sandbox did not start.",
+            status: "stopped",
+        });
+    });
 });
 
 function lastPlugins(events: readonly PluginsChangedEvent[]): unknown {
     return events.at(-1)?.data.plugins;
 }
 
-async function createHarness(): Promise<{
+async function createHarness(options: { startError?: Error } = {}): Promise<{
     dataRoot: string;
     events: PluginsChangedEvent[];
     fs: FileSystemContext;
@@ -160,8 +215,9 @@ async function createHarness(): Promise<{
         daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
         directory: join(root, "plugins"),
         environment: { HAPPY_PLUGIN_DATA_DIRECTORY: dataRoot } as NodeJS.ProcessEnv,
-        start: (plugin) => {
+        start: async (plugin) => {
             started.push(plugin.manifest.name);
+            if (options.startError !== undefined) throw options.startError;
             let finish = () => {};
             const completion = new Promise<{
                 code: number | null;
@@ -169,10 +225,13 @@ async function createHarness(): Promise<{
             }>((resolve) => {
                 finish = () => resolve({ code: 0, signal: null });
             });
-            return Promise.resolve({
+            const logPath = join(plugin.directory, ".build", "plugin.log");
+            await mkdir(join(plugin.directory, ".build"), { recursive: true });
+            await writeFile(logPath, "[stdout] ready\n");
+            return {
                 completion,
                 dataDirectory: join(dataRoot, plugin.folderName),
-                logPath: join(plugin.directory, ".build", "plugin.log"),
+                logPath,
                 name: plugin.manifest.name,
                 pid: 1234,
                 close: () => {
@@ -180,7 +239,7 @@ async function createHarness(): Promise<{
                     finish();
                     return Promise.resolve();
                 },
-            });
+            };
         },
         store,
     });

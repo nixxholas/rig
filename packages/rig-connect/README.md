@@ -18,6 +18,30 @@ standard timers — so the same build runs in Node, in a browser, and in any run
 them. It has no runtime dependency on the `rig` package, and a browser bundle carries no daemon
 code.
 
+Local plugin interfaces can read Rig's explicit plugin states and bounded current logs through the
+same authenticated endpoint:
+
+```ts
+const plugins = await rig.listPlugins();
+const log = await rig.readPluginLog("Project tools");
+```
+
+`status` is `running`, `stopped`, or `build_failed`; the log reports whether it came from the
+current run or build diagnostics and whether its newest 16 KiB snapshot omitted older output.
+These are request-response snapshots. Plugin lifecycle changes travel on the shared live event
+stream, so a UI can render the event or refresh deliberately instead of running a log polling
+loop:
+
+```ts
+const rig = connectRig({
+    endpoint,
+    token,
+    onPluginsChanged(plugins) {
+        renderPluginStates(plugins);
+    },
+});
+```
+
 ## Creating a connection
 
 ```ts

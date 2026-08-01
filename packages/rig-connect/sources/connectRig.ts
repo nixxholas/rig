@@ -46,6 +46,10 @@ import type {
     GlobalStreamHello,
     GetTimelineResponse,
     ListProviderUsageResponse,
+    ListPluginsResponse,
+    PluginLogResponse,
+    PluginLogSnapshot,
+    PluginSummary,
     SessionStateResponse,
     TimelineScope,
 } from "./protocol.js";
@@ -77,6 +81,8 @@ export interface ConnectRigOptions {
     onMutationRejected?: (delta: MutationRejectedDelta) => void;
     /** Reports the result of the daemon protocol handshake. */
     onCompatibilityChange?: (compatibility: ServerCompatibility) => void;
+    /** Receives live plugin lifecycle changes without polling the plugin catalog or logs. */
+    onPluginsChanged?: (plugins: readonly PluginSummary[]) => void;
     /**
      * Fires the moment a chat starts waiting for the person.
      *
@@ -269,6 +275,13 @@ export interface RigConnection {
         options: RigProviderUsageSubscriptionOptions,
     ) => RigProviderUsageConnection;
     connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
+    /** Reads the current plugin catalog once. Lifecycle changes are also announced live. */
+    listPlugins: (options?: { signal?: AbortSignal }) => Promise<{
+        failures: readonly { error: string; folder: string }[];
+        plugins: readonly PluginSummary[];
+    }>;
+    /** Reads one bounded current-run or build-failure log snapshot. */
+    readPluginLog: (name: string, options?: { signal?: AbortSignal }) => Promise<PluginLogSnapshot>;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -1395,6 +1408,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             onEvent: (event, cursor) => {
                 rememberGlobalIdentity(event);
+                if (event.type === "plugins_changed") {
+                    options.onPluginsChanged?.(
+                        (event as Extract<GlobalEvent, { type: "plugins_changed" }>).data.plugins,
+                    );
+                }
                 if (
                     event.type === "project_git_changed" ||
                     event.type === "workspace_git_changed"
@@ -2862,14 +2880,52 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return enqueue(mutation);
     };
 
+    const listPlugins = async (
+        readOptions: { signal?: AbortSignal } = {},
+    ): Promise<ListPluginsResponse> => {
+        const response = await request(endpointUrl(options.endpoint, "plugins"), {
+            headers: {
+                accept: "application/json",
+                authorization: `Bearer ${options.token}`,
+            },
+            ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
+        });
+        if (!response.ok) {
+            throw new Error(`Rig could not read plugins (${String(response.status)}).`);
+        }
+        return (await response.json()) as ListPluginsResponse;
+    };
+
+    const readPluginLog = async (
+        name: string,
+        readOptions: { signal?: AbortSignal } = {},
+    ): Promise<PluginLogSnapshot> => {
+        const response = await request(
+            endpointUrl(options.endpoint, `plugins/${encodeURIComponent(name)}/log`),
+            {
+                headers: {
+                    accept: "application/json",
+                    authorization: `Bearer ${options.token}`,
+                },
+                ...(readOptions.signal === undefined ? {} : { signal: readOptions.signal }),
+            },
+        );
+        if (!response.ok) {
+            throw new Error(`Rig could not read the plugin log (${String(response.status)}).`);
+        }
+        return ((await response.json()) as PluginLogResponse).log;
+    };
+
     // Finish notifications are told from the catalog, so a caller that wants
     // them gets it loaded and followed without opening a view of its own.
     if (options.onSessionFinished !== undefined) startGroupEntry(createGroupEntry());
+    if (options.onPluginsChanged !== undefined) ensureLiveStream();
 
     return {
         archiveWorkspace,
         compatibility: () => compatibility,
         markSessionRead,
+        listPlugins,
         close: () => {
             if (closed) return;
             for (const closePresence of [...presenceClosers]) closePresence();
@@ -2925,6 +2981,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         detachSecret,
         forkSession,
         readBackgroundProcess,
+        readPluginLog,
         recordActivity,
         renameGroup,
         resolveExternalToolCall,

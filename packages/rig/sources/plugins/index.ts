@@ -8,9 +8,15 @@ export { getPluginDataDirectory, getPluginDataRoot } from "./getPluginDataDirect
 export { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 export { PluginBuildError } from "./PluginBuildError.js";
 export { PluginLog } from "./PluginLog.js";
+export {
+    PluginMcpRegistry,
+    type PluginMcpConnection,
+    type PluginMcpRegistryOptions,
+} from "./PluginMcpRegistry.js";
 export { PluginManager, type PluginManagerOptions } from "./PluginManager.js";
 export { getPluginsDirectory } from "./getPluginsDirectory.js";
 export { readPluginManifest } from "./readPluginManifest.js";
+export { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 export { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
 export {
     PLUGIN_MANIFEST_FILE_NAME,

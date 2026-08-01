@@ -2,6 +2,7 @@ import { visibleWidth, type TUI } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 
 import { Agent } from "../agent/Agent.js";
+import type { PluginContext } from "../agent/context/PluginContext.js";
 import type { AgentLoopEvent } from "../agent/loop.js";
 import type { ProtocolHttpClient } from "../client/ProtocolHttpClient.js";
 import { RemoteAgent } from "../client/RemoteAgent.js";
@@ -3201,6 +3202,87 @@ describe("CodingAssistantApp", () => {
         expect(permissionBlocked).toContain(
             "Trusted Helper — MCP servers are available in Auto or Full access because they can act outside Rig's sandbox.",
         );
+    });
+
+    it("shows authoritative plugin log truncation without marking complete logs", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamText("unused");
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const readLog = vi
+            .fn<PluginContext["readLog"]>()
+            .mockResolvedValueOnce({
+                folder: "truncated-plugin",
+                name: "Truncated plugin",
+                source: "current_run",
+                status: "running",
+                text: "TRUNCATED_LOG_TAIL",
+                truncated: true,
+                updatedAt: 1,
+            })
+            .mockResolvedValueOnce({
+                folder: "complete-plugin",
+                name: "Complete plugin",
+                source: "current_run",
+                status: "stopped",
+                text: "COMPLETE_LOG_OUTPUT",
+                truncated: false,
+                updatedAt: 2,
+            });
+        const plugins: PluginContext = {
+            async install() {
+                throw new Error("Unused in this test.");
+            },
+            async list() {
+                return { failures: [], plugins: [] };
+            },
+            readLog,
+            async uninstall() {
+                throw new Error("Unused in this test.");
+            },
+        };
+        const app = new CodingAssistantApp({
+            agent: new Agent({
+                provider,
+                modelId: model.id,
+                context: { ...harness.context, plugins },
+                printToConsole: false,
+            }),
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            tui: fakeTui(),
+        });
+
+        submit(app, "/plugins Truncated plugin");
+        await vi.waitFor(() =>
+            expect(stripAnsi(app.render(100).join("\n"))).toContain("TRUNCATED_LOG_TAIL"),
+        );
+        const truncated = stripAnsi(app.render(100).join("\n"));
+        expect(truncated.replace(/\s+/gu, " ")).toContain(
+            "[Earlier plugin output omitted.] TRUNCATED_LOG_TAIL",
+        );
+
+        submit(app, "/plugins Complete plugin");
+        await vi.waitFor(() =>
+            expect(stripAnsi(app.render(100).join("\n"))).toContain("COMPLETE_LOG_OUTPUT"),
+        );
+        const complete = stripAnsi(app.render(100).join("\n"));
+        const completeEntry = complete.slice(complete.lastIndexOf("Complete plugin · stopped"));
+        expect(completeEntry).toContain("COMPLETE_LOG_OUTPUT");
+        expect(completeEntry).not.toContain("[Earlier plugin output omitted.]");
+        expect(complete.match(/\[Earlier plugin output omitted\.\]/gu)).toHaveLength(1);
+        expect(readLog).toHaveBeenNthCalledWith(1, "Truncated plugin");
+        expect(readLog).toHaveBeenNthCalledWith(2, "Complete plugin");
     });
 
     it("shows persisted task progress from the tasks command", () => {

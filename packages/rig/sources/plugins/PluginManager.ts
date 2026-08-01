@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
-import type { PluginSummary } from "../protocol/index.js";
+import type { PluginLogSnapshot, PluginSummary } from "../protocol/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
@@ -11,8 +11,11 @@ import { discoverPlugins } from "./discoverPlugins.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { getPluginsDirectory } from "./getPluginsDirectory.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
+import { PluginBuildError } from "./PluginBuildError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { RegisteredPlugin } from "./types.js";
+import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
+import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
 
 export interface PluginManagerOptions {
@@ -21,6 +24,7 @@ export interface PluginManagerOptions {
     directory?: string;
     environment?: NodeJS.ProcessEnv;
     now?: () => number;
+    mcpRegistry?: PluginMcpRegistry;
     /** How a registered plugin is started. Tests replace the real sandboxed process. */
     start?: (plugin: RegisteredPlugin, options: StartPluginOptions) => Promise<RunningPlugin>;
     store: SessionStore;
@@ -30,6 +34,14 @@ export interface UninstalledPlugin {
     dataDirectory: string;
     folder: string;
     name: string;
+}
+
+interface PluginRuntimeState {
+    error?: string;
+    logTruncated?: boolean;
+    logPath?: string;
+    status: PluginSummary["status"];
+    updatedAt: number;
 }
 
 /**
@@ -47,7 +59,9 @@ export class PluginManager {
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #environment: NodeJS.ProcessEnv;
     readonly #now: () => number;
+    readonly #mcpRegistry: PluginMcpRegistry | undefined;
     readonly #running = new Map<string, RunningPlugin>();
+    readonly #states = new Map<string, PluginRuntimeState>();
     readonly #start: (
         plugin: RegisteredPlugin,
         options: StartPluginOptions,
@@ -61,6 +75,7 @@ export class PluginManager {
         this.#defaultDocker = options.defaultDocker;
         this.#environment = options.environment ?? process.env;
         this.#now = options.now ?? Date.now;
+        this.#mcpRegistry = options.mcpRegistry;
         this.#start = options.start ?? startPlugin;
         this.#store = options.store;
         this.directory = options.directory ?? getPluginsDirectory(this.#environment);
@@ -130,6 +145,7 @@ export class PluginManager {
             force: true,
             recursive: true,
         });
+        this.#states.delete(installed.folderName);
         this.#daemonLog.record(
             "info",
             "plugin_uninstalled",
@@ -159,14 +175,57 @@ export class PluginManager {
                 error: failure.error,
                 folder: failure.folderName,
             })),
-            plugins: discovery.plugins.map((plugin) => ({
-                dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
-                description: plugin.manifest.description,
-                directory: plugin.directory,
-                folder: plugin.folderName,
-                name: plugin.manifest.name,
-                running: this.#running.has(plugin.folderName),
-            })),
+            plugins: discovery.plugins.map((plugin) => {
+                const state = this.#states.get(plugin.folderName) ?? {
+                    status: "stopped" as const,
+                    updatedAt: this.#now(),
+                };
+                return {
+                    dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
+                    description: plugin.manifest.description,
+                    directory: plugin.directory,
+                    ...(state.error === undefined ? {} : { error: state.error }),
+                    folder: plugin.folderName,
+                    logAvailable: state.error !== undefined || state.logPath !== undefined,
+                    name: plugin.manifest.name,
+                    status: state.status,
+                };
+            }),
+        };
+    }
+
+    /** Reads at most the current plugin log's fixed retention bound. */
+    async readLog(name: string): Promise<PluginLogSnapshot> {
+        const discovery = await discoverPlugins(this.directory);
+        const wanted = name.trim().toLowerCase();
+        const plugin = discovery.plugins.find(
+            (candidate) =>
+                candidate.folderName.toLowerCase() === wanted ||
+                candidate.manifest.name.toLowerCase() === wanted,
+        );
+        if (plugin === undefined) throw new Error(`No installed plugin is named ${name}.`);
+        const state = this.#states.get(plugin.folderName) ?? {
+            status: "stopped" as const,
+            updatedAt: this.#now(),
+        };
+        const output =
+            state.status === "build_failed"
+                ? {
+                      text: state.error ?? "The plugin build failed.",
+                      truncated: state.logTruncated ?? false,
+                  }
+                : state.logPath === undefined
+                  ? { text: "", truncated: false }
+                  : await readBoundedPluginLog(state.logPath);
+        return {
+            ...(state.error === undefined ? {} : { error: state.error }),
+            folder: plugin.folderName,
+            name: plugin.manifest.name,
+            source: state.status === "build_failed" ? "build" : "current_run",
+            status: state.status,
+            text: output.text,
+            truncated: output.truncated,
+            updatedAt: state.updatedAt,
         };
     }
 
@@ -192,6 +251,7 @@ export class PluginManager {
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),
                 environment: this.#environment,
+                ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
                 store: this.#store,
             });
             if (this.#closed) {
@@ -199,6 +259,11 @@ export class PluginManager {
                 return;
             }
             this.#running.set(folderName, running);
+            this.#states.set(folderName, {
+                logPath: running.logPath,
+                status: "running",
+                updatedAt: this.#now(),
+            });
             this.#daemonLog.record("info", "plugin_started", `The ${name} plugin started.`, {
                 dataDirectory: running.dataDirectory,
                 logPath: running.logPath,
@@ -208,7 +273,17 @@ export class PluginManager {
             });
             void running.completion.then(
                 ({ code, signal }) => {
-                    this.#forgetExited(folderName, running);
+                    const exitError =
+                        code !== null && code !== 0
+                            ? `The plugin exited with code ${String(code)}.`
+                            : signal === null
+                              ? undefined
+                              : `The plugin exited after receiving ${signal}.`;
+                    this.#forgetExited(
+                        folderName,
+                        running,
+                        exitError === undefined ? {} : { error: exitError },
+                    );
                     this.#daemonLog.record(
                         code === 0 ? "info" : "warning",
                         "plugin_exited",
@@ -221,7 +296,9 @@ export class PluginManager {
                     );
                 },
                 (error: unknown) => {
-                    this.#forgetExited(folderName, running);
+                    this.#forgetExited(folderName, running, {
+                        error: errorToMessage(error),
+                    });
                     this.#daemonLog.record(
                         "error",
                         "plugin_process_failed",
@@ -231,11 +308,19 @@ export class PluginManager {
                 },
             );
         } catch (error) {
+            const status = error instanceof PluginBuildError ? "build_failed" : "stopped";
+            const diagnostic = boundPluginLogText(errorToMessage(error));
+            this.#states.set(folderName, {
+                error: diagnostic.text,
+                logTruncated: diagnostic.truncated,
+                status,
+                updatedAt: this.#now(),
+            });
             this.#daemonLog.record(
                 "error",
                 "plugin_start_failed",
                 `Rig could not start the ${name} plugin.`,
-                { error: errorToMessage(error), plugin: name, pluginDirectory: directory },
+                { error: diagnostic.text, plugin: name, pluginDirectory: directory },
             );
         }
     }
@@ -245,12 +330,27 @@ export class PluginManager {
         if (running === undefined) return;
         this.#running.delete(folderName);
         await running.close();
+        this.#states.set(folderName, {
+            logPath: running.logPath,
+            status: "stopped",
+            updatedAt: this.#now(),
+        });
     }
 
     /** A plugin that ends on its own leaves the running set, and clients see it stop. */
-    #forgetExited(folderName: string, running: RunningPlugin): void {
+    #forgetExited(folderName: string, running: RunningPlugin, options: { error?: string }): void {
         if (this.#running.get(folderName) !== running) return;
         this.#running.delete(folderName);
+        const boundedError =
+            options.error === undefined ? undefined : boundPluginLogText(options.error);
+        this.#states.set(folderName, {
+            ...(boundedError === undefined
+                ? {}
+                : { error: boundedError.text, logTruncated: boundedError.truncated }),
+            logPath: running.logPath,
+            status: "stopped",
+            updatedAt: this.#now(),
+        });
         void this.#publishChanged();
     }
 

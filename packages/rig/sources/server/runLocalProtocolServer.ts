@@ -21,7 +21,7 @@ import { TrackedTaskDrain } from "../utils/TrackedTaskDrain.js";
 import { readLocalServerToken } from "./readLocalServerToken.js";
 import { removeStaleSocket } from "./removeStaleSocket.js";
 import { resolveHappyIntegrationMode } from "./resolveHappyIntegrationMode.js";
-import { McpClientManager } from "../mcp/index.js";
+import { CompositeMcpToolProvider, McpClientManager, type McpToolProvider } from "../mcp/index.js";
 import { ensureUserConfigurationFiles, loadConfig, writeDaemonSettings } from "../config/index.js";
 import { createConfiguredPresenceStore } from "../presence/index.js";
 import { createProviderQuotaService } from "../executor/createProviderQuotaService.js";
@@ -49,7 +49,7 @@ import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDi
 import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
-import { PluginManager } from "../plugins/index.js";
+import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -114,7 +114,7 @@ async function runOwnedLocalProtocolServer(
     }
 
     let startupState: DaemonStartupState = { status: "starting" };
-    let mcpToolProvider: McpClientManager | undefined;
+    let mcpToolProvider: McpToolProvider | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -355,7 +355,8 @@ async function runOwnedLocalProtocolServer(
             disabledProviderReasons,
             providers: loadedConfig.config.providers,
         });
-        mcpToolProvider = new McpClientManager();
+        const pluginMcpRegistry = new PluginMcpRegistry();
+        mcpToolProvider = new CompositeMcpToolProvider([new McpClientManager(), pluginMcpRegistry]);
         taskDrain = new TrackedTaskDrain();
         gitStateTracker = new GitStateTracker({
             // Snapshots ride the live channel, so they reach subscribers without ever entering the
@@ -409,6 +410,7 @@ async function runOwnedLocalProtocolServer(
         const plugins: PluginContext = {
             install: (request) => requirePluginManager(pluginManager).install(request),
             list: () => requirePluginManager(pluginManager).list(),
+            readLog: (name) => requirePluginManager(pluginManager).readLog(name),
             uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
         };
         store = new PersistentSessionStore({
@@ -463,6 +465,7 @@ async function runOwnedLocalProtocolServer(
             ...(loadedConfig.config.docker === undefined
                 ? {}
                 : { defaultDocker: loadedConfig.config.docker }),
+            mcpRegistry: pluginMcpRegistry,
             store,
         }));
         const pluginsStarted = startedPluginManager.start().catch((error: unknown) => {
@@ -541,6 +544,7 @@ async function runOwnedLocalProtocolServer(
                     : { globalEventQueue: store.globalEventQueue }),
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
+                plugins,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 listProviderUsage: () => providerUsageTracker?.all() ?? [],
                 onDaemonSettingsChange: async (settings) => {

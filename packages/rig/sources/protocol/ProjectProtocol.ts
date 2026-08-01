@@ -301,8 +301,35 @@ export interface PluginSummary {
     /** Where Rig installed the plugin's code. */
     directory: string;
     folder: string;
+    /** Why the current plugin generation is or is not available. */
+    status: "build_failed" | "running" | "stopped";
+    /** Present for a failed build or process failure. */
+    error?: string;
+    /** Whether a bounded current-run or build diagnostic is available. */
+    logAvailable: boolean;
     name: string;
-    running: boolean;
+}
+
+/** One bounded snapshot of the current plugin generation's output. */
+export interface PluginLogSnapshot {
+    /** Startup or exit reason when the current generation is unavailable. */
+    error?: string;
+    folder: string;
+    name: string;
+    source: "build" | "current_run";
+    status: PluginSummary["status"];
+    text: string;
+    truncated: boolean;
+    updatedAt: number;
+}
+
+export interface ListPluginsResponse {
+    failures: readonly { error: string; folder: string }[];
+    plugins: readonly PluginSummary[];
+}
+
+export interface PluginLogResponse {
+    log: PluginLogSnapshot;
 }
 
 /**

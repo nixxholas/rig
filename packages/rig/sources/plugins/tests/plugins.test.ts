@@ -11,6 +11,7 @@ import { PluginBuildError } from "../PluginBuildError.js";
 import { PluginLog } from "../PluginLog.js";
 import { getPluginDataDirectory } from "../getPluginDataDirectory.js";
 import { getPluginsDirectory } from "../getPluginsDirectory.js";
+import { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "../readBoundedPluginLog.js";
 import { readPluginManifest } from "../readPluginManifest.js";
 
 const require = createRequire(import.meta.url);
@@ -99,14 +100,46 @@ describe("plugins", () => {
         );
     });
 
-    it("keeps captured plugin output within its configured bound", async () => {
+    it("keeps recent output within its bound and resets between current runs", async () => {
         const root = await temporaryDirectory();
         const logPath = join(root, "plugin.log");
         const log = new PluginLog({ maximumBytes: 64, path: logPath });
         log.append("stdout", Buffer.alloc(1024, "x"));
+        log.append("stdout", Buffer.from("LATEST_OUTPUT\n"));
         await log.close();
 
         await expect(readFile(logPath)).resolves.toHaveLength(64);
+        const retained = await readFile(logPath, "utf8");
+        expect(retained).toContain("Earlier plugin output omitted");
+        expect(retained).toContain("LATEST_OUTPUT");
+
+        const nextRun = new PluginLog({ maximumBytes: 64, path: logPath });
+        nextRun.append("stdout", Buffer.from("fresh run\n"));
+        await nextRun.close();
+        await expect(readFile(logPath, "utf8")).resolves.toBe("[stdout] fresh run\n");
+    });
+
+    it("preserves multibyte chunk boundaries and reads only the newest 16 KiB", async () => {
+        const root = await temporaryDirectory();
+        const logPath = join(root, "plugin.log");
+        const log = new PluginLog({ maximumBytes: 80, path: logPath });
+        log.append("stdout", Buffer.alloc(200, "o"));
+        const emoji = Buffer.from("🙂");
+        log.append("stdout", emoji.subarray(0, 2));
+        log.append("stdout", emoji.subarray(2));
+        log.append("stdout", Buffer.from(" NEWEST_MULTIBYTE\n"));
+        await log.close();
+
+        const retained = await readFile(logPath, "utf8");
+        expect(retained).toContain("🙂 NEWEST_MULTIBYTE");
+        expect(retained).not.toContain("�");
+
+        await writeFile(logPath, `${"old-output\n".repeat(2_000)}🙂 NEWEST_PROTOCOL_OUTPUT\n`);
+        const snapshot = await readBoundedPluginLog(logPath);
+        expect(snapshot.truncated).toBe(true);
+        expect(Buffer.byteLength(snapshot.text)).toBeLessThanOrEqual(MAXIMUM_PLUGIN_LOG_READ_BYTES);
+        expect(snapshot.text).toContain("🙂 NEWEST_PROTOCOL_OUTPUT");
+        expect(snapshot.text).not.toContain("�");
     });
 
     it("builds with TypeScript 7 against Rig's SDK and rejects incompatible calls", async () => {

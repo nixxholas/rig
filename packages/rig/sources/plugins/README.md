@@ -38,3 +38,17 @@ plugin writes to. Every change — including a plugin that exits on its own — 
 `plugins_changed` event carrying the whole current set, so clients never poll and never wait for a
 restart. A plugin is staged in a hidden folder and compiled there, so a plugin that fails to build
 is never installed and never replaces a working one.
+
+`PluginMcpRegistry` is a daemon-wide `McpToolProvider`. Each plugin process generation owns a
+connection to it through the already-authenticated plugin socket. An SDK registration becomes live
+only when its NDJSON call stream attaches; exit, disconnect, replacement, restart, or uninstall
+retires that generation and rejects pending calls before stale completions can land. Sessions load
+this provider through the same composite MCP path as configured servers, so provider tool assembly
+and `AgentContext`/`PermissionContext` behavior stay shared.
+
+The manager records one authoritative state for every registered plugin: `running`, `stopped`, or
+`build_failed`. The current-run file retains the most recent 1 MiB and resets for each process
+generation. `readLog` returns its newest 16 KiB, or the newest 16 KiB of the build diagnostic, and
+marks the snapshot when that read bound omitted older output. The daemon protocol serves these
+through `GET /plugins` and `GET /plugins/<name>/log`; `/plugins`, the `plugin_logs` agent tool, and
+`rig-connect` consume that boundary without polling.

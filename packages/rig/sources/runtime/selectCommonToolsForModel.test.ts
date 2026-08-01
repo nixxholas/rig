@@ -14,6 +14,7 @@ describe("selectCommonToolsForModel", () => {
             "plugin_install",
             "plugin_uninstall",
             "plugin_list",
+            "plugin_logs",
         ]);
     });
 
@@ -26,6 +27,7 @@ describe("selectCommonToolsForModel", () => {
             "plugin_install",
             "plugin_uninstall",
             "plugin_list",
+            "plugin_logs",
         ]);
     });
 });

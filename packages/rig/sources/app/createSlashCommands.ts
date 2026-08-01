@@ -51,6 +51,12 @@ export function createSlashCommands(
             aliases: ["todos"],
         },
         {
+            value: "plugins",
+            label: "/plugins",
+            description: "Show plugins, or add a name to read its current log.",
+            aliases: [],
+        },
+        {
             value: "presence",
             label: "/presence",
             description: "Say whether you are here to answer questions.",
@@ -142,7 +148,8 @@ export function createSlashCommands(
         },
     ];
     if (options.workflowsEnabled !== false) {
-        commands.splice(9, 0, {
+        const usageIndex = commands.findIndex((command) => command.value === "usage");
+        commands.splice(usageIndex, 0, {
             value: "workflows",
             label: "/workflows",
             description: "Open the live workflow monitor.",

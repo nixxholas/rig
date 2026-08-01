@@ -55,13 +55,25 @@ describe("InMemorySession MCP permissions", () => {
             toUI: () => "changed",
             locks: [],
         });
+        const refreshedMcpTool = defineTool({
+            ...mcpTool,
+            label: "Read refreshed state",
+            name: "mcp__trusted__read_refreshed_state",
+        });
+        let activeMcpTools = [mcpTool];
         const release = vi.fn(async () => undefined);
         const load = vi.fn<McpToolProvider["load"]>(async (_cwd, permissionMode) =>
             permissionMode === "auto" || permissionMode === "full_access"
                 ? {
                       release,
-                      servers: [{ name: "trusted", status: "connected", toolCount: 1 }],
-                      tools: [mcpTool],
+                      servers: [
+                          {
+                              name: "trusted",
+                              status: "connected",
+                              toolCount: activeMcpTools.length,
+                          },
+                      ],
+                      tools: activeMcpTools,
                   }
                 : {
                       servers: [
@@ -113,8 +125,17 @@ describe("InMemorySession MCP permissions", () => {
             expect.objectContaining({ name: "trusted", status: "connected" }),
         ]);
 
-        await session.changePermissionMode({ permissionMode: "workspace_write" });
+        activeMcpTools = [refreshedMcpTool];
+        const refreshedRun = session.submit({ text: "Refresh this active session." });
+        await expect(session.waitForRun(refreshedRun.runId)).resolves.toEqual({
+            status: "completed",
+        });
+        expect(toolCatalogs.at(-1)).toContain(refreshedMcpTool.name);
+        expect(toolCatalogs.at(-1)).not.toContain(mcpTool.name);
         expect(release).toHaveBeenCalledOnce();
+
+        await session.changePermissionMode({ permissionMode: "workspace_write" });
+        expect(release).toHaveBeenCalledTimes(2);
         expect(runtime?.agent.tools.map((tool) => tool.name)).not.toContain(mcpTool.name);
         expect(session.snapshot().mcpServers).toEqual([
             expect.objectContaining({ name: "trusted", status: "blocked" }),
@@ -126,6 +147,7 @@ describe("InMemorySession MCP permissions", () => {
         expect(toolCatalogs.at(-1)).not.toContain(mcpTool.name);
         expect(load.mock.calls.map((call) => call[1])).toEqual([
             "read_only",
+            "auto",
             "auto",
             "workspace_write",
         ]);

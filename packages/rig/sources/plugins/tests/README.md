@@ -8,3 +8,6 @@ depending on a real home directory.
 real one spawns a sandboxed process, which cannot nest inside the sandbox this suite may already
 run in, and the manager's contract under test is registration, stopping, and the events it
 publishes. Spawning a real plugin is covered by the gym instead.
+
+`PluginMcpRegistry.test.ts` covers live registration identity, forwarding, concurrency,
+cancellation, timeout, permissions, restart, and stale-completion contracts.

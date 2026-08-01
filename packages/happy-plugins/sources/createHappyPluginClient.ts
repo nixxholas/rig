@@ -3,6 +3,7 @@ import { request as requestHttp } from "node:http";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import { startHappyMcpServer } from "./startHappyMcpServer.js";
 import type { CreateHappyPluginClientOptions, HappyPluginClient } from "./types.js";
 import {
     agentMessageDeliverySchema,
@@ -45,8 +46,15 @@ export function createHappyPluginClient(
     options: CreateHappyPluginClientOptions = {},
 ): HappyPluginClient {
     Value.Assert(createHappyPluginClientOptionsSchema, options);
+    const socketPath = () =>
+        requiredSetting(
+            options.socketPath ?? process.env.HAPPY_PLUGIN_SOCKET_PATH,
+            "HAPPY_PLUGIN_SOCKET_PATH",
+        );
+    const token = () =>
+        requiredSetting(options.token ?? process.env.HAPPY_PLUGIN_TOKEN, "HAPPY_PLUGIN_TOKEN");
     const request = <TSchema_ extends TSchema>(
-        method: "GET" | "PATCH" | "POST",
+        method: "DELETE" | "GET" | "PATCH" | "POST",
         path: string,
         responseSchema: TSchema_,
         body?: unknown,
@@ -56,14 +64,8 @@ export function createHappyPluginClient(
             method,
             path,
             responseSchema,
-            socketPath: requiredSetting(
-                options.socketPath ?? process.env.HAPPY_PLUGIN_SOCKET_PATH,
-                "HAPPY_PLUGIN_SOCKET_PATH",
-            ),
-            token: requiredSetting(
-                options.token ?? process.env.HAPPY_PLUGIN_TOKEN,
-                "HAPPY_PLUGIN_TOKEN",
-            ),
+            socketPath: socketPath(),
+            token: token(),
         });
 
     return {
@@ -81,6 +83,18 @@ export function createHappyPluginClient(
         projects: {
             list: async () =>
                 (await request("GET", "/projects", listProjectsResponseSchema)).projects,
+        },
+        mcp: {
+            startServer: (serverOptions) =>
+                startHappyMcpServer(serverOptions, {
+                    request,
+                    get socketPath() {
+                        return socketPath();
+                    },
+                    get token() {
+                        return token();
+                    },
+                }),
         },
         sessions: {
             create: async (input) => {
@@ -147,7 +161,7 @@ function requiredSetting(value: string | undefined, name: string): string {
 
 function requestJson<TSchema_ extends TSchema>(options: {
     body?: unknown;
-    method: string;
+    method: "DELETE" | "GET" | "PATCH" | "POST";
     path: string;
     responseSchema: TSchema_;
     socketPath: string;
