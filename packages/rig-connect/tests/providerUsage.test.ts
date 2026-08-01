@@ -53,6 +53,32 @@ async function settle(): Promise<void> {
 }
 
 describe("connectProviderUsage", () => {
+    it("keeps provider usage beneath a path-prefixed endpoint", async () => {
+        const requested: string[] = [];
+        const rig = connectRig({
+            endpoint: "https://connector.test/capability/rig-connect",
+            token: "t",
+            fetch: ((input: RequestInfo | URL) => {
+                requested.push(String(input));
+                return Promise.resolve(
+                    new Response(JSON.stringify({ providers: [entry("codex", 42)] }), {
+                        status: 200,
+                    }),
+                );
+            }) as typeof globalThis.fetch,
+        });
+        const usage = rig.connectProviderUsage({ onChange: () => {} });
+
+        await settle();
+
+        expect(requested).toEqual([
+            "https://connector.test/capability/rig-connect/provider-usage",
+        ]);
+        expect(usage.providers()).toEqual([entry("codex", 42)]);
+        usage.close();
+        rig.close();
+    });
+
     it("reports loading before the first answer, then the usage", async () => {
         const daemon = usageDaemon([[entry("codex", 42)]]);
         const rig = connectRig({

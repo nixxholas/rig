@@ -2988,7 +2988,9 @@ function mutationIdOf(event: SessionEvent | GlobalEvent): string | undefined {
 }
 
 function endpointUrl(endpoint: string, path: string): string {
-    return new URL(path, endpoint.endsWith("/") ? endpoint : `${endpoint}/`).toString();
+    const base = new URL(endpoint);
+    if (!base.pathname.endsWith("/")) base.pathname += "/";
+    return new URL(path.replace(/^\/+/, ""), base).toString();
 }
 
 function ifMatchHeader(value: string | number | undefined): Record<string, string> {
