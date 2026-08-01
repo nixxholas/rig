@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { createReleaseTestEnvironment } from "./createReleaseTestEnvironment.js";
 
-test("removes the release runner's temporary directory without mutating its environment", () => {
+test("moves release tests out of the workspace without mutating the runner environment", () => {
     const environment = {
         PATH: "/usr/bin",
         TMPDIR: "/workspace/.local",
@@ -11,6 +11,7 @@ test("removes the release runner's temporary directory without mutating its envi
 
     assert.deepEqual(createReleaseTestEnvironment(environment), {
         PATH: "/usr/bin",
+        TMPDIR: "/tmp",
     });
     assert.equal(environment.TMPDIR, "/workspace/.local");
 });
