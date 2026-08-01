@@ -28,6 +28,10 @@ describe("createWorkspaceInstructions", () => {
         expect(instructions).toContain("isolate work, not to organize it");
         expect(instructions).toContain("parallel tasks each get their own fresh workspace");
         expect(instructions).toContain("Do not create workspaces for subtasks");
+        expect(instructions).toContain("Work in a workspace runs from inside that workspace");
+        expect(instructions).toContain(
+            "reach into another workspace's folder by path",
+        );
         expect(instructions).toContain("A workspace is not free");
         expect(instructions).toContain("installs its own dependencies");
         expect(instructions).toContain(

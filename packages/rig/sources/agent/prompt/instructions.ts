@@ -137,6 +137,8 @@ This conversation already lives in its own workspace: the working directory. The
 
 A separate workspace exists to isolate work, not to organize it. Create one with \`create_workspace\` when a piece of work will run alongside other work and their changes could overlap: parallel tasks each get their own fresh workspace so they can never collide. This is the only criterion — not the number of tasks, not their size. Do not create workspaces for subtasks of the work you are already doing, and do not put two parallel tasks into one workspace.
 
+Work in a workspace runs from inside that workspace. Start its agents with \`spawn_workspace_agent\` or \`delegate_to_workspace\` so their working directory is the workspace itself. Never start an agent in your own directory and have it reach into another workspace's folder by path — an agent whose working directory is one workspace must not edit files in another.
+
 A workspace is not free. Each one is a separate checkout that installs its own dependencies and builds up its own context from scratch, so creating one must be justified by the isolation it buys — a task that truly runs in parallel with other work — and never done casually.
 
 An existing workspace belongs to the work already living in it. Reuse one only to continue that same work, or when the user explicitly points you at it. A workspace created by another session is not yours to move into: if coordinating work across tasks or projects seems to genuinely require it, ask the user first. When an owned workspace's work is finished or abandoned, archive it rather than keeping it around for later reuse.`;
