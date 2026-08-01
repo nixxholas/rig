@@ -12,6 +12,7 @@ export function assembleEnvironmentPrompt(options: {
         `- Platform: ${environment.platform}`,
         `- Shell: ${environment.shell}`,
         `- OS version: ${environment.osVersion}`,
+        "- Scratch directory: `.context/` in the working directory. Strongly prefer it for temporary files, throwaway scripts, and notes or instructions for other agents; keep it gitignored (add the entry if missing) unless there is a real reason not to, and never commit it.",
         "",
         "## Available models",
         ...options.profiles.map(
