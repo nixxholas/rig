@@ -1,5 +1,5 @@
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, sep } from "node:path";
 
 import { PROJECT_CONFIG_FILE_NAMES } from "../../config/projectConfigFileNames.js";
 import type { PermissionMode } from "../../permissions/index.js";
@@ -31,18 +31,30 @@ export async function createMacOsSeatbeltCommand(options: {
     // Read only withholds the workspace but still needs a writable temporary directory. Toolchain
     // shims such as macOS `xcrun` cache into TMPDIR on every invocation, and denying that write
     // makes them fall back to a path resolution that costs hundreds of milliseconds per command.
+    const projectCandidates =
+        options.mode === "read_only"
+            ? []
+            : [options.cwd, ...(await findGitWritablePaths(options.cwd))];
     const writableCandidates =
         options.mode === "read_only"
             ? [temporaryDirectory, "/tmp"]
-            : [
-                  options.cwd,
-                  ...(await findGitWritablePaths(options.cwd)),
-                  temporaryDirectory,
-                  "/tmp",
-              ];
+            : [...projectCandidates, temporaryDirectory, "/tmp"];
     const writableRoots = [
         ...new Set(await Promise.all(writableCandidates.map(resolvePotentialPath))),
     ];
+    // A unix socket is reachable by path, so where it may live decides what a command can talk to.
+    // Inside a project a socket can only be one the command itself created; the host's own sockets —
+    // the Docker daemon, the ssh agent, Rig's control socket in the temporary directory — sit
+    // elsewhere and stay unreachable, which is why this is narrower than writable space.
+    //
+    // The home folder is the exception that makes the rule worth stating: a session can run there,
+    // and `~/.docker`, `~/.gnupg`, and password-manager agents keep their sockets under it, so
+    // granting the home folder would hand over exactly what this scope exists to withhold. Any
+    // ancestor of the home folder is refused for the same reason.
+    const home = await resolvePotentialPath(homedir());
+    const projectSocketRoots = [
+        ...new Set(await Promise.all(projectCandidates.map(resolvePotentialPath))),
+    ].filter((root) => !isAtOrAbove(root, home));
     const protectedCandidates = [
         ...PROTECTED_WORKSPACE_NAMES.map((name) => join(options.cwd, name)),
         join(temporaryDirectory, `rig-${process.getuid?.() ?? 0}`),
@@ -62,12 +74,26 @@ export async function createMacOsSeatbeltCommand(options: {
         definitions.push(`-D${key}=${root}`);
         return `  (subpath (param "${key}"))`;
     });
+    const projectSocketRules = projectSocketRoots.flatMap((root, index) => {
+        const key = `PROJECT_SOCKET_ROOT_${String(index)}`;
+        definitions.push(`-D${key}=${root}`);
+        return [
+            `(allow network-bind (local unix-socket (subpath (param "${key}"))))`,
+            `(allow network-outbound (remote unix-socket (subpath (param "${key}"))))`,
+        ];
+    });
     const protectedRules = protectedPaths.map((path, index) => {
         const key = `PROTECTED_WRITE_${String(index)}`;
         definitions.push(`-D${key}=${path}`);
         return `(deny file-write*
   (literal (param "${key}"))
-  (subpath (param "${key}")))`;
+  (subpath (param "${key}")))
+(deny network-bind
+  (local unix-socket (literal (param "${key}")))
+  (local unix-socket (subpath (param "${key}"))))
+(deny network-outbound
+  (remote unix-socket (literal (param "${key}")))
+  (remote unix-socket (subpath (param "${key}"))))`;
     });
     const fileWritePolicy =
         writableRules.length === 0 ? "" : `(allow file-write*\n${writableRules.join("\n")}\n)`;
@@ -85,6 +111,7 @@ export async function createMacOsSeatbeltCommand(options: {
         ...(options.networkAllowedLoopbackPorts ?? []).map(
             (port) => `(allow network-outbound (remote ip "localhost:${String(port)}"))`,
         ),
+        ...projectSocketRules,
         fileWritePolicy,
         ...protectedRules,
     ]
@@ -105,4 +132,11 @@ export async function createMacOsSeatbeltCommand(options: {
         ],
         command: MACOS_SEATBELT_EXECUTABLE,
     };
+}
+
+/** True when `candidate` is the path itself or one of its ancestors. */
+function isAtOrAbove(candidate: string, path: string): boolean {
+    if (candidate === path) return true;
+    const prefix = candidate.endsWith(sep) ? candidate : `${candidate}${sep}`;
+    return path.startsWith(prefix);
 }

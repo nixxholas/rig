@@ -509,6 +509,18 @@ listener uses the host loopback interface, while external inbound and outbound
 traffic remains blocked. “All ports” removes Rig's policy restriction; it does
 not bypass normal OS privileges or an existing listener occupying the port.
 
+On macOS, local unix sockets are handled separately and need no configuration. An
+Auto or Workspace write command may always create and connect to unix sockets
+inside the working directory and its Git control directory, which is where a
+development server, language server, or test harness puts its socket. That is
+deliberately narrower than writable space: sockets in temporary directories and
+everywhere else on the host stay unreachable, so a sandboxed command cannot
+reach the Docker daemon socket, the SSH agent, or Rig's own control socket. The
+home folder is never granted, because host agents keep their sockets under it, so
+a session in the Home project creates no sockets. Read only creates none either.
+Linux and Docker commands are confined by their mount and network namespaces
+instead, so a socket there follows writable space rather than this rule.
+
 Linux and Docker commands always retain loopback binding inside their isolated
 network namespace, so `allow_local_binding` does not change their sandbox.
 Those listeners are reachable only by processes in the same command namespace;

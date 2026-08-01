@@ -1,0 +1,4 @@
+[network]
+# Rig's own tests start daemons, HTTP servers, and unix sockets on the loopback
+# interface, so a sandboxed command has to be allowed to listen locally.
+allow_local_binding = true

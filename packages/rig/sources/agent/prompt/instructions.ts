@@ -14,6 +14,31 @@ export const RIG_AGENT_TOOL_INSTRUCTIONS = `## Agent tool portability
 - \`rig\` is provider-neutral. Use it when selecting or crossing models, providers, or regions, when native collaboration is unavailable, and when setting effort.
 - If a native collaboration call rejects the target, retry with the matching \`rig\` tool and provide the normal task text. Never copy or reinterpret encrypted content.`;
 
+/**
+ * Describes what a sandboxed command cannot do, so the model recognizes a boundary instead of
+ * rediscovering it as a mysterious failure.
+ *
+ * Each line is something that has surprised an agent in practice: a write that lands outside the
+ * workspace, a socket that exists but cannot be reached, a credential store that answers as if the
+ * secret were simply missing. Knowing the shape of the wall is what turns a retry loop into either
+ * a reviewed escalation or an honest report.
+ */
+function sandboxLimitsInstructions(mode: PermissionMode): string {
+    return [
+        "Shell commands run in a sandbox with these limits:",
+        mode === "read_only"
+            ? "- Nothing on the host is writable except temporary directories, and on macOS no local socket may be created."
+            : "- Writes are confined to the working directory, its Git control directory, and temporary directories. Everything else on the host is readable but not writable.",
+        "- Put any local unix socket inside the working directory. On macOS a socket anywhere else is refused, including one in a temporary directory. Never rely on reaching the host's own sockets, such as the Docker daemon or the SSH agent.",
+        "- On macOS, binding a local TCP or UDP port is refused unless the user has enabled local binding in configuration. On Linux and in Docker, a listener is reachable only from inside that command.",
+        "- Outbound network access is blocked except for domains and ports the user has allowed, which are reached through a managed proxy.",
+        "- On macOS, the keychain is unavailable: `security`, and anything backed by the keychain, fails or reports nothing rather than returning a secret. Treat other system credential stores the same way.",
+        mode === "auto"
+            ? "- When one of these limits blocks necessary work, request reviewed full-access execution for that one command and explain why. Never route around a limit by another means."
+            : "- When one of these limits blocks necessary work, stop and tell the user which limit it was. A sandbox refusal is not a bug in your command, and it is not something to route around.",
+    ].join("\n");
+}
+
 export function createPermissionInstructions(
     mode: PermissionMode,
     tools: readonly AnyDefinedTool[] = [],
@@ -30,14 +55,21 @@ export function createPermissionInstructions(
         ];
         return [
             "You are in Auto mode. Routine reads and workspace edits run automatically. Permission-sensitive actions are reviewed automatically; low-risk actions proceed, while potentially unsafe actions require one-time user approval. Every shell tool uses the same workspace sandbox by default. Request reviewed full-access execution only when that sandbox blocks necessary work, and give a clear reason. Do not work around a denied permission or retry the same action unchanged.",
+            sandboxLimitsInstructions(mode),
             ...toolInstructions,
         ].join("\n\n");
     }
     if (mode === "read_only") {
-        return "You are in Read only mode. You may inspect files and run non-mutating shell commands. File tools cannot make changes; shell commands may only write temporary files, and shell network access is blocked.";
+        return [
+            "You are in Read only mode. You may inspect files and run non-mutating shell commands. File tools cannot make changes; shell commands may only write temporary files, and shell network access is blocked.",
+            sandboxLimitsInstructions(mode),
+        ].join("\n\n");
     }
     if (mode === "workspace_write") {
-        return "You are in Workspace write mode. You may modify files inside the working directory. Shell writes outside it and shell network access are blocked.";
+        return [
+            "You are in Workspace write mode. You may modify files inside the working directory. Shell writes outside it and shell network access are blocked.",
+            sandboxLimitsInstructions(mode),
+        ].join("\n\n");
     }
     return "You are in Full access mode. Filesystem, shell, and network access are unrestricted.";
 }
