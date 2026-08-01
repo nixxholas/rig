@@ -97,7 +97,7 @@ export const modelOpenaiGpt56Sol = defineModel({
     id: "openai/gpt-5.6-sol",
     name: "GPT-5.6 Sol",
     thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max", "ultra"],
-    defaultThinkingLevel: "low",
+    defaultThinkingLevel: "medium",
     contextWindow: 372_000,
 });
 
