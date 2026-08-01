@@ -4,6 +4,7 @@ export interface RunCommandOptions {
     allowFailure?: boolean;
     captureOutput?: boolean;
     cwd?: string;
+    environment?: NodeJS.ProcessEnv;
 }
 
 export interface RunCommandResult {
@@ -20,6 +21,7 @@ export function runCommand(
     const result = spawnSync(command, arguments_, {
         cwd: options.cwd,
         encoding: "utf8",
+        env: options.environment,
         stdio: options.captureOutput === true ? ["ignore", "pipe", "pipe"] : "inherit",
     });
 
