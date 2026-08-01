@@ -124,29 +124,13 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            # rig-connect and happy-plugins ship on their own schedules, so each one only needs a
-            # canary build when its own sources move.
-            - name: Check which side packages changed
+            # A resolvable published side-package canary is its watermark, keeping later package
+            # changes pending across failed workflows.
+            - name: Check for unpublished side-package changes
               id: changed
               env:
                   PUSHED_FROM: ${{ github.event.before }}
-              run: |
-                  base="$PUSHED_FROM"
-                  if [[ -z "$base" ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
-                      base="$(git rev-parse HEAD~1)"
-                  fi
-                  files="$(git diff --name-only "$base" HEAD)"
-                  for entry in connect:rig-connect plugins:happy-plugins; do
-                      output="${entry%%:*}"
-                      package="${entry#*:}"
-                      if grep --quiet "^packages/${package}/" <<< "$files"; then
-                          echo "Publishing a ${package} canary build for this push."
-                          echo "${output}=true" >> "$GITHUB_OUTPUT"
-                      else
-                          echo "${package} is unchanged since ${base}; skipping its canary build."
-                          echo "${output}=false" >> "$GITHUB_OUTPUT"
-                      fi
-                  done
+              run: pnpm exec tsx scripts/detectCanaryPackageChanges.ts
 
             - name: Set the canary versions
               env:
