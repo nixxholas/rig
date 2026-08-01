@@ -1848,7 +1848,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (providerUsageEntry === entry) scheduleProviderUsage(entry);
             });
         }, entry.refreshIntervalMs);
-        entry.timer.unref?.();
     };
 
     const connectProviderUsage = (
