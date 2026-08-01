@@ -77,13 +77,17 @@ export function agentTimelineSpans(
     // A trailing waiting span stays open on purpose. The chat really is still
     // waiting for the person, and the chart draws that as a bar running to now.
     //
-    // Waiting is the one kind Rig infers rather than records, so a stretch of it
-    // that took no time at all — a subagent handed its prompt the instant it was
-    // created — is dropped instead of becoming a bar nobody waited through. A
-    // run or a question is a recorded fact and stays, however brief.
+    // Waiting is the one kind Rig infers rather than records. A subagent can be
+    // handed its prompt the instant it is created, so a zero-length waiting
+    // stretch is dropped instead of becoming a bar nobody waited through.
+    // Primary chats retain the state transition even when millisecond timestamps
+    // collide: they are the rows where the person can actually be awaited.
     return spans.filter(
         (span) =>
-            span.kind !== "waiting" || span.endedAt === undefined || span.endedAt > span.startedAt,
+            agent.type === "primary" ||
+            span.kind !== "waiting" ||
+            span.endedAt === undefined ||
+            span.endedAt > span.startedAt,
     );
 }
 

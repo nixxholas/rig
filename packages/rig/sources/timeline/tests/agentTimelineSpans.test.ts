@@ -164,6 +164,22 @@ describe("agentTimelineSpans", () => {
             startedAt: 0,
         });
     });
+
+    it("keeps a primary chat's initial waiting state when submission shares its timestamp", () => {
+        const spans = agentTimelineSpans(agent(), [
+            messageSubmitted(0, "run-1"),
+            runStarted(0, "run-1"),
+            runFinished(MINUTE, "run-1", "stop"),
+        ]);
+
+        expect(spans.map((span) => span.kind)).toEqual(["waiting", "working", "waiting"]);
+        expect(spans[0]).toEqual({
+            endedAt: 0,
+            kind: "waiting",
+            outcome: "completed",
+            startedAt: 0,
+        });
+    });
 });
 
 function agent(): TimelineAgentSource {
