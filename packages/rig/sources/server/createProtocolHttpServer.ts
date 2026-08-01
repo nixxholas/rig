@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { isCuid } from "@paralleldrive/cuid2";
+import { Value } from "@sinclair/typebox/value";
 
 import type {
     AbortRunResponse,
@@ -24,6 +25,7 @@ import type {
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
+    GetGlobalSecurityPolicyResponse,
     GetSessionUsageResponse,
     GetTimelineResponse,
     ListProviderUsageResponse,
@@ -83,13 +85,17 @@ import type {
     UpdateDaemonConfigResponse,
     UpdateGlobalInstructionsRequest,
     UpdateGlobalInstructionsResponse,
+    UpdateGlobalSecurityPolicyResponse,
     SetSessionDraftRequest,
     UpdateSessionRequest,
     WriteSessionFileRequest,
     WriteSessionFileResponse,
 } from "../protocol/index.js";
-import { RIG_PROTOCOL_VERSION } from "../protocol/index.js";
-import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
+import {
+    globalSecurityPolicySchema,
+    RIG_PROTOCOL_VERSION,
+    SESSION_DRAFT_MAX_LENGTH,
+} from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { isOpenQuestion } from "../user-input/index.js";
@@ -136,6 +142,10 @@ import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
 import { GLOBAL_AGENTS_MD_MAX_BYTES } from "../config/globalAgentsMdMaxBytes.js";
 import { readGlobalAgentsMd } from "../config/readGlobalAgentsMd.js";
 import { writeGlobalAgentsMd } from "../config/writeGlobalAgentsMd.js";
+import { getGlobalSecurityMdPath } from "../config/getGlobalSecurityMdPath.js";
+import { GLOBAL_SECURITY_MD_MAX_BYTES } from "../config/globalSecurityMdMaxBytes.js";
+import { readGlobalSecurityMd } from "../config/readGlobalSecurityMd.js";
+import { writeGlobalSecurityMd } from "../config/writeGlobalSecurityMd.js";
 import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
@@ -164,6 +174,8 @@ export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
     /** Where the user's global AGENTS.md lives. Defaults to the file beside the daemon config. */
     globalInstructionsPath?: string;
+    /** Where the user's global SECURITY.md lives. Defaults to the file beside the daemon config. */
+    globalSecurityPolicyPath?: string;
     defaultDocker?: DockerExecutionConfig;
     gitStateTracker?: GitStateTracker;
     identity?: DaemonIdentity;
@@ -204,6 +216,7 @@ export function createProtocolHttpServer(
         gitStateTracker: options.gitStateTracker,
         globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
+        globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
@@ -278,6 +291,7 @@ interface ProtocolServerRuntimeConfig {
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
     globalInstructionsPath: string;
+    globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
@@ -289,6 +303,8 @@ interface AppliedDaemonSettings {
     codexStreamMaxRetries: number;
     globalEventQueue: GlobalEventQueue;
 }
+
+const GLOBAL_SECURITY_POLICY_REQUEST_MAX_BYTES = GLOBAL_SECURITY_MD_MAX_BYTES * 6 + 1024;
 
 async function handleRequest(
     request: IncomingMessage,
@@ -1019,6 +1035,32 @@ async function handleRequest(
         // Reading the file back states what sessions will actually pick up before their next turn.
         sendJson<UpdateGlobalInstructionsResponse>(response, 200, {
             instructions: (await readGlobalAgentsMd(runtimeConfig.globalInstructionsPath)) ?? "",
+        });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "global-security-policy") {
+        sendJson<GetGlobalSecurityPolicyResponse>(response, 200, {
+            policy: (await readGlobalSecurityMd(runtimeConfig.globalSecurityPolicyPath)) ?? "",
+        });
+        return;
+    }
+
+    if (request.method === "PUT" && route.name === "global-security-policy") {
+        const body = await readJson<unknown>(request, GLOBAL_SECURITY_POLICY_REQUEST_MAX_BYTES);
+        if (!Value.Check(globalSecurityPolicySchema, body)) {
+            sendJson(response, 400, { error: "Global security policy must be text." });
+            return;
+        }
+        if (Buffer.byteLength(body.policy, "utf8") > GLOBAL_SECURITY_MD_MAX_BYTES) {
+            sendJson(response, 400, {
+                error: `Global security policy must be smaller than ${GLOBAL_SECURITY_MD_MAX_BYTES / 1024} KB.`,
+            });
+            return;
+        }
+        await writeGlobalSecurityMd(body.policy, runtimeConfig.globalSecurityPolicyPath);
+        sendJson<UpdateGlobalSecurityPolicyResponse>(response, 200, {
+            policy: (await readGlobalSecurityMd(runtimeConfig.globalSecurityPolicyPath)) ?? "",
         });
         return;
     }
@@ -2363,6 +2405,7 @@ function matchRoute(pathname: string):
               | "external-tool-calls"
               | "config"
               | "global-instructions"
+              | "global-security-policy"
               | "debug-inspector"
               | "health"
               | "happy-reload"
@@ -2468,6 +2511,7 @@ function matchRoute(pathname: string):
     if (pathname === "/happy/reload") return { name: "happy-reload" };
     if (pathname === "/config") return { name: "config" };
     if (pathname === "/config/instructions") return { name: "global-instructions" };
+    if (pathname === "/config/security") return { name: "global-security-policy" };
     if (pathname === "/debug/inspector") return { name: "debug-inspector" };
     if (pathname === "/events") return { name: "global-events" };
     if (pathname === "/events/stream") return { name: "global-events-stream" };
@@ -2729,6 +2773,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route === undefined) return false;
     if (route.name === "config") return request.method === "PATCH";
     if (route.name === "global-instructions") return request.method === "PUT";
+    if (route.name === "global-security-policy") return request.method === "PUT";
     if (route.name === "debug-inspector") return request.method === "POST";
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { getDefaultGlobalConfigPath } from "./getDefaultGlobalConfigPath.js";
 import { getGlobalAgentsMdPath } from "./getGlobalAgentsMdPath.js";
+import { getGlobalSecurityMdPath } from "./getGlobalSecurityMdPath.js";
 import { getHappyConfigDirectory } from "./getHappyConfigDirectory.js";
 
 describe("getHappyConfigDirectory", () => {
@@ -34,7 +35,7 @@ describe("getHappyConfigDirectory", () => {
         ).toThrow("RIG_CONFIGURATION_DIRECTORY must be an absolute path.");
     });
 
-    it("keeps happy.toml and AGENTS.md together in the configuration directory", () => {
+    it("keeps the global configuration files together", () => {
         const environment = {
             RIG_CONFIGURATION_DIRECTORY: "/srv/happy-config",
         };
@@ -44,6 +45,9 @@ describe("getHappyConfigDirectory", () => {
         );
         expect(getGlobalAgentsMdPath(environment, "/home/tester")).toBe(
             "/srv/happy-config/AGENTS.md",
+        );
+        expect(getGlobalSecurityMdPath(environment, "/home/tester")).toBe(
+            "/srv/happy-config/SECURITY.md",
         );
     });
 });

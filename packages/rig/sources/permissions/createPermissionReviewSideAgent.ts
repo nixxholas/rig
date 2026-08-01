@@ -1,6 +1,7 @@
 import { Agent } from "../agent/Agent.js";
 import type { AgentContext } from "../agent/context/AgentContext.js";
 import {
+    createPermissionReviewInstructions,
     PERMISSION_REVIEW_FOLLOWUP_REMINDER,
     PERMISSION_REVIEW_INSTRUCTIONS,
 } from "../agent/prompt/permissionReviewInstructions.js";
@@ -34,6 +35,8 @@ export function createPermissionReviewSideAgent(options: {
     id: string;
     model: Model;
     provider: Provider;
+    /** Reads the user's global SECURITY.md again before every review. */
+    readSecurityPolicy?: () => Promise<string | undefined>;
     startDate?: string;
     tools: readonly AnyDefinedTool[];
 }): PermissionReviewAgent {
@@ -87,6 +90,8 @@ export function createPermissionReviewSideAgent(options: {
         reset: () => serialize(discardUnfinishedReview),
         review: (request: PermissionReviewRequest): Promise<PermissionReviewResponse> =>
             serialize(async () => {
+                const securityPolicy = await options.readSecurityPolicy?.();
+                agent.setSystemPrompt(createPermissionReviewInstructions(securityPolicy));
                 const first = reviewedMessageCount === 0;
                 // Older turns are already in the reviewer's own history, so only the new ones are
                 // sent. Budgeting still runs over the whole conversation, because whether user

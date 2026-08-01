@@ -10,7 +10,7 @@ afterEach(async () => {
 });
 
 describe("user configuration initialization", () => {
-    it("creates a commented happy.toml and an empty AGENTS.md", async () => {
+    it("creates a commented happy.toml and empty global markdown files", async () => {
         const gym = await createGym({
             inference: [{ content: [{ text: "Rig is ready.", type: "text" }] }],
         });
@@ -30,7 +30,7 @@ describe("user configuration initialization", () => {
         expect(snapshot.text).toContain("Rig is ready.");
     }, 30_000);
 
-    it("preserves an existing happy.toml while creating AGENTS.md", async () => {
+    it("preserves an existing happy.toml while creating global markdown files", async () => {
         const gym = await createGym({
             homeFiles: {
                 "happy/config/happy.toml": "[settings]\nshow_usage = false\n",
@@ -76,7 +76,9 @@ import { readFile } from "node:fs/promises";
 const configuration = ${JSON.stringify(configurationDirectory)};
 const template = await readFile(configuration + "/happy.toml", "utf8");
 const instructions = await readFile(configuration + "/AGENTS.md", "utf8");
+const security = await readFile(configuration + "/SECURITY.md", "utf8");
 if (instructions !== "") throw new Error("AGENTS.md must start empty.");
+if (security !== "") throw new Error("SECURITY.md must start empty.");
 if (template.split("\n").some((line) => line.trim().length > 0 && !line.startsWith("#"))) {
     throw new Error("The generated happy.toml must be fully commented.");
 }
@@ -89,9 +91,11 @@ import { readFile } from "node:fs/promises";
 const configuration = ${JSON.stringify(configurationDirectory)};
 const config = await readFile(configuration + "/happy.toml", "utf8");
 const instructions = await readFile(configuration + "/AGENTS.md", "utf8");
+const security = await readFile(configuration + "/SECURITY.md", "utf8");
 if (config !== "[settings]\nshow_usage = false\n") {
     throw new Error("The existing happy.toml was replaced.");
 }
 if (instructions !== "") throw new Error("AGENTS.md must start empty.");
+if (security !== "") throw new Error("SECURITY.md must start empty.");
 process.stdout.write("Existing Happy configuration was preserved.\n");
 `;

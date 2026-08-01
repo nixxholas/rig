@@ -32,6 +32,7 @@ import type {
     SetPresenceRequestBody,
     SetPresenceResponse,
     GetGlobalInstructionsResponse,
+    GetGlobalSecurityPolicyResponse,
     GetSessionUsageResponse,
     ListProviderUsageResponse,
     GlobalStreamHello,
@@ -86,6 +87,8 @@ import type {
     UpdateDaemonConfigResponse,
     UpdateGlobalInstructionsRequest,
     UpdateGlobalInstructionsResponse,
+    UpdateGlobalSecurityPolicyRequest,
+    UpdateGlobalSecurityPolicyResponse,
     UpdateSessionRequest,
     WriteSessionFileRequest,
     WriteSessionFileResponse,
@@ -862,6 +865,10 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/config/instructions");
     }
 
+    getGlobalSecurityPolicy(): Promise<GetGlobalSecurityPolicyResponse> {
+        return this.#requestJson("GET", "/config/security");
+    }
+
     getGlobalEvents(after?: string, limit = 100): Promise<ListGlobalEventsResponse> {
         const parameters = new URLSearchParams({ limit: String(limit) });
         if (after !== undefined) parameters.set("after", String(after));
@@ -975,6 +982,12 @@ export class ProtocolHttpClient {
         request: UpdateGlobalInstructionsRequest,
     ): Promise<UpdateGlobalInstructionsResponse> {
         return this.#requestJson("PUT", "/config/instructions", request);
+    }
+
+    updateGlobalSecurityPolicy(
+        request: UpdateGlobalSecurityPolicyRequest,
+    ): Promise<UpdateGlobalSecurityPolicyResponse> {
+        return this.#requestJson("PUT", "/config/security", request);
     }
 
     async watchSessionEvents(options: WatchSessionEventsOptions): Promise<void> {

@@ -87,6 +87,12 @@ export type {
     TimelineSpanOutcome,
 } from "./TimelineProtocol.js";
 export {
+    globalSecurityPolicySchema,
+    type GetGlobalSecurityPolicyResponse,
+    type UpdateGlobalSecurityPolicyRequest,
+    type UpdateGlobalSecurityPolicyResponse,
+} from "./GlobalSecurityProtocol.js";
+export {
     createEventIdFactory,
     eventIdsShareScope,
     type EventIdFactoryOptions,

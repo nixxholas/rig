@@ -198,6 +198,33 @@ describe("createPermissionReviewSideAgent", () => {
         await reviewer.close();
     });
 
+    it("reads the latest global security policy before every review", async () => {
+        const { provider, model, requests } = recordingProvider();
+        let securityPolicy = "FIRST SECURITY POLICY";
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("read_only");
+        const reviewer = createPermissionReviewSideAgent({
+            context: harness.context,
+            id: "auto-reviewer",
+            model,
+            provider,
+            readSecurityPolicy: () => Promise.resolve(securityPolicy),
+            tools: [],
+        });
+
+        await reviewer.review({ action: "first", messages: [user("u1", "ALPHA")] });
+        securityPolicy = "SECOND SECURITY POLICY";
+        await reviewer.review({
+            action: "second",
+            messages: [user("u1", "ALPHA"), user("u2", "BRAVO")],
+        });
+
+        expect(systemPromptOf(requests[0])).toContain("FIRST SECURITY POLICY");
+        expect(systemPromptOf(requests[1])).toContain("SECOND SECURITY POLICY");
+        expect(systemPromptOf(requests[1])).not.toContain("FIRST SECURITY POLICY");
+        await reviewer.close();
+    });
+
     it("reports what each review did and cost, without re-reporting earlier reviews", async () => {
         const { provider, model } = recordingProvider();
         const reviewer = sideAgent(provider, model);
@@ -253,6 +280,10 @@ function sideAgent(
 
 function user(id: string, text: string): Message {
     return { role: "user", id, blocks: [{ type: "text", text }] };
+}
+
+function systemPromptOf(context: Context | undefined): string {
+    return context?.systemPromptOverride ?? context?.systemPrompt ?? "";
 }
 
 function recordingProvider(

@@ -4,16 +4,21 @@ import { dirname } from "node:path";
 import { createPrivateConfigurationDirectory } from "./createPrivateConfigurationDirectory.js";
 import { getDefaultGlobalConfigPath } from "./getDefaultGlobalConfigPath.js";
 import { getGlobalAgentsMdPath } from "./getGlobalAgentsMdPath.js";
+import { getGlobalSecurityMdPath } from "./getGlobalSecurityMdPath.js";
 
 export async function ensureUserConfigurationFiles(
     options: {
         agentsPath?: string;
         configPath?: string;
+        securityPath?: string;
     } = {},
 ): Promise<void> {
     const configPath = options.configPath ?? getDefaultGlobalConfigPath();
     const agentsPath = options.agentsPath ?? getGlobalAgentsMdPath();
-    const directories = [...new Set([dirname(configPath), dirname(agentsPath)])];
+    const securityPath = options.securityPath ?? getGlobalSecurityMdPath();
+    const directories = [
+        ...new Set([dirname(configPath), dirname(agentsPath), dirname(securityPath)]),
+    ];
 
     await Promise.all(
         directories.map((directory) => createPrivateConfigurationDirectory(directory)),
@@ -23,6 +28,7 @@ export async function ensureUserConfigurationFiles(
             readFile(new URL("./happy.template.toml", import.meta.url), "utf8"),
         ),
         writeFileIfMissing(agentsPath, () => Promise.resolve("")),
+        writeFileIfMissing(securityPath, () => Promise.resolve("")),
     ]);
 }
 

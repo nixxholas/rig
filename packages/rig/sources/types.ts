@@ -28,6 +28,11 @@ export type {
     UpdateDaemonConfigRequest,
     UpdateGlobalInstructionsRequest,
 } from "./protocol/SessionProtocol.js";
+export type {
+    GetGlobalSecurityPolicyResponse,
+    UpdateGlobalSecurityPolicyRequest,
+    UpdateGlobalSecurityPolicyResponse,
+} from "./protocol/GlobalSecurityProtocol.js";
 export type { TrimGlobalEventsRequest } from "./protocol/ProjectProtocol.js";
 export type { DurableSkillDefinition } from "./external-skills/types.js";
 export type {
