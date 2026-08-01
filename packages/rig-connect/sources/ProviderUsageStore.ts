@@ -42,15 +42,13 @@ export class ProviderUsageStore {
     }
 
     #setState(next: ProviderUsageState): ProviderUsageDelta[] {
-        if (
-            this.#state.loading === next.loading &&
-            this.#state.loadedAt === next.loadedAt &&
-            this.#state.error === next.error
-        ) {
-            return [];
-        }
+        // A read that only moves the clock forward is recorded but not
+        // announced. Every successful read lands later than the one before it,
+        // so announcing the time by itself would wake every view on exactly the
+        // timer that comparing identical readings away was meant to spare them.
+        const quiet = this.#state.loading === next.loading && this.#state.error === next.error;
         this.#state = next;
-        return [{ state: next, type: "provider_usage_state_changed" }];
+        return quiet ? [] : [{ state: next, type: "provider_usage_state_changed" }];
     }
 }
 
