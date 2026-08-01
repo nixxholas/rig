@@ -3,6 +3,10 @@ export { createProjectConfigSecurityNoticeTitle } from "./createProjectConfigSec
 export { createProjectConfigSecurityNotice } from "./createProjectConfigSecurityNotice.js";
 export { DEFAULT_RIG_CONFIG } from "./defaultConfig.js";
 export { getDefaultGlobalConfigPath } from "./getDefaultGlobalConfigPath.js";
+export { getGlobalAgentsMdPath } from "./getGlobalAgentsMdPath.js";
+export { GLOBAL_AGENTS_MD_MAX_BYTES } from "./globalAgentsMdMaxBytes.js";
+export { readGlobalAgentsMd } from "./readGlobalAgentsMd.js";
+export { writeGlobalAgentsMd } from "./writeGlobalAgentsMd.js";
 export { getDefaultLocalConfigPath } from "./getDefaultLocalConfigPath.js";
 export { getDefaultRuntimeConfigPath } from "./getDefaultRuntimeConfigPath.js";
 export { getRigHome } from "./getRigHome.js";

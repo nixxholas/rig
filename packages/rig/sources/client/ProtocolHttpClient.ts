@@ -28,6 +28,7 @@ import type {
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
+    GetGlobalInstructionsResponse,
     GetSessionUsageResponse,
     GlobalStreamHello,
     HealthResponse,
@@ -79,6 +80,8 @@ import type {
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
+    UpdateGlobalInstructionsRequest,
+    UpdateGlobalInstructionsResponse,
     UpdateSessionRequest,
     WriteSessionFileRequest,
     WriteSessionFileResponse,
@@ -838,6 +841,10 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/config");
     }
 
+    getGlobalInstructions(): Promise<GetGlobalInstructionsResponse> {
+        return this.#requestJson("GET", "/config/instructions");
+    }
+
     getGlobalEvents(after?: string, limit = 100): Promise<ListGlobalEventsResponse> {
         const parameters = new URLSearchParams({ limit: String(limit) });
         if (after !== undefined) parameters.set("after", String(after));
@@ -945,6 +952,12 @@ export class ProtocolHttpClient {
 
     updateDaemonConfig(request: UpdateDaemonConfigRequest): Promise<UpdateDaemonConfigResponse> {
         return this.#requestJson("PATCH", "/config", request);
+    }
+
+    updateGlobalInstructions(
+        request: UpdateGlobalInstructionsRequest,
+    ): Promise<UpdateGlobalInstructionsResponse> {
+        return this.#requestJson("PUT", "/config/instructions", request);
     }
 
     async watchSessionEvents(options: WatchSessionEventsOptions): Promise<void> {

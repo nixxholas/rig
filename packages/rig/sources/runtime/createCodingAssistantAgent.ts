@@ -20,6 +20,8 @@ import {
 import type { Message } from "../agent/types.js";
 import { DEFAULT_RIG_CONFIG } from "../config/defaultConfig.js";
 import { findConfiguredProvider } from "../config/findConfiguredProvider.js";
+import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
+import { readGlobalAgentsMd } from "../config/readGlobalAgentsMd.js";
 import type { ConfigProviders } from "../config/types.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { NativeProcessManager } from "../processes/index.js";
@@ -287,6 +289,7 @@ export function createCodingAssistantAgent(
         modelId,
         context,
         id: agentId,
+        readGlobalInstructions: () => readGlobalAgentsMd(getGlobalAgentsMdPath(env)),
         ...(options.instructions !== undefined
             ? { instructions: options.instructions }
             : provider.type === "claude" || usesOfficialCodexBedrockPrompt

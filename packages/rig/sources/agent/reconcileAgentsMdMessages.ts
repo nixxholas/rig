@@ -7,7 +7,7 @@ import { loadAgentsMdInstructions } from "./loadAgentsMdInstructions.js";
 import type { Message } from "./types.js";
 
 /**
- * Keeps the model's view of the project instructions current.
+ * Keeps the model's view of the user's global and the project's instructions current.
  *
  * The first record leads the conversation so the instructions arrive before anything the user
  * asked for, and stays byte-identical while the file is unchanged so the cached prefix survives.
@@ -16,10 +16,16 @@ import type { Message } from "./types.js";
  */
 export async function reconcileAgentsMdMessages(options: {
     fs: FileSystemContext;
+    /** The user's global AGENTS.md, read fresh for this turn. */
+    globalInstructions?: string;
     idFactory: () => string;
     messages: readonly Message[];
 }): Promise<readonly Message[]> {
-    const instructions = await loadAgentsMdInstructions(options.fs);
+    const instructions = await loadAgentsMdInstructions(options.fs, {
+        ...(options.globalInstructions === undefined
+            ? {}
+            : { globalInstructions: options.globalInstructions }),
+    });
     const fingerprint = instructions === undefined ? null : createAgentsMdFingerprint(instructions);
     const record = findLatestAgentsMdRecord(options.messages);
 

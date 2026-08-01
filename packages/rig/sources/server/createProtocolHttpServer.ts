@@ -23,6 +23,7 @@ import type {
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
+    GetGlobalInstructionsResponse,
     GetSessionUsageResponse,
     GetTimelineResponse,
     SessionStateResponse,
@@ -78,6 +79,8 @@ import type {
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
+    UpdateGlobalInstructionsRequest,
+    UpdateGlobalInstructionsResponse,
     SetSessionDraftRequest,
     UpdateSessionRequest,
     WriteSessionFileRequest,
@@ -121,6 +124,10 @@ import {
     DEFAULT_CODEX_STREAM_MAX_RETRIES,
     MAX_CODEX_STREAM_MAX_RETRIES,
 } from "../config/codexStreamRetrySettings.js";
+import { getGlobalAgentsMdPath } from "../config/getGlobalAgentsMdPath.js";
+import { GLOBAL_AGENTS_MD_MAX_BYTES } from "../config/globalAgentsMdMaxBytes.js";
+import { readGlobalAgentsMd } from "../config/readGlobalAgentsMd.js";
+import { writeGlobalAgentsMd } from "../config/writeGlobalAgentsMd.js";
 import { SessionConfigurationError } from "../session/SessionConfigurationError.js";
 import type { TaskDrain } from "../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
@@ -146,6 +153,8 @@ import {
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
+    /** Where the user's global AGENTS.md lives. Defaults to the file beside the daemon config. */
+    globalInstructionsPath?: string;
     defaultDocker?: DockerExecutionConfig;
     gitStateTracker?: GitStateTracker;
     identity?: DaemonIdentity;
@@ -182,6 +191,7 @@ export function createProtocolHttpServer(
         codexStreamMaxRetries: options.codexStreamMaxRetries ?? DEFAULT_CODEX_STREAM_MAX_RETRIES,
         gitStateTracker: options.gitStateTracker,
         globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
+        globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
@@ -253,6 +263,7 @@ interface ProtocolServerRuntimeConfig {
     codexStreamMaxRetries: number;
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
+    globalInstructionsPath: string;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
@@ -907,6 +918,34 @@ async function handleRequest(
         const { all: _all, sessionIds: _sessionIds, ...message } = broadcast;
         sendJson<BroadcastMessageResponse>(response, 202, {
             submissions: sessions.map((candidate) => candidate!.submit(message)),
+        });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "global-instructions") {
+        sendJson<GetGlobalInstructionsResponse>(response, 200, {
+            instructions: (await readGlobalAgentsMd(runtimeConfig.globalInstructionsPath)) ?? "",
+        });
+        return;
+    }
+
+    if (request.method === "PUT" && route.name === "global-instructions") {
+        const body = await readJson<UpdateGlobalInstructionsRequest>(request);
+        const instructions = body.instructions;
+        if (typeof instructions !== "string") {
+            sendJson(response, 400, { error: "Global instructions must be text." });
+            return;
+        }
+        if (Buffer.byteLength(instructions, "utf8") > GLOBAL_AGENTS_MD_MAX_BYTES) {
+            sendJson(response, 400, {
+                error: `Global instructions must be smaller than ${GLOBAL_AGENTS_MD_MAX_BYTES / 1024} KB.`,
+            });
+            return;
+        }
+        await writeGlobalAgentsMd(instructions, runtimeConfig.globalInstructionsPath);
+        // Reading the file back states what sessions will actually pick up before their next turn.
+        sendJson<UpdateGlobalInstructionsResponse>(response, 200, {
+            instructions: (await readGlobalAgentsMd(runtimeConfig.globalInstructionsPath)) ?? "",
         });
         return;
     }
@@ -2250,6 +2289,7 @@ function matchRoute(pathname: string):
               | "global-events-trim"
               | "external-tool-calls"
               | "config"
+              | "global-instructions"
               | "debug-inspector"
               | "health"
               | "happy-reload"
@@ -2350,6 +2390,7 @@ function matchRoute(pathname: string):
     if (pathname === "/health") return { name: "health" };
     if (pathname === "/happy/reload") return { name: "happy-reload" };
     if (pathname === "/config") return { name: "config" };
+    if (pathname === "/config/instructions") return { name: "global-instructions" };
     if (pathname === "/debug/inspector") return { name: "debug-inspector" };
     if (pathname === "/events") return { name: "global-events" };
     if (pathname === "/events/stream") return { name: "global-events-stream" };
@@ -2599,6 +2640,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     const route = matchRoute(url.pathname);
     if (route === undefined) return false;
     if (route.name === "config") return request.method === "PATCH";
+    if (route.name === "global-instructions") return request.method === "PUT";
     if (route.name === "debug-inspector") return request.method === "POST";
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";

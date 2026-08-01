@@ -225,6 +225,20 @@ export interface UpdateDaemonConfigRequest {
 
 export type UpdateDaemonConfigResponse = GetDaemonConfigResponse;
 
+/**
+ * The user's global AGENTS.md. Every session reads it again before each turn, so a change made
+ * here reaches open sessions too. Empty text means the user has no global instructions.
+ */
+export interface GetGlobalInstructionsResponse {
+    instructions: string;
+}
+
+export interface UpdateGlobalInstructionsRequest {
+    instructions: string;
+}
+
+export type UpdateGlobalInstructionsResponse = GetGlobalInstructionsResponse;
+
 export interface PendingSteeringMessage {
     createdAt: number;
     message: UserMessage;

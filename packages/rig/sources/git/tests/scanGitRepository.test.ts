@@ -124,12 +124,7 @@ describe("scanGitRepository", () => {
         await write(unrelated, "b.txt", "2\n");
         await commitAll(unrelated);
         const foreign = await git(unrelated, ["rev-parse", "HEAD"]);
-        await git(repository, [
-            "fetch",
-            "--quiet",
-            unrelated,
-            "main:refs/remotes/foreign/main",
-        ]);
+        await git(repository, ["fetch", "--quiet", unrelated, "main:refs/remotes/foreign/main"]);
         await git(repository, ["update-ref", "refs/remotes/origin/main", foreign]);
 
         const snapshot = await scanGitRepository({ path: repository });

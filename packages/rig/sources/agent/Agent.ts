@@ -73,6 +73,11 @@ export interface AgentOptions {
      * this off, because repository content must never instruct the agent judging an action.
      */
     projectInstructions?: "include" | "exclude";
+    /**
+     * Reads the user's global AGENTS.md. It is consulted before every turn, so instructions the
+     * user changes mid-session reach the model without restarting anything.
+     */
+    readGlobalInstructions?: () => Promise<string | undefined>;
     modelId: string;
     context: AgentContext;
     id?: string;
@@ -126,6 +131,7 @@ export class Agent {
     readonly #createPermissionReviewAgent: (() => PermissionReviewAgent) | undefined;
     readonly #allowReviewerModel: boolean;
     readonly #projectInstructions: "include" | "exclude";
+    readonly #readGlobalInstructions: (() => Promise<string | undefined>) | undefined;
     #permissionReviewAgent: PermissionReviewAgent | undefined;
     #appendSystemPrompt: string | undefined;
     #model: Model;
@@ -162,6 +168,7 @@ export class Agent {
         this.#createPermissionReviewAgent = options.createPermissionReviewAgent;
         this.#allowReviewerModel = options.allowReviewerModel === true;
         this.#projectInstructions = options.projectInstructions ?? "include";
+        this.#readGlobalInstructions = options.readGlobalInstructions;
         this.#model = this.#findModel(options.modelId, this.#allowReviewerModel);
         this.context = options.context;
         this.#effort = options.effort ?? this.#model.defaultThinkingLevel;
@@ -442,11 +449,19 @@ export class Agent {
             });
 
             const beforeAgentsMd = this.#contextMessages ?? this.#messages;
+            // Read before every turn, so an edit made while this session is open takes effect on
+            // the next thing the user asks for.
+            const globalInstructions =
+                this.#projectInstructions === "exclude" ||
+                this.#readGlobalInstructions === undefined
+                    ? undefined
+                    : await this.#readGlobalInstructions();
             const withAgentsMd =
                 this.#projectInstructions === "exclude"
                     ? beforeAgentsMd
                     : await reconcileAgentsMdMessages({
                           fs: this.context.fs,
+                          ...(globalInstructions === undefined ? {} : { globalInstructions }),
                           idFactory: this.#idFactory,
                           messages: beforeAgentsMd,
                       });

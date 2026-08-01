@@ -5,6 +5,7 @@ export type {
     CreateSessionRequest,
     CreateSessionResponse,
     GetDaemonConfigResponse,
+    GetGlobalInstructionsResponse,
     HealthResponse,
     ListModelsResponse,
     ListSessionsArchivedFilter,
@@ -25,6 +26,7 @@ export type {
     SubagentSummary,
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
+    UpdateGlobalInstructionsRequest,
 } from "./protocol/SessionProtocol.js";
 export type { TrimGlobalEventsRequest } from "./protocol/ProjectProtocol.js";
 export type { DurableSkillDefinition } from "./external-skills/types.js";
