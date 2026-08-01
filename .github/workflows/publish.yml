@@ -124,10 +124,10 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            # rig-connect ships on its own schedule, so it only needs a canary build when its
-            # own sources move.
-            - name: Check whether rig-connect changed
-              id: connect
+            # rig-connect and happy-plugins ship on their own schedules, so each one only needs a
+            # canary build when its own sources move.
+            - name: Check which side packages changed
+              id: changed
               env:
                   PUSHED_FROM: ${{ github.event.before }}
               run: |
@@ -135,20 +135,31 @@ jobs:
                   if [[ -z "$base" ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
                       base="$(git rev-parse HEAD~1)"
                   fi
-                  if git diff --name-only "$base" HEAD | grep --quiet '^packages/rig-connect/'; then
-                      echo "Publishing a rig-connect canary build for this push."
-                      echo "changed=true" >> "$GITHUB_OUTPUT"
-                  else
-                      echo "rig-connect is unchanged since ${base}; skipping its canary build."
-                      echo "changed=false" >> "$GITHUB_OUTPUT"
-                  fi
+                  files="$(git diff --name-only "$base" HEAD)"
+                  for entry in connect:rig-connect plugins:happy-plugins; do
+                      output="${entry%%:*}"
+                      package="${entry#*:}"
+                      if grep --quiet "^packages/${package}/" <<< "$files"; then
+                          echo "Publishing a ${package} canary build for this push."
+                          echo "${output}=true" >> "$GITHUB_OUTPUT"
+                      else
+                          echo "${package} is unchanged since ${base}; skipping its canary build."
+                          echo "${output}=false" >> "$GITHUB_OUTPUT"
+                      fi
+                  done
 
             - name: Set the canary versions
               env:
                   CANARY_BUILD_NUMBER: ${{ github.run_number }}
                   CANARY_COMMIT: ${{ github.sha }}
-                  CONNECT_CHANGED: ${{ steps.connect.outputs.changed }}
+                  CONNECT_CHANGED: ${{ steps.changed.outputs.connect }}
+                  PLUGINS_CHANGED: ${{ steps.changed.outputs.plugins }}
               run: |
+                  # happy-plugins is versioned before the build so the SDK Rig bundles carries the
+                  # same canary version that is published.
+                  if [[ "$PLUGINS_CHANGED" == "true" ]]; then
+                      RELEASE_PACKAGE=happy-plugins pnpm exec tsx scripts/setCanaryVersion.ts
+                  fi
                   RELEASE_PACKAGE=rig pnpm exec tsx scripts/setCanaryVersion.ts
                   if [[ "$CONNECT_CHANGED" == "true" ]]; then
                       RELEASE_PACKAGE=rig-connect pnpm exec tsx scripts/setCanaryVersion.ts
@@ -156,7 +167,7 @@ jobs:
 
             - name: Build the packages
               env:
-                  CONNECT_CHANGED: ${{ steps.connect.outputs.changed }}
+                  CONNECT_CHANGED: ${{ steps.changed.outputs.connect }}
               run: |
                   pnpm run build
                   if [[ "$CONNECT_CHANGED" == "true" ]]; then
@@ -175,9 +186,13 @@ jobs:
 
             - name: Publish the canary builds
               env:
-                  CONNECT_CHANGED: ${{ steps.connect.outputs.changed }}
+                  CONNECT_CHANGED: ${{ steps.changed.outputs.connect }}
+                  PLUGINS_CHANGED: ${{ steps.changed.outputs.plugins }}
                   RELEASE_DIST_TAG: canary
               run: |
+                  if [[ "$PLUGINS_CHANGED" == "true" ]]; then
+                      RELEASE_PACKAGE=happy-plugins pnpm exec tsx scripts/publishPackage.ts
+                  fi
                   RELEASE_PACKAGE=rig pnpm exec tsx scripts/publishPackage.ts
                   if [[ "$CONNECT_CHANGED" == "true" ]]; then
                       RELEASE_PACKAGE=rig-connect pnpm exec tsx scripts/publishPackage.ts
