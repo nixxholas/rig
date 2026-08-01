@@ -24,6 +24,12 @@ import { resolveHappyIntegrationMode } from "./resolveHappyIntegrationMode.js";
 import { McpClientManager } from "../mcp/index.js";
 import { loadConfig, writeDaemonSettings } from "../config/index.js";
 import { createProviderQuotaService } from "../executor/createProviderQuotaService.js";
+import {
+    createProviderUsageTracker,
+    type ProviderUsageTracker,
+} from "../executor/createProviderUsageTracker.js";
+import { loadConfiguredProviderUsage } from "../executor/loadConfiguredProviderUsage.js";
+import { gracefulShutdown } from "../concurrency/index.js";
 import { disableUnavailableProviders } from "../executor/disableUnavailableProviders.js";
 import { resolveProviderDisabledReasons } from "../executor/resolveProviderDisabledReasons.js";
 import { createCodingAssistantAgent } from "../runtime/createCodingAssistantAgent.js";
@@ -111,7 +117,9 @@ async function runOwnedLocalProtocolServer(
     let gitStateTracker: GitStateTracker | undefined;
     let store: PersistentSessionStore | undefined;
     let taskDrain: TrackedTaskDrain | undefined;
+    let providerUsageTracker: ProviderUsageTracker | undefined;
     let stopping = false;
+    const shutdown = gracefulShutdown();
     let resolveStopped: (() => void) | undefined;
     const stopped = new Promise<void>((resolve) => {
         resolveStopped = resolve;
@@ -133,6 +141,25 @@ async function runOwnedLocalProtocolServer(
         gitStateTracker?.dispose();
         taskDrain?.beginClose();
         void (async () => {
+            // Background loops are told to stop first, and the names of any
+            // that linger say what the daemon is waiting for.
+            const report = await shutdown.shutdown();
+            if (report.timedOut.length > 0) {
+                daemonLog.record(
+                    "warning",
+                    "daemon_shutdown_slow",
+                    "Rig daemon is still waiting for background work to stop.",
+                    { pending: report.timedOut.join(", ") },
+                );
+            }
+            for (const failure of report.failed) {
+                daemonLog.record(
+                    "error",
+                    "daemon_shutdown_handler_failed",
+                    "A Rig daemon background task failed while shutting down.",
+                    { error: errorToMessage(failure.error), task: failure.name },
+                );
+            }
             if (store !== undefined) {
                 try {
                     await store.prepareForShutdown("shutdown");
@@ -283,6 +310,24 @@ async function runOwnedLocalProtocolServer(
             cwd: process.cwd(),
             providers: loadedConfig.config.providers,
         });
+        providerUsageTracker = createProviderUsageTracker({
+            loadUsage: (providerId) =>
+                loadConfiguredProviderUsage({
+                    providerId,
+                    providers: loadedConfig.config.providers,
+                }),
+            onError: (providerId, error) => {
+                daemonLog.record(
+                    "warning",
+                    "provider_usage_poll_failed",
+                    "Rig could not read a provider's usage.",
+                    { error: errorToMessage(error), providerId },
+                );
+            },
+            providerIds: Object.keys(loadedConfig.config.providers),
+            shutdown,
+        });
+        providerUsageTracker.start();
         const disabledProviderReasons = await resolveProviderDisabledReasons(
             loadedConfig.config.providers,
             process.env,
@@ -451,6 +496,7 @@ async function runOwnedLocalProtocolServer(
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
+                listProviderUsage: () => providerUsageTracker?.all() ?? [],
                 onDaemonSettingsChange: async (settings) => {
                     await writeDaemonSettings(settings);
                     const globalEventQueue = store?.setDurableGlobalEventQueue(

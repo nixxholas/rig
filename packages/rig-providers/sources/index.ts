@@ -6,6 +6,12 @@ export type {
     ProviderQuotaSource,
     ProviderQuotaWindow,
 } from "@/core/ProviderQuota.js";
+export type {
+    ProviderUsage,
+    ProviderUsageCredits,
+    ProviderUsageVendor,
+    ProviderUsageWindow,
+} from "@/core/ProviderUsage.js";
 export {
     createProviderQuotaCache,
     type ProviderQuotaCache,
@@ -82,6 +88,12 @@ export {
     type ClaudeQuotaQuery,
     type FetchClaudeProviderQuotaOptions,
 } from "@/vendors/claude/fetchClaudeProviderQuota.js";
+export {
+    fetchClaudeProviderUsage,
+    parseClaudeProviderUsage,
+    type FetchClaudeProviderUsageOptions,
+} from "@/vendors/claude/fetchClaudeProviderUsage.js";
+export { parseClaudeRateLimitHeaders } from "@/vendors/claude/parseClaudeRateLimitHeaders.js";
 export { resolveClaudeCodeExecutablePath } from "@/vendors/claude/resolveClaudeCodeExecutablePath.js";
 export {
     ClaudeSession,
@@ -89,6 +101,11 @@ export {
     type ClaudeSessionOptions,
 } from "@/vendors/claude/ClaudeSession.js";
 export { GROK_DEFAULT_ENDPOINT } from "@/vendors/grok/impl/grokConstants.js";
+export {
+    fetchGrokProviderUsage,
+    parseGrokProviderUsage,
+    type FetchGrokProviderUsageOptions,
+} from "@/vendors/grok/fetchGrokProviderUsage.js";
 export { GrokSession, type GrokSessionOptions } from "@/vendors/grok/GrokSession.js";
 export type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 export { CodexProvider, type CodexProviderOptions } from "@/vendors/codex/CodexProvider.js";
@@ -96,6 +113,11 @@ export {
     fetchCodexProviderQuota,
     type FetchCodexProviderQuotaOptions,
 } from "@/vendors/codex/fetchCodexProviderQuota.js";
+export {
+    fetchCodexProviderUsage,
+    parseCodexProviderUsage,
+    type FetchCodexProviderUsageOptions,
+} from "@/vendors/codex/fetchCodexProviderUsage.js";
 export { CodexSession, type CodexSessionOptions } from "@/vendors/codex/CodexSession.js";
 export type {
     CodexToolDefinitionVendor,

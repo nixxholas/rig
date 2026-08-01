@@ -6,7 +6,11 @@ import type {
 } from "../agent/index.js";
 import type { AgentMessage, Message, UserMessage } from "../agent/types.js";
 import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
-import type { ProviderModelCompatibilityType, ProviderQuota } from "@slopus/rig-providers";
+import type {
+    ProviderModelCompatibilityType,
+    ProviderQuota,
+    ProviderUsage,
+} from "@slopus/rig-providers";
 import type { PermissionMode } from "../permissions/index.js";
 import type { UserInputRequest, UserInputResponse } from "../user-input/index.js";
 import type { McpServerSummary } from "../mcp/index.js";
@@ -725,6 +729,21 @@ export interface GetSessionUsageResponse {
 export interface GetCurrentProviderQuotaResponse {
     currentProviderId: string;
     quota?: ProviderQuota;
+}
+
+/** The latest usage reading Rig holds for every configured provider. */
+export interface ListProviderUsageResponse {
+    providers: readonly ProviderUsageEntry[];
+}
+
+export interface ProviderUsageEntry {
+    providerId: string;
+    /** The last reading, or null when the provider has never answered. */
+    usage: ProviderUsage | null;
+    /** When Rig last finished asking, whatever the answer was. */
+    checkedAt: number | null;
+    /** Why the last attempt produced nothing, when it produced nothing. */
+    error: string | null;
 }
 
 export interface SessionProviderQuota {

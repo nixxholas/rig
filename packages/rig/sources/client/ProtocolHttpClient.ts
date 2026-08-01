@@ -30,6 +30,7 @@ import type {
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
     GetSessionUsageResponse,
+    ListProviderUsageResponse,
     GlobalStreamHello,
     HealthResponse,
     GoalSessionResponse,
@@ -813,6 +814,11 @@ export class ProtocolHttpClient {
             "GET",
             `/sessions/${encodeURIComponent(sessionId)}/current-provider-quota`,
         );
+    }
+
+    /** The usage Rig polls for every configured provider. */
+    listProviderUsage(): Promise<ListProviderUsageResponse> {
+        return this.#requestJson("GET", "/provider-usage");
     }
 
     getEvents(

@@ -108,6 +108,8 @@ export type {
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
     GetSessionUsageResponse,
+    ListProviderUsageResponse,
+    ProviderUsageEntry,
     ListSessionsResponse,
     ListSessionsArchivedFilter,
     ListSessionsOptions,

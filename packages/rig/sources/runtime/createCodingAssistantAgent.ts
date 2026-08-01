@@ -46,6 +46,7 @@ import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
 import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
 import type { SchedulingContext } from "../scheduling/index.js";
+import type { ProviderUsageContext } from "../agent/context/ProviderUsageContext.js";
 import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 
 export interface CreateCodingAssistantAgentOptions {
@@ -72,6 +73,7 @@ export interface CreateCodingAssistantAgentOptions {
     processManager?: NativeProcessManager;
     permissionMode?: PermissionMode;
     providers?: ConfigProviders;
+    providerUsage?: ProviderUsageContext;
     resolveCodexStreamMaxRetries?: () => number;
     serviceTier?: ServiceTier;
     startDate?: string;
@@ -138,6 +140,9 @@ export function createCodingAssistantAgent(
     }
     if (options.scheduling !== undefined) {
         context.scheduling = options.scheduling;
+    }
+    if (options.providerUsage !== undefined) {
+        context.providerUsage = options.providerUsage;
     }
     const modelId = options.modelId ?? modelOpenaiGpt56Sol.id;
     const providerId =

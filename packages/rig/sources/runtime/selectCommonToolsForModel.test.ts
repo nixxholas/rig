@@ -8,6 +8,7 @@ describe("selectCommonToolsForModel", () => {
             "wait",
             "wait_until",
             "schedule_message",
+            "get_provider_usage",
         ]);
     });
 
@@ -15,6 +16,7 @@ describe("selectCommonToolsForModel", () => {
         expect(selectCommonToolsForModel({ isSubagent: true }).map((tool) => tool.name)).toEqual([
             "wait",
             "wait_until",
+            "get_provider_usage",
         ]);
     });
 });

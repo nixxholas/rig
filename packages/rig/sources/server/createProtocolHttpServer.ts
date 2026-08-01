@@ -26,6 +26,8 @@ import type {
     GetGlobalInstructionsResponse,
     GetSessionUsageResponse,
     GetTimelineResponse,
+    ListProviderUsageResponse,
+    ProviderUsageEntry,
     SessionStateResponse,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
@@ -162,6 +164,8 @@ export interface ProtocolHttpServerOptions {
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
+    /** Hands out the usage the daemon polls for every configured provider. */
+    listProviderUsage?: () => readonly ProviderUsageEntry[];
     onDaemonSettingsChange?: (
         settings: DaemonConfig["settings"],
     ) => AppliedDaemonSettings | undefined | Promise<AppliedDaemonSettings | undefined>;
@@ -192,6 +196,7 @@ export function createProtocolHttpServer(
         gitStateTracker: options.gitStateTracker,
         globalEventQueue: options.globalEventQueue ?? store.globalEventQueue,
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
+        listProviderUsage: options.listProviderUsage,
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
@@ -264,6 +269,7 @@ interface ProtocolServerRuntimeConfig {
     gitStateTracker: GitStateTracker | undefined;
     globalEventQueue: GlobalEventQueue;
     globalInstructionsPath: string;
+    listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
@@ -346,6 +352,13 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "projects") {
         sendJson<ListProjectsResponse>(response, 200, { projects: store.listProjects() });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "provider-usage") {
+        sendJson<ListProviderUsageResponse>(response, 200, {
+            providers: runtimeConfig.listProviderUsage?.() ?? [],
+        });
         return;
     }
 
@@ -2296,6 +2309,7 @@ function matchRoute(pathname: string):
               | "messages"
               | "models"
               | "projects"
+              | "provider-usage"
               | "secret-registrations"
               | "sessions"
               | "shutdown"
@@ -2403,6 +2417,7 @@ function matchRoute(pathname: string):
     if (pathname === "/messages") return { name: "messages" };
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/projects") return { name: "projects" };
+    if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
     if (pathname === "/shutdown") return { name: "shutdown" };

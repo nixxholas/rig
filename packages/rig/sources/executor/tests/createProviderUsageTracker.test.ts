@@ -1,0 +1,176 @@
+import type { ProviderUsage } from "@slopus/rig-providers";
+import { describe, expect, it, vi } from "vitest";
+
+import { delay, gracefulShutdown } from "../../concurrency/index.js";
+import { createProviderUsageTracker } from "../createProviderUsageTracker.js";
+
+function usage(providerId: string, usedPercent: number): ProviderUsage {
+    return {
+        providerId,
+        vendor: "codex",
+        capturedAt: 1_000,
+        planName: "Pro",
+        exhausted: false,
+        windows: {
+            fiveHour: null,
+            weekly: { usedPercent, resetsAt: null, startsAt: null, durationMs: null },
+            monthly: null,
+        },
+        credits: null,
+    };
+}
+
+describe("createProviderUsageTracker", () => {
+    it("lists every provider before anything has been read", () => {
+        const shutdown = gracefulShutdown();
+        const tracker = createProviderUsageTracker({
+            loadUsage: () => Promise.resolve(null),
+            providerIds: ["codex", "claude"],
+            shutdown,
+        });
+
+        expect(tracker.all()).toEqual([
+            { providerId: "codex", usage: null, checkedAt: null, error: null },
+            { providerId: "claude", usage: null, checkedAt: null, error: null },
+        ]);
+    });
+
+    it("stores a reading and when it was taken", async () => {
+        const shutdown = gracefulShutdown();
+        const tracker = createProviderUsageTracker({
+            loadUsage: (providerId) => Promise.resolve(usage(providerId, 42)),
+            now: () => 5_000,
+            providerIds: ["codex"],
+            shutdown,
+        });
+
+        await tracker.refresh("codex");
+
+        expect(tracker.get("codex")?.usage?.windows.weekly?.usedPercent).toBe(42);
+        expect(tracker.get("codex")?.checkedAt).toBe(5_000);
+        expect(tracker.get("codex")?.error).toBeNull();
+    });
+
+    it("keeps the previous reading when a provider stops answering", async () => {
+        const shutdown = gracefulShutdown();
+        let answer: ProviderUsage | null = usage("codex", 10);
+        const tracker = createProviderUsageTracker({
+            loadUsage: () => Promise.resolve(answer),
+            providerIds: ["codex"],
+            shutdown,
+        });
+
+        await tracker.refresh("codex");
+        answer = null;
+        await tracker.refresh("codex");
+
+        // The stale reading is still the best thing we know, and it carries its
+        // own capture time so a reader can judge it.
+        expect(tracker.get("codex")?.usage?.windows.weekly?.usedPercent).toBe(10);
+        expect(tracker.get("codex")?.error).toBe("The provider did not report usage.");
+    });
+
+    it("records a thrown failure without losing the entry", async () => {
+        const shutdown = gracefulShutdown();
+        const onError = vi.fn();
+        const tracker = createProviderUsageTracker({
+            loadUsage: () => Promise.reject(new Error("network is down")),
+            onError,
+            providerIds: ["grok"],
+            shutdown,
+        });
+
+        await tracker.refresh("grok");
+
+        expect(tracker.get("grok")?.error).toBe("network is down");
+        expect(onError).toHaveBeenCalledOnce();
+    });
+
+    it("polls every provider in parallel and keeps polling on a schedule", async () => {
+        const shutdown = gracefulShutdown();
+        const calls: string[] = [];
+        const tracker = createProviderUsageTracker({
+            intervalMs: 5,
+            loadUsage: (providerId) => {
+                calls.push(providerId);
+                return Promise.resolve(usage(providerId, 1));
+            },
+            providerIds: ["codex", "claude"],
+            shutdown,
+        });
+
+        tracker.start();
+        await delay(30);
+        await shutdown.shutdown();
+
+        expect(calls.filter((id) => id === "codex").length).toBeGreaterThan(1);
+        expect(calls.filter((id) => id === "claude").length).toBeGreaterThan(1);
+    });
+
+    it("stops polling when the daemon shuts down", async () => {
+        const shutdown = gracefulShutdown();
+        let calls = 0;
+        const tracker = createProviderUsageTracker({
+            intervalMs: 1,
+            loadUsage: () => {
+                calls += 1;
+                return Promise.resolve(null);
+            },
+            providerIds: ["codex"],
+            shutdown,
+        });
+
+        tracker.start();
+        await delay(20);
+        const report = await shutdown.shutdown();
+        const afterShutdown = calls;
+        await delay(20);
+
+        expect(report.timedOut).toEqual([]);
+        expect(calls).toBe(afterShutdown);
+    });
+
+    it("registers each loop under a name that identifies the provider", async () => {
+        const shutdown = gracefulShutdown();
+        const register = vi.spyOn(shutdown, "register");
+        const tracker = createProviderUsageTracker({
+            intervalMs: 1_000,
+            loadUsage: () => Promise.resolve(null),
+            providerIds: ["kirill_claude"],
+            shutdown,
+        });
+
+        tracker.start();
+        await shutdown.shutdown();
+
+        expect(register).toHaveBeenCalledWith("provider-usage:kirill_claude", expect.any(Function));
+    });
+
+    it("starts only once", async () => {
+        const shutdown = gracefulShutdown();
+        const register = vi.spyOn(shutdown, "register");
+        const tracker = createProviderUsageTracker({
+            intervalMs: 1_000,
+            loadUsage: () => Promise.resolve(null),
+            providerIds: ["codex"],
+            shutdown,
+        });
+
+        tracker.start();
+        tracker.start();
+        await shutdown.shutdown();
+
+        expect(register).toHaveBeenCalledOnce();
+    });
+
+    it("ignores a provider it does not track", async () => {
+        const shutdown = gracefulShutdown();
+        const tracker = createProviderUsageTracker({
+            loadUsage: () => Promise.resolve(null),
+            providerIds: ["codex"],
+            shutdown,
+        });
+
+        await expect(tracker.refresh("unknown")).resolves.toBeUndefined();
+    });
+});

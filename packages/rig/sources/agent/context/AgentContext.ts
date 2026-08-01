@@ -12,6 +12,7 @@ import type { SessionSecretContext } from "../../secrets/index.js";
 import type { AgentCommunicationContext } from "./AgentCommunicationContext.js";
 import type { WorkspaceContext } from "./WorkspaceContext.js";
 import type { SchedulingContext } from "../../scheduling/index.js";
+import type { ProviderUsageContext } from "./ProviderUsageContext.js";
 
 export interface AgentContext {
     agentCommunication?: AgentCommunicationContext;
@@ -21,6 +22,7 @@ export interface AgentContext {
     fileReads?: FileReadState;
     goals?: GoalContext;
     permissions?: PermissionContext;
+    providerUsage?: ProviderUsageContext;
     scheduling?: SchedulingContext;
     secrets?: SessionSecretContext;
     subagents?: SubagentContext;
