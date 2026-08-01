@@ -93,7 +93,7 @@ const { DatabaseSync } = require("node:sqlite");
 const databasePath = [
   "/home/rig/.server/sessions.sqlite",
   "/home/rig/.local/state/rig/sessions.sqlite",
-  "/home/rig/.rig/sessions.sqlite",
+  "/home/rig/.happy/rig/sessions.sqlite",
 ].find(existsSync);
 if (databasePath === undefined) throw new Error("Session database was not found.");
 const database = new DatabaseSync(databasePath, { readOnly: true });

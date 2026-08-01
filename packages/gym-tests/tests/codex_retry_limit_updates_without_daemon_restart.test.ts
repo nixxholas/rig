@@ -28,7 +28,7 @@ describe("Codex retry configuration", () => {
             },
             homeFiles: {
                 ".codex/auth.json": codexAuth(),
-                ".rig/config.toml": "[settings]\ncodex_stream_max_retries = 0\n",
+                "happy/config/happy.toml": "[settings]\ncodex_stream_max_retries = 0\n",
             },
             modelId: "openai/gpt-5.6-sol",
             providerId: "codex",

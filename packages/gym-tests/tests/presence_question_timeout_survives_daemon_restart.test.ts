@@ -22,7 +22,7 @@ describe("finite question waits across a daemon restart", () => {
                 ].join("; "),
             ],
             homeFiles: {
-                ".rig/config.toml": [
+                "happy/config/happy.toml": [
                     "[presence]",
                     'current = "briefly-away"',
                     "",

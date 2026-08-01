@@ -66,7 +66,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js";
 import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";
 
-const databasePath = "/home/rig/.rig/sessions.sqlite";
+const databasePath = "/home/rig/.happy/rig/sessions.sqlite";
 const createdAt = Date.now() - 60_000;
 const store = new PersistentSessionStore({ databasePath, now: () => createdAt });
 const session = store.create({

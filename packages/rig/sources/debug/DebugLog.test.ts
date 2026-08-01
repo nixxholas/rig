@@ -16,7 +16,7 @@ describe("DebugLog", () => {
     it("writes immutable, lexically ordered JSON records", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-debug-log-"));
         directories.add(root);
-        const directory = join(root, ".rig", "debug", "request-1");
+        const directory = join(root, ".happy", "rig", "debug", "request-1");
         let now = 1_700_000_000_000;
         const log = new DebugLog({ directory, now: () => now++ });
         const mutable = { value: "before" };
@@ -28,9 +28,9 @@ describe("DebugLog", () => {
 
         const files = (await readdir(directory)).sort();
         expect(files).toEqual(["0000000001-request.json", "0000000002-tool-result.json"]);
-        await expect(readFile(join(root, ".rig", "debug", ".gitignore"), "utf8")).resolves.toBe(
-            "*\n",
-        );
+        await expect(
+            readFile(join(root, ".happy", "rig", "debug", ".gitignore"), "utf8"),
+        ).resolves.toBe("*\n");
         expect(JSON.parse(await readFile(join(directory, files[0]!), "utf8"))).toMatchObject({
             data: { value: "before" },
             sequence: 1,
@@ -46,7 +46,7 @@ describe("DebugLog", () => {
     it("serializes indirect Error cause cycles without losing error details", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-debug-log-"));
         directories.add(root);
-        const directory = join(root, ".rig", "debug", "request-error");
+        const directory = join(root, ".happy", "rig", "debug", "request-error");
         const log = new DebugLog({ directory });
         const error = new Error("outer failure", { cause: new Error("inner failure") });
         (error.cause as Error).cause = { outer: error };
@@ -71,7 +71,7 @@ describe("DebugLog", () => {
     it("recovers after a transient record write failure", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-debug-log-"));
         directories.add(root);
-        const directory = join(root, ".rig", "debug", "request-recovery");
+        const directory = join(root, ".happy", "rig", "debug", "request-recovery");
         const log = new DebugLog({ directory });
         await log.flush();
 

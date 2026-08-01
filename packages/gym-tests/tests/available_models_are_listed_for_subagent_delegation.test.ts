@@ -63,7 +63,7 @@ describe("available model guidance", () => {
                 ".codex/auth.json": JSON.stringify({
                     tokens: { access_token: "codex-test-token" },
                 }),
-                ".rig/config.toml": [
+                "happy/config/happy.toml": [
                     "[providers]",
                     "default_enable = false",
                     "",
@@ -113,7 +113,7 @@ describe("available model guidance", () => {
                 RIG_GYM_PROVIDER_OVERRIDES: "bedrock",
             },
             homeFiles: {
-                ".rig/config.toml": [
+                "happy/config/happy.toml": [
                     "[providers]",
                     "default_enable = false",
                     "",

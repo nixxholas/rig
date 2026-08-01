@@ -22,7 +22,7 @@ import { readLocalServerToken } from "./readLocalServerToken.js";
 import { removeStaleSocket } from "./removeStaleSocket.js";
 import { resolveHappyIntegrationMode } from "./resolveHappyIntegrationMode.js";
 import { McpClientManager } from "../mcp/index.js";
-import { loadConfig, writeDaemonSettings } from "../config/index.js";
+import { ensureUserConfigurationFiles, loadConfig, writeDaemonSettings } from "../config/index.js";
 import { createConfiguredPresenceStore } from "../presence/index.js";
 import { createProviderQuotaService } from "../executor/createProviderQuotaService.js";
 import {
@@ -301,6 +301,16 @@ async function runOwnedLocalProtocolServer(
     if (fatalDatabaseFailure !== undefined) throw fatalDatabaseFailure;
 
     async function initializeDaemon(): Promise<void> {
+        try {
+            await ensureUserConfigurationFiles();
+        } catch (error) {
+            daemonLog.record(
+                "warning",
+                "daemon_user_configuration_initialization_failed",
+                "Rig could not create the default user configuration files.",
+                { error: errorToMessage(error) },
+            );
+        }
         const loadedConfig = await loadConfig({ cwd: process.cwd() });
         if (stopping) return;
         const runtimeSettings = {

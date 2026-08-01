@@ -24,7 +24,7 @@ function conversationText(gym: Gym, index: number): string {
 describe("global instructions reach the model and follow edits", () => {
     it("delivers the user's global AGENTS.md and picks up a change before the next turn", async () => {
         const gym = await createGym({
-            homeFiles: { ".rig/AGENTS.md": "Always greet the user in Portuguese.\n" },
+            homeFiles: { "happy/config/AGENTS.md": "Always greet the user in Portuguese.\n" },
             inference: [
                 { content: [{ text: "First answer.", type: "text" }] },
                 { content: [{ text: "Second answer.", type: "text" }] },
@@ -43,7 +43,7 @@ describe("global instructions reach the model and follow edits", () => {
         // on the next turn, without restarting anything.
         await gym.runInContainer("node", [
             "-e",
-            'require("node:fs").writeFileSync("/home/rig/.rig/AGENTS.md", "Always greet the user in Japanese.\\n")',
+            'require("node:fs").writeFileSync("/home/rig/happy/config/AGENTS.md", "Always greet the user in Japanese.\\n")',
         ]);
 
         gym.terminal.type("Say hello again.");

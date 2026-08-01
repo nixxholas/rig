@@ -43,8 +43,8 @@ const createNewerDatabaseScript = String.raw`
 import { mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
-const databasePath = "/home/rig/.rig/sessions.sqlite";
-mkdirSync("/home/rig/.rig", { recursive: true });
+const databasePath = "/home/rig/.happy/rig/sessions.sqlite";
+mkdirSync("/home/rig/.happy/rig", { recursive: true });
 const database = new DatabaseSync(databasePath);
 database.exec("PRAGMA application_id = 1380534066; PRAGMA user_version = 5");
 database.close();
@@ -53,7 +53,7 @@ database.close();
 const makeDatabaseCompatibleScript = String.raw`
 import { DatabaseSync } from "node:sqlite";
 
-const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite");
+const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
 database.exec("PRAGMA user_version = 0");
 database.close();
 `;

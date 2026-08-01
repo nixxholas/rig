@@ -42,8 +42,8 @@ describe("Happy mobile synchronization", () => {
             [
                 'const fs=require("node:fs")',
                 'const {DatabaseSync}=require("node:sqlite")',
-                'const copied=JSON.parse(fs.readFileSync("/home/rig/.rig/happy/access.key","utf8"))',
-                'const mode=fs.statSync("/home/rig/.rig/happy/access.key").mode & 0o777',
+                'const copied=JSON.parse(fs.readFileSync("/home/rig/.happy/rig/happy/access.key","utf8"))',
+                'const mode=fs.statSync("/home/rig/.happy/rig/happy/access.key").mode & 0o777',
                 'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
                 'const sessions=db.prepare("select count(*) as count from happy_sessions").get().count',
                 'const outbox=db.prepare("select count(*) as count from happy_outbox").get().count',

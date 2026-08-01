@@ -17,7 +17,7 @@ function parseArguments(arguments_: readonly string[]): {
     }
     return {
         fullIntegrityCheck: arguments_.includes("--full"),
-        sourcePath: positional[0] ?? join(homedir(), ".rig", "sessions.sqlite"),
+        sourcePath: positional[0] ?? join(homedir(), ".happy", "rig", "sessions.sqlite"),
     };
 }
 

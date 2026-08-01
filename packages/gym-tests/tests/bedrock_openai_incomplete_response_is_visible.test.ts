@@ -22,7 +22,7 @@ describe("Bedrock OpenAI response semantics", () => {
             entrypoint: [
                 "/bin/sh",
                 "-lc",
-                'sed -i "s|BEDROCK_GYM_ENDPOINT|$BEDROCK_GYM_ENDPOINT|" /home/rig/.rig/config.toml\nexec node /app/packages/rig/dist/main.js',
+                'sed -i "s|BEDROCK_GYM_ENDPOINT|$BEDROCK_GYM_ENDPOINT|" /home/rig/happy/config/happy.toml\nexec node /app/packages/rig/dist/main.js',
             ],
             environment: {
                 AWS_BEARER_TOKEN_BEDROCK: "gym-placeholder-token",
@@ -30,7 +30,7 @@ describe("Bedrock OpenAI response semantics", () => {
                 NO_PROXY: "host.docker.internal",
             },
             homeFiles: {
-                ".rig/config.toml": bedrockConfig(),
+                "happy/config/happy.toml": bedrockConfig(),
             },
             httpProxy: {
                 handler(request) {
@@ -68,7 +68,7 @@ describe("Bedrock OpenAI response semantics", () => {
             entrypoint: [
                 "/bin/sh",
                 "-lc",
-                'sed -i "s|BEDROCK_GYM_ENDPOINT|$BEDROCK_GYM_ENDPOINT|" /home/rig/.rig/config.toml\nexec node /app/packages/rig/dist/main.js',
+                'sed -i "s|BEDROCK_GYM_ENDPOINT|$BEDROCK_GYM_ENDPOINT|" /home/rig/happy/config/happy.toml\nexec node /app/packages/rig/dist/main.js',
             ],
             environment: {
                 AWS_BEARER_TOKEN_BEDROCK: "gym-placeholder-token",
@@ -76,7 +76,7 @@ describe("Bedrock OpenAI response semantics", () => {
                 NO_PROXY: "host.docker.internal",
             },
             homeFiles: {
-                ".rig/config.toml": bedrockConfig(),
+                "happy/config/happy.toml": bedrockConfig(),
             },
             httpProxy: {
                 handler(request) {

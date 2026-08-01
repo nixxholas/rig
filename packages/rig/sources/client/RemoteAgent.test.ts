@@ -330,7 +330,7 @@ describe("RemoteAgent", () => {
         });
         const session = protocolSession(model);
         const submitMessage = vi.fn(async () => ({
-            debugDirectory: "/workspace/.rig/debug/request-1",
+            debugDirectory: "/workspace/.happy/rig/debug/request-1",
             eventId: "event-submit",
             runId: "run-1",
             sessionId: session.id,
@@ -355,7 +355,7 @@ describe("RemoteAgent", () => {
 
         expect(failure).toBeInstanceOf(RemoteAgentRunError);
         expect(failure).toMatchObject({
-            debugDirectory: "/workspace/.rig/debug/request-1",
+            debugDirectory: "/workspace/.happy/rig/debug/request-1",
             message: "provider failed",
         });
         expect(submitMessage).toHaveBeenCalledWith(session.id, {

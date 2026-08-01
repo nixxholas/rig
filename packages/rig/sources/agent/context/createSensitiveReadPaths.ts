@@ -2,6 +2,7 @@ import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { getRigHome } from "../../config/getRigHome.js";
+import { getHappyConfigDirectory } from "../../config/getHappyConfigDirectory.js";
 
 export function createSensitiveReadPaths(
     options: {
@@ -21,6 +22,7 @@ export function createSensitiveReadPaths(
             ? configuredDirectory
             : join(homeDirectory, ".config");
     const rigHome = getRigHome(environment, homeDirectory);
+    const happyConfigDirectory = getHappyConfigDirectory(environment, homeDirectory);
     return [
         homeDirectory,
         join(homeDirectory, ".aws"),
@@ -49,6 +51,7 @@ export function createSensitiveReadPaths(
         join(configDirectory, "gh"),
         join(configDirectory, "glab-cli"),
         join(configDirectory, "op"),
+        happyConfigDirectory,
         rigHome,
         join(temporaryDirectory, `rig-${options.uid ?? process.getuid?.() ?? 0}`),
         environment.AWS_CONFIG_FILE,

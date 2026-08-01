@@ -176,7 +176,7 @@ const transientTypes = new Set([
     "done",
     "error",
 ]);
-const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite", { readOnly: true });
+const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite", { readOnly: true });
 const sessionId = database
     .prepare("SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1")
     .get().id;

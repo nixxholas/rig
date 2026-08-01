@@ -172,7 +172,7 @@ async function createMcpGym(
         mode: "docker",
         cols: COLS,
         homeFiles: {
-            ".rig/config.toml": RIG_CONFIG,
+            "happy/config/happy.toml": RIG_CONFIG,
             "mcp-security-server.mjs": MCP_SERVER,
         },
         inference,

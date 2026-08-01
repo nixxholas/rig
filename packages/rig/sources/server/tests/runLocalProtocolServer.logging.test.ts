@@ -22,16 +22,19 @@ describe("runLocalProtocolServer logging", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-server-logging-"));
         roots.add(root);
         const serverDirectory = join(root, "server");
-        const rigHome = join(root, "home", ".rig");
+        const configDirectory = join(root, "config");
+        const rigHome = join(root, "home", ".happy", "rig");
         await Promise.all([
             prepareLocalServerDirectory(serverDirectory),
+            mkdir(configDirectory, { recursive: true }),
             mkdir(rigHome, { recursive: true }),
         ]);
         await writeFile(
-            join(rigHome, "config.toml"),
+            join(configDirectory, "happy.toml"),
             "[providers]\ndefault_enable = false\n\n[providers.bedrock]\nenabled = true\n",
         );
         vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "test-token");
+        vi.stubEnv("RIG_CONFIGURATION_DIRECTORY", configDirectory);
         vi.stubEnv("RIG_HOME", rigHome);
         vi.stubEnv("RIG_SERVER_DIRECTORY", serverDirectory);
         const tokenPath = join(serverDirectory, "token");

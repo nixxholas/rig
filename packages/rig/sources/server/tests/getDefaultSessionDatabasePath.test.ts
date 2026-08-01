@@ -23,6 +23,6 @@ describe("getDefaultSessionDatabasePath", () => {
                 },
                 "/home/tester",
             ),
-        ).toBe("/home/tester/.rig/sessions.sqlite");
+        ).toBe("/home/tester/.happy/rig/sessions.sqlite");
     });
 });

@@ -114,7 +114,7 @@ describe("Happy machine registration", () => {
             "-e",
             [
                 'const fs=require("node:fs")',
-                'const dir="/home/rig/.rig/happy/machines"',
+                'const dir="/home/rig/.happy/rig/happy/machines"',
                 'const files=fs.readdirSync(dir).filter(file=>file.endsWith(".json"))',
                 'process.stdout.write(JSON.parse(fs.readFileSync(`${dir}/${files[0]}`,"utf8")).id)',
             ].join(";"),

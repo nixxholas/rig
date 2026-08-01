@@ -256,9 +256,10 @@ The adapter must:
 
 1. Upload a `pnpm pack` artifact built from the pinned clean Rig worktree and
    install it during Harbor's trusted setup phase.
-2. Create empty, trial-local `RIG_HOME` and `CODEX_HOME` directories. Disable
-   Happy sync and set `providers.default_enable = false` in the trial-local Rig
-   config, enabling only Codex and the selected model. Construct an explicit
+2. Create empty, trial-local `RIG_HOME`, `RIG_CONFIGURATION_DIRECTORY`, and
+   `CODEX_HOME` directories. Disable Happy sync and set
+   `providers.default_enable = false` in the trial-local Rig config, enabling
+   only Codex and the selected model. Construct an explicit
    process-environment allowlist containing only ordinary runtime variables and
    the trial's OpenAI proxy values; do not inherit Anthropic, xAI, Moonshot,
    Gemini, AWS, or other provider credentials. Do not copy host sessions,

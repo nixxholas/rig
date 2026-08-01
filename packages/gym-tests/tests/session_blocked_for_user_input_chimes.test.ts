@@ -13,7 +13,7 @@ describe("session blocked for user input chimes", () => {
     it("chimes when the question tool waits for an answer", async () => {
         const gym = await createGym({
             homeFiles: {
-                ".rig/config.toml": "[settings]\ncompletion_chime = true\n",
+                "happy/config/happy.toml": "[settings]\ncompletion_chime = true\n",
             },
             inference: [
                 {

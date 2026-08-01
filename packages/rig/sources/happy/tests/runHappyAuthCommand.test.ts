@@ -47,12 +47,12 @@ describe("runHappyAuthCommand", () => {
                 onAuthenticated,
                 pollIntervalMs: 0,
                 renderQrCode,
-                rigHome: join(directory, ".rig"),
+                rigHome: join(directory, ".happy", "rig"),
             }),
         ).resolves.toBe(true);
 
         const stored = JSON.parse(
-            await readFile(join(directory, ".rig", "happy", "access.key"), "utf8"),
+            await readFile(join(directory, ".happy", "rig", "happy", "access.key"), "utf8"),
         ) as Record<string, any>;
         expect(stored.token).toBe("happy-token");
         expect(stored.encryption.publicKey).toBe(Buffer.from(accountPublicKey).toString("base64"));

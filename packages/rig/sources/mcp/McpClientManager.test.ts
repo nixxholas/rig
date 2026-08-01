@@ -18,7 +18,7 @@ describe("McpClientManager", () => {
             const configHome = join(root, "rig-home");
             const marker = join(root, "server-started.txt");
             const manager = new McpClientManager({
-                env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+                env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
                 homeDirectory,
             });
             try {
@@ -26,7 +26,7 @@ describe("McpClientManager", () => {
                 await mkdir(homeDirectory, { recursive: true });
                 await mkdir(cwd, { recursive: true });
                 await writeFile(
-                    join(configHome, "config.toml"),
+                    join(configHome, "happy.toml"),
                     `[mcp_servers.trusted]\ncommand = "${process.execPath}"\nargs = ["server.mjs"]\n`,
                     "utf8",
                 );
@@ -70,13 +70,13 @@ describe("McpClientManager", () => {
         await mkdir(homeDirectory, { recursive: true });
         await mkdir(cwd, { recursive: true });
         await writeFile(
-            join(configHome, "config.toml"),
+            join(configHome, "happy.toml"),
             `[mcp_servers.trusted]\ncommand = "${process.execPath}"\nargs = ["${fixture}"]\n`,
             "utf8",
         );
         let prompts = 0;
         const first = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
@@ -102,7 +102,7 @@ describe("McpClientManager", () => {
         }
 
         const second = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
@@ -115,7 +115,7 @@ describe("McpClientManager", () => {
             expect(loaded.tools.map((tool) => tool.name)).toContain("mcp__trusted__echo_value");
             expect(prompts).toBe(1);
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `[mcp_servers.trusted]\ncommand = "${process.execPath}"\nargs = ["${fixture}"]\nenabled_tools = ["echo_value"]\n`,
                 "utf8",
             );
@@ -143,14 +143,14 @@ describe("McpClientManager", () => {
             "stdioMcpServer.mjs",
         );
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         await mkdir(configHome, { recursive: true });
         await mkdir(homeDirectory, { recursive: true });
         await mkdir(cwd, { recursive: true });
         await writeFile(
-            join(configHome, "config.toml"),
+            join(configHome, "happy.toml"),
             `[mcp_servers.trusted]\ncommand = "${process.execPath}"\nargs = ["${fixture}"]\n`,
             "utf8",
         );
@@ -188,7 +188,7 @@ describe("McpClientManager", () => {
         const homeMarker = join(root, "home-server-started.txt");
         const workspaceMarker = join(root, "workspace-shadow-started.txt");
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
@@ -201,7 +201,7 @@ describe("McpClientManager", () => {
             await mkdir(homeDirectory, { recursive: true });
             await mkdir(cwd, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `[mcp_servers.trusted]\ncommand = "${process.execPath}"\nargs = ["server.mjs"]\n`,
                 "utf8",
             );
@@ -237,7 +237,10 @@ describe("McpClientManager", () => {
         const configHome = join(cwd, "config-home");
         const homeDirectory = join(cwd, "home");
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: {
+                RIG_CONFIGURATION_DIRECTORY: configHome,
+                RIG_HOME: configHome,
+            } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
@@ -251,7 +254,7 @@ describe("McpClientManager", () => {
             await mkdir(configHome, { recursive: true });
             await mkdir(homeDirectory, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `[mcp_servers."Global Docs"]\ncommand = "${process.execPath}"\nargs = ["${fixture}"]\n`,
                 "utf8",
             );
@@ -326,7 +329,7 @@ describe("McpClientManager", () => {
         const configHome = join(cwd, "empty-rig-home");
         const homeDirectory = join(cwd, "empty-home");
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
@@ -338,7 +341,7 @@ describe("McpClientManager", () => {
             await mkdir(configHome, { recursive: true });
             await mkdir(homeDirectory, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `[mcp_servers."test server"]\ncommand = "${process.execPath}"\nargs = ["${fixture}"]\n`,
                 "utf8",
             );
@@ -432,14 +435,14 @@ describe("McpClientManager", () => {
         const cwd = join(root, "workspace");
         const homeDirectory = join(root, "home");
         const configHome = join(root, "rig-home");
-        const configPath = join(configHome, "config.toml");
+        const configPath = join(configHome, "happy.toml");
         const fixture = join(
             dirname(fileURLToPath(import.meta.url)),
             "testing",
             "stdioMcpServer.mjs",
         );
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         await mkdir(dirname(configPath), { recursive: true });
@@ -493,14 +496,14 @@ describe("McpClientManager", () => {
         const configHome = join(cwd, "empty-rig-home");
         const homeDirectory = join(cwd, "empty-home");
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
             await mkdir(configHome, { recursive: true });
             await mkdir(homeDirectory, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 '[mcp_servers.missing]\ncommand = "rig-command-that-does-not-exist"\n',
                 "utf8",
             );
@@ -529,7 +532,7 @@ describe("McpClientManager", () => {
         const configHome = join(cwd, "empty-rig-home");
         const homeDirectory = join(cwd, "empty-home");
         const manager = new McpClientManager({
-            env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+            env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
             homeDirectory,
         });
         try {
@@ -541,7 +544,7 @@ describe("McpClientManager", () => {
             await mkdir(configHome, { recursive: true });
             await mkdir(homeDirectory, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `[mcp_servers.restricted]\ncommand = "${process.execPath}"\nargs = ["${fixture}"]\nenabled_tools = ["echo_value"]\n`,
                 "utf8",
             );

@@ -17,7 +17,7 @@ describe("Happy configuration", () => {
                     secret: Buffer.alloc(32, 7).toString("base64"),
                     token: "happy-gym-token",
                 }),
-                ".rig/config.toml": "[settings]\nhappy_integration = false\n",
+                "happy/config/happy.toml": "[settings]\nhappy_integration = false\n",
             },
             inference: [
                 {
@@ -39,7 +39,7 @@ describe("Happy configuration", () => {
                 'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
                 'const sessions=db.prepare("select count(*) as count from happy_sessions").get().count',
                 "db.close()",
-                'const copied=fs.existsSync("/home/rig/.rig/happy/access.key")',
+                'const copied=fs.existsSync("/home/rig/.happy/rig/happy/access.key")',
                 "process.stdout.write(JSON.stringify({copied,sessions}))",
             ].join(";"),
         ]);
@@ -76,7 +76,7 @@ describe("Happy configuration", () => {
                 'const db=new DatabaseSync("/home/rig/.server/sessions.sqlite")',
                 'const sessions=db.prepare("select count(*) as count from happy_sessions").get().count',
                 "db.close()",
-                'const copied=fs.existsSync("/home/rig/.rig/happy/access.key")',
+                'const copied=fs.existsSync("/home/rig/.happy/rig/happy/access.key")',
                 "process.stdout.write(JSON.stringify({copied,sessions}))",
             ].join(";"),
         ]);

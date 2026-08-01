@@ -34,7 +34,7 @@ describe("daemon startup with no database", () => {
 const verifyFreshDatabaseScript = String.raw`
 import { DatabaseSync } from "node:sqlite";
 
-const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite", { readOnly: true });
+const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite", { readOnly: true });
 const expectedTables = [
     "durable_global_event_state",
     "durable_global_events",
@@ -90,7 +90,7 @@ database.close();
 const startWithFreshDatabaseScript = String.raw`#!/usr/bin/env bash
 set -euo pipefail
 
-test ! -e /home/rig/.rig/sessions.sqlite
+test ! -e /home/rig/.happy/rig/sessions.sqlite
 node /app/packages/rig/dist/main.js daemon start
 node /app/packages/rig/dist/main.js daemon status
 node /workspace/verify-fresh-database.mjs

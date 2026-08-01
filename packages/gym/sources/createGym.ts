@@ -287,9 +287,9 @@ function createLocalEnvironment(
     const environment = {
         HOME: homePath,
         PATH: process.env.PATH ?? "",
+        RIG_CONFIGURATION_DIRECTORY: join(homePath, "happy", "config"),
         RIG_GYM_INFERENCE_URL: inference.localUrl,
         RIG_GYM_TOKEN: inference.token,
-        RIG_HOME: join(homePath, ".rig"),
         RIG_GYM_DISPLAY_WORKSPACE: "/workspace",
         RIG_GYM_HOME_PATH: homePath,
         RIG_GYM_IN_PROCESS_DAEMON: "1",

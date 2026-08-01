@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { getHappyConfigDirectory } from "./getHappyConfigDirectory.js";
 import { loadNetworkConfig, loadNetworkConfigForProject } from "./loadNetworkConfig.js";
 import { parseConfigToml } from "./parseConfigToml.js";
 
@@ -44,13 +45,15 @@ describe("loadNetworkConfig", () => {
         temporaryDirectories.push(root);
         const homeDirectory = join(root, "home");
         const workspace = join(root, "workspace");
-        const rigHome = join(homeDirectory, ".rig");
+        const configDirectory = getHappyConfigDirectory({}, homeDirectory);
+        const rigHome = join(homeDirectory, ".happy", "rig");
         await Promise.all([
+            mkdir(configDirectory, { recursive: true }),
             mkdir(rigHome, { recursive: true }),
             mkdir(workspace, { recursive: true }),
         ]);
         await writeFile(
-            join(rigHome, "config.toml"),
+            join(configDirectory, "happy.toml"),
             '[network]\nallowed_domains = ["global.example"]\n',
         );
         await writeFile(
@@ -74,10 +77,10 @@ describe("loadNetworkConfig", () => {
     it("combines host machine settings with a Docker project config", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-docker-network-config-"));
         temporaryDirectories.push(root);
-        const rigHome = join(root, ".rig");
-        await mkdir(rigHome, { recursive: true });
+        const configDirectory = getHappyConfigDirectory({}, root);
+        await mkdir(configDirectory, { recursive: true });
         await writeFile(
-            join(rigHome, "config.toml"),
+            join(configDirectory, "happy.toml"),
             '[network]\nallowed_domains = ["global.example"]\n',
         );
         const project = parseConfigToml(
@@ -96,13 +99,15 @@ describe("loadNetworkConfig", () => {
         temporaryDirectories.push(root);
         const homeDirectory = join(root, "home");
         const workspace = join(root, "workspace");
-        const rigHome = join(homeDirectory, ".rig");
+        const configDirectory = getHappyConfigDirectory({}, homeDirectory);
+        const rigHome = join(homeDirectory, ".happy", "rig");
         await Promise.all([
+            mkdir(configDirectory, { recursive: true }),
             mkdir(rigHome, { recursive: true }),
             mkdir(workspace, { recursive: true }),
         ]);
         await writeFile(
-            join(rigHome, "config.toml"),
+            join(configDirectory, "happy.toml"),
             [
                 "[network]",
                 'allowed_domains = ["global.example"]',

@@ -178,7 +178,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createEventIdFactory } from "/app/packages/rig/dist/protocol/index.js";
 import { PersistentSessionStore } from "/app/packages/rig/dist/session/index.js";
 
-const databasePath = "/home/rig/.rig/sessions.sqlite";
+const databasePath = "/home/rig/.happy/rig/sessions.sqlite";
 const semanticMessageCount = requiredEvenCount("HEAVY_SEMANTIC_MESSAGES");
 const transientEventCount = requiredCount("HEAVY_TRANSIENT_EVENTS");
 const contextMessageCount = Math.min(requiredCount("HEAVY_CONTEXT_MESSAGES"), semanticMessageCount);

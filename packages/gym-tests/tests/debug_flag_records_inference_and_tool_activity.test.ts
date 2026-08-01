@@ -43,7 +43,7 @@ describe("request debug logging", () => {
         gym.terminal.press("enter");
         await gym.terminal.waitForText("Debug capture complete.", 30_000);
 
-        const root = join(gym.workspacePath, ".rig", "debug");
+        const root = join(gym.workspacePath, ".happy", "rig", "debug");
         const requestDirectories = (await readdir(root, { withFileTypes: true }))
             .filter((entry) => entry.isDirectory())
             .map((entry) => entry.name);

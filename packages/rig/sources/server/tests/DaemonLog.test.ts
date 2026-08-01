@@ -15,13 +15,13 @@ describe("DaemonLog", () => {
         });
 
         log.record("info", "daemon_starting", "Rig daemon is starting.", {
-            databasePath: "/home/tester/.rig/sessions.sqlite",
+            databasePath: "/home/tester/.happy/rig/sessions.sqlite",
             socketPath: "/tmp/rig-501/server.sock",
         });
 
         expect(lines).toHaveLength(1);
         expect(JSON.parse(lines[0]!)).toEqual({
-            databasePath: "/home/tester/.rig/sessions.sqlite",
+            databasePath: "/home/tester/.happy/rig/sessions.sqlite",
             event: "daemon_starting",
             level: "info",
             message: "Rig daemon is starting.",

@@ -17,7 +17,7 @@ describe("Claude typed inference errors", () => {
                 RIG_PROVIDER: "kirill_claude",
             },
             homeFiles: {
-                ".rig/config.toml": [
+                "happy/config/happy.toml": [
                     "[providers.claude]",
                     "enabled = false",
                     "",

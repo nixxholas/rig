@@ -18,7 +18,7 @@ describe("delegated workspace session", () => {
         const gym = await createGym({
             cols: 100,
             files: { "CHANGELOG.md": "# Changelog\n" },
-            homeFiles: { ".rig/config.toml": "[features]\ncross_workspace = true\n" },
+            homeFiles: { "happy/config/happy.toml": "[features]\ncross_workspace = true\n" },
             inference(request) {
                 const sessionId = request.options.sessionId;
                 const lastMessage = request.context.messages.at(-1);

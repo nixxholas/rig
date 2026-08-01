@@ -16,7 +16,7 @@ export async function readConfigFile(path: string): Promise<ConfigSource> {
             typeof error === "object" &&
             error !== null &&
             "code" in error &&
-            error.code === "ENOENT"
+            (error.code === "ENOENT" || error.code === "ENOTDIR")
         ) {
             return {
                 exists: false,

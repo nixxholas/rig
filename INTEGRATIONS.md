@@ -19,7 +19,7 @@ create sync state, or open Happy HTTP and socket connections. Config changes
 take effect after restarting the daemon.
 
 The daemon imports the newest valid Happy credentials from `~/.happy/access.key`
-into `~/.rig/happy/access.key` at startup. `HAPPY_HOME_DIR` changes the source
+into `~/.happy/rig/happy/access.key` at startup. `HAPPY_HOME_DIR` changes the source
 directory. `RIG_HAPPY_SERVER_URL`, then `HAPPY_SERVER_URL`, can override the
 server URL. `rig happy auth` performs Happy's QR authentication directly and
 hot-reloads a running daemon without interrupting its sessions.

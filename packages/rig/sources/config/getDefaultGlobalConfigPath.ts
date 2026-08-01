@@ -1,10 +1,10 @@
 import { join } from "node:path";
 
-import { getRigHome } from "./getRigHome.js";
+import { getHappyConfigDirectory } from "./getHappyConfigDirectory.js";
 
 export function getDefaultGlobalConfigPath(
     env: NodeJS.ProcessEnv = process.env,
     homeDirectory?: string,
 ): string {
-    return join(getRigHome(env, homeDirectory), "config.toml");
+    return join(getHappyConfigDirectory(env, homeDirectory), "happy.toml");
 }

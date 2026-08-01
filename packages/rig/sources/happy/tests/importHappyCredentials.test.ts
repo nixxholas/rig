@@ -23,7 +23,7 @@ describe("importHappyCredentials", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-import-"));
         temporaryDirectories.push(root);
         const home = join(root, "home");
-        const rigHome = join(home, ".rig");
+        const rigHome = join(home, ".happy", "rig");
         const happyHome = join(home, ".happy");
         await mkdir(happyHome, { recursive: true });
         const source = {
@@ -67,7 +67,7 @@ describe("importHappyCredentials", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-existing-"));
         temporaryDirectories.push(root);
         const home = join(root, "home");
-        const rigHome = join(home, ".rig");
+        const rigHome = join(home, ".happy", "rig");
         await mkdir(join(home, ".happy"), { recursive: true });
         await mkdir(join(rigHome, "happy"), { recursive: true });
         await writeFile(join(home, ".happy", "access.key"), "not-json");
@@ -94,7 +94,7 @@ describe("importHappyCredentials", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-newest-"));
         temporaryDirectories.push(root);
         const home = join(root, "home");
-        const rigHome = join(home, ".rig");
+        const rigHome = join(home, ".happy", "rig");
         const sourceHome = join(home, ".happy");
         const targetHome = join(rigHome, "happy");
         await mkdir(sourceHome, { recursive: true });
@@ -135,7 +135,7 @@ describe("importHappyCredentials", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-settings-write-"));
         temporaryDirectories.push(root);
         const home = join(root, "home");
-        const rigHome = join(home, ".rig");
+        const rigHome = join(home, ".happy", "rig");
         const sourceHome = join(home, ".happy");
         const targetHome = join(rigHome, "happy");
         await mkdir(sourceHome, { recursive: true });
@@ -172,7 +172,7 @@ describe("importHappyCredentials", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-daemon-scopes-"));
         temporaryDirectories.push(root);
         const home = join(root, "home");
-        const rigHome = join(home, ".rig");
+        const rigHome = join(home, ".happy", "rig");
         await mkdir(join(home, ".happy"), { recursive: true });
         await writeFile(
             join(home, ".happy", "access.key"),

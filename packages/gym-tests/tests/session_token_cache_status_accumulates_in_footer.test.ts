@@ -29,7 +29,7 @@ describe("session token and cache status", () => {
 
     it("counts growing session context once while weighting cache hits across requests", async () => {
         const gym = await createGym({
-            homeFiles: { ".rig/config.toml": "[settings]\nshow_usage = true\n" },
+            homeFiles: { "happy/config/happy.toml": "[settings]\nshow_usage = true\n" },
             inference: [
                 {
                     content: [{ text: "FIRST_USAGE_RECORDED", type: "text" }],

@@ -109,7 +109,7 @@ if (action === "steer") {
     );
     process.stdout.write("steered\n");
 } else if (action === "inspect") {
-    const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite");
+    const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
     const sessionId = database
         .prepare("SELECT id FROM sessions WHERE parent_session_id IS NULL ORDER BY created_at_ms DESC LIMIT 1")
         .get().id;

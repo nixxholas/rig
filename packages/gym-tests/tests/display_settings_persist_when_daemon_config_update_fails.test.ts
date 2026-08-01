@@ -53,7 +53,7 @@ import { mkdir, rm, symlink, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-const runtimePath = join(homedir(), ".rig", "runtime.toml");
+const runtimePath = join(homedir(), ".happy", "rig", "runtime.toml");
 await mkdir(dirname(runtimePath), { recursive: true });
 await rm(runtimePath, { force: true });
 await symlink("/workspace/runtime-after-daemon-failure.toml", runtimePath);

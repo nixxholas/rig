@@ -54,7 +54,10 @@ describe("config", () => {
 
             const loaded = await loadConfig({
                 cwd: root,
-                env: { RIG_HOME: join(root, "config-home") } as NodeJS.ProcessEnv,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: join(root, "config-home"),
+                    RIG_HOME: join(root, "config-home"),
+                } as NodeJS.ProcessEnv,
             });
 
             expect(loaded.config.workspace.setupCommands).toEqual(["printf happy"]);
@@ -83,7 +86,10 @@ describe("config", () => {
 
             const loaded = await loadConfig({
                 cwd: root,
-                env: { RIG_HOME: join(root, "config-home") } as NodeJS.ProcessEnv,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: join(root, "config-home"),
+                    RIG_HOME: join(root, "config-home"),
+                } as NodeJS.ProcessEnv,
             });
 
             expect(loaded.config.workspace.setupCommands).toEqual(["printf rig"]);
@@ -108,7 +114,10 @@ describe("config", () => {
             await expect(
                 loadConfig({
                     cwd: root,
-                    env: { RIG_HOME: join(root, "config-home") } as NodeJS.ProcessEnv,
+                    env: {
+                        RIG_CONFIGURATION_DIRECTORY: join(root, "config-home"),
+                        RIG_HOME: join(root, "config-home"),
+                    } as NodeJS.ProcessEnv,
                 }),
             ).rejects.toThrow("Unknown invalid setting.");
         } finally {
@@ -148,7 +157,7 @@ enabled = true
             const configHome = join(root, "config-home");
             await mkdir(configHome, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `
 [providers]
 default_enable = false
@@ -179,7 +188,10 @@ enabled = true
 
             const loaded = await loadConfig({
                 cwd: root,
-                env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: configHome,
+                    RIG_HOME: configHome,
+                } as NodeJS.ProcessEnv,
             });
 
             expect(loaded.config.providerDefaultEnable).toBe(false);
@@ -408,13 +420,16 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
         try {
             const configHome = join(root, "config-home");
             const cwd = join(root, "repo");
-            const globalPath = join(configHome, "config.toml");
+            const globalPath = join(configHome, "happy.toml");
             const runtimePath = join(configHome, "runtime.toml");
             await mkdir(configHome, { recursive: true });
             await mkdir(cwd, { recursive: true });
             await writeFile(globalPath, '[defaults]\nservice_tier = "fast"\n', "utf8");
 
-            const environment = { RIG_HOME: configHome } as NodeJS.ProcessEnv;
+            const environment = {
+                RIG_CONFIGURATION_DIRECTORY: configHome,
+                RIG_HOME: configHome,
+            } as NodeJS.ProcessEnv;
             expect((await loadConfig({ cwd, env: environment })).config.defaults.serviceTier).toBe(
                 "fast",
             );
@@ -540,7 +555,7 @@ bearer_token_env_var = "WORK_BEDROCK_TOKEN"
         try {
             const cwd = join(root, "repo");
             const configHome = join(root, "config-home");
-            const globalPath = join(configHome, "config.toml");
+            const globalPath = join(configHome, "happy.toml");
             const runtimePath = join(configHome, "runtime.toml");
             const localPath = join(cwd, "rig.toml");
             await mkdir(configHome, { recursive: true });
@@ -615,7 +630,10 @@ codex_stream_max_retries = 8
 
             const loaded = await loadConfig({
                 cwd,
-                env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: configHome,
+                    RIG_HOME: configHome,
+                } as NodeJS.ProcessEnv,
             });
 
             expect(loaded.config.defaults).toEqual({
@@ -656,7 +674,10 @@ codex_stream_max_retries = 8
             await mkdir(emptyCwd, { recursive: true });
             const defaultLoaded = await loadConfig({
                 cwd: emptyCwd,
-                env: { RIG_HOME: join(root, "empty-rig-home") } as NodeJS.ProcessEnv,
+                env: {
+                    RIG_CONFIGURATION_DIRECTORY: join(root, "empty-config-home"),
+                    RIG_HOME: join(root, "empty-rig-home"),
+                } as NodeJS.ProcessEnv,
             });
             expect(defaultLoaded.config.settings).toEqual({
                 codexStreamMaxRetries: 5,
@@ -929,7 +950,10 @@ codex_stream_max_retries = 8
                 },
                 {
                     cwd,
-                    env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+                    env: {
+                        RIG_CONFIGURATION_DIRECTORY: configHome,
+                        RIG_HOME: configHome,
+                    } as NodeJS.ProcessEnv,
                 },
             );
 
@@ -1027,11 +1051,14 @@ codex_stream_max_retries = 8
     it("clears an inherited fallback and expiry when writing a permanent presence", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-permanent-presence-"));
         const configHome = join(root, "config-home");
-        const env = { RIG_HOME: configHome } as NodeJS.ProcessEnv;
+        const env = {
+            RIG_CONFIGURATION_DIRECTORY: configHome,
+            RIG_HOME: configHome,
+        } as NodeJS.ProcessEnv;
         try {
             await mkdir(configHome, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 [
                     "[presence]",
                     'current = "away"',

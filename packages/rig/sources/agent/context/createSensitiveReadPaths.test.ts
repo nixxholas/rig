@@ -39,4 +39,15 @@ describe("createSensitiveReadPaths", () => {
 
         expect(paths).toContain("/private/rig-home");
     });
+
+    it("protects a custom Happy configuration directory", () => {
+        const paths = createSensitiveReadPaths({
+            environment: { RIG_CONFIGURATION_DIRECTORY: "/private/happy-config" },
+            homeDirectory: "/home/tester",
+            temporaryDirectory: "/tmp",
+            uid: 501,
+        });
+
+        expect(paths).toContain("/private/happy-config");
+    });
 });

@@ -25,17 +25,20 @@ describe("runLocalProtocolServer database failures", () => {
         const root = await mkdtemp(join(tmpdir(), "rig-server-database-failure-"));
         roots.add(root);
         const serverDirectory = join(root, "server");
-        const rigHome = join(root, "home", ".rig");
+        const configDirectory = join(root, "config");
+        const rigHome = join(root, "home", ".happy", "rig");
         await Promise.all([
             prepareLocalServerDirectory(serverDirectory),
+            mkdir(configDirectory, { recursive: true }),
             mkdir(rigHome, { recursive: true }),
         ]);
         await writeFile(
-            join(rigHome, "config.toml"),
+            join(configDirectory, "happy.toml"),
             "[providers]\ndefault_enable = false\n\n[providers.bedrock]\nenabled = true\n",
         );
         await writeFile(join(serverDirectory, "sessions.sqlite"), "not a SQLite database");
         vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "test-token");
+        vi.stubEnv("RIG_CONFIGURATION_DIRECTORY", configDirectory);
         vi.stubEnv("RIG_HOME", rigHome);
         vi.stubEnv("RIG_SERVER_DIRECTORY", serverDirectory);
         const tokenPath = join(serverDirectory, "token");
@@ -64,8 +67,10 @@ describe("runLocalProtocolServer database failures", () => {
     }, 60_000);
 
     it("rejects after cleanup when the shutdown drain hits a database failure", async () => {
-        const { rigHome, serverDirectory, socketPath, tokenPath } = await prepareServer();
+        const { configDirectory, rigHome, serverDirectory, socketPath, tokenPath } =
+            await prepareServer();
         vi.stubEnv("AWS_BEARER_TOKEN_BEDROCK", "test-token");
+        vi.stubEnv("RIG_CONFIGURATION_DIRECTORY", configDirectory);
         vi.stubEnv("RIG_HOME", rigHome);
         vi.stubEnv("RIG_SERVER_DIRECTORY", serverDirectory);
         const token = await writeLocalServerToken(tokenPath);
@@ -110,6 +115,7 @@ describe("runLocalProtocolServer database failures", () => {
 });
 
 async function prepareServer(): Promise<{
+    configDirectory: string;
     rigHome: string;
     serverDirectory: string;
     socketPath: string;
@@ -118,16 +124,19 @@ async function prepareServer(): Promise<{
     const root = await mkdtemp(join(tmpdir(), "rig-server-database-failure-"));
     roots.add(root);
     const serverDirectory = join(root, "server");
-    const rigHome = join(root, "home", ".rig");
+    const configDirectory = join(root, "config");
+    const rigHome = join(root, "home", ".happy", "rig");
     await Promise.all([
         prepareLocalServerDirectory(serverDirectory),
+        mkdir(configDirectory, { recursive: true }),
         mkdir(rigHome, { recursive: true }),
     ]);
     await writeFile(
-        join(rigHome, "config.toml"),
+        join(configDirectory, "happy.toml"),
         "[providers]\ndefault_enable = false\n\n[providers.bedrock]\nenabled = true\n",
     );
     return {
+        configDirectory,
         rigHome,
         serverDirectory,
         socketPath: join(serverDirectory, "server.sock"),

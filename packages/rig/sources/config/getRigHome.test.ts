@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { getRigHome } from "./getRigHome.js";
 
 describe("getRigHome", () => {
-    it("defaults to the .rig directory in the user's home", () => {
-        expect(getRigHome({}, "/home/tester")).toBe("/home/tester/.rig");
+    it("defaults to the Rig directory inside .happy in the user's home", () => {
+        expect(getRigHome({}, "/home/tester")).toBe("/home/tester/.happy/rig");
     });
 
     it("honors an absolute RIG_HOME", () => {
@@ -20,11 +20,13 @@ describe("getRigHome", () => {
                 },
                 "/home/tester",
             ),
-        ).toBe("/home/tester/.rig");
+        ).toBe("/home/tester/.happy/rig");
     });
 
     it.each(["", "   "])("uses the default for an empty RIG_HOME", (configuredHome) => {
-        expect(getRigHome({ RIG_HOME: configuredHome }, "/home/tester")).toBe("/home/tester/.rig");
+        expect(getRigHome({ RIG_HOME: configuredHome }, "/home/tester")).toBe(
+            "/home/tester/.happy/rig",
+        );
     });
 
     it("rejects a relative RIG_HOME", () => {

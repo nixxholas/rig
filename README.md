@@ -79,7 +79,8 @@ time to choose an available model.
 ### Optional: Connect Happy mobile
 
 Happy is enabled for the normal Rig CLI by default. Disable it machine-wide in
-`~/.rig/config.toml` and restart the daemon:
+`~/Happy/Config/happy.toml` on macOS or `~/happy/config/happy.toml` on Linux,
+then restart the daemon:
 
 ```toml
 [settings]
@@ -253,10 +254,10 @@ rig exec --stream-json "Run the test suite"
 ```
 
 Add `--debug` to an interactive or headless invocation to capture every request
-as ordered JSON files under `.rig/debug` in the project. Each request gets a
-time-sortable directory containing normalized inference inputs, every streamed
-provider event and final response, agent events and messages, tool arguments and
-results, and run completion or failure details:
+as ordered JSON files under `.happy/rig/debug` in the project. Each request gets
+a time-sortable directory containing normalized inference inputs, every
+streamed provider event and final response, agent events and messages, tool
+arguments and results, and run completion or failure details:
 
 ```sh
 rig --debug
@@ -382,18 +383,24 @@ permission_mode = "workspace_write"
 
 ## Configuration
 
-Rig reads user-wide settings from `~/.rig/config.toml` and repository
-settings from `rig.toml`. If it is absent, Rig reads `happy.toml`; when both
-files exist, `rig.toml` wins. Repository values win where both are allowed. MCP
-servers use these same Rig-owned configuration layers; provider configuration
-files are not imported.
+Rig reads user-wide settings from `~/Happy/Config/happy.toml` on macOS and
+`~/happy/config/happy.toml` on Linux. The user's global `AGENTS.md` lives beside
+it. On startup, Rig creates the platform-specific folder, a comprehensive
+commented `happy.toml` template, and an empty `AGENTS.md` whenever they are
+missing. Existing files are never replaced. Set `RIG_CONFIGURATION_DIRECTORY`
+to an absolute path to choose a different user configuration folder.
 
-Rig keeps its durable user files together in `~/.rig`: configuration,
-runtime settings, MCP trust decisions, the saved-session database, and binary
-files returned by web fetches. Temporary daemon control files remain in the
-system temporary directory. Set `RIG_HOME` to an absolute path to use a
-different durable directory. Rig does not search or migrate older XDG config
-or state locations.
+Repository settings come from `rig.toml`. If it is absent, Rig reads
+`happy.toml`; when both files exist, `rig.toml` wins. Repository values win
+where both are allowed. MCP servers use these same Rig-owned configuration
+layers; provider configuration files are not imported.
+
+Rig keeps internal durable state in `~/.happy/rig`: runtime settings, MCP trust
+decisions, the saved-session database, Happy credentials, and binary files
+returned by web fetches. Temporary daemon control files remain in the system
+temporary directory. Set `RIG_HOME` to an absolute path to use a different
+state directory. Rig does not search or migrate older config or state
+locations.
 
 Managed workspaces are user-facing folders rather than internal Rig state. New
 workspaces default to `~/Happy/Workspaces` on macOS and
@@ -437,14 +444,14 @@ all commands succeed. A failed or timed-out command leaves the workspace failed,
 skips the remaining commands, and prevents sessions and inference from starting
 there. These commands are trusted project lifecycle code and run with full
 filesystem and network access. Each command has a 30-minute limit.
-The same setting can provide a user-wide default in `~/.rig/config.toml`; a
+The same setting can provide a user-wide default in the user `happy.toml`; a
 repository list replaces that default for its workspaces.
 
 ### Managed network access
 
 Auto and Workspace write shell commands have no general network access. To let
 those commands use a specific external service, add a managed network policy to
-the global `~/.rig/config.toml` or the repository's root `rig.toml` (falling
+the user `happy.toml` or the repository's root `rig.toml` (falling
 back to `happy.toml`). Read only
 always keeps shell networking disabled, even when a policy exists. Full access
 is unrestricted and ignores the managed policy. The policy is
@@ -574,7 +581,7 @@ the machine running Rig, not an arbitrary container port. Full access remains
 unrestricted and can bypass the managed proxy by design.
 
 Provider availability is machine-wide because the local daemon owns the model
-catalog and authentication paths. Configure it in `~/.rig/config.toml`:
+catalog and authentication paths. Configure it in the user `happy.toml`:
 
 ```toml
 [providers]
@@ -706,7 +713,7 @@ The same options work with `rig exec`. `--docker-socket`, `--docker-name`, and
 repeated `--docker-env` or `--docker-mount` options provide additional control.
 Use `--local` to ignore a configured Docker default for one new session.
 
-Machine-wide Docker defaults belong in `~/.rig/config.toml`:
+Machine-wide Docker defaults belong in the user `happy.toml`:
 
 ```toml
 [docker]

@@ -7,7 +7,7 @@ export function getRigHome(
 ): string {
     const configuredHome = environment.RIG_HOME?.trim();
     if (!configuredHome) {
-        return join(homeDirectory, ".rig");
+        return join(homeDirectory, ".happy", "rig");
     }
     if (!isAbsolute(configuredHome)) {
         throw new Error("RIG_HOME must be an absolute path.");

@@ -1,12 +1,13 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
+import { createPrivateConfigurationDirectory } from "./createPrivateConfigurationDirectory.js";
 import { getGlobalAgentsMdPath } from "./getGlobalAgentsMdPath.js";
 import { GLOBAL_AGENTS_MD_MAX_BYTES } from "./globalAgentsMdMaxBytes.js";
 
 /**
- * Replaces the user's global AGENTS.md. Blank instructions remove the file, so clearing the text
- * is how a user says they no longer have global instructions.
+ * Replaces the user's global AGENTS.md. Blank instructions leave an empty file, which the reader
+ * treats as no global instructions.
  */
 export async function writeGlobalAgentsMd(
     instructions: string,
@@ -18,11 +19,11 @@ export async function writeGlobalAgentsMd(
         );
     }
 
-    if (instructions.trim().length === 0) {
-        await rm(path, { force: true });
-        return;
-    }
-
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, instructions, "utf8");
+    const directory = dirname(path);
+    await createPrivateConfigurationDirectory(directory);
+    await writeFile(path, instructions.trim().length === 0 ? "" : instructions, {
+        encoding: "utf8",
+        mode: 0o600,
+    });
+    await chmod(path, 0o600);
 }

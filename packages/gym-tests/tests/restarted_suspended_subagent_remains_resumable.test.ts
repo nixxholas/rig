@@ -206,7 +206,7 @@ function messageText(content: unknown): string {
 const markSuspendedActiveRunScript = `
 import { DatabaseSync } from "node:sqlite";
 
-const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite");
+const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
 const result = database
     .prepare("UPDATE sessions SET status = 'suspended', active_run_id = 'stale-suspended-run' WHERE parent_session_id IS NOT NULL")
     .run();
@@ -221,7 +221,7 @@ import { writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 try {
-    const database = new DatabaseSync("/home/rig/.rig/sessions.sqlite");
+    const database = new DatabaseSync("/home/rig/.happy/rig/sessions.sqlite");
     const child = database
         .prepare("SELECT status, active_run_id FROM sessions WHERE parent_session_id IS NOT NULL")
         .get();

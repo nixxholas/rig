@@ -14,7 +14,7 @@ describe("loadMcpServerConfigEntries", () => {
             await mkdir(configHome, { recursive: true });
             await mkdir(cwd, { recursive: true });
             await writeFile(
-                join(configHome, "config.toml"),
+                join(configHome, "happy.toml"),
                 `
 [mcp_servers.docs]
 command = "docs-server"
@@ -41,7 +41,7 @@ enabled = false
                 "utf8",
             );
             const entries = await loadMcpServerConfigEntries(cwd, {
-                env: { RIG_HOME: configHome } as NodeJS.ProcessEnv,
+                env: { RIG_CONFIGURATION_DIRECTORY: configHome } as NodeJS.ProcessEnv,
                 homeDirectory: join(root, "home"),
             });
             expect(Object.fromEntries(entries.map((entry) => [entry.name, entry.config]))).toEqual({

@@ -23,7 +23,7 @@ describe("Rig and official Codex Bedrock requests", () => {
             entrypoint: [
                 "/bin/sh",
                 "-lc",
-                'sed -i "s|BEDROCK_GYM_ENDPOINT|$BEDROCK_GYM_ENDPOINT|g" /home/rig/.rig/config.toml /home/rig/.codex/config.toml\nexec node /app/packages/rig/dist/main.js',
+                'sed -i "s|BEDROCK_GYM_ENDPOINT|$BEDROCK_GYM_ENDPOINT|g" /home/rig/happy/config/happy.toml /home/rig/.codex/config.toml\nexec node /app/packages/rig/dist/main.js',
             ],
             environment: {
                 AWS_BEARER_TOKEN_BEDROCK: "fake-bedrock-token",
@@ -35,7 +35,7 @@ describe("Rig and official Codex Bedrock requests", () => {
             files: { "direct-bedrock-probe.mjs": directProbe() },
             homeFiles: {
                 ".codex/config.toml": codexConfig(),
-                ".rig/config.toml": rigConfig(),
+                "happy/config/happy.toml": rigConfig(),
             },
             httpProxy: {
                 handler(request) {

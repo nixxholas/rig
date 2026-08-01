@@ -12,8 +12,18 @@ export function formatManagedNetworkDenial(request: ManagedNetworkBlockedRequest
     return (
         `Network access to ${request.host}:${String(request.port)} was denied by Rig's sandbox ` +
         `network policy because ${reason}. Rig manages the proxy variables for this sandbox; ` +
-        "removing them cannot grant direct network access. The user must update rig.toml (or " +
-        "happy.toml when rig.toml is absent) or " +
-        "~/.rig/config.toml to allow this destination.\n"
+        "removing them cannot grant direct network access. The user must update this repository's " +
+        "rig.toml (or its happy.toml fallback), or the global config at " +
+        `${formatGlobalConfigPath()} ` +
+        "to allow this destination.\n"
     );
+}
+
+function formatGlobalConfigPath(): string {
+    if (process.env.RIG_CONFIGURATION_DIRECTORY?.trim()) {
+        return "$RIG_CONFIGURATION_DIRECTORY/happy.toml";
+    }
+    return process.platform === "darwin"
+        ? "~/Happy/Config/happy.toml"
+        : "~/happy/config/happy.toml";
 }

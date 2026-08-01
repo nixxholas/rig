@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -25,6 +25,7 @@ describe("global instructions over the local protocol", () => {
                 client.updateGlobalInstructions({ instructions: "Answer in English.\n" }),
             ).resolves.toEqual({ instructions: "Answer in English.\n" });
             await expect(readFile(instructionsPath, "utf8")).resolves.toBe("Answer in English.\n");
+            expect((await stat(instructionsPath)).mode & 0o777).toBe(0o600);
             await expect(client.getGlobalInstructions()).resolves.toEqual({
                 instructions: "Answer in English.\n",
             });
@@ -52,7 +53,8 @@ describe("global instructions over the local protocol", () => {
             await expect(
                 client.updateGlobalInstructions({ instructions: "   \n" }),
             ).resolves.toEqual({ instructions: "" });
-            await expect(readFile(instructionsPath, "utf8")).rejects.toThrow();
+            await expect(readFile(instructionsPath, "utf8")).resolves.toBe("");
+            expect((await stat(instructionsPath)).mode & 0o777).toBe(0o600);
         } finally {
             await close();
         }

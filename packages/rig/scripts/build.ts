@@ -84,5 +84,6 @@ await cp(
     "sources/agent/skills/codex-skills-instructions.template.md",
     "dist/codex-skills-instructions.template.md",
 );
+await cp("sources/config/happy.template.toml", "dist/happy.template.toml");
 await cp("sources/agent/prompt/guardian-policy-template.md", "dist/guardian-policy-template.md");
 await cp("sources/agent/prompt/guardian-policy.md", "dist/guardian-policy.md");
