@@ -62,6 +62,12 @@ export type {
 } from "./ToolResultPresentation.js";
 export type { AgentContext } from "./context/AgentContext.js";
 export type {
+    AgentTreeRelation,
+    AgentTreeUsage,
+    AgentTreeUsageContext,
+    AgentTreeUsageSession,
+} from "./context/AgentTreeUsageContext.js";
+export type {
     AgentCommunicationContext,
     AgentCommunicationIdentity,
     AgentCommunicationInfo,

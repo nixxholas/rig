@@ -8,6 +8,7 @@ import { scheduling } from "./migrations/04-scheduling.js";
 import { projectDefaultBranch } from "./migrations/05-project-default-branch.js";
 import { presenceDetachedQuestions } from "./migrations/06-presence-detached-questions.js";
 import { presenceQuestionDeadlines } from "./migrations/07-presence-question-deadlines.js";
+import { agentTreeUsage } from "./migrations/08-agent-tree-usage.js";
 
 const migrations = [
     init,
@@ -17,6 +18,7 @@ const migrations = [
     projectDefaultBranch,
     presenceDetachedQuestions,
     presenceQuestionDeadlines,
+    agentTreeUsage,
 ] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 

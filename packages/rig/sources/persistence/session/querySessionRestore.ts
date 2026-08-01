@@ -165,6 +165,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         titleStatus: readString(row, "title_status") as SessionTitleStatus,
         transcriptHasEarlier: hasEarlierTranscript,
         totalTokens: readNumber(row, "total_tokens"),
+        lifetimeTotalTokens: readNumber(row, "lifetime_total_tokens"),
         ...(sessionTokenCountJson === undefined
             ? {}
             : { sessionTokenCount: JSON.parse(sessionTokenCountJson) as SessionTokenCount }),

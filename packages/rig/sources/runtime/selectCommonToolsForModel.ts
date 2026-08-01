@@ -3,6 +3,7 @@ import { scheduleMessageTool, waitTool, waitUntilTool } from "../scheduling/inde
 import { pluginTools } from "../tools/plugins/pluginTools.js";
 import { getProviderUsageTool } from "../tools/providerUsage/get_provider_usage.js";
 import { cancelAskTool } from "../tools/userInput/cancel_ask.js";
+import { getAgentTreeUsageTool } from "../tools/get_agent_tree_usage.js";
 
 export function selectCommonToolsForModel(options: {
     isSubagent: boolean;
@@ -11,6 +12,7 @@ export function selectCommonToolsForModel(options: {
         waitTool,
         waitUntilTool,
         ...(options.isSubagent ? [] : [scheduleMessageTool, cancelAskTool]),
+        getAgentTreeUsageTool,
         getProviderUsageTool,
         ...pluginTools,
     ] as readonly AnyDefinedTool[];

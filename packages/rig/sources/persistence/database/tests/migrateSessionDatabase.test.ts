@@ -10,6 +10,7 @@ import {
     CURRENT_SESSION_DATABASE_VERSION,
     migrateSessionDatabase,
 } from "../migrateSessionDatabase.js";
+import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import * as schema from "../schema.js";
 
@@ -138,6 +139,65 @@ describe("migrateSessionDatabase", () => {
                 }
             }
         }
+
+        opened.client.close();
+    });
+
+    it("backfills exact committed lifetime usage and adds the delegated traversal index", () => {
+        const opened = openTestDatabase();
+        opened.database.run(
+            sql.raw(`
+            CREATE TABLE sessions (
+                id TEXT NOT NULL PRIMARY KEY,
+                delegated_by_session_id TEXT,
+                created_at_ms INTEGER NOT NULL,
+                usage_json TEXT
+            )
+        `),
+        );
+        opened.database.run(
+            sql.raw(`
+            INSERT INTO sessions (id, delegated_by_session_id, created_at_ms, usage_json)
+            VALUES
+                (
+                    'exact',
+                    'root',
+                    1,
+                    '{"committed":{"totalTokens":125},"summary":{"groups":[{"usage":{"totalTokens":100}},{"usage":{"totalTokens":25}}]}}'
+                ),
+                ('negative', 'root', 2, '{"committed":{"totalTokens":-5}}'),
+                ('invalid', 'root', 3, '{invalid'),
+                ('missing', NULL, 4, NULL)
+        `),
+        );
+
+        agentTreeUsage(opened.database);
+
+        expect(
+            opened.database.all<{ id: string; lifetime_total_tokens: number }>(
+                sql.raw(
+                    "SELECT id, lifetime_total_tokens FROM sessions ORDER BY created_at_ms, id",
+                ),
+            ),
+        ).toEqual([
+            { id: "exact", lifetime_total_tokens: 125 },
+            { id: "negative", lifetime_total_tokens: 0 },
+            { id: "invalid", lifetime_total_tokens: 0 },
+            { id: "missing", lifetime_total_tokens: 0 },
+        ]);
+        expect(
+            opened.database
+                .all<{ detail: string }>(
+                    sql.raw(`
+                        EXPLAIN QUERY PLAN
+                        SELECT id
+                        FROM sessions INDEXED BY sessions_delegated_created
+                        WHERE delegated_by_session_id = 'root'
+                        ORDER BY created_at_ms, id
+                    `),
+                )
+                .some((row) => row.detail.includes("sessions_delegated_created")),
+        ).toBe(true);
 
         opened.client.close();
     });

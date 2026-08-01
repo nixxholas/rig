@@ -54,6 +54,7 @@ import {
 import { buildTimeline, isTimelineEventType } from "../timeline/index.js";
 import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 import { timelineAgentSource } from "./impl/timelineAgentSource.js";
+import { queryLiveAgentTreeUsage } from "./queryLiveAgentTreeUsage.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -163,6 +164,7 @@ export class InMemorySessionStore implements SessionStore {
                             session.agentMetadata().rootSessionId === rootSessionId &&
                             session.isSubagent(),
                     ),
+                queryAgentTreeUsage: (sessionId) => this.queryAgentTreeUsage(sessionId),
                 ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
             },
@@ -468,6 +470,10 @@ export class InMemorySessionStore implements SessionStore {
             })
             .map((session) => session.subagentSummary())
             .sort((left, right) => left.createdAt - right.createdAt);
+    }
+
+    queryAgentTreeUsage(sessionId: string) {
+        return queryLiveAgentTreeUsage(this.#sessions.values(), sessionId);
     }
 
     listSecrets(): readonly SecretSummary[] {

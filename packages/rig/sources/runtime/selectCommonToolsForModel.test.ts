@@ -9,6 +9,7 @@ describe("selectCommonToolsForModel", () => {
             "wait_until",
             "schedule_message",
             "cancel_ask",
+            "get_agent_tree_usage",
             "get_provider_usage",
             "plugin_install",
             "plugin_uninstall",
@@ -20,6 +21,7 @@ describe("selectCommonToolsForModel", () => {
         expect(selectCommonToolsForModel({ isSubagent: true }).map((tool) => tool.name)).toEqual([
             "wait",
             "wait_until",
+            "get_agent_tree_usage",
             "get_provider_usage",
             "plugin_install",
             "plugin_uninstall",

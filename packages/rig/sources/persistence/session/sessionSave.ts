@@ -70,6 +70,7 @@ export function sessionSave(
             titleStatus: state.titleStatus,
             toolsJson: JSON.stringify(state.tools),
             totalTokens: state.totalTokens ?? 0,
+            lifetimeTotalTokens: state.lifetimeTotalTokens ?? state.usage?.totalTokens ?? 0,
             trackUnread: state.trackUnread === true,
             unreadReason: state.unread?.reason ?? null,
             unreadSinceMs: state.unread?.since ?? null,

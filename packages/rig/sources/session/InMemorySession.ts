@@ -277,6 +277,7 @@ export interface PersistedSessionState {
     titleStatus: SessionTitleStatus;
     transcriptHasEarlier?: boolean;
     totalTokens?: number;
+    lifetimeTotalTokens?: number;
     sessionTokenCount?: SessionTokenCount;
     usage?: Usage;
     usageSummary?: SessionUsageSummary;
@@ -506,6 +507,7 @@ export class InMemorySession {
     #instructions: string | undefined;
     #interruption: SessionInterruption | undefined;
     #lastMessageAt: number | undefined;
+    #lifetimeTotalTokens = 0;
     #lastSessionRunId: string | undefined;
     #metadataController: AbortController | undefined;
     #metadataInitialAttempted = false;
@@ -755,6 +757,7 @@ export class InMemorySession {
             options.restore?.usage === undefined
                 ? this.#sumCommittedUsage()
                 : structuredClone(options.restore.usage);
+        this.#lifetimeTotalTokens = options.restore?.lifetimeTotalTokens ?? this.#usage.totalTokens;
         for (const persisted of options.restore?.workflows ?? []) {
             const state = cloneWorkflowRun(persisted.state);
             if (state.status === "running") {
@@ -1307,6 +1310,10 @@ export class InMemorySession {
         return { ...this.#agentMetadata };
     }
 
+    lifetimeTotalTokens(): number {
+        return this.#lifetimeTotalTokens;
+    }
+
     usage(events?: readonly SessionEvent[]): SessionUsageSummary {
         const eventRevision = this.events.usageRevision();
         if (
@@ -1710,6 +1717,7 @@ export class InMemorySession {
             archived: false,
             id,
             lastMessageAt: this.#now(),
+            lifetimeTotalTokens: 0,
             messages: state.messages.map((message) => ({ ...message })),
             nextTaskId: 1,
             queuedRuns: [],
@@ -3704,6 +3712,7 @@ export class InMemorySession {
             ...(this.#titleError !== undefined ? { titleError: this.#titleError } : {}),
             titleStatus: this.#titleStatus,
             totalTokens: this.#totalTokens,
+            lifetimeTotalTokens: this.#lifetimeTotalTokens,
             sessionTokenCount: structuredClone(this.#sessionTokenCount),
             usage: structuredClone(this.#usage),
             usageSummary,
@@ -5479,13 +5488,15 @@ export class InMemorySession {
         }
 
         const previousUsage = this.#usage;
+        const previousLifetimeTotalTokens = this.#lifetimeTotalTokens;
         if (event.type === "permission_review" && event.transcript !== undefined) {
-            this.#usage = addUsage(this.#usage, event.transcript.usage);
+            this.#setCommittedUsage(addUsage(this.#usage, event.transcript.usage));
         }
         try {
             this.#append("agent_event", { event, runId });
         } catch (error) {
             this.#usage = previousUsage;
+            this.#lifetimeTotalTokens = previousLifetimeTotalTokens;
             throw error;
         }
         if (event.type === "context_compacted" && this.isSubagent()) {
@@ -5615,7 +5626,7 @@ export class InMemorySession {
         const nextUsage =
             message.role === "agent" || message.role === "compaction" ? message.usage : undefined;
         if (!isDeepStrictEqual(previousUsage, nextUsage)) {
-            this.#usage = replaceUsage(this.#usage, previousUsage, nextUsage);
+            this.#setCommittedUsage(replaceUsage(this.#usage, previousUsage, nextUsage));
         }
         this.#append("agent_message", { message: eventMessage, runId });
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
@@ -5640,6 +5651,14 @@ export class InMemorySession {
                     : total,
             messageUsage,
         );
+    }
+
+    #setCommittedUsage(usage: Usage): void {
+        this.#lifetimeTotalTokens = Math.max(
+            0,
+            this.#lifetimeTotalTokens + usage.totalTokens - this.#usage.totalTokens,
+        );
+        this.#usage = usage;
     }
 
     #appendRunFinished(runId: string, result: AgentRunResult): SessionRunCompletion["status"] {
@@ -5805,6 +5824,9 @@ export class InMemorySession {
             ...(agentManager === undefined
                 ? {}
                 : {
+                      agentTreeUsage: {
+                          read: () => agentManager.queryAgentTreeUsage(this.id),
+                      },
                       chatHistory: {
                           read: (historyOptions) =>
                               agentManager.readChatHistory(this.id, historyOptions),

@@ -14,9 +14,11 @@ import type { AgentCommunicationContext } from "./AgentCommunicationContext.js";
 import type { WorkspaceContext } from "./WorkspaceContext.js";
 import type { SchedulingContext } from "../../scheduling/index.js";
 import type { ProviderUsageContext } from "./ProviderUsageContext.js";
+import type { AgentTreeUsageContext } from "./AgentTreeUsageContext.js";
 
 export interface AgentContext {
     agentCommunication?: AgentCommunicationContext;
+    agentTreeUsage?: AgentTreeUsageContext;
     fs: FileSystemContext;
     bash: BashContext;
     chatHistory?: ChatHistoryContext;

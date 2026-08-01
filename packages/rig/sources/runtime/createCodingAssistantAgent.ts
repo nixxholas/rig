@@ -9,6 +9,7 @@ import {
     createDockerAgentContext,
     type AgentOptions,
     type AgentCommunicationContext,
+    type AgentTreeUsageContext,
     type ChatHistoryContext,
     type GoalContext,
     type PermissionMode,
@@ -54,6 +55,7 @@ import type { ImageGenerationProvider } from "../tools/imageGeneration/createIma
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
     agentCommunication?: AgentCommunicationContext;
+    agentTreeUsage?: AgentTreeUsageContext;
     cwd: string;
     docker?: DockerExecutionConfig;
     durableSkills?: readonly DurableSkillDefinition[];
@@ -132,6 +134,9 @@ export function createCodingAssistantAgent(
                 throw new Error("Cross-agent messaging is unavailable in this session.");
             },
         } satisfies AgentCommunicationContext);
+    if (options.agentTreeUsage !== undefined) {
+        context.agentTreeUsage = options.agentTreeUsage;
+    }
     if (options.chatHistory !== undefined) {
         context.chatHistory = options.chatHistory;
     }

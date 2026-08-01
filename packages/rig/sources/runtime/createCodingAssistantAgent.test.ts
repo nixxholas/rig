@@ -34,7 +34,13 @@ describe("createCodingAssistantAgent", () => {
         expect(runtime.agent.snapshot().instructions).toContain(cwd);
         expect(runtime.agent.snapshot().effort).toBe("medium");
         expect(runtime.agent.tools.map((tool) => tool.name)).toEqual(
-            expect.arrayContaining(["agent_me", "agent_info", "agent_send", "codex_imagegen"]),
+            expect.arrayContaining([
+                "agent_me",
+                "agent_info",
+                "agent_send",
+                "codex_imagegen",
+                "get_agent_tree_usage",
+            ]),
         );
     });
 
@@ -136,6 +142,7 @@ describe("createCodingAssistantAgent", () => {
             "wait_until",
             "schedule_message",
             "cancel_ask",
+            "get_agent_tree_usage",
             "get_provider_usage",
             "plugin_install",
             "plugin_uninstall",
@@ -207,6 +214,7 @@ describe("createCodingAssistantAgent", () => {
             "wait_until",
             "schedule_message",
             "cancel_ask",
+            "get_agent_tree_usage",
             "get_provider_usage",
             "plugin_install",
             "plugin_uninstall",
@@ -709,6 +717,7 @@ describe("createCodingAssistantAgent", () => {
             "wait_until",
             "schedule_message",
             "cancel_ask",
+            "get_agent_tree_usage",
             "get_provider_usage",
             "plugin_install",
             "plugin_uninstall",

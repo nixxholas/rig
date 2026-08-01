@@ -15,6 +15,7 @@ import type {
     SessionSummary,
     TimelineAgent,
 } from "../protocol/index.js";
+import type { AgentTreeUsage } from "../agent/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
@@ -71,6 +72,7 @@ export interface SessionStore {
     }): readonly ExternalToolCall[];
     listDurableUserInputs(): readonly DurableUserInputCall[];
     listSubagents(parentSessionId: string): readonly SubagentSummary[];
+    queryAgentTreeUsage(sessionId: string): AgentTreeUsage | undefined;
     listSecrets(): readonly SecretSummary[];
     applyGitFacts(
         target: { projectId: string; workspaceId?: string },

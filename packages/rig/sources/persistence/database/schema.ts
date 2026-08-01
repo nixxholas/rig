@@ -150,12 +150,18 @@ export const sessions = sqliteTable(
         lastMessageAtMs: integer("last_message_at_ms"),
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
-        // Added by a later migration, so it follows the columns of the initial schema.
+        // Added by later migrations, so they follow the columns of the initial schema.
         delegatedBySessionId: text("delegated_by_session_id"),
+        lifetimeTotalTokens: integer("lifetime_total_tokens").notNull().default(0),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),
         index("sessions_parent_created").on(table.parentSessionId, table.createdAtMs),
+        index("sessions_delegated_created").on(
+            table.delegatedBySessionId,
+            table.createdAtMs,
+            table.id,
+        ),
         index("sessions_project_activity").on(
             table.projectId,
             sql`${table.lastMessageAtMs} DESC`,

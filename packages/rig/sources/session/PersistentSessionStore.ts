@@ -123,6 +123,7 @@ import { querySubagentSessionIdsByRoot } from "../persistence/session/querySubag
 import { querySubagentSummaries } from "../persistence/session/querySubagentSummaries.js";
 import { queryTimelineAgents } from "../persistence/timeline/queryTimelineAgents.js";
 import { queryTimelineEvents } from "../persistence/timeline/queryTimelineEvents.js";
+import { queryAgentTreeUsage as queryPersistedAgentTreeUsage } from "../persistence/session/queryAgentTreeUsage.js";
 import { buildTimeline } from "../timeline/index.js";
 import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 import { queryTerminalRunEvent } from "../persistence/session/queryTerminalRunEvent.js";
@@ -282,6 +283,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 listProjects: () => this.#projects.listProjects(),
                 listProjectWorkspaces: (projectId) => this.#projects.listWorkspaces(projectId),
                 listProjectSessions: (target) => queryWorkspaceSessions(this.#tx(), target),
+                queryAgentTreeUsage: (sessionId) => this.queryAgentTreeUsage(sessionId),
                 ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
                 workspace: (projectId, workspaceId) =>
@@ -658,6 +660,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
 
     listSubagents(parentSessionId: string): readonly SubagentSummary[] {
         return querySubagentSummaries(this.#tx(), parentSessionId);
+    }
+
+    queryAgentTreeUsage(sessionId: string) {
+        return queryPersistedAgentTreeUsage(this.#tx(), sessionId);
     }
 
     timeline(request: GetTimelineRequest): readonly TimelineAgent[] {

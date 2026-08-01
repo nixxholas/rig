@@ -80,6 +80,7 @@ describe("InMemorySession subagent usage", () => {
             lastContextTokens: 1_100,
             totalTokens: 2_200,
         });
+        expect(session.state().lifetimeTotalTokens).toBe(2_200);
         expect(session.subagentSummary().totalTokens).toBe(1_100);
     });
 });

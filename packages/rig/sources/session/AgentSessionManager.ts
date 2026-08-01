@@ -13,6 +13,7 @@ import {
     type SpawnSubagentResult,
     type SubagentRunStatus,
     type WaitForSubagentResult,
+    type AgentTreeUsage,
 } from "../agent/index.js";
 import { DEFAULT_SUBAGENT_WAIT_TIMEOUT_MS } from "../agent/context/subagentWaitTimeouts.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
@@ -72,6 +73,7 @@ export interface AgentSessionRepository {
         projectId: string;
         workspaceId?: string;
     }): readonly AgentWorkspaceSession[];
+    queryAgentTreeUsage?(sessionId: string): AgentTreeUsage | undefined;
     ownedWorkspace?(
         ownerSessionId: string,
         projectId: string,
@@ -118,6 +120,18 @@ export class AgentSessionManager {
         return root?.isCodexV2Collaboration?.() === true
             ? Math.min(this.maxActive, DEFAULT_MAX_ACTIVE_CODEX_V2_SUBAGENTS)
             : this.maxActive;
+    }
+
+    queryAgentTreeUsage(sessionId: string): AgentTreeUsage {
+        const query = this.#repository.queryAgentTreeUsage;
+        if (query === undefined) {
+            throw new Error("Agent tree usage is unavailable in this session.");
+        }
+        const usage = query(sessionId);
+        if (usage === undefined) {
+            throw new Error("The current session is no longer available.");
+        }
+        return usage;
     }
 
     recordChanged(child: InMemorySession): void {
