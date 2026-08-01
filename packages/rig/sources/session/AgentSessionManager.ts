@@ -210,6 +210,7 @@ export class AgentSessionManager {
     async delegate(
         delegatorSessionId: string,
         request: DelegatedSessionRequest,
+        options: { crossWorkspace: boolean } = { crossWorkspace: true },
     ): Promise<DelegatedSession> {
         const delegator = this.#current(delegatorSessionId);
         const create = this.#repository.createDelegatedSession;
@@ -221,7 +222,7 @@ export class AgentSessionManager {
             throw new Error("Only a primary session can start work in another workspace.");
         }
         const snapshot = delegator.snapshot();
-        const projectId = request.projectId ?? snapshot.projectId;
+        const projectId = this.#targetProjectId(delegatorSessionId, request.projectId, options);
         const workspace = await this.#waitForWorkspace(() =>
             resolveWorkspace(projectId, request.workspaceId),
         );

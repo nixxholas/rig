@@ -189,6 +189,21 @@ describe("sessionActivityAfterEvent", () => {
         expect(answered.pendingInputRequestIds).toBeUndefined();
     });
 
+    it("stops reporting a question once presence detaches it", () => {
+        const activity = apply([
+            event("run_started", { runId: "run-1" }),
+            event("user_input_requested", { questions: [], requestId: "question-1" }),
+            event("user_input_detached", {
+                presenceId: "away",
+                reason: "away",
+                requestId: "question-1",
+            }),
+        ]);
+
+        expect(activity.kind).toBe("thinking");
+        expect(activity.pendingInputRequestIds).toBeUndefined();
+    });
+
     it("reports how a run ended", () => {
         const started = event("run_started", { runId: "run-1" });
 

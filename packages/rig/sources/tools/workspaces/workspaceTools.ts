@@ -265,7 +265,7 @@ export const delegateToWorkspaceTool = defineTool({
     describeAutoPermissionAction: ({ workspace_id }) =>
         `start a user-visible agent session in workspace ${JSON.stringify(workspace_id)}, which works outside this conversation's own workspace`,
     execute: ({ project_id, prompt, title, workspace_id }, context) =>
-        requireCrossWorkspace(context).delegate({
+        requireWorkspaces(context).delegate({
             prompt,
             workspaceId: workspace_id,
             ...(project_id === undefined ? {} : { projectId: project_id }),
@@ -282,6 +282,7 @@ export const workspaceTools = [
     archiveWorkspaceTool,
     listWorkspacesTool,
     listWorkspaceSessionsTool,
+    delegateToWorkspaceTool,
 ] as const;
 
-export const crossWorkspaceTools = [listProjectsTool, delegateToWorkspaceTool] as const;
+export const crossWorkspaceTools = [listProjectsTool] as const;

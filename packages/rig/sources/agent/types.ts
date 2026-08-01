@@ -14,7 +14,7 @@ import type {
 } from "@slopus/rig-execution";
 import type { ToolResultPresentation } from "./ToolResultPresentation.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
-import type { UserInputResponse } from "../user-input/types.js";
+import type { UnansweredUserInput, UserInputResponse } from "../user-input/types.js";
 
 /** Plain text content. */
 export interface TextBlock {
@@ -272,6 +272,10 @@ export interface DefinedTool<
         response: UserInputResponse,
         args: Static<TArgsSchema>,
     ) => Static<TReturnSchema>;
+    resolveUnansweredUserInput?: (
+        outcome: UnansweredUserInput,
+        args: Static<TArgsSchema>,
+    ) => Static<TReturnSchema>;
     isError?: (result: Static<TReturnSchema>) => boolean;
     toLLM: (result: Static<TReturnSchema>) => readonly ContentBlock[];
     toCallPresentation?: (
@@ -322,6 +326,7 @@ export interface AnyDefinedTool {
         options: ToolExecutionOptions,
     ) => Promise<unknown> | unknown;
     resolveUserInput?: (response: UserInputResponse, args: never) => unknown;
+    resolveUnansweredUserInput?: (outcome: UnansweredUserInput, args: never) => unknown;
     isError?: (result: never) => boolean;
     toLLM: (result: never) => readonly ContentBlock[];
     toCallPresentation?: (args: never, context: AgentContext) => ToolCallPresentation | undefined;
@@ -368,6 +373,10 @@ export function defineTool<
     ) => Promise<Static<TReturnSchema>> | Static<TReturnSchema>;
     resolveUserInput?: (
         response: UserInputResponse,
+        args: Static<TArgsSchema>,
+    ) => Static<TReturnSchema>;
+    resolveUnansweredUserInput?: (
+        outcome: UnansweredUserInput,
         args: Static<TArgsSchema>,
     ) => Static<TReturnSchema>;
     isError?: (result: Static<TReturnSchema>) => boolean;

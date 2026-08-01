@@ -102,20 +102,38 @@ describe("workspace tools", () => {
         expect(listSessions).toHaveBeenCalledWith({ workspaceId: "workspace-1" });
     });
 
-    it("keeps projects and delegation behind the cross-workspace setting", () => {
+    it("keeps project listing behind the cross-workspace setting", () => {
         const harness = createJustBashToolHarness();
         harness.context.workspaces = workspaceContext({});
 
         expect(() => listProjectsTool.execute({}, harness.context, {})).toThrow(
             "features.cross_workspace",
         );
-        expect(() =>
+    });
+
+    it("delegates within the current project without cross-workspace access", async () => {
+        const harness = createJustBashToolHarness();
+        const delegate = vi.fn(async () => ({
+            agentId: "agent-2",
+            projectId: "project-1",
+            sessionId: "session-2",
+            title: "Update the changelog",
+            workspaceId: "workspace-2",
+            workspacePath: "/workspaces/changelog",
+        }));
+        harness.context.workspaces = workspaceContext({ delegate });
+
+        await expect(
             delegateToWorkspaceTool.execute(
                 { prompt: "Update the changelog.", workspace_id: "workspace-2" },
                 harness.context,
                 {},
             ),
-        ).toThrow("features.cross_workspace");
+        ).resolves.toMatchObject({ agentId: "agent-2", projectId: "project-1" });
+        expect(delegate).toHaveBeenCalledWith({
+            prompt: "Update the changelog.",
+            workspaceId: "workspace-2",
+        });
     });
 
     it("delegates a visible conversation once cross-workspace work is allowed", async () => {

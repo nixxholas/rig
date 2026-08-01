@@ -7,6 +7,8 @@ import type { TX } from "../Transaction.js";
 export function durableUserInputSave(tx: TX, call: DurableUserInputCall): void {
     tx.insert(durableUserInputs)
         .values({
+            answerDueAtMs: call.answerDueAt ?? null,
+            answerWaitStartedAtMs: call.answerWaitStartedAt ?? null,
             batchId: call.batchId,
             consumed: call.consumed,
             createdAtMs: call.createdAt,
@@ -29,6 +31,8 @@ export function durableUserInputSave(tx: TX, call: DurableUserInputCall): void {
         })
         .onConflictDoUpdate({
             set: {
+                answerDueAtMs: sql`excluded.answer_due_at_ms`,
+                answerWaitStartedAtMs: sql`excluded.answer_wait_started_at_ms`,
                 consumed: sql`excluded.consumed`,
                 detachedAtMs: sql`excluded.detached_at_ms`,
                 resolvedAtMs: sql`excluded.resolved_at_ms`,

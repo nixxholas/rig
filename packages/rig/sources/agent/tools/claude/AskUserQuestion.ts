@@ -117,6 +117,20 @@ export const claudeAskUserQuestionTool = defineTool({
     resolveUserInput(response, { questions }) {
         return resolveClaudeUserInput(response, questions);
     },
+    resolveUnansweredUserInput(outcome, { questions }) {
+        return {
+            questions: questions.map((question) => ({ ...question })),
+            answers: {},
+            unanswered: describeUnansweredQuestion({
+                askId: outcome.askId,
+                ...(outcome.changesAt === undefined ? {} : { changesAt: outcome.changesAt }),
+                now: Date.now(),
+                presence: outcome.presence,
+                reason: outcome.reason,
+                waitedMs: outcome.waitedMs,
+            }),
+        };
+    },
     toLLM: (result) => [
         {
             type: "text",

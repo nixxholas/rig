@@ -1,6 +1,6 @@
 import { loadConfig } from "./loadConfig.js";
 import type { LoadConfigOptions, PartialConfigPresence, PartialRigConfig } from "./types.js";
-import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
+import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 
 export interface PresenceSelectionToWrite {
     fallbackPresenceId?: string;
@@ -14,15 +14,16 @@ export async function writePresenceSelection(
     options: LoadConfigOptions = {},
 ): Promise<void> {
     const loaded = await loadConfig(options);
-    const runtime = loaded.sources.runtime.values;
-    const presence: PartialConfigPresence = {
-        current: selection.presenceId,
-        ...(selection.fallbackPresenceId === undefined
-            ? {}
-            : { fallback: selection.fallbackPresenceId }),
-        ...(runtime.presence?.states === undefined ? {} : { states: runtime.presence.states }),
-        ...(selection.until === undefined ? {} : { until: selection.until }),
-    };
-    const updated: PartialRigConfig = { ...runtime, presence };
-    await writeRuntimeConfig(loaded.paths.runtime, updated);
+    await updateRuntimeConfig(loaded.paths.runtime, async () => {
+        const runtime = (await loadConfig(options)).sources.runtime.values;
+        const presence: PartialConfigPresence = {
+            current: selection.presenceId,
+            ...(selection.fallbackPresenceId === undefined
+                ? {}
+                : { fallback: selection.fallbackPresenceId }),
+            ...(runtime.presence?.states === undefined ? {} : { states: runtime.presence.states }),
+            ...(selection.until === undefined ? {} : { until: selection.until }),
+        };
+        return { ...runtime, presence } satisfies PartialRigConfig;
+    });
 }

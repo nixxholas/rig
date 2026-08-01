@@ -13,8 +13,39 @@ import { writePresenceSelection } from "./writePresenceSelection.js";
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 import { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
 import { writeDaemonSettings } from "./writeDaemonSettings.js";
+import { updateRuntimeConfig } from "./updateRuntimeConfig.js";
 
 describe("config", () => {
+    it("serializes runtime config read-modify-write operations", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-runtime-config-lock-"));
+        const runtimePath = join(root, "runtime.toml");
+        let releaseFirst!: () => void;
+        const firstCanFinish = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        const entered: string[] = [];
+        try {
+            const first = updateRuntimeConfig(runtimePath, async () => {
+                entered.push("first");
+                await firstCanFinish;
+                return { settings: { showUsage: true } };
+            });
+            await Promise.resolve();
+            const second = updateRuntimeConfig(runtimePath, async () => {
+                entered.push("second");
+                return { settings: { showReasoning: true } };
+            });
+            await Promise.resolve();
+
+            expect(entered).toEqual(["first"]);
+            releaseFirst();
+            await Promise.all([first, second]);
+            expect(entered).toEqual(["first", "second"]);
+        } finally {
+            releaseFirst();
+            await rm(root, { recursive: true, force: true });
+        }
+    });
     it("falls back to happy.toml when rig.toml is absent", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-happy-config-"));
         try {

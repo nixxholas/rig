@@ -7,6 +7,7 @@ import { timelineIndex } from "./migrations/03-timeline-index.js";
 import { scheduling } from "./migrations/04-scheduling.js";
 import { projectDefaultBranch } from "./migrations/05-project-default-branch.js";
 import { presenceDetachedQuestions } from "./migrations/06-presence-detached-questions.js";
+import { presenceQuestionDeadlines } from "./migrations/07-presence-question-deadlines.js";
 
 const migrations = [
     init,
@@ -15,6 +16,7 @@ const migrations = [
     scheduling,
     projectDefaultBranch,
     presenceDetachedQuestions,
+    presenceQuestionDeadlines,
 ] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 

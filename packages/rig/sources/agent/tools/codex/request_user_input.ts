@@ -192,6 +192,17 @@ export const codexRequestUserInputTool = defineTool({
         return resolveCodexUserInput(outcome);
     },
     resolveUserInput: resolveCodexUserInput,
+    resolveUnansweredUserInput: (outcome) => ({
+        answers: {},
+        unanswered: describeUnansweredQuestion({
+            askId: outcome.askId,
+            ...(outcome.changesAt === undefined ? {} : { changesAt: outcome.changesAt }),
+            now: Date.now(),
+            presence: outcome.presence,
+            reason: outcome.reason,
+            waitedMs: outcome.waitedMs,
+        }),
+    }),
     toLLM: (result) => [{ type: "text", text: result.unanswered ?? JSON.stringify(result) }],
     toTrustedUserEvidence: (result) =>
         result.unanswered === undefined

@@ -53,6 +53,35 @@ describe("createCodingAssistantAgent", () => {
         );
     });
 
+    it("allows same-project delegation without cross-workspace access", () => {
+        const runtime = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            env: {},
+            workspaces: {
+                archive: async () => {
+                    throw new Error("unused");
+                },
+                create: async () => {
+                    throw new Error("unused");
+                },
+                crossWorkspace: false,
+                delegate: async () => {
+                    throw new Error("unused");
+                },
+                listProjects: () => [],
+                listSessions: () => [],
+                listWorkspaces: () => [],
+                spawn: async () => {
+                    throw new Error("unused");
+                },
+            },
+        });
+        const names = runtime.agent.tools.map((tool) => tool.name);
+
+        expect(names).toContain("delegate_to_workspace");
+        expect(names).not.toContain("list_projects");
+    });
+
     it("gives the Auto permission reviewer read-only tools and its own permissions", async () => {
         const runtime = createCodingAssistantAgent({
             agentId: "agent-session",

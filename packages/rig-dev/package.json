@@ -7,7 +7,7 @@
     "type": "module",
     "scripts": {
         "check": "tsc --noEmit",
-        "dev": "tsx sources/main.ts"
+        "dev": "TMPDIR=\"$PWD/../../.local\" tsx sources/main.ts"
     },
     "dependencies": {
         "tsx": "^4.23.0"

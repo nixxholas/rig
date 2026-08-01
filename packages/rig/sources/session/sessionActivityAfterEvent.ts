@@ -52,6 +52,7 @@ export function sessionActivityAfterEvent(
         case "user_input_requested":
             return withPendingInput(previous, event.createdAt, event.data.requestId);
         case "user_input_resolved":
+        case "user_input_detached":
             return withoutPendingInput(previous, event.createdAt, event.data.requestId);
         case "agent_event":
             return activityAfterAgentEvent(previous, event.createdAt, event.data.event);

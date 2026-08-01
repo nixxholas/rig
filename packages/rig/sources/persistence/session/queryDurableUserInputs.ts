@@ -21,6 +21,8 @@ export function queryDurableUserInputs(
             ORDER BY created_at_ms ASC, tool_call_index ASC
         `)
         .map((row) => {
+            const answerDueAt = readOptionalNumber(row, "answer_due_at_ms");
+            const answerWaitStartedAt = readOptionalNumber(row, "answer_wait_started_at_ms");
             const permissionJson = readOptionalString(row, "permission_json");
             const providerToolCallId = readOptionalString(row, "provider_tool_call_id");
             const responseJson = readOptionalString(row, "response_json");
@@ -28,6 +30,8 @@ export function queryDurableUserInputs(
             const resolvedAt = readOptionalNumber(row, "resolved_at_ms");
             const detachedAt = readOptionalNumber(row, "detached_at_ms");
             return {
+                ...(answerDueAt === undefined ? {} : { answerDueAt }),
+                ...(answerWaitStartedAt === undefined ? {} : { answerWaitStartedAt }),
                 batchId: readString(row, "batch_id"),
                 consumed: readNumber(row, "consumed") !== 0,
                 createdAt: readNumber(row, "created_at_ms"),

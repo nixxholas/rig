@@ -101,7 +101,6 @@ import type {
     DurableUserInputOptions,
     UserInputOutcome,
     UserInputRequest,
-    UserInputResponse,
 } from "../user-input/index.js";
 import type { CancelAskResult } from "../agent/context/UserInputContext.js";
 import { isOpenQuestion } from "../user-input/isOpenQuestion.js";
@@ -808,6 +807,7 @@ export class InMemorySession {
         for (const review of options.restore?.permissionReviews ?? []) {
             this.#permissionReviews.set(review.toolCallId, { ...review });
         }
+        this.#restoreUserInputPresenceTimers();
         this.#restoreDurableWaitTimers();
         this.#refreshWaitActivity(false);
         for (const event of this.events.all()) {
@@ -2220,6 +2220,17 @@ export class InMemorySession {
         for (const pending of [...this.#pendingUserInputs.values()]) {
             this.#applyPresenceToUserInput(pending.request.requestId, pending.durable?.kind, state);
         }
+        for (const call of this.#durableUserInputs.values()) {
+            if (
+                this.#pendingUserInputs.has(call.request.requestId) ||
+                call.kind !== "question" ||
+                call.consumed ||
+                call.status !== "pending"
+            ) {
+                continue;
+            }
+            this.#applyPresenceToRestoredUserInput(call, state);
+        }
     }
 
     /**
@@ -2238,29 +2249,160 @@ export class InMemorySession {
         const state = currentState ?? this.#presence?.state();
         if (state === undefined) return;
         const answerWaitMs = state.presence.answerWaitMs;
-        if (answerWaitMs === null) return;
+        const durable = this.#pendingUserInputs.get(requestId)?.durable;
+        if (answerWaitMs === null) {
+            if (durable?.answerDueAt !== undefined || durable?.answerWaitStartedAt !== undefined) {
+                delete durable.answerDueAt;
+                delete durable.answerWaitStartedAt;
+                this.#persistence?.upsertDurableUserInput?.(durable);
+            }
+            return;
+        }
+        const startedAt = this.#now();
+        const dueAt = startedAt + Math.max(0, answerWaitMs);
+        if (durable !== undefined) {
+            durable.answerDueAt = dueAt;
+            durable.answerWaitStartedAt = startedAt;
+            this.#persistence?.upsertDurableUserInput?.(durable);
+        }
         if (answerWaitMs <= 0) {
             this.#detachUserInput(requestId, "away", state);
             return;
         }
-        this.#armUserInputPresenceTimer(requestId, this.#now() + answerWaitMs, state);
+        this.#armUserInputPresenceTimer(requestId, dueAt, state);
     }
 
-    #armUserInputPresenceTimer(requestId: string, dueAt: number, state: PresenceState): void {
+    #armUserInputPresenceTimer(
+        requestId: string,
+        dueAt: number,
+        state: PresenceState,
+        reason: "away" | "timeout" = "timeout",
+    ): void {
         const timer = setTimeout(
             () => {
                 if (this.#userInputPresenceTimers.get(requestId) !== timer) return;
                 this.#userInputPresenceTimers.delete(requestId);
                 if (dueAt > this.#now()) {
-                    this.#armUserInputPresenceTimer(requestId, dueAt, state);
+                    this.#armUserInputPresenceTimer(requestId, dueAt, state, reason);
                     return;
                 }
-                this.#detachUserInput(requestId, "timeout", this.#presence?.state() ?? state);
+                const currentState = this.#presence?.state() ?? state;
+                if (this.#pendingUserInputs.has(requestId)) {
+                    this.#detachUserInput(requestId, reason, currentState);
+                } else {
+                    this.#detachRestoredUserInput(requestId, reason, currentState);
+                }
             },
             Math.min(MAX_TIMER_DELAY_MS, Math.max(0, dueAt - this.#now())),
         );
         timer.unref?.();
         this.#userInputPresenceTimers.set(requestId, timer);
+    }
+
+    #restoreUserInputPresenceTimers(): void {
+        const state = this.#presence?.state();
+        if (state === undefined || state.presence.answerWaitMs === null) return;
+        for (const call of this.#durableUserInputs.values()) {
+            if (
+                call.kind !== "question" ||
+                call.consumed ||
+                call.status !== "pending" ||
+                call.detachedAt !== undefined
+            ) {
+                continue;
+            }
+            const startedAt = call.answerWaitStartedAt ?? this.#now();
+            const dueAt = call.answerDueAt ?? startedAt + Math.max(0, state.presence.answerWaitMs);
+            if (call.answerDueAt === undefined || call.answerWaitStartedAt === undefined) {
+                call.answerDueAt = dueAt;
+                call.answerWaitStartedAt = startedAt;
+                this.#persistence?.upsertDurableUserInput?.(call);
+            }
+            this.#armUserInputPresenceTimer(
+                call.request.requestId,
+                dueAt,
+                state,
+                state.presence.answerWaitMs <= 0 ? "away" : "timeout",
+            );
+        }
+    }
+
+    #applyPresenceToRestoredUserInput(call: DurableUserInputCall, state: PresenceState): void {
+        this.#clearUserInputPresenceTimer(call.request.requestId);
+        const answerWaitMs = state.presence.answerWaitMs;
+        if (answerWaitMs === null) {
+            delete call.answerDueAt;
+            delete call.answerWaitStartedAt;
+            this.#persistence?.upsertDurableUserInput?.(call);
+            return;
+        }
+        const startedAt = this.#now();
+        const dueAt = startedAt + Math.max(0, answerWaitMs);
+        call.answerDueAt = dueAt;
+        call.answerWaitStartedAt = startedAt;
+        this.#persistence?.upsertDurableUserInput?.(call);
+        this.#armUserInputPresenceTimer(
+            call.request.requestId,
+            dueAt,
+            state,
+            answerWaitMs <= 0 ? "away" : "timeout",
+        );
+    }
+
+    #detachRestoredUserInput(
+        requestId: string,
+        reason: "away" | "timeout",
+        state: PresenceState,
+    ): void {
+        const call = this.#durableUserInputs.get(requestId);
+        if (
+            call === undefined ||
+            call.kind !== "question" ||
+            call.consumed ||
+            call.status !== "pending"
+        ) {
+            return;
+        }
+        const outcome = {
+            askId: requestId,
+            ...(state.changesAt === undefined ? {} : { changesAt: state.changesAt }),
+            presence: state.presence,
+            reason,
+            status: "unanswered" as const,
+            waitedMs: Math.max(0, this.#now() - (call.answerWaitStartedAt ?? call.createdAt)),
+        };
+        const runtime = this.#ensureRuntime();
+        const tool = runtime.agent.tools.find((candidate) => candidate.name === call.toolName);
+        call.result =
+            tool?.resolveUnansweredUserInput === undefined
+                ? createErrorToolResultBlock(
+                      {
+                          id: call.toolCallId,
+                          name: call.toolName,
+                          ...(call.providerToolCallId === undefined
+                              ? {}
+                              : { providerToolCallId: call.providerToolCallId }),
+                      },
+                      `Tool '${call.toolName}' could not restore its unanswered question.`,
+                      { kind: "execution_failed" },
+                  )
+                : createToolResultBlock(
+                      tool,
+                      call.toolArguments,
+                      tool.resolveUnansweredUserInput(outcome, call.toolArguments as never),
+                      call.toolCallId,
+                      undefined,
+                      call.providerToolCallId,
+                  );
+        call.detachedAt = this.#now();
+        call.status = "completed";
+        this.#persistence?.upsertDurableUserInput?.(call);
+        this.#append("user_input_detached", {
+            presenceId: state.presence.id,
+            reason,
+            requestId,
+        });
+        this.resumeDurableToolRun();
     }
 
     #detachUserInput(requestId: string, reason: "away" | "timeout", state: PresenceState): void {
@@ -5779,7 +5921,8 @@ export class InMemorySession {
                     create: async (input) =>
                         workspaceResult(await agentManager.createWorkspace(this.id, input)),
                     crossWorkspace,
-                    delegate: (request) => agentManager.delegate(this.id, request),
+                    delegate: (request) =>
+                        agentManager.delegate(this.id, request, { crossWorkspace }),
                     listProjects: () => agentManager.listProjects(this.id),
                     listSessions: (target) =>
                         agentManager.listSessions(this.id, target, { crossWorkspace }),

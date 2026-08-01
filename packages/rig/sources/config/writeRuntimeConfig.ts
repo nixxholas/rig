@@ -4,8 +4,17 @@ import { stringify } from "smol-toml";
 
 import type { PartialRigConfig } from "./types.js";
 import { serializeProviders } from "./serializeProviders.js";
+import { runWithRuntimeConfigLock } from "./runtimeConfigLock.js";
 
 export async function writeRuntimeConfig(path: string, config: PartialRigConfig): Promise<void> {
+    await runWithRuntimeConfigLock(() => writeRuntimeConfigInsideLock(path, config));
+}
+
+/** Writes while the caller holds the shared runtime config lock. */
+export async function writeRuntimeConfigInsideLock(
+    path: string,
+    config: PartialRigConfig,
+): Promise<void> {
     const defaults = config.defaults;
     const settings = config.settings;
     const presence = config.presence;

@@ -8,6 +8,10 @@ export interface DurableUserInputPermission {
 }
 
 export interface DurableUserInputCall {
+    /** Exact deadline for the active presence wait, persisted across daemon restarts. */
+    answerDueAt?: number;
+    /** When the active presence wait began. */
+    answerWaitStartedAt?: number;
     batchId: string;
     consumed: boolean;
     createdAt: number;
