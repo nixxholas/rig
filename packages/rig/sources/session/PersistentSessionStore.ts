@@ -127,6 +127,7 @@ import { buildTimeline } from "../timeline/index.js";
 import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 import { queryTerminalRunEvent } from "../persistence/session/queryTerminalRunEvent.js";
 import { inTx } from "../persistence/inTx.js";
+import { PresenceStore, resolvePresences } from "../presence/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 
@@ -143,6 +144,7 @@ export interface PersistentSessionStoreOptions {
     onSessionAccess?: (session: InMemorySession) => void;
     onSessionEvent?: (event: SessionEvent, session: InMemorySession | undefined) => void;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
+    presence?: PresenceStore;
     projectGit?: GitCommandRunner;
     taskDrain?: TaskDrain;
     secrets?: readonly SecretRegistration[];
@@ -156,6 +158,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #agentManager: AgentSessionManager;
     #client: ReturnType<typeof openSessionDatabase>["client"];
     #createRuntime: InMemorySessionOptions["createRuntime"];
+    readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     #database: SessionDatabase;
     #modelCatalog: ModelCatalog;
@@ -184,9 +187,21 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #activeTransaction: TX | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
     readonly liveEvents = new LiveGlobalEventQueue();
+    readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
 
     constructor(options: PersistentSessionStoreOptions) {
+        this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
+        this.presence.onChange((state) => {
+            const event = {
+                createdAt: this.#now(),
+                data: { presence: state },
+                id: this.#createPresenceEventId(),
+                type: "presence_changed" as const,
+            };
+            this.#globalEventQueue.publishLive(event);
+            this.liveEvents.publish(event);
+        });
         this.#secrets = new SecretRegistry();
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
         this.#createRuntime = options.createRuntime;
@@ -438,6 +453,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         let session!: InMemorySession;
         this.#transaction(() => {
             session = new InMemorySession({
+                presence: this.presence,
                 agentManager: this.#agentManager,
                 workspaceFeatures: this.#workspaceFeatures,
                 createEventId: createEventIdFactory(),
@@ -530,6 +546,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 };
             })();
             session = new InMemorySession({
+                presence: this.presence,
                 agentManager: this.#agentManager,
                 workspaceFeatures: this.#workspaceFeatures,
                 createEventId: createEventIdFactory(),
@@ -1282,6 +1299,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const loaded = querySessionRestore(this.#tx(), sessionId);
         if (loaded === undefined) return undefined;
         return new InMemorySession({
+            presence: this.presence,
             agentManager: this.#agentManager,
             workspaceFeatures: this.#workspaceFeatures,
             createEventId: createEventIdFactory(

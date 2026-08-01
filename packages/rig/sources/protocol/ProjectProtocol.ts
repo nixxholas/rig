@@ -255,7 +255,46 @@ export interface RemoteTerminalGroupState {
     terminals: readonly RemoteTerminalSummary[];
 }
 
+/** One presence state the user can be in. */
+export interface PresenceSummary {
+    /** How long a question may wait for an answer. `null` waits indefinitely, `0` never waits. */
+    answerWaitMs: number | null;
+    emoji: string;
+    id: string;
+    prompt: string;
+    title: string;
+}
+
+/** Where the user is right now, and everything they can switch to. */
+export interface PresenceSnapshot {
+    /** When the current presence expires and the fallback takes over, when that is known. */
+    changesAt?: number;
+    fallbackPresenceId?: string;
+    presence: PresenceSummary;
+    presences: readonly PresenceSummary[];
+    since: number;
+}
+
+/**
+ * The user switched presence. It is live-only: presence says where the user is now, and a client
+ * that reconnects reads the current state from the catalog rather than replaying old switches.
+ */
+export interface PresenceChangedEvent {
+    createdAt: number;
+    data: { presence: PresenceSnapshot };
+    id: EventId;
+    type: "presence_changed";
+}
+
+export interface SetPresenceRequestBody {
+    fallbackPresenceId?: string;
+    presenceId: string;
+    /** Expiry in milliseconds since the epoch. Omitted keeps the presence until it is changed. */
+    until?: number;
+}
+
 export type GlobalLiveEvent =
+    | PresenceChangedEvent
     | ProjectGitEvent
     | ProjectWorkspaceGitEvent
     | RemoteTerminalsChangedEvent
@@ -282,6 +321,7 @@ export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDeliver
 
 export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
     return (
+        event.type === "presence_changed" ||
         event.type === "project_git_changed" ||
         event.type === "workspace_git_changed" ||
         event.type === "remote_terminals_changed" ||
@@ -312,6 +352,8 @@ export interface GlobalStreamHello {
     cursor: string;
     catalog: ModelCatalog;
     identity: DaemonIdentity;
+    /** Where the user is right now, and every presence they can switch to. */
+    presence: PresenceSnapshot;
     protocolVersion: number;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];

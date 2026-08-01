@@ -23,6 +23,7 @@ import { removeStaleSocket } from "./removeStaleSocket.js";
 import { resolveHappyIntegrationMode } from "./resolveHappyIntegrationMode.js";
 import { McpClientManager } from "../mcp/index.js";
 import { loadConfig, writeDaemonSettings } from "../config/index.js";
+import { createConfiguredPresenceStore } from "../presence/index.js";
 import { createProviderQuotaService } from "../executor/createProviderQuotaService.js";
 import {
     createProviderUsageTracker,
@@ -399,6 +400,7 @@ async function runOwnedLocalProtocolServer(
                 }),
             databasePath: paths.databasePath,
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
+            presence: createConfiguredPresenceStore(loadedConfig.config.presence),
             mcpToolProvider,
             modelCatalog,
             workspacesDirectory: getManagedWorkspacesDirectory(),

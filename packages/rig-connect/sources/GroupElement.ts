@@ -2,6 +2,7 @@ import type { ConnectionState, MutationRejectedDelta } from "./ChatElement.js";
 import type {
     GitChangeSnapshot,
     DaemonIdentity,
+    PresenceSnapshot,
     ModelCatalog,
     RemoteTerminalSummary,
     SessionStatus,
@@ -117,6 +118,8 @@ export interface GroupsState {
     readonly connection: ConnectionState;
     readonly catalog?: ModelCatalog;
     readonly identity?: DaemonIdentity;
+    /** Where the user is right now, and every presence they can switch to. */
+    readonly presence?: PresenceSnapshot;
     /** True because the opening frame carries the complete active session catalog. */
     readonly sessionsComplete: boolean;
 }

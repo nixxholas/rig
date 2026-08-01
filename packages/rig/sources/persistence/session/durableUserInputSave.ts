@@ -10,6 +10,7 @@ export function durableUserInputSave(tx: TX, call: DurableUserInputCall): void {
             batchId: call.batchId,
             consumed: call.consumed,
             createdAtMs: call.createdAt,
+            detachedAtMs: call.detachedAt ?? null,
             kind: call.kind,
             permissionJson: call.permission === undefined ? null : JSON.stringify(call.permission),
             providerToolCallId: call.providerToolCallId ?? null,
@@ -29,6 +30,7 @@ export function durableUserInputSave(tx: TX, call: DurableUserInputCall): void {
         .onConflictDoUpdate({
             set: {
                 consumed: sql`excluded.consumed`,
+                detachedAtMs: sql`excluded.detached_at_ms`,
                 resolvedAtMs: sql`excluded.resolved_at_ms`,
                 responseJson: sql`excluded.response_json`,
                 resultJson: sql`excluded.result_json`,

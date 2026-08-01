@@ -28,6 +28,9 @@ import type {
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
+    GetPresenceResponse,
+    SetPresenceRequestBody,
+    SetPresenceResponse,
     GetGlobalInstructionsResponse,
     GetSessionUsageResponse,
     ListProviderUsageResponse,
@@ -845,6 +848,14 @@ export class ProtocolHttpClient {
 
     getDaemonConfig(): Promise<GetDaemonConfigResponse> {
         return this.#requestJson("GET", "/config");
+    }
+
+    getPresence(): Promise<GetPresenceResponse> {
+        return this.#requestJson("GET", "/presence");
+    }
+
+    setPresence(request: SetPresenceRequestBody): Promise<SetPresenceResponse> {
+        return this.#requestJson("PUT", "/presence", request);
     }
 
     getGlobalInstructions(): Promise<GetGlobalInstructionsResponse> {

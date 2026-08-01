@@ -68,6 +68,25 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
         },
         cursor,
         identity: { version: "test" },
+        presence: {
+            presence: {
+                answerWaitMs: null,
+                emoji: "🟢",
+                id: "online",
+                prompt: "The user is at the keyboard.",
+                title: "Online",
+            },
+            presences: [
+                {
+                    answerWaitMs: null,
+                    emoji: "🟢",
+                    id: "online",
+                    prompt: "The user is at the keyboard.",
+                    title: "Online",
+                },
+            ],
+            since: 0,
+        },
         protocolVersion: 1,
         projects: [
             {

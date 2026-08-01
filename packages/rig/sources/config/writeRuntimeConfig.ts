@@ -8,6 +8,7 @@ import { serializeProviders } from "./serializeProviders.js";
 export async function writeRuntimeConfig(path: string, config: PartialRigConfig): Promise<void> {
     const defaults = config.defaults;
     const settings = config.settings;
+    const presence = config.presence;
     const providers = config.providers;
     const theme = config.theme;
     const workspace = config.workspace;
@@ -30,6 +31,12 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
             happy_integration?: boolean;
             show_reasoning?: boolean;
             show_usage?: boolean;
+        };
+        presence?: {
+            current?: string;
+            fallback?: string;
+            states?: Record<string, Record<string, string>>;
+            until?: string;
         };
         providers?: Record<string, unknown>;
         workspace?: {
@@ -85,6 +92,30 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
         if (settings.showUsage !== undefined) document.settings.show_usage = settings.showUsage;
     }
 
+    if (presence !== undefined) {
+        document.presence = {};
+        if (presence.current !== undefined) document.presence.current = presence.current;
+        if (presence.fallback !== undefined) document.presence.fallback = presence.fallback;
+        if (presence.until !== undefined) {
+            document.presence.until = new Date(presence.until).toISOString();
+        }
+        if (presence.states !== undefined && Object.keys(presence.states).length > 0) {
+            document.presence.states = Object.fromEntries(
+                Object.entries(presence.states).map(([id, state]) => [
+                    id,
+                    {
+                        ...(state.answerWaitMs === undefined
+                            ? {}
+                            : { answer_wait: serializeAnswerWait(state.answerWaitMs) }),
+                        ...(state.emoji === undefined ? {} : { emoji: state.emoji }),
+                        ...(state.prompt === undefined ? {} : { prompt: state.prompt }),
+                        ...(state.title === undefined ? {} : { title: state.title }),
+                    },
+                ]),
+            );
+        }
+    }
+
     if (providers !== undefined || config.providerDefaultEnable !== undefined) {
         document.providers = serializeProviders(providers ?? {}, config.providerDefaultEnable);
     }
@@ -102,4 +133,10 @@ export async function writeRuntimeConfig(path: string, config: PartialRigConfig)
 
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, stringify(document), "utf8");
+}
+
+function serializeAnswerWait(answerWaitMs: number | null): string {
+    if (answerWaitMs === null) return "unlimited";
+    if (answerWaitMs === 0) return "none";
+    return `${String(Math.round(answerWaitMs / 1_000))} seconds`;
 }

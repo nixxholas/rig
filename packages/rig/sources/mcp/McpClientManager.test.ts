@@ -379,7 +379,10 @@ describe("McpClientManager", () => {
             expect(tool?.locks).toEqual(["mcp:test server"]);
 
             harness.context.userInput = {
-                request: async () => ({ answers: { environment: ["staging"] } }),
+                request: async () => ({
+                    status: "answered" as const,
+                    answers: { environment: ["staging"] },
+                }),
             };
             const elicitingTool = loaded.tools.find(
                 (candidate) => candidate.name === "mcp__test_server__ask_environment",

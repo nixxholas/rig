@@ -11,6 +11,8 @@ export interface DurableUserInputCall {
     batchId: string;
     consumed: boolean;
     createdAt: number;
+    /** When presence released the run from waiting for this answer. */
+    detachedAt?: number;
     kind: "permission" | "question";
     permission?: DurableUserInputPermission;
     providerToolCallId?: string;

@@ -51,6 +51,12 @@ export function createSlashCommands(
             aliases: ["todos"],
         },
         {
+            value: "presence",
+            label: "/presence",
+            description: "Say whether you are here to answer questions.",
+            aliases: ["away"],
+        },
+        {
             value: "debug",
             label: "/debug",
             description: "Start live process debugging.",

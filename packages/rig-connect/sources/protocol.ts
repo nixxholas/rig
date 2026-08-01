@@ -1147,11 +1147,32 @@ export interface RemoteTerminalGroupState {
     terminals: readonly RemoteTerminalSummary[];
 }
 
+/** One presence state the user can be in. */
+export interface PresenceSummary {
+    /** How long a question may wait for an answer. `null` waits indefinitely, `0` never waits. */
+    answerWaitMs: number | null;
+    emoji: string;
+    id: string;
+    prompt: string;
+    title: string;
+}
+
+/** Where the user is right now, and everything they can switch to. */
+export interface PresenceSnapshot {
+    /** When the current presence expires and the fallback takes over, when that is known. */
+    changesAt?: number;
+    fallbackPresenceId?: string;
+    presence: PresenceSummary;
+    presences: readonly PresenceSummary[];
+    since: number;
+}
+
 /** The catalog snapshot returned by `GET /catalog`. */
 export interface GlobalStreamHello {
     catalog: ModelCatalog;
     cursor: string;
     identity: DaemonIdentity;
+    presence: PresenceSnapshot;
     protocolVersion: number;
     projects: readonly Project[];
     terminalGroups: readonly RemoteTerminalGroupState[];
@@ -1233,6 +1254,12 @@ export type GlobalEvent =
     | BaseGlobalEvent<"workspace_git_changed", { git: GitChangeSnapshot }>
     | BaseGlobalEvent<"remote_terminals_changed", { terminals: readonly RemoteTerminalSummary[] }>
     | BaseSessionEvent<"session_current", { session: SessionSummary }>
+    | {
+          createdAt: number;
+          data: { presence: PresenceSnapshot };
+          id: string;
+          type: "presence_changed";
+      }
     | SessionEvent;
 
 export interface MutationRequest {

@@ -113,6 +113,25 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
             models: [],
             providers: [],
         },
+        presence: {
+            presence: {
+                answerWaitMs: null,
+                emoji: "🟢",
+                id: "online",
+                prompt: "The user is at the keyboard.",
+                title: "Online",
+            },
+            presences: [
+                {
+                    answerWaitMs: null,
+                    emoji: "🟢",
+                    id: "online",
+                    prompt: "The user is at the keyboard.",
+                    title: "Online",
+                },
+            ],
+            since: 0,
+        },
         identity: { version: "test" },
         protocolVersion: 1,
         projects: [

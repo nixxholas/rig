@@ -894,7 +894,10 @@ describe("InMemorySession", () => {
 
         session.answerUserInput("question-1", { answers: { database: ["PostgreSQL"] } });
 
-        await expect(pending).resolves.toEqual({ answers: { database: ["PostgreSQL"] } });
+        await expect(pending).resolves.toEqual({
+            status: "answered",
+            answers: { database: ["PostgreSQL"] },
+        });
         expect(session.snapshot().pendingUserInputs).toEqual([]);
         expect(session.events.since(undefined)?.at(-1)).toMatchObject({
             data: {
@@ -939,7 +942,10 @@ describe("InMemorySession", () => {
         expect(session.markRead()).toBe(false);
 
         session.answerUserInput("question-unread", { answers: { database: ["SQLite"] } });
-        await expect(pending).resolves.toEqual({ answers: { database: ["SQLite"] } });
+        await expect(pending).resolves.toEqual({
+            status: "answered",
+            answers: { database: ["SQLite"] },
+        });
 
         const untracked = store.create({ cwd: "/tmp/rig-session-test" });
         const untrackedPending = untracked.requestUserInput({

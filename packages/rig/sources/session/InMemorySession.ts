@@ -99,9 +99,13 @@ import { createEncryptedAgentTransportScope } from "../executor/createEncryptedA
 import type {
     DurableUserInputCall,
     DurableUserInputOptions,
+    UserInputOutcome,
     UserInputRequest,
     UserInputResponse,
 } from "../user-input/index.js";
+import type { CancelAskResult } from "../agent/context/UserInputContext.js";
+import { isOpenQuestion } from "../user-input/isOpenQuestion.js";
+import type { PresenceState } from "../presence/index.js";
 import {
     humanizeWorkflowName,
     serializeWorkflowValue,
@@ -357,6 +361,7 @@ export interface InMemorySessionOptions {
     onAppendEvent?: (event: SessionEvent) => void;
     orderKey?: string;
     persistence?: InMemorySessionPersistence;
+    presence?: { state(): PresenceState };
     request: CreateSessionRequest;
     projectSecretIds?: readonly string[];
     projectId?: string;
@@ -415,8 +420,10 @@ const MAX_SUBAGENT_INSPECTION_TEXT_CHARS = 32_000;
 interface PendingUserInput {
     durable?: DurableUserInputCall;
     onAbort?: () => void;
+    /** When presence started counting down the wait for this question. */
+    requestedAt: number;
     request: UserInputRequest;
-    resolve: (response: UserInputResponse) => void;
+    resolve: (outcome: UserInputOutcome) => void;
     signal?: AbortSignal;
 }
 
@@ -542,6 +549,8 @@ export class InMemorySession {
     #pendingSteeringContinuations = new Map<string, PendingSteeringContinuation>();
     #pendingUserInputs = new Map<string, PendingUserInput>();
     #persistence: InMemorySessionPersistence | undefined;
+    #presence: { state(): PresenceState } | undefined;
+    #userInputPresenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
     #providerId: string;
     #projectId: string;
     #permissionMode: PermissionMode;
@@ -598,6 +607,7 @@ export class InMemorySession {
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#modelCatalog = options.modelCatalog;
         this.#persistence = options.persistence;
+        this.#presence = options.presence;
         this.#request = {
             ...options.request,
             trackUnread: options.restore?.trackUnread ?? options.request.trackUnread ?? false,
@@ -2091,7 +2101,7 @@ export class InMemorySession {
     requestUserInput(
         request: UserInputRequest,
         options: { durable?: DurableUserInputOptions; signal?: AbortSignal } = {},
-    ): Promise<UserInputResponse> {
+    ): Promise<UserInputOutcome> {
         if (this.isSubagent()) {
             throw new Error("Only the primary session can ask the user a question.");
         }
@@ -2121,7 +2131,10 @@ export class InMemorySession {
                     );
                 }
                 if (existing.response !== undefined) {
-                    return Promise.resolve(structuredClone(existing.response));
+                    return Promise.resolve({
+                        status: "answered" as const,
+                        ...structuredClone(existing.response),
+                    });
                 }
                 durable = existing;
             } else {
@@ -2151,9 +2164,11 @@ export class InMemorySession {
             }
         }
 
-        const response = new Promise<UserInputResponse>((resolve, reject) => {
+        const requestedAt = this.#now();
+        const response = new Promise<UserInputOutcome>((resolve, reject) => {
             const pending: PendingUserInput = {
                 request,
+                requestedAt,
                 resolve,
                 ...(durable === undefined ? {} : { durable }),
             };
@@ -2161,6 +2176,7 @@ export class InMemorySession {
             const onAbort = () => {
                 if (this.#pendingUserInputs.get(request.requestId) !== pending) return;
                 this.#pendingUserInputs.delete(request.requestId);
+                this.#clearUserInputPresenceTimer(request.requestId);
                 if (pending.durable === undefined) {
                     this.#append("user_input_resolved", {
                         requestId: request.requestId,
@@ -2181,7 +2197,92 @@ export class InMemorySession {
         if (isSignalAborted(options.signal)) {
             this.#pendingUserInputs.get(request.requestId)?.onAbort?.();
         }
+        this.#applyPresenceToUserInput(request.requestId, options.durable?.kind);
         return response;
+    }
+
+    /**
+     * Questions follow the user's presence: Online waits indefinitely, Away never waits, and a
+     * custom state waits for however long it allows. When presence ends the wait the question
+     * keeps its place in the Inbox and only stops blocking the agent.
+     */
+    #applyPresenceToUserInput(
+        requestId: string,
+        kind: DurableUserInputCall["kind"] | undefined,
+    ): void {
+        if (kind !== "question") return;
+        if (!this.#pendingUserInputs.has(requestId)) return;
+        const state = this.#presence?.state();
+        if (state === undefined) return;
+        const answerWaitMs = state.presence.answerWaitMs;
+        if (answerWaitMs === null) return;
+        if (answerWaitMs <= 0) {
+            this.#detachUserInput(requestId, "away", state);
+            return;
+        }
+        const timer = setTimeout(
+            () => {
+                this.#userInputPresenceTimers.delete(requestId);
+                this.#detachUserInput(requestId, "timeout", this.#presence?.state() ?? state);
+            },
+            Math.min(MAX_TIMER_DELAY_MS, answerWaitMs),
+        );
+        timer.unref?.();
+        this.#userInputPresenceTimers.set(requestId, timer);
+    }
+
+    #detachUserInput(requestId: string, reason: "away" | "timeout", state: PresenceState): void {
+        const pending = this.#pendingUserInputs.get(requestId);
+        if (pending === undefined) return;
+        this.#clearUserInputPresenceTimer(requestId);
+        this.#pendingUserInputs.delete(requestId);
+        if (pending.onAbort !== undefined) {
+            pending.signal?.removeEventListener("abort", pending.onAbort);
+        }
+        const durable = pending.durable;
+        if (durable !== undefined && durable.status === "pending") {
+            // The run no longer waits for this answer, so a restart must not replay it.
+            durable.consumed = true;
+            durable.detachedAt = this.#now();
+            this.#persistence?.upsertDurableUserInput?.(durable);
+        }
+        this.#append("user_input_detached", { presenceId: state.presence.id, reason, requestId });
+        pending.resolve({
+            askId: requestId,
+            ...(state.changesAt === undefined ? {} : { changesAt: state.changesAt }),
+            presence: state.presence,
+            reason,
+            status: "unanswered",
+            waitedMs: Math.max(0, this.#now() - pending.requestedAt),
+        });
+    }
+
+    #clearUserInputPresenceTimer(requestId: string): void {
+        const timer = this.#userInputPresenceTimers.get(requestId);
+        if (timer === undefined) return;
+        clearTimeout(timer);
+        this.#userInputPresenceTimers.delete(requestId);
+    }
+
+    /** Withdraws a question the agent no longer needs an answer to. */
+    cancelUserInput(requestId: string): CancelAskResult {
+        const durable = this.#durableUserInputs.get(requestId);
+        if (durable === undefined) {
+            return { cancelled: false, reason: "There is no question with that id." };
+        }
+        if (!isOpenQuestion(durable)) {
+            return {
+                cancelled: false,
+                reason:
+                    durable.status === "cancelled"
+                        ? "That question was already withdrawn."
+                        : "The user already answered that question.",
+            };
+        }
+        this.#clearUserInputPresenceTimer(requestId);
+        this.#cancelDurableUserInput(durable);
+        this.#pruneDurableUserInputs();
+        return { cancelled: true };
     }
 
     answerUserInput(
@@ -2233,6 +2334,7 @@ export class InMemorySession {
             answers[question.id] = [...selected];
         }
 
+        this.#clearUserInputPresenceTimer(requestId);
         if (pending !== undefined) {
             this.#pendingUserInputs.delete(requestId);
             if (pending.onAbort !== undefined) {
@@ -2240,6 +2342,7 @@ export class InMemorySession {
             }
         }
         const normalizedResponse = { answers };
+        const detached = durable?.detachedAt !== undefined;
         if (durable !== undefined) {
             durable.response = structuredClone(normalizedResponse);
             durable.resolvedAt = this.#now();
@@ -2253,11 +2356,52 @@ export class InMemorySession {
             status: "answered",
         });
         if (pending !== undefined) {
-            pending.resolve(normalizedResponse);
+            pending.resolve({ status: "answered", ...normalizedResponse });
+        } else if (detached && durable !== undefined) {
+            // Nothing is waiting for this answer any more, so it arrives as a late notice instead.
+            this.#deliverDetachedAnswer(durable, answers);
         } else if (durable !== undefined) {
             this.resumeDurableToolRun();
         }
         return this.snapshot();
+    }
+
+    /**
+     * Tells the agent about an answer that arrived after presence had already released the run.
+     * The agent asked the question, so the late answer belongs in the conversation.
+     */
+    #deliverDetachedAnswer(
+        call: DurableUserInputCall,
+        answers: Readonly<Record<string, readonly string[]>>,
+    ): void {
+        const lines = call.request.questions.map((question) => {
+            const answer = answers[question.id];
+            return answer === undefined || answer.length === 0
+                ? `${question.question} — no answer.`
+                : `${question.question} — ${answer.join(", ")}`;
+        });
+        const message: SystemMessage = {
+            blocks: [
+                {
+                    type: "text",
+                    text: `The user has now answered the question you asked earlier.\n${lines.join("\n")}`,
+                },
+            ],
+            id: createId(),
+            internal: true,
+            role: "system",
+        };
+        const runtime = this.#runtime;
+        if (runtime === undefined) {
+            this.#separateModelContextFromVisibleTranscript();
+            this.#contextMessages?.push(message);
+            return;
+        }
+        if (this.#activeRun !== undefined && runtime.agent.status === "running") {
+            runtime.agent.steerMessage(message);
+        } else {
+            runtime.agent.enqueueMessage(message);
+        }
     }
 
     markUserInputExecuting(requestId: string): void {
@@ -2506,6 +2650,8 @@ export class InMemorySession {
         this.#closing = true;
         for (const timer of this.#durableWaitTimers.values()) clearTimeout(timer);
         this.#durableWaitTimers.clear();
+        for (const timer of this.#userInputPresenceTimers.values()) clearTimeout(timer);
+        this.#userInputPresenceTimers.clear();
         this.#releaseMcpToolLease();
         this.#clearMetadataSettlement();
         for (const workflow of this.#workflowRuns.values()) {
@@ -3276,11 +3422,7 @@ export class InMemorySession {
             ...(this.#titleError !== undefined ? { titleError: this.#titleError } : {}),
             ...(this.#interruption !== undefined ? { interruption: this.#interruption } : {}),
             inboxItems: [...this.#durableUserInputs.values()]
-                .filter(
-                    (call) =>
-                        call.kind === "question" &&
-                        (call.status === "pending" || call.response !== undefined),
-                )
+                .filter((call) => isOpenQuestion(call) || call.response !== undefined)
                 .map((call) => ({
                     ...(call.response === undefined ? {} : { answers: call.response.answers }),
                     createdAt: call.createdAt,
@@ -4315,7 +4457,9 @@ export class InMemorySession {
     }
 
     #cancelDurableUserInput(call: DurableUserInputCall): void {
-        if (call.status === "cancelled" || call.consumed) return;
+        // A detached question is consumed by its run but still open to the user, so it can be
+        // withdrawn.
+        if (call.status === "cancelled" || (call.consumed && !isOpenQuestion(call))) return;
         call.status = "cancelled";
         call.resolvedAt = this.#now();
         this.#persistence?.upsertDurableUserInput?.(call);
@@ -4463,7 +4607,10 @@ export class InMemorySession {
 
     #pruneDurableUserInputs(): void {
         const eligible = [...this.#durableUserInputs.values()]
-            .filter((call) => call.status === "cancelled" || call.consumed)
+            // A question presence detached is consumed but still open, so it must survive pruning.
+            .filter(
+                (call) => call.status === "cancelled" || (call.consumed && !isOpenQuestion(call)),
+            )
             .sort(
                 (left, right) =>
                     (right.resolvedAt ?? right.createdAt) - (left.resolvedAt ?? left.createdAt) ||
@@ -4706,11 +4853,14 @@ export class InMemorySession {
     }
 
     async #requestMcpTrust(request: McpServerTrustRequest, signal?: AbortSignal): Promise<boolean> {
-        const response = await this.requestUserInput(
+        const outcome = await this.requestUserInput(
             createMcpTrustUserInputRequest(request),
             signal === undefined ? {} : { signal },
         );
-        return response.answers.mcp_trust?.includes(MCP_TRUST_ANSWER) === true;
+        return (
+            outcome.status === "answered" &&
+            outcome.answers.mcp_trust?.includes(MCP_TRUST_ANSWER) === true
+        );
     }
 
     #removeMcpTools(runtime: CodingAssistantRuntime | undefined): void {
@@ -5455,6 +5605,7 @@ export class InMemorySession {
                 wait: (request, signal) => this.waitDurably(request, signal),
             },
             userInput: {
+                cancel: (askId) => this.cancelUserInput(askId),
                 markExecuting: (requestId) => this.markUserInputExecuting(requestId),
                 request: (request, requestOptions) =>
                     this.requestUserInput(request, requestOptions),

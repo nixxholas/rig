@@ -2,13 +2,16 @@ import { parse, TomlDate, type TomlTable, type TomlValue } from "smol-toml";
 import { MAX_CODEX_STREAM_MAX_RETRIES } from "./codexStreamRetrySettings.js";
 
 import type {
+    ConfigPresenceState,
     PartialConfigProvider,
     PartialConfigDefaults,
     PartialConfigFeatures,
+    PartialConfigPresence,
     PartialConfigSettings,
     PartialConfigTheme,
     PartialRigConfig,
 } from "./types.js";
+import { parseDateMs, parseDurationMs } from "../scheduling/parseScheduleTime.js";
 import type { McpServerConfig } from "../mcp/types.js";
 import { isPermissionMode, type PermissionMode } from "../permissions/index.js";
 import type {
@@ -29,6 +32,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         "features",
         "mcp_servers",
         "network",
+        "presence",
         "providers",
         "settings",
         "theme",
@@ -36,6 +40,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
     ]);
     const docker = readDockerConfig(table.docker);
     const network = readNetworkConfig(table.network);
+    const presence = readPresenceConfig(table.presence);
     const defaultsTable = readTable(table.defaults, "defaults");
 
     if (defaultsTable !== undefined) {
@@ -210,6 +215,7 @@ export function parseConfigToml(source: string): PartialRigConfig {
         ...(Object.keys(features).length > 0 ? { features } : {}),
         ...(mcpServers !== undefined ? { mcpServers } : {}),
         ...(network !== undefined ? { network } : {}),
+        ...(presence !== undefined ? { presence } : {}),
         ...(providerSettings?.defaultEnable === undefined
             ? {}
             : { providerDefaultEnable: providerSettings.defaultEnable }),
@@ -262,6 +268,72 @@ function readNetworkConfig(
         ),
     };
     return Object.keys(network).length === 0 ? undefined : network;
+}
+
+function readPresenceConfig(value: TomlValue | undefined): PartialConfigPresence | undefined {
+    if (value === undefined) return undefined;
+    if (!isTomlTable(value)) throw new Error("presence must be a TOML table.");
+    assertKnownKeys(value, "presence", ["current", "fallback", "states", "until"]);
+    const statesTable = readTable(value.states, "presence.states");
+    const states: Record<string, ConfigPresenceState> = {};
+    for (const [id, rawState] of Object.entries(statesTable ?? {})) {
+        if (!/^[a-z0-9_-]+$/u.test(id)) {
+            throw new Error(
+                `Presence "${id}" must be named with lowercase letters, numbers, dashes, or underscores.`,
+            );
+        }
+        if (!isTomlTable(rawState)) {
+            throw new Error(`presence.states.${id} must be a TOML table.`);
+        }
+        const path = `presence.states.${id}`;
+        assertKnownKeys(rawState, path, ["answer_wait", "emoji", "prompt", "title"]);
+        states[id] = {
+            ...readPresenceAnswerWait(rawState, path),
+            ...readOptionalString(rawState, "emoji", "emoji", `${path}.emoji`),
+            ...readOptionalString(rawState, "prompt", "prompt", `${path}.prompt`),
+            ...readOptionalString(rawState, "title", "title", `${path}.title`),
+        };
+    }
+    const until = value.until;
+    const presence: PartialConfigPresence = {
+        ...readOptionalString(value, "current", "current", "presence.current"),
+        ...readOptionalString(value, "fallback", "fallback", "presence.fallback"),
+        ...(Object.keys(states).length === 0 ? {} : { states }),
+        ...(until === undefined ? {} : { until: readPresenceUntil(until) }),
+    };
+    return Object.keys(presence).length === 0 ? undefined : presence;
+}
+
+function readPresenceAnswerWait(table: TomlTable, path: string): ConfigPresenceState {
+    const value = table.answer_wait;
+    if (value === undefined) return {};
+    if (typeof value !== "string") {
+        throw new Error(
+            `${path}.answer_wait must be a duration such as "15 minutes", "none", or "unlimited".`,
+        );
+    }
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "unlimited" || normalized === "forever") return { answerWaitMs: null };
+    if (normalized === "none" || normalized === "never") return { answerWaitMs: 0 };
+    try {
+        return { answerWaitMs: parseDurationMs({ duration: normalized }) };
+    } catch {
+        throw new Error(
+            `${path}.answer_wait must be a duration such as "15 minutes", "none", or "unlimited".`,
+        );
+    }
+}
+
+function readPresenceUntil(value: TomlValue): number {
+    if (value instanceof TomlDate) return value.getTime();
+    if (typeof value === "string" || typeof value === "number") {
+        try {
+            return parseDateMs(value);
+        } catch {
+            throw new Error("presence.until must be a date.");
+        }
+    }
+    throw new Error("presence.until must be a date.");
 }
 
 function readProviders(

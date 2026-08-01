@@ -8,6 +8,7 @@ describe("selectCommonToolsForModel", () => {
             "wait",
             "wait_until",
             "schedule_message",
+            "cancel_ask",
             "get_provider_usage",
         ]);
     });

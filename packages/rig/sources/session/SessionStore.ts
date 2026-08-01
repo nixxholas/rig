@@ -23,11 +23,14 @@ import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.
 import type { ProjectAvatarAsset } from "../project/ProjectRepository.js";
 import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
+import type { PresenceStore } from "../presence/index.js";
 
 export interface SessionStore {
     readonly globalEventQueue: GlobalEventQueue;
     /** The ephemeral stream every local client follows. Never persisted. */
     readonly liveEvents: LiveGlobalEventQueue;
+    /** Where the user is right now, and every presence they can switch to. */
+    readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     attachSecret(
         sessionId: string,

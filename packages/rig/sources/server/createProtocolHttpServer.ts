@@ -92,6 +92,12 @@ import { RIG_PROTOCOL_VERSION } from "../protocol/index.js";
 import { SESSION_DRAFT_MAX_LENGTH } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { isOpenQuestion } from "../user-input/index.js";
+import type {
+    GetPresenceResponse,
+    SetPresenceRequestBody,
+    SetPresenceResponse,
+} from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import type { SessionUsageSummary } from "../session/usage/index.js";
@@ -347,6 +353,39 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "models") {
         sendJson<ListModelsResponse>(response, 200, { catalog: modelCatalog });
+        return;
+    }
+
+    if (request.method === "GET" && route.name === "presence") {
+        sendJson<GetPresenceResponse>(response, 200, { presence: store.presence.state() });
+        return;
+    }
+
+    if (request.method === "PUT" && route.name === "presence") {
+        const body = await readJson<SetPresenceRequestBody>(request);
+        if (typeof body.presenceId !== "string" || body.presenceId.trim().length === 0) {
+            sendJson(response, 400, { error: "Choose which presence to switch to." });
+            return;
+        }
+        if (
+            body.until !== undefined &&
+            (typeof body.until !== "number" || !Number.isFinite(body.until))
+        ) {
+            sendJson(response, 400, { error: "The expiry must be a time." });
+            return;
+        }
+        try {
+            const presence = await store.presence.setPresence({
+                ...(body.fallbackPresenceId === undefined
+                    ? {}
+                    : { fallbackPresenceId: body.fallbackPresenceId }),
+                presenceId: body.presenceId,
+                ...(body.until === undefined ? {} : { until: body.until }),
+            });
+            sendJson<SetPresenceResponse>(response, 200, { presence });
+        } catch (error) {
+            sendJson(response, 400, { error: errorToMessage(error) });
+        }
         return;
     }
 
@@ -2308,6 +2347,7 @@ function matchRoute(pathname: string):
               | "happy-reload"
               | "messages"
               | "models"
+              | "presence"
               | "projects"
               | "provider-usage"
               | "secret-registrations"
@@ -2416,6 +2456,7 @@ function matchRoute(pathname: string):
     if (pathname === "/models") return { name: "models" };
     if (pathname === "/messages") return { name: "messages" };
     if (pathname === "/git/watch") return { name: "git-watch" };
+    if (pathname === "/presence") return { name: "presence" };
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
@@ -2940,12 +2981,7 @@ function buildGroupCatalog(
 ): Omit<GlobalStreamHello, "cursor"> {
     const inboxItems = new Map<string, ReturnType<SessionStore["listDurableUserInputs"]>>();
     for (const call of store.listDurableUserInputs()) {
-        if (
-            call.kind !== "question" ||
-            (call.status !== "pending" && call.response === undefined)
-        ) {
-            continue;
-        }
+        if (!isOpenQuestion(call) && call.response === undefined) continue;
         inboxItems.set(call.sessionId, [...(inboxItems.get(call.sessionId) ?? []), call]);
     }
     const sessions = store
@@ -2978,6 +3014,7 @@ function buildGroupCatalog(
     return {
         catalog: modelCatalog,
         identity,
+        presence: store.presence.state(),
         protocolVersion: RIG_PROTOCOL_VERSION,
         projects,
         terminalGroups: store.remoteTerminals.groups().flatMap((group) =>

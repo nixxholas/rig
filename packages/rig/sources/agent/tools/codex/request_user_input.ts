@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../../types.js";
 import type { UserInputResponse } from "../../../user-input/index.js";
+import { describeUnansweredQuestion } from "../../../presence/index.js";
 
 const optionSchema = Type.Object(
     {
@@ -129,7 +130,10 @@ export const codexRequestUserInputTool = defineTool({
         },
         { additionalProperties: false },
     ),
-    returnType: Type.Object({ answers: Type.Record(Type.String(), answerSchema) }),
+    returnType: Type.Object({
+        answers: Type.Record(Type.String(), answerSchema),
+        unanswered: Type.Optional(Type.String()),
+    }),
     execution: "durable",
     shouldReviewInAutoMode: () => false,
     async execute({ autoResolutionMs, questions }, context, execution) {
@@ -145,7 +149,7 @@ export const codexRequestUserInputTool = defineTool({
         if (new Set(questions.map((question) => question.id)).size !== questions.length) {
             throw new Error("Interactive question identifiers must be unique.");
         }
-        const response = await context.userInput.request(
+        const outcome = await context.userInput.request(
             {
                 ...(autoResolutionMs === undefined ? {} : { autoResolutionMs }),
                 requestId: execution.toolCallId,
@@ -172,19 +176,37 @@ export const codexRequestUserInputTool = defineTool({
                 ...(execution.signal === undefined ? {} : { signal: execution.signal }),
             },
         );
-        return resolveCodexUserInput(response);
+        if (outcome.status === "unanswered") {
+            return {
+                answers: {},
+                unanswered: describeUnansweredQuestion({
+                    askId: outcome.askId,
+                    ...(outcome.changesAt === undefined ? {} : { changesAt: outcome.changesAt }),
+                    now: Date.now(),
+                    presence: outcome.presence,
+                    reason: outcome.reason,
+                    waitedMs: outcome.waitedMs,
+                }),
+            };
+        }
+        return resolveCodexUserInput(outcome);
     },
     resolveUserInput: resolveCodexUserInput,
-    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
-    toTrustedUserEvidence: (result) => [
-        {
-            type: "text",
-            text: JSON.stringify({
-                answers: Object.values(result.answers).map((answer) => answer.answers),
-            }),
-        },
-    ],
-    toUI: (_result, args) =>
-        `Answered ${args.questions.length} question${args.questions.length === 1 ? "" : "s"}`,
+    toLLM: (result) => [{ type: "text", text: result.unanswered ?? JSON.stringify(result) }],
+    toTrustedUserEvidence: (result) =>
+        result.unanswered === undefined
+            ? [
+                  {
+                      type: "text",
+                      text: JSON.stringify({
+                          answers: Object.values(result.answers).map((answer) => answer.answers),
+                      }),
+                  },
+              ]
+            : [],
+    toUI: (result, args) =>
+        result.unanswered === undefined
+            ? `Answered ${args.questions.length} question${args.questions.length === 1 ? "" : "s"}`
+            : "Left the question waiting for the user",
     locks: [],
 });

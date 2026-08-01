@@ -676,6 +676,7 @@ codex_stream_max_retries = 8
                     workspaces: true,
                 },
                 mcpServers: {},
+                presence: { states: {} },
                 providerDefaultEnable: false,
                 providers: {
                     codex: { enabled: false, type: "codex" },
@@ -916,6 +917,74 @@ codex_stream_max_retries = 8
                 theme: {
                     primary: "#123456",
                     warning: "ansi:202",
+                },
+            });
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+    it("reads presence states and every way of writing an answer window", () => {
+        const config = parseConfigToml(
+            [
+                "[presence]",
+                'current = "errands"',
+                'fallback = "online"',
+                "[presence.states.online]",
+                'answer_wait = "forever"',
+                "[presence.states.away]",
+                'answer_wait = "never"',
+                "[presence.states.errands]",
+                'emoji = "\u{1f6b6}"',
+                'title = "Running errands"',
+                'prompt = "Decide without me."',
+                'answer_wait = "15 minutes"',
+            ].join("\n"),
+        );
+
+        expect(config.presence).toEqual({
+            current: "errands",
+            fallback: "online",
+            states: {
+                away: { answerWaitMs: 0 },
+                errands: {
+                    answerWaitMs: 900_000,
+                    emoji: "\u{1f6b6}",
+                    prompt: "Decide without me.",
+                    title: "Running errands",
+                },
+                online: { answerWaitMs: null },
+            },
+        });
+    });
+
+    it("writes the chosen presence back so a restart keeps it", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-presence-config-"));
+        try {
+            const runtimePath = join(root, "runtime.toml");
+            await writeRuntimeConfig(runtimePath, {
+                presence: {
+                    current: "errands",
+                    states: {
+                        errands: {
+                            answerWaitMs: 900_000,
+                            emoji: "\u{1f6b6}",
+                            title: "Running errands",
+                        },
+                    },
+                },
+            });
+
+            const written = await readFile(runtimePath, "utf8");
+            expect(written).toContain('current = "errands"');
+            expect(written).toContain('answer_wait = "900 seconds"');
+            expect(parseConfigToml(written).presence).toEqual({
+                current: "errands",
+                states: {
+                    errands: {
+                        answerWaitMs: 900_000,
+                        emoji: "\u{1f6b6}",
+                        title: "Running errands",
+                    },
                 },
             });
         } finally {

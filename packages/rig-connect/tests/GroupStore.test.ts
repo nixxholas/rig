@@ -78,6 +78,25 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
         },
         cursor: "c1",
         identity: { version: "test" },
+        presence: {
+            presence: {
+                answerWaitMs: null,
+                emoji: "🟢",
+                id: "online",
+                prompt: "The user is at the keyboard.",
+                title: "Online",
+            },
+            presences: [
+                {
+                    answerWaitMs: null,
+                    emoji: "🟢",
+                    id: "online",
+                    prompt: "The user is at the keyboard.",
+                    title: "Online",
+                },
+            ],
+            since: 0,
+        },
         protocolVersion: 1,
         projects: [project("p1")],
         sessions: [session("s1", "p1")],
@@ -1111,5 +1130,54 @@ describe("GroupStore and chats waiting for the person", () => {
         store.apply(event("session_archived", { archived: true }, { sessionId: "s1" }));
 
         expect(store.projects()[0]?.unread).toEqual({ attentionCount: 0, count: 0 });
+    });
+});
+
+describe("GroupStore and where the user is", () => {
+    const away = {
+        presence: {
+            answerWaitMs: 0,
+            emoji: "🌙",
+            id: "away",
+            prompt: "The user is away and cannot be reached.",
+            title: "Away",
+        },
+        presences: [
+            {
+                answerWaitMs: null,
+                emoji: "🟢",
+                id: "online",
+                prompt: "The user is at the keyboard.",
+                title: "Online",
+            },
+            {
+                answerWaitMs: 0,
+                emoji: "🌙",
+                id: "away",
+                prompt: "The user is away and cannot be reached.",
+                title: "Away",
+            },
+        ],
+        since: 5,
+    };
+
+    it("reads presence from the opening frame and follows it as it changes", () => {
+        const store = new GroupStore();
+        store.applyHello(hello());
+        expect(store.state().presence?.presence.id).toBe("online");
+
+        const deltas = store.apply(event("presence_changed", { presence: away }));
+
+        expect(deltas.map((delta) => delta.type)).toContain("groups_state_changed");
+        expect(store.state().presence).toEqual(away);
+    });
+
+    it("ignores a presence change that says what it already knows", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ presence: away }));
+        const before = store.state();
+
+        expect(store.apply(event("presence_changed", { presence: { ...away } }))).toEqual([]);
+        expect(store.state()).toBe(before);
     });
 });

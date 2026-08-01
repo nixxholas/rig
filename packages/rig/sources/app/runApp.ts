@@ -290,6 +290,11 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                 : [{ text: projectMcpNotice, title: "Project MCP needs trust" }]),
         ];
         const tuiInspectorUrl = getNodeInspectorUrl();
+        // Presence is daemon-wide, so a client that cannot read it simply hides the control.
+        const initialPresence = await localServer.client
+            .getPresence()
+            .then((result) => result.presence)
+            .catch(() => undefined);
         const app = new CodingAssistantApp({
             ...(activeAgentLabel === undefined ? {} : { activeAgentLabel }),
             agent,
@@ -322,6 +327,14 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             modelLocked: session.session.modelLocked,
             listSecrets: () =>
                 localServer.client.listSecrets().then((response) => response.secrets),
+            presence: {
+                get: () => localServer.client.getPresence().then((result) => result.presence),
+                ...(initialPresence === undefined ? {} : { initial: initialPresence }),
+                set: (presenceId) =>
+                    localServer.client
+                        .setPresence({ presenceId })
+                        .then((result) => result.presence),
+            },
             onDefaultModelChange: (preference) =>
                 enqueueRuntimeConfigWrite(() =>
                     writeRuntimeConfig(loadedConfig.paths.runtime, {

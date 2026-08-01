@@ -12,6 +12,7 @@ describe("handleMcpElicitation", () => {
         const harness = createJustBashToolHarness();
         harness.context.userInput = {
             request: async () => ({
+                status: "answered" as const,
                 answers: { count: ["42"], environment: ["Production environment"] },
             }),
         };
@@ -48,7 +49,7 @@ describe("handleMcpElicitation", () => {
         const client = {} as Client;
         const harness = createJustBashToolHarness();
         harness.context.userInput = {
-            request: async () => ({ answers: { action: ["Skip"] } }),
+            request: async () => ({ status: "answered" as const, answers: { action: ["Skip"] } }),
         };
         const request = {
             method: "elicitation/create",
@@ -78,7 +79,7 @@ describe("handleMcpElicitation", () => {
         harness.context.userInput = {
             request: async (request) => {
                 requests.push(request);
-                return { answers: { confirmed: ["Yes"] } };
+                return { status: "answered" as const, answers: { confirmed: ["Yes"] } };
             },
         };
         const request = {
@@ -122,7 +123,7 @@ describe("handleMcpElicitation", () => {
         harness.context.userInput = {
             request: async (request) => {
                 requests.push(request);
-                return { answers: { confirmation: ["Continue"] } };
+                return { status: "answered" as const, answers: { confirmation: ["Continue"] } };
             },
         };
         const request = emptySchemaRequest("Proceed with deleting remote records?");
@@ -150,7 +151,10 @@ describe("handleMcpElicitation", () => {
         const client = {} as Client;
         const harness = createJustBashToolHarness();
         harness.context.userInput = {
-            request: async () => ({ answers: { confirmation: ["Decline"] } }),
+            request: async () => ({
+                status: "answered" as const,
+                answers: { confirmation: ["Decline"] },
+            }),
         };
 
         const result = await runMcpClientCall(client, harness.context, () =>

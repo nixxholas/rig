@@ -12,6 +12,7 @@ export const DEFAULT_RIG_CONFIG: RigConfig = {
         workspaces: true,
     },
     mcpServers: {},
+    presence: { states: {} },
     providerDefaultEnable: true,
     providers: {
         codex: {

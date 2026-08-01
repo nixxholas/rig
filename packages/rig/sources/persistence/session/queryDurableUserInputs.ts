@@ -26,10 +26,12 @@ export function queryDurableUserInputs(
             const responseJson = readOptionalString(row, "response_json");
             const resultJson = readOptionalString(row, "result_json");
             const resolvedAt = readOptionalNumber(row, "resolved_at_ms");
+            const detachedAt = readOptionalNumber(row, "detached_at_ms");
             return {
                 batchId: readString(row, "batch_id"),
                 consumed: readNumber(row, "consumed") !== 0,
                 createdAt: readNumber(row, "created_at_ms"),
+                ...(detachedAt === undefined ? {} : { detachedAt }),
                 kind: readString(row, "kind") as DurableUserInputCall["kind"],
                 ...(permissionJson === undefined ? {} : { permission: JSON.parse(permissionJson) }),
                 ...(providerToolCallId === undefined ? {} : { providerToolCallId }),

@@ -83,12 +83,14 @@ export async function handleMcpElicitation(
                 },
             ],
         });
-        return response.answers.confirmation?.includes("Continue") === true
+        return response.status === "answered" &&
+            response.answers.confirmation?.includes("Continue") === true
             ? { action: "accept", content: {} }
             : { action: "decline" };
     }
 
     const response = await userInput.request({ requestId: `mcp:${randomUUID()}`, questions });
+    if (response.status !== "answered") return { action: "decline" };
     const content: Record<string, string | number | boolean | string[]> = {};
     for (const [id, property] of entries) {
         const answers = response.answers[id] ?? [];

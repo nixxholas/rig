@@ -46,6 +46,7 @@ import {
     type RemoteTerminalScope,
 } from "../terminal/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
+import { PresenceStore, resolvePresences } from "../presence/index.js";
 import {
     openSessionDatabase,
     type SessionDatabase,
@@ -59,6 +60,7 @@ export interface InMemorySessionStoreOptions {
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
+    presence?: PresenceStore;
     secrets?: readonly SecretRegistration[];
     homeDirectory?: string;
     stateDirectory?: string;
@@ -76,10 +78,12 @@ export class InMemorySessionStore implements SessionStore {
     #projectSecretIds = new Map<string, Set<string>>();
     readonly #client: ReturnType<typeof openSessionDatabase>["client"];
     readonly #database: SessionDatabase;
+    readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     readonly #projects: ProjectRepository;
     readonly globalEventQueue = new InMemoryGlobalEventQueue();
     readonly liveEvents = new LiveGlobalEventQueue();
+    readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
@@ -122,6 +126,17 @@ export class InMemorySessionStore implements SessionStore {
                 this.liveEvents.publish(event);
             },
             resolveContext: (scope) => this.#remoteTerminalContext(scope),
+        });
+        this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
+        this.presence.onChange((state) => {
+            const event = {
+                createdAt: Date.now(),
+                data: { presence: state },
+                id: this.#createPresenceEventId(),
+                type: "presence_changed" as const,
+            };
+            this.globalEventQueue.publishLive(event);
+            this.liveEvents.publish(event);
         });
         this.#secrets = new SecretRegistry(options.secrets);
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
@@ -265,6 +280,7 @@ export class InMemorySessionStore implements SessionStore {
             }
         }
         const session = new InMemorySession({
+            presence: this.presence,
             agentManager: this.#agentManager,
             createEventId: createEventIdFactory(),
             ...(targetSessionId === undefined ? {} : { id: targetSessionId }),
@@ -338,6 +354,7 @@ export class InMemorySessionStore implements SessionStore {
             };
         })();
         const session = new InMemorySession({
+            presence: this.presence,
             agentManager: this.#agentManager,
             createEventId: createEventIdFactory(),
             ...(this.#createRuntime === undefined ? {} : { createRuntime: this.#createRuntime }),

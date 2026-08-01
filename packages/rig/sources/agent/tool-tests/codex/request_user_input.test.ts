@@ -6,7 +6,10 @@ import { codexRequestUserInputTool } from "../../tools/codex/request_user_input.
 describe("Codex request_user_input tool", () => {
     it("pauses for a structured answer and returns Codex's answer shape", async () => {
         const harness = createJustBashToolHarness();
-        const request = vi.fn(async () => ({ answers: { database: ["PostgreSQL"] } }));
+        const request = vi.fn(async () => ({
+            status: "answered" as const,
+            answers: { database: ["PostgreSQL"] },
+        }));
         harness.context.userInput = { request };
         const questions = [
             {

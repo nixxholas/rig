@@ -12,6 +12,7 @@ import type {
     GitChangeSnapshot,
     GlobalEvent,
     GlobalStreamHello,
+    PresenceSnapshot,
     Project,
     ProjectWorkspace,
     RemoteTerminalGroupState,
@@ -420,9 +421,11 @@ export class GroupStore {
         const deltas: GroupDelta[] = [];
         const catalog = hello.catalog;
         const identity = hello.identity;
+        const presence = hello.presence;
         if (
             this.#state.sessionsComplete !== hello.sessionsComplete ||
             !sameProtocolValue(this.#state.catalog, catalog) ||
+            !sameProtocolValue(this.#state.presence, presence) ||
             !sameProtocolValue(this.#state.identity, identity)
         ) {
             this.#state = {
@@ -430,6 +433,7 @@ export class GroupStore {
                 sessionsComplete: hello.sessionsComplete,
                 catalog,
                 identity,
+                presence,
             };
             deltas.push({ state: this.#state, type: "groups_state_changed" });
         }
@@ -441,6 +445,13 @@ export class GroupStore {
     apply(event: GlobalEvent): readonly GroupDelta[] {
         const deltas: GroupDelta[] = [];
         switch (event.type) {
+            case "presence_changed": {
+                const { presence } = event.data as { presence: PresenceSnapshot };
+                if (sameProtocolValue(this.#state.presence, presence)) break;
+                this.#state = { ...this.#state, presence };
+                deltas.push({ state: this.#state, type: "groups_state_changed" });
+                break;
+            }
             case "project_created":
             case "project_updated": {
                 const { project } = event.data as { project: Project };

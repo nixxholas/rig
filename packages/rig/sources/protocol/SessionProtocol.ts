@@ -18,7 +18,7 @@ import type { SessionTask } from "../tasks/index.js";
 import type { WorkflowRun, WorkflowRunUpdate } from "../workflows/index.js";
 import type { ChangeGoalStatusRequest, CreateGoalRequest, SessionGoal } from "../goals/index.js";
 import type { EventId } from "./EventId.js";
-import type { GitChangeSnapshot } from "./ProjectProtocol.js";
+import type { GitChangeSnapshot, PresenceSnapshot } from "./ProjectProtocol.js";
 import type { DockerExecutionConfig } from "../execution/DockerExecutionConfig.js";
 import type { SessionExecutionEnvironment } from "../execution/SessionExecutionEnvironment.js";
 import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
@@ -990,6 +990,7 @@ export type SessionEvent =
     | SessionDraftChangedEvent
     | SecretsChangedEvent
     | UserInputRequestedEvent
+    | UserInputDetachedEvent
     | UserInputResolvedEvent
     | MutationAppliedEvent
     | McpServersChangedEvent
@@ -1286,6 +1287,12 @@ export type SecretsChangedEvent = BaseSessionEvent<
 
 export type UserInputRequestedEvent = BaseSessionEvent<"user_input_requested", UserInputRequest>;
 
+/** Presence stopped an agent from waiting for this question; it stays open in the Inbox. */
+export type UserInputDetachedEvent = BaseSessionEvent<
+    "user_input_detached",
+    { presenceId: string; reason: "away" | "timeout"; requestId: string }
+>;
+
 export type UserInputResolvedEvent = BaseSessionEvent<
     "user_input_resolved",
     {
@@ -1295,6 +1302,14 @@ export type UserInputResolvedEvent = BaseSessionEvent<
         status: "answered" | "cancelled";
     }
 >;
+
+export interface GetPresenceResponse {
+    presence: PresenceSnapshot;
+}
+
+export interface SetPresenceResponse {
+    presence: PresenceSnapshot;
+}
 
 export type MutationAppliedEvent = BaseSessionEvent<"mutation_applied", { mutationId: string }>;
 

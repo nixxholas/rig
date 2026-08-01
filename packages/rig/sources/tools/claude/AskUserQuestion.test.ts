@@ -7,6 +7,7 @@ describe("Claude AskUserQuestion tool", () => {
     it("maps multi-select answers back to Claude's question-keyed result", async () => {
         const harness = createJustBashToolHarness();
         const request = vi.fn(async () => ({
+            status: "answered" as const,
             answers: { question_1: ["Email", "Push notifications"] },
         }));
         harness.context.userInput = { request };
@@ -61,7 +62,7 @@ describe("Claude AskUserQuestion tool", () => {
     it("rejects duplicate question text before answers can overwrite each other", async () => {
         const harness = createJustBashToolHarness();
         harness.context.userInput = {
-            request: vi.fn(async () => ({ answers: {} })),
+            request: vi.fn(async () => ({ status: "answered" as const, answers: {} })),
         };
         const question = {
             header: "Choice",

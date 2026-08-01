@@ -1599,6 +1599,30 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
+    it("reports where the user is and lets a client switch it", async () => {
+        const { client, close } = await startServer();
+        try {
+            const initial = await client.getPresence();
+
+            expect(initial.presence.presence.id).toBe("online");
+            expect(initial.presence.presences.map((presence) => presence.id)).toEqual([
+                "online",
+                "away",
+            ]);
+            expect((await client.catalog()).presence.presence.id).toBe("online");
+
+            const changed = await client.setPresence({ presenceId: "away" });
+
+            expect(changed.presence.presence.title).toBe("Away");
+            expect((await client.catalog()).presence.presence.id).toBe("away");
+            await expect(client.setPresence({ presenceId: "sleeping" })).rejects.toThrow(
+                /There is no presence called/u,
+            );
+        } finally {
+            await close();
+        }
+    });
+
     it("changes session permissions through a dedicated endpoint", async () => {
         const { client, close } = await startServer();
         try {
@@ -1902,7 +1926,10 @@ describe("createProtocolHttpServer", () => {
                 answers: { database: ["SQLite"] },
             });
 
-            await expect(pending).resolves.toEqual({ answers: { database: ["SQLite"] } });
+            await expect(pending).resolves.toEqual({
+                status: "answered",
+                answers: { database: ["SQLite"] },
+            });
             expect(answered.session.pendingUserInputs).toEqual([]);
             await expect(
                 client.answerUserInput(created.session.id, "question/1", {
@@ -1924,7 +1951,7 @@ describe("createProtocolHttpServer", () => {
                 ],
             });
             await client.answerUserInput(created.session.id, "question/optional", { answers: {} });
-            await expect(optional).resolves.toEqual({ answers: {} });
+            await expect(optional).resolves.toEqual({ status: "answered", answers: {} });
         } finally {
             await close();
         }

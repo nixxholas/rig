@@ -20,6 +20,7 @@ export { resolveConfigPaths } from "./resolveConfigPaths.js";
 export { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 export { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
 export { writeDaemonSettings } from "./writeDaemonSettings.js";
+export { writePresenceSelection } from "./writePresenceSelection.js";
 export type {
     ConfigDefaults,
     ConfigBedrockProvider,
@@ -30,6 +31,8 @@ export type {
     DaemonSettings,
     ConfigFeatures,
     ConfigPaths,
+    ConfigPresence,
+    ConfigPresenceState,
     ConfigProviders,
     ConfigSettings,
     ConfigSource,
@@ -41,6 +44,7 @@ export type {
     RigConfig,
     PartialConfigDefaults,
     PartialConfigFeatures,
+    PartialConfigPresence,
     PartialConfigProviders,
     PartialConfigSettings,
     PartialConfigTheme,

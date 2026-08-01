@@ -64,6 +64,31 @@ export interface PartialConfigWorkspace {
     setupCommands?: readonly string[];
 }
 
+export interface ConfigPresenceState {
+    /** How long a question may wait for an answer. `null` waits indefinitely, `0` never waits. */
+    answerWaitMs?: number | null;
+    emoji?: string;
+    prompt?: string;
+    title?: string;
+}
+
+export interface ConfigPresence {
+    /** Presence the user is in. Written back by the daemon when the user switches. */
+    current?: string;
+    /** Presence to fall back to when the current one expires. */
+    fallback?: string;
+    states: Readonly<Record<string, ConfigPresenceState>>;
+    /** Expiry of the current presence, in milliseconds since the epoch. */
+    until?: number;
+}
+
+export interface PartialConfigPresence {
+    current?: string;
+    fallback?: string;
+    states?: Readonly<Record<string, ConfigPresenceState>>;
+    until?: number;
+}
+
 interface ConfigProviderBase {
     enabled: boolean;
     excludeModels?: readonly string[];
@@ -139,6 +164,7 @@ export interface RigConfig {
     features: ConfigFeatures;
     mcpServers: Readonly<Record<string, McpServerConfig>>;
     network?: ConfigNetwork;
+    presence: ConfigPresence;
     providerDefaultEnable: boolean;
     providers: ConfigProviders;
     settings: ConfigSettings;
@@ -152,6 +178,7 @@ export interface PartialRigConfig {
     features?: PartialConfigFeatures;
     mcpServers?: Readonly<Record<string, McpServerConfig>>;
     network?: ConfigNetwork;
+    presence?: PartialConfigPresence;
     providerDefaultEnable?: boolean;
     providers?: PartialConfigProviders;
     settings?: PartialConfigSettings;

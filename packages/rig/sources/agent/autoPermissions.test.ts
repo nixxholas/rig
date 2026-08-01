@@ -116,6 +116,7 @@ describe("Auto permissions", () => {
         const tool = permissionProbeTool(observedModes);
         const provider = autoReviewProvider("allow");
         const request = vi.fn<UserInputContext["request"]>(async () => ({
+            status: "answered" as const,
             answers: { permission: ["Deny"] },
         }));
         harness.context.userInput = { request };
@@ -511,6 +512,7 @@ describe("Auto permissions", () => {
         const tool = sessionInputProbeTool(observedInputs);
         const provider = compromisedSessionInputReviewProvider();
         const request = vi.fn<UserInputContext["request"]>(async () => ({
+            status: "answered" as const,
             answers: { permission: ["Deny"] },
         }));
         harness.context.userInput = { request };
@@ -590,6 +592,7 @@ describe("Auto permissions", () => {
         const tool = permissionProbeTool(observedModes);
         const provider = autoReviewProvider("deny");
         const request = vi.fn<UserInputContext["request"]>(async () => ({
+            status: "answered" as const,
             answers: { permission: ["Deny"] },
         }));
         harness.context.userInput = { request };
@@ -633,7 +636,10 @@ describe("Auto permissions", () => {
         const harness = createJustBashToolHarness();
         harness.context.permissions = createPermissionContext("auto");
         harness.context.userInput = {
-            request: async () => ({ answers: { question_1: ["Dark"] } }),
+            request: async () => ({
+                status: "answered" as const,
+                answers: { question_1: ["Dark"] },
+            }),
         };
         const questions = [
             {

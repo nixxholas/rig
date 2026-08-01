@@ -10,6 +10,7 @@ export async function writeDaemonSettings(
     const runtime = loaded.sources.runtime.values;
     const updated: PartialRigConfig = {
         ...(runtime.defaults === undefined ? {} : { defaults: runtime.defaults }),
+        ...(runtime.presence === undefined ? {} : { presence: runtime.presence }),
         ...(runtime.providerDefaultEnable === undefined
             ? {}
             : { providerDefaultEnable: runtime.providerDefaultEnable }),

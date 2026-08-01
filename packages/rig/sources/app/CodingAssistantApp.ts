@@ -29,6 +29,7 @@ import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/
 import { parseSkillFrontmatter } from "../agent/skills/parseSkillFrontmatter.js";
 import type { FileDiff } from "../agent/ToolResultPresentation.js";
 import { errorToMessage } from "../errorToMessage.js";
+import { ONLINE_PRESENCE_ID } from "../presence/index.js";
 import type { NativeProcessManager } from "../processes/index.js";
 import { humanizeMcpName } from "../mcp/humanizeMcpName.js";
 import type { ServiceTier, Usage } from "@slopus/rig-execution";
@@ -40,6 +41,8 @@ import type {
     FileSearchResult,
     EventId,
     McpServerSummary,
+    PresenceSnapshot,
+    PresenceSummary,
     RunShellCommandResult,
     RunShellCommandResponse,
     SecretSummary,
@@ -175,6 +178,14 @@ const MAX_DIFF_ROWS_PER_TOOL = 120;
 
 export type AppExitReason = "exit" | "reload";
 
+/** Plain-English summary of how long this presence lets a question wait. */
+function describePresenceWait(answerWaitMs: number | null): string {
+    if (answerWaitMs === null) return "Questions wait for you as long as they need to.";
+    if (answerWaitMs <= 0) return "Questions never wait; agents keep working on their own.";
+    const minutes = Math.max(1, Math.round(answerWaitMs / 60_000));
+    return `Questions wait about ${String(minutes)} minute${minutes === 1 ? "" : "s"}, then agents continue.`;
+}
+
 export interface CodingAssistantAppOptions {
     activeAgentLabel?: string;
     agent: CodingAssistantAgentBackend;
@@ -197,6 +208,12 @@ export interface CodingAssistantAppOptions {
     initialUserInputs?: readonly UserInputRequest[];
     modelLocked?: boolean;
     listSecrets?: () => readonly SecretSummary[] | Promise<readonly SecretSummary[]>;
+    /** Where the user is, and how to switch it. Absent when the daemon does not report presence. */
+    presence?: {
+        get?: () => Promise<PresenceSnapshot>;
+        initial?: PresenceSnapshot;
+        set: (presenceId: string) => Promise<PresenceSnapshot>;
+    };
     processManager: NativeProcessManager;
     sessionBacked?: boolean;
     tui: TUI;
@@ -386,6 +403,8 @@ export class CodingAssistantApp implements Component, Focusable {
     readonly #theme: TerminalTheme;
     readonly #startupStatus: StartupStatusCardModel;
     readonly #secretMenu: SecretMenuController;
+    readonly #presence: CodingAssistantAppOptions["presence"];
+    #presenceState: PresenceSnapshot | undefined;
     readonly #version: string;
     readonly #exitPromise: Promise<AppExitReason>;
 
@@ -556,6 +575,8 @@ export class CodingAssistantApp implements Component, Focusable {
             theme: this.#theme,
             unregisterSecret: options.unregisterSecret,
         });
+        this.#presence = options.presence;
+        this.#presenceState = options.presence?.initial;
         this.#version = options.version ?? "0.0.0";
         const snapshot = options.agent.snapshot();
         const startupStatus: StartupStatusCardModel = {
@@ -1977,6 +1998,11 @@ export class CodingAssistantApp implements Component, Focusable {
 
         if (prompt === "/debug") {
             this.#handleDebugCommand();
+            return true;
+        }
+
+        if (prompt === "/presence" || prompt === "/away") {
+            this.#openPresenceMenu();
             return true;
         }
 
@@ -4325,6 +4351,74 @@ export class CodingAssistantApp implements Component, Focusable {
         return this.#renderNoticeEntry("System", entry.text, width, this.#theme.secondary);
     }
 
+    #openPresenceMenu(): void {
+        const presence = this.#presence;
+        if (presence === undefined || this.#presenceState === undefined) {
+            this.#appendEntry({
+                role: "event",
+                title: "Presence",
+                text: "This session cannot change your presence.",
+            });
+            this.#requestRender();
+            return;
+        }
+        if (presence.get === undefined) {
+            this.#showPresencePanel(presence, this.#presenceState);
+            return;
+        }
+        // Presence is daemon-wide and can expire on its own, so read it again before showing it.
+        presence
+            .get()
+            .then((fresh) => {
+                this.#presenceState = fresh;
+                this.#showPresencePanel(presence, fresh);
+            })
+            .catch(() => {
+                if (this.#presenceState !== undefined) {
+                    this.#showPresencePanel(presence, this.#presenceState);
+                }
+            });
+    }
+
+    #showPresencePanel(
+        presence: NonNullable<CodingAssistantAppOptions["presence"]>,
+        state: PresenceSnapshot,
+    ): void {
+        const panel = createSelectionPanel({
+            theme: this.#theme,
+            title: "Where are you?",
+            subtitle: "Agents follow this when they need an answer",
+            selectedValue: state.presence.id,
+            items: state.presences.map((candidate: PresenceSummary) => ({
+                value: candidate.id,
+                label: `${candidate.emoji} ${candidate.title}`,
+                description: describePresenceWait(candidate.answerWaitMs),
+            })),
+            onSelect: (item) => {
+                presence
+                    .set(item.value)
+                    .then((next) => {
+                        this.#presenceState = next;
+                        this.#appendEntry({
+                            role: "event",
+                            title: "Presence",
+                            text: `You are now ${next.presence.title}.`,
+                        });
+                        this.#requestRender();
+                    })
+                    .catch((error: unknown) => {
+                        this.#appendEntry({ role: "error", text: errorToMessage(error) });
+                        this.#requestRender();
+                    });
+                this.#closeSelectionPanel();
+                this.#requestRender();
+            },
+            onCancel: () => this.#closeSelectionPanel(),
+        });
+        this.#showSelectionPanel(panel);
+        this.#requestRender();
+    }
+
     #renderFooter(
         width: number,
         suggestions: readonly AutocompleteItem[],
@@ -4346,6 +4440,13 @@ export class CodingAssistantApp implements Component, Focusable {
         }
         if (this.#pendingPrompts.length > 0) {
             parts.push(`${this.#theme.secondary}queued ${this.#pendingPrompts.length}${RESET}`);
+        }
+        // Online is the quiet default, so the footer only speaks up when the user is elsewhere.
+        const presence = this.#presenceState?.presence;
+        if (presence !== undefined && presence.id !== ONLINE_PRESENCE_ID) {
+            parts.push(
+                `${this.#theme.secondary}${presence.emoji} ${presence.title.toLowerCase()}${RESET}`,
+            );
         }
         parts.push(
             `${this.#theme.secondary}${humanizePermissionMode(this.#agent.permissionMode).toLowerCase()}${RESET}`,

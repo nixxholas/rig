@@ -1,4 +1,9 @@
-import type { PartialConfigProvider, RigConfig, PartialRigConfig } from "./types.js";
+import type {
+    ConfigPresence,
+    PartialConfigProvider,
+    RigConfig,
+    PartialRigConfig,
+} from "./types.js";
 
 export function mergeConfigValues(
     baseDefaults: RigConfig,
@@ -9,6 +14,10 @@ export function mergeConfigValues(
     const features = { ...baseDefaults.features };
     const mcpServers = { ...baseDefaults.mcpServers };
     let network = baseDefaults.network;
+    const presence: ConfigPresence = {
+        ...baseDefaults.presence,
+        states: { ...baseDefaults.presence.states },
+    };
     let providerDefaultEnable = baseDefaults.providerDefaultEnable;
     const providers: Record<string, PartialConfigProvider> = Object.fromEntries(
         Object.entries(baseDefaults.providers).map(([id, provider]) => {
@@ -93,6 +102,19 @@ export function mergeConfigValues(
             Object.assign(mcpServers, config.mcpServers);
         }
         if (config.network !== undefined) network = config.network;
+        if (config.presence !== undefined) {
+            if (config.presence.current !== undefined) presence.current = config.presence.current;
+            if (config.presence.fallback !== undefined) {
+                presence.fallback = config.presence.fallback;
+            }
+            if (config.presence.until !== undefined) presence.until = config.presence.until;
+            for (const [id, state] of Object.entries(config.presence.states ?? {})) {
+                presence.states = {
+                    ...presence.states,
+                    [id]: { ...presence.states[id], ...state },
+                };
+            }
+        }
         if (config.workspace?.setupCommands !== undefined) {
             workspace.setupCommands = config.workspace.setupCommands;
         }
@@ -103,6 +125,7 @@ export function mergeConfigValues(
         features,
         mcpServers,
         ...(network === undefined ? {} : { network }),
+        presence,
         providerDefaultEnable,
         providers: Object.fromEntries(
             Object.entries(providers).map(([id, provider]) => [

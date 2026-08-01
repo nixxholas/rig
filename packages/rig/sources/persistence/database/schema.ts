@@ -314,6 +314,7 @@ export const durableUserInputs = sqliteTable(
         consumed: integer("consumed", { mode: "boolean" }).notNull(),
         createdAtMs: integer("created_at_ms").notNull(),
         resolvedAtMs: integer("resolved_at_ms"),
+        detachedAtMs: integer("detached_at_ms"),
     },
     (table) => [
         primaryKey({ columns: [table.sessionId, table.requestId] }),

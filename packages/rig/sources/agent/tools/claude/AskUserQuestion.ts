@@ -2,6 +2,7 @@ import { Type, type Static } from "@sinclair/typebox";
 
 import { defineTool } from "../../types.js";
 import type { UserInputResponse } from "../../../user-input/index.js";
+import { describeUnansweredQuestion } from "../../../presence/index.js";
 
 const optionSchema = Type.Object(
     {
@@ -58,6 +59,7 @@ export const claudeAskUserQuestionTool = defineTool({
     returnType: Type.Object({
         questions: Type.Array(questionSchema),
         answers: Type.Record(Type.String(), Type.String()),
+        unanswered: Type.Optional(Type.String()),
     }),
     execution: "durable",
     shouldReviewInAutoMode: () => false,
@@ -79,7 +81,7 @@ export const claudeAskUserQuestionTool = defineTool({
             id: `question_${index + 1}`,
             multiSelect: question.multiSelect ?? false,
         }));
-        const response = await context.userInput.request(
+        const outcome = await context.userInput.request(
             { requestId: execution.toolCallId, questions: normalizedQuestions },
             {
                 durable: {
@@ -96,19 +98,38 @@ export const claudeAskUserQuestionTool = defineTool({
                 ...(execution.signal === undefined ? {} : { signal: execution.signal }),
             },
         );
-        return resolveClaudeUserInput(response, questions);
+        if (outcome.status === "unanswered") {
+            return {
+                questions: questions.map((question) => ({ ...question })),
+                answers: {} as Record<string, string>,
+                unanswered: describeUnansweredQuestion({
+                    askId: outcome.askId,
+                    ...(outcome.changesAt === undefined ? {} : { changesAt: outcome.changesAt }),
+                    now: Date.now(),
+                    presence: outcome.presence,
+                    reason: outcome.reason,
+                    waitedMs: outcome.waitedMs,
+                }),
+            };
+        }
+        return resolveClaudeUserInput(outcome, questions);
     },
     resolveUserInput(response, { questions }) {
         return resolveClaudeUserInput(response, questions);
     },
-    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
-    toTrustedUserEvidence: (result) => [
+    toLLM: (result) => [
         {
             type: "text",
-            text: JSON.stringify({ answers: Object.values(result.answers) }),
+            text: result.unanswered ?? JSON.stringify(result),
         },
     ],
-    toUI: (_result, args) =>
-        `Answered ${args.questions.length} question${args.questions.length === 1 ? "" : "s"}`,
+    toTrustedUserEvidence: (result) =>
+        result.unanswered === undefined
+            ? [{ type: "text", text: JSON.stringify({ answers: Object.values(result.answers) }) }]
+            : [],
+    toUI: (result, args) =>
+        result.unanswered === undefined
+            ? `Answered ${args.questions.length} question${args.questions.length === 1 ? "" : "s"}`
+            : "Left the question waiting for the user",
     locks: [],
 });
