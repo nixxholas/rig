@@ -301,6 +301,7 @@ function normalize(value: unknown, cwd: string): unknown {
         if (typeof item === "string") {
             return item
                 .replaceAll(cwd, "<WORKSPACE>")
+                .replaceAll(tmpdir(), "<TMP>")
                 .replaceAll(home, "<HOME>")
                 .replaceAll(homeRelativeCwd, "<WORKSPACE>")
                 .replaceAll(SDK_DEFAULT_WORKSPACE_SLUG, "<WORKSPACE_SLUG>")
