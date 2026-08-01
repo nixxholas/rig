@@ -1,6 +1,6 @@
 import { type Static, Type } from "@sinclair/typebox";
 
-export const EXTENSION_MANIFEST_FILE_NAME = "rig.plugin.json";
+export const EXTENSION_MANIFEST_FILE_NAME = "happy.plugin.json";
 
 export const extensionManifestSchema = Type.Object(
     {

@@ -7,10 +7,11 @@ on:
         tags:
             - "v*"
             - "rig-connect-v*"
+            - "happy-plugins-v*"
     workflow_dispatch:
 
 env:
-    RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || 'rig' }}
+    RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || startsWith(github.ref_name, 'happy-plugins-v') && 'happy-plugins' || 'rig' }}
 
 permissions:
     contents: read
@@ -81,11 +82,11 @@ jobs:
 
             - name: Build the package
               run: |
-                  if [[ "$RELEASE_PACKAGE" == "rig-connect" ]]; then
-                      pnpm --filter @slopus/rig-connect build
-                  else
-                      pnpm run build
-                  fi
+                  case "$RELEASE_PACKAGE" in
+                      rig-connect) pnpm --filter @slopus/rig-connect build ;;
+                      happy-plugins) pnpm --filter happy-plugins build ;;
+                      *) pnpm run build ;;
+                  esac
 
             - name: Publish the package
               run: pnpm exec tsx scripts/publishPackage.ts

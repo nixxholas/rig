@@ -7,10 +7,10 @@ the existing command sandbox, and serving the private API socket it uses.
 ```text
 ~/Happy/Extensions/<folder>          (Linux: ~/happy/extensions)
   |
-  +-- rig.plugin.json
+  +-- happy.plugin.json
   +-- icon.png
   +-- index.ts
-  +-- .rig/
+  +-- .happy/
        +-- build/                    TypeScript output
        +-- node_modules/happy-plugins/ SDK shipped by this Rig
        +-- runtime/plugin.sock       per-extension API

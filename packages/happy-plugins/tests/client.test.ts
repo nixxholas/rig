@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createRigPluginClient, RigPluginApiError } from "../sources/index.js";
+import { createHappyPluginClient, HappyPluginApiError } from "../sources/index.js";
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -28,7 +28,7 @@ afterEach(async () => {
 
 describe("happy-plugins client", () => {
     it("authenticates over the provided Unix socket and validates the response schema", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-sdk-"));
+        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-sdk-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "api.sock");
         const server = createServer((request, response) => {
@@ -36,7 +36,7 @@ describe("happy-plugins client", () => {
             expect(request.method).toBe("GET");
             expect(request.url).toBe("/projects");
             const body = JSON.stringify({
-                projects: [{ id: "project-1", name: "Rig", path: "/workspace" }],
+                projects: [{ id: "project-1", name: "Happy", path: "/workspace" }],
             });
             response.writeHead(200, {
                 "content-length": Buffer.byteLength(body),
@@ -47,14 +47,14 @@ describe("happy-plugins client", () => {
         servers.push(server);
         await listen(server, socketPath);
 
-        const client = createRigPluginClient({ socketPath, token: "extension-token" });
+        const client = createHappyPluginClient({ socketPath, token: "extension-token" });
         await expect(client.projects.list()).resolves.toEqual([
-            { id: "project-1", name: "Rig", path: "/workspace" },
+            { id: "project-1", name: "Happy", path: "/workspace" },
         ]);
     });
 
     it("rejects invalid daemon responses through the TypeBox schema", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-sdk-"));
+        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-sdk-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "api.sock");
         const server = createServer((_request, response) => {
@@ -63,12 +63,12 @@ describe("happy-plugins client", () => {
         servers.push(server);
         await listen(server, socketPath);
 
-        const client = createRigPluginClient({ socketPath, token: "extension-token" });
+        const client = createHappyPluginClient({ socketPath, token: "extension-token" });
         await expect(client.projects.list()).rejects.toThrow();
     });
 
     it("surfaces daemon errors and missing injected settings in human language", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-sdk-"));
+        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-sdk-"));
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "api.sock");
         const server = createServer((_request, response) => {
@@ -78,13 +78,13 @@ describe("happy-plugins client", () => {
         servers.push(server);
         await listen(server, socketPath);
 
-        const client = createRigPluginClient({ socketPath, token: "extension-token" });
+        const client = createHappyPluginClient({ socketPath, token: "extension-token" });
         await expect(client.projects.list()).rejects.toEqual(
-            new RigPluginApiError(409, "The workspace already exists."),
+            new HappyPluginApiError(409, "The workspace already exists."),
         );
         await expect(
-            createRigPluginClient({ socketPath: "", token: "" }).projects.list(),
-        ).rejects.toThrow("RIG_PLUGIN_SOCKET_PATH");
+            createHappyPluginClient({ socketPath: "", token: "" }).projects.list(),
+        ).rejects.toThrow("HAPPY_PLUGIN_SOCKET_PATH");
     });
 });
 

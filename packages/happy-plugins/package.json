@@ -1,7 +1,7 @@
 {
     "name": "happy-plugins",
     "version": "0.0.1",
-    "description": "The typed API available to TypeScript extensions running inside Rig.",
+    "description": "The typed API available to TypeScript extensions running inside Happy.",
     "license": "MIT",
     "repository": {
         "type": "git",

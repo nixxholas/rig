@@ -22,10 +22,10 @@ export async function buildExtension(
     extension: RegisteredExtension,
     options: BuildExtensionOptions = {},
 ): Promise<BuiltExtension> {
-    const runtimeDirectory = join(extension.directory, ".rig");
+    const runtimeDirectory = join(extension.directory, ".happy");
     await prepareRuntimeDirectory(runtimeDirectory);
     const buildDirectory = join(runtimeDirectory, "build");
-    const sdkInstallDirectory = join(runtimeDirectory, "node_modules", "@slopus", "plugins");
+    const sdkInstallDirectory = join(runtimeDirectory, "node_modules", "happy-plugins");
     const typeBoxInstallDirectory = join(runtimeDirectory, "node_modules", "@sinclair", "typebox");
     await Promise.all([
         rm(buildDirectory, { force: true, recursive: true }),
@@ -165,7 +165,7 @@ async function prepareRuntimeDirectory(directory: string): Promise<void> {
     try {
         const info = await lstat(directory);
         if (info.isSymbolicLink() || !info.isDirectory()) {
-            throw new Error("The extension's .rig runtime path must be an ordinary directory.");
+            throw new Error("The extension's .happy runtime path must be an ordinary directory.");
         }
     } catch (error) {
         if (isMissingPath(error)) {

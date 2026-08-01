@@ -3,11 +3,11 @@ import { request as requestHttp } from "node:http";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
-import type { CreateRigPluginClientOptions, RigPluginClient } from "./types.js";
+import type { CreateHappyPluginClientOptions, HappyPluginClient } from "./types.js";
 import {
     agentMessageDeliverySchema,
     archiveWorkspaceInputSchema,
-    createRigPluginClientOptionsSchema,
+    createHappyPluginClientOptionsSchema,
     createSessionInputSchema,
     createWorkspaceInputSchema,
     listProjectsResponseSchema,
@@ -24,25 +24,27 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const errorResponseSchema = Type.Object({ error: Type.String() }, { additionalProperties: true });
 const requiredSettingSchema = Type.String({ minLength: 1, pattern: "\\S" });
 
-/** An HTTP error returned by the owning Rig daemon for an otherwise valid SDK request. */
-export class RigPluginApiError extends Error {
+/** An HTTP error returned by the owning Happy daemon for an otherwise valid SDK request. */
+export class HappyPluginApiError extends Error {
     readonly status: number;
 
     constructor(status: number, message: string) {
         super(message);
-        this.name = "RigPluginApiError";
+        this.name = "HappyPluginApiError";
         this.status = status;
     }
 }
 
 /**
- * Creates a Rig extension API client.
+ * Creates a Happy extension API client.
  *
- * Normal extensions should use the exported `rig` singleton. Supplying a socket path and token is
+ * Normal extensions should use the exported `happy` singleton. Supplying a socket path and token is
  * useful for tests and custom harnesses.
  */
-export function createRigPluginClient(options: CreateRigPluginClientOptions = {}): RigPluginClient {
-    Value.Assert(createRigPluginClientOptionsSchema, options);
+export function createHappyPluginClient(
+    options: CreateHappyPluginClientOptions = {},
+): HappyPluginClient {
+    Value.Assert(createHappyPluginClientOptionsSchema, options);
     const request = <TSchema_ extends TSchema>(
         method: "GET" | "PATCH" | "POST",
         path: string,
@@ -55,12 +57,12 @@ export function createRigPluginClient(options: CreateRigPluginClientOptions = {}
             path,
             responseSchema,
             socketPath: requiredSetting(
-                options.socketPath ?? process.env.RIG_PLUGIN_SOCKET_PATH,
-                "RIG_PLUGIN_SOCKET_PATH",
+                options.socketPath ?? process.env.HAPPY_PLUGIN_SOCKET_PATH,
+                "HAPPY_PLUGIN_SOCKET_PATH",
             ),
             token: requiredSetting(
-                options.token ?? process.env.RIG_PLUGIN_TOKEN,
-                "RIG_PLUGIN_TOKEN",
+                options.token ?? process.env.HAPPY_PLUGIN_TOKEN,
+                "HAPPY_PLUGIN_TOKEN",
             ),
         });
 
@@ -140,7 +142,7 @@ export function createRigPluginClient(options: CreateRigPluginClientOptions = {}
 
 function requiredSetting(value: string | undefined, name: string): string {
     if (Value.Check(requiredSettingSchema, value)) return value;
-    throw new Error(`Rig did not provide ${name} to this extension.`);
+    throw new Error(`Happy did not provide ${name} to this extension.`);
 }
 
 function requestJson<TSchema_ extends TSchema>(options: {
@@ -176,7 +178,9 @@ function requestJson<TSchema_ extends TSchema>(options: {
                     length += chunk.length;
                     if (length > MAX_RESPONSE_BYTES) {
                         request.destroy(
-                            new Error("Rig returned more extension data than the SDK can accept."),
+                            new Error(
+                                "Happy returned more extension data than the SDK can accept.",
+                            ),
                         );
                         return;
                     }
@@ -190,8 +194,8 @@ function requestJson<TSchema_ extends TSchema>(options: {
                         if (status < 200 || status >= 300) {
                             const message = Value.Check(errorResponseSchema, payload)
                                 ? payload.error
-                                : `Rig rejected the extension request with HTTP ${String(status)}.`;
-                            reject(new RigPluginApiError(status, message));
+                                : `Happy rejected the extension request with HTTP ${String(status)}.`;
+                            reject(new HappyPluginApiError(status, message));
                             return;
                         }
                         resolve(Value.Decode(options.responseSchema, payload));

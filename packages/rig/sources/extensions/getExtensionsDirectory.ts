@@ -6,10 +6,10 @@ export function getExtensionsDirectory(
     homeDirectory: string = homedir(),
     platform: NodeJS.Platform = process.platform,
 ): string {
-    const configured = environment.RIG_EXTENSIONS_DIRECTORY?.trim();
+    const configured = environment.HAPPY_EXTENSIONS_DIRECTORY?.trim();
     if (configured) {
         if (!isAbsolute(configured)) {
-            throw new Error("RIG_EXTENSIONS_DIRECTORY must be an absolute path.");
+            throw new Error("HAPPY_EXTENSIONS_DIRECTORY must be an absolute path.");
         }
         return resolve(configured);
     }

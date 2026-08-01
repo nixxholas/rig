@@ -1,45 +1,45 @@
-export { createRigPluginClient, RigPluginApiError } from "./createRigPluginClient.js";
-export { createRigPluginClient as connectRig } from "./createRigPluginClient.js";
+export { createHappyPluginClient, HappyPluginApiError } from "./createHappyPluginClient.js";
+export { createHappyPluginClient as connectHappy } from "./createHappyPluginClient.js";
 export type {
     AgentMessageDelivery,
     ArchiveWorkspaceInput,
-    CreateRigPluginClientOptions,
+    CreateHappyPluginClientOptions,
     CreateSessionInput,
     CreateWorkspaceInput,
+    HappyPluginClient,
+    HappyProject,
+    HappySession,
+    HappyWorkspace,
+    HappyWorkspaceStatus,
     ListWorkspacesInput,
     RenameWorkspaceInput,
-    RigPluginClient,
-    RigProject,
-    RigSession,
-    RigWorkspace,
-    RigWorkspaceStatus,
     SendAgentMessageInput,
 } from "./types.js";
 export {
     agentMessageDeliverySchema,
     archiveWorkspaceBodySchema,
     archiveWorkspaceInputSchema,
-    createRigPluginClientOptionsSchema,
+    createHappyPluginClientOptionsSchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
     createWorkspaceInputSchema,
+    happyProjectSchema,
+    happySessionSchema,
+    happyWorkspaceSchema,
+    happyWorkspaceStatusSchema,
     listProjectsResponseSchema,
     listSessionsResponseSchema,
     listWorkspacesInputSchema,
     listWorkspacesResponseSchema,
     renameWorkspaceInputSchema,
     renameWorkspaceBodySchema,
-    rigProjectSchema,
-    rigSessionSchema,
-    rigWorkspaceSchema,
-    rigWorkspaceStatusSchema,
     sendAgentMessageInputSchema,
     sendAgentMessageBodySchema,
     sessionResponseSchema,
     workspaceResponseSchema,
 } from "./types.js";
 
-import { createRigPluginClient } from "./createRigPluginClient.js";
+import { createHappyPluginClient } from "./createHappyPluginClient.js";
 
-/** The extension's ready-to-use connection to its owning Rig daemon. */
-export const rig = createRigPluginClient();
+/** The extension's ready-to-use connection to its owning Happy daemon. */
+export const happy = createHappyPluginClient();

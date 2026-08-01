@@ -34,7 +34,7 @@ describe("extensions", () => {
         );
         expect(
             getExtensionsDirectory(
-                { RIG_EXTENSIONS_DIRECTORY: "/srv/rig-extensions" },
+                { HAPPY_EXTENSIONS_DIRECTORY: "/srv/rig-extensions" },
                 "/home/steve",
                 "linux",
             ),
@@ -44,7 +44,7 @@ describe("extensions", () => {
         ).toBe("/tmp/isolated-home/extensions");
         expect(() =>
             getExtensionsDirectory(
-                { RIG_EXTENSIONS_DIRECTORY: "relative" },
+                { HAPPY_EXTENSIONS_DIRECTORY: "relative" },
                 "/home/steve",
                 "linux",
             ),
@@ -69,7 +69,7 @@ describe("extensions", () => {
         const discovery = await discoverExtensions(root);
         expect(discovery.extensions.map((extension) => extension.manifest.name)).toEqual(["Clock"]);
         expect(discovery.failures).toHaveLength(1);
-        expect(discovery.failures[0]?.error).toContain("rig.plugin.json is invalid");
+        expect(discovery.failures[0]?.error).toContain("happy.plugin.json is invalid");
     });
 
     it("rejects manifest assets that escape through symbolic links", async () => {
@@ -101,8 +101,8 @@ describe("extensions", () => {
         const directory = join(root, "builder");
         await createExtensionFixture(directory, {
             source: [
-                'import { rig } from "happy-plugins";',
-                "const projects = await rig.projects.list();",
+                'import { happy } from "happy-plugins";',
+                "const projects = await happy.projects.list();",
                 'console.log(projects.map((project) => project.name).join(","));',
                 "",
             ].join("\n"),
@@ -117,8 +117,8 @@ describe("extensions", () => {
         await writeFile(
             extension.entryPath,
             [
-                'import { rig } from "happy-plugins";',
-                'await rig.workspaces.create({ name: 42, projectId: "project" });',
+                'import { happy } from "happy-plugins";',
+                'await happy.workspaces.create({ name: 42, projectId: "project" });',
                 "",
             ].join("\n"),
         );
@@ -144,7 +144,7 @@ async function createExtensionFixture(
     await mkdir(directory, { recursive: true });
     await Promise.all([
         writeFile(
-            join(directory, "rig.plugin.json"),
+            join(directory, "happy.plugin.json"),
             `${JSON.stringify(
                 options.manifest ?? {
                     description: "A small clock.",

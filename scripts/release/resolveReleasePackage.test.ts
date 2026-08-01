@@ -19,6 +19,15 @@ describe("resolveReleasePackage", () => {
         assert.match(target.directory, /packages\/rig-connect\/?$/u);
     });
 
+    it("gives happy-plugins its own tag namespace and package directory", () => {
+        const target = resolveReleasePackage("happy-plugins");
+
+        assert.equal(target.key, "happy-plugins");
+        assert.equal(target.tagPrefix, "happy-plugins-v");
+        assert.match(target.directory, /packages\/happy-plugins\/?$/u);
+        assert.deepEqual(target.buildArguments, ["--filter", "happy-plugins", "build"]);
+    });
+
     it("rejects a target that could publish an unintended workspace package", () => {
         assert.throws(() => resolveReleasePackage("other"), /Unknown release package other/u);
     });

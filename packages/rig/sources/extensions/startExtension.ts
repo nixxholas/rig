@@ -82,9 +82,9 @@ export async function startExtension(
                 ...(await createToolEnvironment("workspace_write", environment, {
                     cwd: extension.directory,
                 })),
-                RIG_PLUGIN_DIRECTORY: extension.directory,
-                RIG_PLUGIN_SOCKET_PATH: socketPath,
-                RIG_PLUGIN_TOKEN: token,
+                HAPPY_PLUGIN_DIRECTORY: extension.directory,
+                HAPPY_PLUGIN_SOCKET_PATH: socketPath,
+                HAPPY_PLUGIN_TOKEN: token,
             },
             stdio: ["ignore", "pipe", "pipe"],
         });

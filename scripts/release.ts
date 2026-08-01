@@ -18,16 +18,21 @@ const SEMANTIC_VERSION = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)
 const USAGE = `Usage:
   pnpm release <version>
   pnpm release rig-connect <version>
+  pnpm release happy-plugins <version>
 
 Examples:
   pnpm release 0.1.0
   pnpm release patch
   pnpm release minor
-  pnpm release rig-connect patch`;
+  pnpm release rig-connect patch
+  pnpm release happy-plugins patch`;
 
 async function release(): Promise<void> {
     const arguments_ = process.argv.slice(2);
-    const explicitPackage = arguments_[0] === "rig" || arguments_[0] === "rig-connect";
+    const explicitPackage =
+        arguments_[0] === "rig" ||
+        arguments_[0] === "rig-connect" ||
+        arguments_[0] === "happy-plugins";
     const releasePackage = resolveReleasePackage(explicitPackage ? arguments_.shift() : undefined);
     const releaseInput = arguments_[0];
     if (releaseInput === "--help" || releaseInput === "-h") {

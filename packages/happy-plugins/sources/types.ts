@@ -3,7 +3,7 @@ import { type Static, Type } from "@sinclair/typebox";
 const exact = { additionalProperties: false } as const;
 const nonEmptyText = Type.String({ minLength: 1 });
 
-export const rigProjectSchema = Type.Object(
+export const happyProjectSchema = Type.Object(
     {
         archivedAt: Type.Optional(Type.Number()),
         id: nonEmptyText,
@@ -12,18 +12,18 @@ export const rigProjectSchema = Type.Object(
     },
     exact,
 );
-export type RigProject = Static<typeof rigProjectSchema>;
+export type HappyProject = Static<typeof happyProjectSchema>;
 
-export const rigWorkspaceStatusSchema = Type.Union([
+export const happyWorkspaceStatusSchema = Type.Union([
     Type.Literal("initializing"),
     Type.Literal("ready"),
     Type.Literal("failed"),
     Type.Literal("archiving"),
     Type.Literal("archived"),
 ]);
-export type RigWorkspaceStatus = Static<typeof rigWorkspaceStatusSchema>;
+export type HappyWorkspaceStatus = Static<typeof happyWorkspaceStatusSchema>;
 
-export const rigWorkspaceSchema = Type.Object(
+export const happyWorkspaceSchema = Type.Object(
     {
         archivedAt: Type.Optional(Type.Number()),
         baseRef: Type.Optional(Type.String()),
@@ -32,14 +32,14 @@ export const rigWorkspaceSchema = Type.Object(
         name: nonEmptyText,
         path: nonEmptyText,
         projectId: nonEmptyText,
-        status: rigWorkspaceStatusSchema,
+        status: happyWorkspaceStatusSchema,
         version: Type.Integer({ minimum: 0 }),
     },
     exact,
 );
-export type RigWorkspace = Static<typeof rigWorkspaceSchema>;
+export type HappyWorkspace = Static<typeof happyWorkspaceSchema>;
 
-export const rigSessionSchema = Type.Object(
+export const happySessionSchema = Type.Object(
     {
         agentId: nonEmptyText,
         archived: Type.Boolean(),
@@ -52,7 +52,7 @@ export const rigSessionSchema = Type.Object(
     },
     exact,
 );
-export type RigSession = Static<typeof rigSessionSchema>;
+export type HappySession = Static<typeof happySessionSchema>;
 
 export const createWorkspaceInputSchema = Type.Object(
     {
@@ -132,54 +132,54 @@ export const agentMessageDeliverySchema = Type.Object(
 export type AgentMessageDelivery = Static<typeof agentMessageDeliverySchema>;
 
 export const listProjectsResponseSchema = Type.Object(
-    { projects: Type.Array(rigProjectSchema) },
+    { projects: Type.Array(happyProjectSchema) },
     exact,
 );
 export const listWorkspacesResponseSchema = Type.Object(
-    { workspaces: Type.Array(rigWorkspaceSchema) },
+    { workspaces: Type.Array(happyWorkspaceSchema) },
     exact,
 );
-export const workspaceResponseSchema = Type.Object({ workspace: rigWorkspaceSchema }, exact);
+export const workspaceResponseSchema = Type.Object({ workspace: happyWorkspaceSchema }, exact);
 export const listSessionsResponseSchema = Type.Object(
-    { sessions: Type.Array(rigSessionSchema) },
+    { sessions: Type.Array(happySessionSchema) },
     exact,
 );
-export const sessionResponseSchema = Type.Object({ session: rigSessionSchema }, exact);
+export const sessionResponseSchema = Type.Object({ session: happySessionSchema }, exact);
 
-export const createRigPluginClientOptionsSchema = Type.Object(
+export const createHappyPluginClientOptionsSchema = Type.Object(
     {
         socketPath: Type.Optional(Type.String()),
         token: Type.Optional(Type.String()),
     },
     exact,
 );
-export type CreateRigPluginClientOptions = Static<typeof createRigPluginClientOptionsSchema>;
+export type CreateHappyPluginClientOptions = Static<typeof createHappyPluginClientOptionsSchema>;
 
 /**
- * The public API available to a running Rig extension.
+ * The public API available to a running Happy extension.
  *
- * Use the exported {@link rig} singleton in normal extension code. Rig injects and authenticates
+ * Use the exported {@link happy} singleton in normal extension code. Happy injects and authenticates
  * its transport when the extension process starts.
  */
-export interface RigPluginClient {
+export interface HappyPluginClient {
     /** Send a durable notification to an agent identified by a session's stable Agent ID. */
     readonly agents: {
         sendMessage(input: SendAgentMessageInput): Promise<AgentMessageDelivery>;
     };
-    /** Inspect projects known to the local Rig daemon. */
+    /** Inspect projects known to the local Happy daemon. */
     readonly projects: {
-        list(): Promise<readonly RigProject[]>;
+        list(): Promise<readonly HappyProject[]>;
     };
     /** Inspect existing sessions or create a new agent session. */
     readonly sessions: {
-        create(input: CreateSessionInput): Promise<RigSession>;
-        list(): Promise<readonly RigSession[]>;
+        create(input: CreateSessionInput): Promise<HappySession>;
+        list(): Promise<readonly HappySession[]>;
     };
-    /** Inspect and mutate Rig-managed Git workspaces. */
+    /** Inspect and mutate Happy-managed Git workspaces. */
     readonly workspaces: {
-        archive(input: ArchiveWorkspaceInput): Promise<RigWorkspace>;
-        create(input: CreateWorkspaceInput): Promise<RigWorkspace>;
-        list(input?: ListWorkspacesInput): Promise<readonly RigWorkspace[]>;
-        rename(input: RenameWorkspaceInput): Promise<RigWorkspace>;
+        archive(input: ArchiveWorkspaceInput): Promise<HappyWorkspace>;
+        create(input: CreateWorkspaceInput): Promise<HappyWorkspace>;
+        list(input?: ListWorkspacesInput): Promise<readonly HappyWorkspace[]>;
+        rename(input: RenameWorkspaceInput): Promise<HappyWorkspace>;
     };
 }

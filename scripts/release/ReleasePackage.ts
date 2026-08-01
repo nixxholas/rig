@@ -1,4 +1,4 @@
-export type ReleasePackageKey = "rig" | "rig-connect";
+export type ReleasePackageKey = "rig" | "rig-connect" | "happy-plugins";
 
 export interface ReleasePackage {
     buildArguments: readonly string[];

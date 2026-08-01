@@ -2,7 +2,7 @@ import { request as requestHttp } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import { createRigPluginClient } from "happy-plugins";
+import { createHappyPluginClient } from "happy-plugins";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
@@ -49,7 +49,7 @@ describe("extension API server", () => {
         });
 
         await expect(
-            createRigPluginClient({
+            createHappyPluginClient({
                 socketPath,
                 token: "private-extension-token",
             }).projects.list(),

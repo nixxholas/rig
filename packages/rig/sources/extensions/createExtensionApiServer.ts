@@ -2,7 +2,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { AgentMessageDelivery, RigProject, RigSession, RigWorkspace } from "happy-plugins";
+import type {
+    AgentMessageDelivery,
+    HappyProject,
+    HappySession,
+    HappyWorkspace,
+} from "happy-plugins";
 import {
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
@@ -52,8 +57,8 @@ async function handleRequest(
 ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://rig-extension.local");
     if (request.method === "GET" && url.pathname === "/projects") {
-        sendJson<{ projects: readonly RigProject[] }>(response, 200, {
-            projects: options.store.listProjects().map(toRigProject),
+        sendJson<{ projects: readonly HappyProject[] }>(response, 200, {
+            projects: options.store.listProjects().map(toHappyProject),
         });
         return;
     }
@@ -65,22 +70,22 @@ async function handleRequest(
                 : {},
             "Workspace list settings",
         );
-        sendJson<{ workspaces: readonly RigWorkspace[] }>(response, 200, {
-            workspaces: options.store.listWorkspaces(input.projectId).map(toRigWorkspace),
+        sendJson<{ workspaces: readonly HappyWorkspace[] }>(response, 200, {
+            workspaces: options.store.listWorkspaces(input.projectId).map(toHappyWorkspace),
         });
         return;
     }
     if (request.method === "GET" && url.pathname === "/sessions") {
-        sendJson<{ sessions: readonly RigSession[] }>(response, 200, {
-            sessions: options.store.list().map((session) => toRigSession(options.store, session)),
+        sendJson<{ sessions: readonly HappySession[] }>(response, 200, {
+            sessions: options.store.list().map((session) => toHappySession(options.store, session)),
         });
         return;
     }
     if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await readJson(request, createSessionInputSchema, "Session settings");
         const session = options.store.create(configureSessionRequest(body, options.defaultDocker));
-        sendJson<{ session: RigSession }>(response, 201, {
-            session: toRigSession(options.store, session.snapshot()),
+        sendJson<{ session: HappySession }>(response, 201, {
+            session: toHappySession(options.store, session.snapshot()),
         });
         return;
     }
@@ -132,8 +137,8 @@ async function handleRequest(
                 sendJson(response, 404, { error: "Project not found." });
                 return;
             }
-            sendJson<{ workspace: RigWorkspace }>(response, 202, {
-                workspace: toRigWorkspace(workspace),
+            sendJson<{ workspace: HappyWorkspace }>(response, 202, {
+                workspace: toHappyWorkspace(workspace),
             });
             return;
         }
@@ -154,8 +159,8 @@ async function handleRequest(
                 sendJson(response, 404, { error: "Workspace not found." });
                 return;
             }
-            sendJson<{ workspace: RigWorkspace }>(response, 200, {
-                workspace: toRigWorkspace(workspace),
+            sendJson<{ workspace: HappyWorkspace }>(response, 200, {
+                workspace: toHappyWorkspace(workspace),
             });
             return;
         }
@@ -179,8 +184,8 @@ async function handleRequest(
                 sendJson(response, 404, { error: "Workspace not found." });
                 return;
             }
-            sendJson<{ workspace: RigWorkspace }>(response, 202, {
-                workspace: toRigWorkspace(workspace),
+            sendJson<{ workspace: HappyWorkspace }>(response, 202, {
+                workspace: toHappyWorkspace(workspace),
             });
             return;
         }
@@ -189,7 +194,7 @@ async function handleRequest(
     sendJson(response, 404, { error: "This Rig extension API action does not exist." });
 }
 
-function toRigProject(project: Project): RigProject {
+function toHappyProject(project: Project): HappyProject {
     return {
         ...(project.archivedAt === undefined ? {} : { archivedAt: project.archivedAt }),
         id: project.id,
@@ -198,7 +203,7 @@ function toRigProject(project: Project): RigProject {
     };
 }
 
-function toRigWorkspace(workspace: ProjectWorkspace): RigWorkspace {
+function toHappyWorkspace(workspace: ProjectWorkspace): HappyWorkspace {
     return {
         ...(workspace.archivedAt === undefined ? {} : { archivedAt: workspace.archivedAt }),
         ...(workspace.baseRef === undefined ? {} : { baseRef: workspace.baseRef }),
@@ -212,13 +217,13 @@ function toRigWorkspace(workspace: ProjectWorkspace): RigWorkspace {
     };
 }
 
-function toRigSession(
+function toHappySession(
     store: SessionStore,
     session: Pick<
         SessionSummary,
         "archived" | "cwd" | "id" | "projectId" | "status" | "title" | "workspaceId"
     >,
-): RigSession {
+): HappySession {
     const agentId = store.get(session.id)?.agentIdentity().agentId;
     if (agentId === undefined) {
         throw new Error(`Rig could not resolve the agent for session ${session.id}.`);

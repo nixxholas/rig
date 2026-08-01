@@ -1,18 +1,18 @@
 # happy-plugins
 
-`happy-plugins` is the public TypeScript SDK for writing local Rig extensions.
+`happy-plugins` is the public TypeScript SDK for writing local Happy extensions.
 
 An extension imports one ready-to-use client:
 
 ```ts
-import { rig } from "happy-plugins";
+import { happy } from "happy-plugins";
 
-const projects = await rig.projects.list();
-console.log(`Rig has ${projects.length} projects.`);
+const projects = await happy.projects.list();
+console.log(`Happy has ${projects.length} projects.`);
 ```
 
-Rig supplies the connection automatically when it starts the extension. Extension code does not
-open a daemon connection, find credentials, or depend on Rig's internal protocol.
+Happy supplies the connection automatically when it starts the extension. Extension code does not
+open a daemon connection, find credentials, or depend on Happy's internal protocol.
 
 ## Status
 
@@ -27,12 +27,12 @@ Install the published package while authoring for editor completion and local ty
 pnpm add --save-dev happy-plugins typescript@^7.0.2 @types/node
 ```
 
-This installation is an authoring dependency. At runtime, Rig compiles the extension with
-TypeScript 7 and substitutes the copy of `happy-plugins` shipped with that Rig installation. The
+This installation is an authoring dependency. At runtime, Happy compiles the extension with
+TypeScript 7 and substitutes the copy of `happy-plugins` shipped with that Happy installation. The
 daemon's build is the final compatibility check. An extension cannot accidentally run against a
 different SDK from the one its daemon implements.
 
-Rig itself does not require an extension to have a `package.json` or its own SDK installation. A
+Happy itself does not require an extension to have a `package.json` or its own SDK installation. A
 TypeScript entry file, manifest, and PNG icon are enough.
 
 ## Create an extension
@@ -44,22 +44,22 @@ macOS: ~/Happy/Extensions/project-counter/
 Linux: ~/happy/extensions/project-counter/
 
 project-counter/
-├── rig.plugin.json
+├── happy.plugin.json
 ├── icon.png
 └── index.ts
 ```
 
-The installation root can be overridden with the absolute `RIG_EXTENSIONS_DIRECTORY` environment
+The installation root can be overridden with the absolute `HAPPY_EXTENSIONS_DIRECTORY` environment
 variable.
 
-### `rig.plugin.json`
+### `happy.plugin.json`
 
 The manifest is intentionally small and exact:
 
 ```json
 {
     "name": "Project Counter",
-    "description": "Reports how many projects Rig knows about.",
+    "description": "Reports how many projects Happy knows about.",
     "entry": "index.ts",
     "icon": "icon.png"
 }
@@ -73,19 +73,19 @@ All four fields are required. Extra fields are rejected.
 - `icon`: a relative path to a PNG file inside the extension folder.
 
 Entry and icon paths must remain inside the extension folder. The entry and icon themselves must be
-ordinary files rather than symbolic links. Rig does not register an extension whose manifest or
+ordinary files rather than symbolic links. Happy does not register an extension whose manifest or
 icon is invalid.
 
 ### `index.ts`
 
 ```ts
-import { rig } from "happy-plugins";
+import { happy } from "happy-plugins";
 
-const sessions = await rig.sessions.list();
+const sessions = await happy.sessions.list();
 
 console.log(`The extension can see ${sessions.length} sessions.`);
 
-// Keep a service-style extension alive until Rig shuts it down.
+// Keep a service-style extension alive until Happy shuts it down.
 await new Promise<void>((resolve) => {
     process.once("SIGTERM", resolve);
     process.once("SIGINT", resolve);
@@ -93,35 +93,35 @@ await new Promise<void>((resolve) => {
 ```
 
 The entry is an ES module and may use top-level `await`. Relative TypeScript imports are supported.
-Rig starts the compiled entry with the extension folder as its working directory.
+Happy starts the compiled entry with the extension folder as its working directory.
 
-Restart the Rig daemon after adding or changing an extension. Rig discovers installed folders,
+Restart the Happy daemon after adding or changing an extension. Happy discovers installed folders,
 validates their manifests, compiles their TypeScript, and starts each valid extension.
 
 ## Runtime model
 
-Each extension runs in its own process under Rig's existing command sandbox. The extension may
+Each extension runs in its own process under Happy's existing command sandbox. The extension may
 write state inside its own folder.
 
-Rig injects these environment variables:
+Happy injects these environment variables:
 
-| Variable                 | Meaning                                           |
-| ------------------------ | ------------------------------------------------- |
-| `RIG_PLUGIN_DIRECTORY`   | Absolute path to the extension's writable folder. |
-| `RIG_PLUGIN_SOCKET_PATH` | Private Unix socket used by the SDK.              |
-| `RIG_PLUGIN_TOKEN`       | Per-process bearer token used by the SDK.         |
+| Variable                   | Meaning                                           |
+| -------------------------- | ------------------------------------------------- |
+| `HAPPY_PLUGIN_DIRECTORY`   | Absolute path to the extension's writable folder. |
+| `HAPPY_PLUGIN_SOCKET_PATH` | Private Unix socket used by the SDK.              |
+| `HAPPY_PLUGIN_TOKEN`       | Per-process bearer token used by the SDK.         |
 
-Normal extension code should use the exported `rig` client and does not need to read the socket or
+Normal extension code should use the exported `happy` client and does not need to read the socket or
 token directly.
 
-Rig captures stdout and stderr for the current run in `.rig/extension.log` inside the extension
-folder. The log is bounded to 1 MiB. Files below `.rig/` are generated runtime state and should not
+Happy captures stdout and stderr for the current run in `.happy/extension.log` inside the extension
+folder. The log is bounded to 1 MiB. Files below `.happy/` are generated runtime state and should not
 be edited or distributed.
 
 ## API
 
 ```ts
-import { rig } from "happy-plugins";
+import { happy } from "happy-plugins";
 ```
 
 All methods return promises. Inputs and daemon responses are validated with TypeBox at runtime.
@@ -129,19 +129,19 @@ All methods return promises. Inputs and daemon responses are validated with Type
 ### Projects
 
 ```ts
-const projects = await rig.projects.list();
+const projects = await happy.projects.list();
 ```
 
 Signature:
 
 ```ts
-rig.projects.list(): Promise<readonly RigProject[]>
+happy.projects.list(): Promise<readonly HappyProject[]>
 ```
 
-`RigProject` contains:
+`HappyProject` contains:
 
 ```ts
-type RigProject = {
+type HappyProject = {
     id: string;
     name: string;
     path: string;
@@ -154,14 +154,14 @@ type RigProject = {
 List every workspace, or only workspaces belonging to one project:
 
 ```ts
-const all = await rig.workspaces.list();
-const projectWorkspaces = await rig.workspaces.list({ projectId: "project-id" });
+const all = await happy.workspaces.list();
+const projectWorkspaces = await happy.workspaces.list({ projectId: "project-id" });
 ```
 
 Create a managed workspace:
 
 ```ts
-const workspace = await rig.workspaces.create({
+const workspace = await happy.workspaces.create({
     projectId: "project-id",
     name: "Investigate parser",
     // baseRef: "main",
@@ -171,14 +171,14 @@ const workspace = await rig.workspaces.create({
 Rename or archive a workspace using its current version:
 
 ```ts
-const renamed = await rig.workspaces.rename({
+const renamed = await happy.workspaces.rename({
     projectId: workspace.projectId,
     workspaceId: workspace.id,
     name: "Fix parser",
     version: workspace.version,
 });
 
-await rig.workspaces.archive({
+await happy.workspaces.archive({
     projectId: renamed.projectId,
     workspaceId: renamed.id,
     version: renamed.version,
@@ -188,37 +188,37 @@ await rig.workspaces.archive({
 Signatures:
 
 ```ts
-rig.workspaces.list(input?: {
+happy.workspaces.list(input?: {
     projectId?: string;
-}): Promise<readonly RigWorkspace[]>
+}): Promise<readonly HappyWorkspace[]>
 
-rig.workspaces.create(input: {
+happy.workspaces.create(input: {
     projectId: string;
     name: string;
     baseRef?: string;
-}): Promise<RigWorkspace>
+}): Promise<HappyWorkspace>
 
-rig.workspaces.rename(input: {
+happy.workspaces.rename(input: {
     projectId: string;
     workspaceId: string;
     name: string;
     version: number;
-}): Promise<RigWorkspace>
+}): Promise<HappyWorkspace>
 
-rig.workspaces.archive(input: {
+happy.workspaces.archive(input: {
     projectId: string;
     workspaceId: string;
     version: number;
-}): Promise<RigWorkspace>
+}): Promise<HappyWorkspace>
 ```
 
 Workspace mutations use optimistic versions. Pass the `version` from the most recently returned
 workspace.
 
-`RigWorkspace` contains:
+`HappyWorkspace` contains:
 
 ```ts
-type RigWorkspace = {
+type HappyWorkspace = {
     id: string;
     projectId: string;
     name: string;
@@ -234,9 +234,9 @@ type RigWorkspace = {
 ### Sessions
 
 ```ts
-const sessions = await rig.sessions.list();
+const sessions = await happy.sessions.list();
 
-const session = await rig.sessions.create({
+const session = await happy.sessions.create({
     cwd: "/absolute/path/to/workspace",
     // providerId: "codex",
     // modelId: "openai/gpt-5.6-sol",
@@ -249,22 +249,22 @@ const session = await rig.sessions.create({
 Signatures:
 
 ```ts
-rig.sessions.list(): Promise<readonly RigSession[]>
+happy.sessions.list(): Promise<readonly HappySession[]>
 
-rig.sessions.create(input: {
+happy.sessions.create(input: {
     cwd: string;
     providerId?: string;
     modelId?: string;
     effort?: string;
     appendSystemPrompt?: string;
     workspaceId?: string;
-}): Promise<RigSession>
+}): Promise<HappySession>
 ```
 
-`RigSession` contains:
+`HappySession` contains:
 
 ```ts
-type RigSession = {
+type HappySession = {
     id: string;
     agentId: string;
     cwd: string;
@@ -278,13 +278,13 @@ type RigSession = {
 
 ### Messages to agents
 
-Use the stable `agentId` returned by `rig.sessions.list()` or `rig.sessions.create()`:
+Use the stable `agentId` returned by `happy.sessions.list()` or `happy.sessions.create()`:
 
 ```ts
-const [session] = await rig.sessions.list();
+const [session] = await happy.sessions.list();
 
 if (session !== undefined) {
-    const delivery = await rig.agents.sendMessage({
+    const delivery = await happy.agents.sendMessage({
         agentId: session.agentId,
         message: "The extension finished indexing the project.",
     });
@@ -296,7 +296,7 @@ if (session !== undefined) {
 Signature:
 
 ```ts
-rig.agents.sendMessage(input: {
+happy.agents.sendMessage(input: {
     agentId: string;
     message: string;
 }): Promise<{
@@ -321,7 +321,7 @@ const workspaceInput = Value.Decode(createWorkspaceInputSchema, input);
 
 The primary schema exports are:
 
-- `rigProjectSchema`, `rigWorkspaceSchema`, `rigWorkspaceStatusSchema`, and `rigSessionSchema`
+- `happyProjectSchema`, `happyWorkspaceSchema`, `happyWorkspaceStatusSchema`, and `happySessionSchema`
 - `listWorkspacesInputSchema`
 - `createWorkspaceInputSchema`, `renameWorkspaceInputSchema`, and `archiveWorkspaceInputSchema`
 - `createSessionInputSchema`
@@ -335,51 +335,51 @@ same boundary.
 The SDK rejects invalid inputs before sending them. It also validates every successful daemon
 response against its TypeBox schema.
 
-When Rig rejects a valid request, the SDK throws `RigPluginApiError`:
+When Happy rejects a valid request, the SDK throws `HappyPluginApiError`:
 
 ```ts
-import { RigPluginApiError, rig } from "happy-plugins";
+import { HappyPluginApiError, happy } from "happy-plugins";
 
 try {
-    await rig.workspaces.archive({
+    await happy.workspaces.archive({
         projectId: "missing-project",
         workspaceId: "missing-workspace",
         version: 0,
     });
 } catch (error) {
-    if (error instanceof RigPluginApiError) {
-        console.error(`Rig returned HTTP ${error.status}: ${error.message}`);
+    if (error instanceof HappyPluginApiError) {
+        console.error(`Happy returned HTTP ${error.status}: ${error.message}`);
     }
     throw error;
 }
 ```
 
-## Testing outside Rig
+## Testing outside Happy
 
-Normal extensions should import the singleton `rig`. Tests and custom harnesses may construct a
+Normal extensions should import the singleton `happy`. Tests and custom harnesses may construct a
 client explicitly:
 
 ```ts
-import { createRigPluginClient } from "happy-plugins";
+import { createHappyPluginClient } from "happy-plugins";
 
-const client = createRigPluginClient({
+const client = createHappyPluginClient({
     socketPath: "/path/to/test.sock",
     token: "test-token",
 });
 ```
 
-The explicit client uses the same API and runtime validation as `rig`.
+The explicit client uses the same API and runtime validation as `happy`.
 
 ## Distribution checklist
 
-Distribute the extension folder, excluding generated `.rig/` contents and local `node_modules/`.
+Distribute the extension folder, excluding generated `.happy/` contents and local `node_modules/`.
 Before sharing it:
 
 1. Install the current `happy-plugins` package for local type checking.
 2. Keep the manifest paths relative and inside the extension folder.
 3. Include the TypeScript sources and required PNG icon.
-4. Start it with the oldest Rig version you intend to support; the daemon build is the compatibility
+4. Start it with the oldest Happy version you intend to support; the daemon build is the compatibility
    test.
-5. Check `.rig/extension.log` for startup or runtime errors.
+5. Check `.happy/extension.log` for startup or runtime errors.
 
 The SDK package is MIT licensed. Extensions choose their own license.
