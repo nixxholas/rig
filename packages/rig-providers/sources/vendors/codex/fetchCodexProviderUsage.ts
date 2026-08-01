@@ -68,6 +68,7 @@ interface CodexWindowPayload {
 
 interface CodexUsagePayload {
     plan_type?: unknown;
+    rate_limit_reached_type?: { type?: unknown } | null;
     rate_limit?: {
         allowed?: unknown;
         limit_reached?: unknown;
@@ -77,9 +78,9 @@ interface CodexUsagePayload {
     credits?: {
         balance?: unknown;
         has_credits?: unknown;
-        overage_limit_reached?: unknown;
         unlimited?: unknown;
     } | null;
+    spend_control?: { reached?: unknown } | null;
 }
 
 export function parseCodexProviderUsage(
@@ -95,13 +96,26 @@ export function parseCodexProviderUsage(
         planName: providerPlanName(body.plan_type),
         // Credits outlive an exhausted window: an account with money left can
         // still work even though the rate limit says it is finished.
-        exhausted: body.rate_limit?.limit_reached === true && credits?.available !== true,
+        exhausted:
+            hasCodexHardExhaustion(body) ||
+            (body.rate_limit?.limit_reached === true && credits?.available !== true),
         windows: parseCodexWindows([
             body.rate_limit?.primary_window,
             body.rate_limit?.secondary_window,
         ]),
         credits,
     };
+}
+
+function hasCodexHardExhaustion(body: CodexUsagePayload): boolean {
+    if (body.spend_control?.reached === true) return true;
+    const reachedType = body.rate_limit_reached_type?.type;
+    return (
+        reachedType === "workspace_owner_credits_depleted" ||
+        reachedType === "workspace_member_credits_depleted" ||
+        reachedType === "workspace_owner_usage_limit_reached" ||
+        reachedType === "workspace_member_usage_limit_reached"
+    );
 }
 
 function parseCodexWindows(
@@ -145,9 +159,7 @@ function parseCodexCredits(payload: CodexUsagePayload["credits"]): ProviderUsage
     const remainingCents = Number.isFinite(balance) ? Math.round(balance * 100) : null;
     const hasCredits = payload.has_credits === true;
     return {
-        available:
-            (unlimited || (hasCredits && (remainingCents === null || remainingCents > 0))) &&
-            payload.overage_limit_reached !== true,
+        available: unlimited || (hasCredits && (remainingCents === null || remainingCents > 0)),
         remainingCents: unlimited ? null : remainingCents,
         unlimited,
         usedPercent: null,

@@ -1,5 +1,6 @@
 import { ONLINE_PRESENCE_ID } from "./builtInPresences.js";
 import type { Presence, PresenceState, SetPresenceRequest } from "./types.js";
+import { asyncQueue } from "../concurrency/index.js";
 
 export interface PresenceSelection {
     fallbackPresenceId?: string;
@@ -22,10 +23,12 @@ export interface PresenceStoreOptions {
 export class PresenceStore {
     readonly #listeners = new Set<(state: PresenceState) => void>();
     readonly #now: () => number;
+    readonly #persistenceQueue = asyncQueue();
     readonly #persist: ((selection: PresenceSelection) => Promise<void>) | undefined;
     readonly #presences: readonly Presence[];
     #expiry: ReturnType<typeof setTimeout> | undefined;
     #selection: PresenceSelection;
+    #selectionRevision = 0;
 
     constructor(options: PresenceStoreOptions) {
         this.#now = options.now ?? (() => Date.now());
@@ -47,7 +50,11 @@ export class PresenceStore {
     }
 
     state(): PresenceState {
-        this.#applyExpiry();
+        this.#applyExpiry(true);
+        return this.#currentState();
+    }
+
+    #currentState(): PresenceState {
         const selection = this.#selection;
         return {
             ...(selection.until === undefined ? {} : { changesAt: selection.until }),
@@ -83,10 +90,14 @@ export class PresenceStore {
             since: now,
             ...(request.until === undefined ? {} : { until: request.until }),
         });
-        await this.#persist?.(selection);
-        this.#selection = selection;
-        this.#scheduleExpiry();
-        return this.#publish();
+        const revision = ++this.#selectionRevision;
+        return this.#persistenceQueue.runInLock(async () => {
+            await this.#persist?.(selection);
+            if (revision !== this.#selectionRevision) return this.state();
+            this.#selection = selection;
+            this.#scheduleExpiry();
+            return this.#publish();
+        });
     }
 
     onChange(listener: (state: PresenceState) => void): () => void {
@@ -100,16 +111,29 @@ export class PresenceStore {
         this.#listeners.clear();
     }
 
-    #applyExpiry(): void {
+    #applyExpiry(publishAfterPersistence: boolean): void {
         const selection = this.#selection;
         if (selection.until === undefined || selection.until > this.#now()) return;
-        this.#selection = {
+        const fallback = {
             presenceId: selection.fallbackPresenceId ?? this.#defaultPresenceId(),
             since: selection.until,
         };
-        void this.#persist?.(this.#selection).catch(() => {
-            // An expiry that cannot be written down still takes effect for this daemon.
-        });
+        const revision = ++this.#selectionRevision;
+        this.#selection = fallback;
+        this.#scheduleExpiry();
+        void this.#persistenceQueue
+            .runInLock(async () => {
+                await this.#persist?.(fallback);
+                if (publishAfterPersistence && revision === this.#selectionRevision) {
+                    this.#publish();
+                }
+            })
+            .catch(() => {
+                // An expiry that cannot be written down still takes effect for this daemon.
+                if (publishAfterPersistence && revision === this.#selectionRevision) {
+                    this.#publish();
+                }
+            });
     }
 
     #defaultPresenceId(): string {
@@ -133,7 +157,8 @@ export class PresenceStore {
     }
 
     #publish(): PresenceState {
-        const state = this.state();
+        this.#applyExpiry(false);
+        const state = this.#currentState();
         for (const listener of this.#listeners) listener(state);
         return state;
     }

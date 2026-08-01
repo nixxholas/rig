@@ -9,6 +9,7 @@ import { createProjectConfigSecurityNotice } from "./createProjectConfigSecurity
 import { createProjectConfigSecurityNoticeTitle } from "./createProjectConfigSecurityNoticeTitle.js";
 import { loadConfig } from "./loadConfig.js";
 import { parseConfigToml } from "./parseConfigToml.js";
+import { writePresenceSelection } from "./writePresenceSelection.js";
 import { writeRuntimeConfig } from "./writeRuntimeConfig.js";
 import { writeRuntimeConfigDefaults } from "./writeRuntimeConfigDefaults.js";
 import { writeDaemonSettings } from "./writeDaemonSettings.js";
@@ -986,6 +987,34 @@ codex_stream_max_retries = 8
                         title: "Running errands",
                     },
                 },
+            });
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    it("clears an inherited fallback and expiry when writing a permanent presence", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-permanent-presence-"));
+        const configHome = join(root, "config-home");
+        const env = { RIG_HOME: configHome } as NodeJS.ProcessEnv;
+        try {
+            await mkdir(configHome, { recursive: true });
+            await writeFile(
+                join(configHome, "config.toml"),
+                [
+                    "[presence]",
+                    'current = "away"',
+                    'fallback = "away"',
+                    'until = "2999-01-01T00:00:00.000Z"',
+                ].join("\n"),
+                "utf8",
+            );
+
+            await writePresenceSelection({ presenceId: "online" }, { cwd: root, env });
+
+            expect((await loadConfig({ cwd: root, env })).config.presence).toEqual({
+                current: "online",
+                states: {},
             });
         } finally {
             await rm(root, { recursive: true, force: true });

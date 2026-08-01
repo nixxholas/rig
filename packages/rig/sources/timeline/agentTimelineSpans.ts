@@ -59,10 +59,11 @@ export function agentTimelineSpans(
             spans.push(span);
             continue;
         }
-        if (event.type === "user_input_resolved") {
+        if (event.type === "user_input_resolved" || event.type === "user_input_detached") {
             const span = asking.get(event.data.requestId);
             if (span === undefined) continue;
-            const answered = event.data.status === "answered";
+            const answered =
+                event.type === "user_input_resolved" && event.data.status === "answered";
             close(span, event.createdAt, answered ? "answered" : "cancelled");
             asking.delete(event.data.requestId);
         }

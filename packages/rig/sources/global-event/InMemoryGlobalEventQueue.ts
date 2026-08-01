@@ -66,7 +66,14 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
     }
 
     publish(entry: GlobalEventQueueEntry): void {
-        for (const listener of this.#listeners) listener(entry);
+        for (const listener of this.#listeners) {
+            try {
+                listener(entry);
+            } catch {
+                // One failed subscriber must not prevent every later
+                // subscriber from receiving an already-recorded event.
+            }
+        }
     }
 
     publishLive(event: GlobalLiveEvent): boolean {

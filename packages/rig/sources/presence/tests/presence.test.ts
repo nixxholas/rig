@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createConfiguredPresenceStore } from "../createConfiguredPresenceStore.js";
 import { describeUnansweredQuestion } from "../describeUnansweredQuestion.js";
@@ -59,6 +59,79 @@ describe("presence", () => {
         store.close();
     });
 
+    it("serializes an expiry write ahead of a newer manual selection", async () => {
+        let releaseExpiry!: () => void;
+        const expiryCanFinish = new Promise<void>((resolve) => {
+            releaseExpiry = resolve;
+        });
+        const writes: string[] = [];
+        let persisted = "away";
+        const store = new PresenceStore({
+            now: () => 5_001,
+            persist: async (selection) => {
+                writes.push(selection.presenceId);
+                if (writes.length === 1) await expiryCanFinish;
+                persisted = selection.presenceId;
+            },
+            presences: resolvePresences(),
+            selection: { presenceId: "away", since: 1_000, until: 5_000 },
+        });
+
+        expect(store.state().presence.id).toBe("online");
+        const setting = store.setPresence({ presenceId: "away" });
+        await Promise.resolve();
+
+        expect(writes).toEqual(["online"]);
+        releaseExpiry();
+        await setting;
+
+        expect(writes).toEqual(["online", "away"]);
+        expect(persisted).toBe("away");
+        expect(store.state().presence.id).toBe("away");
+        store.close();
+    });
+
+    it("publishes an automatic expiry exactly once", async () => {
+        vi.useFakeTimers();
+        let now = 1_000;
+        const store = new PresenceStore({
+            now: () => now,
+            persist: async () => undefined,
+            presences: resolvePresences(),
+        });
+        try {
+            await store.setPresence({ presenceId: "away", until: 2_000 });
+            const changed = vi.fn();
+            store.onChange(changed);
+
+            now = 2_001;
+            await vi.advanceTimersByTimeAsync(1_000);
+
+            expect(changed).toHaveBeenCalledOnce();
+            expect(changed.mock.calls[0]?.[0].presence.id).toBe("online");
+        } finally {
+            store.close();
+            vi.useRealTimers();
+        }
+    });
+
+    it("publishes an observed expiry even when persistence fails", async () => {
+        const store = new PresenceStore({
+            now: () => 2_001,
+            persist: () => Promise.reject(new Error("disk unavailable")),
+            presences: resolvePresences(),
+            selection: { presenceId: "away", since: 1_000, until: 2_000 },
+        });
+        const changed = vi.fn();
+        store.onChange(changed);
+
+        expect(store.state().presence.id).toBe("online");
+        await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+
+        expect(changed.mock.calls[0]?.[0].presence.id).toBe("online");
+        store.close();
+    });
+
     it("refuses a state nobody configured", async () => {
         const store = new PresenceStore({ presences: resolvePresences() });
 
@@ -75,6 +148,20 @@ describe("presence", () => {
         );
 
         expect(store.state().presence.id).toBe("away");
+        store.close();
+    });
+
+    it("starts in the fallback when a temporary configured state expired offline", () => {
+        const store = createConfiguredPresenceStore(
+            { current: "away", fallback: "online", states: {}, until: 5_000 },
+            { now: () => 6_000, persist: async () => undefined },
+        );
+
+        expect(store.state()).toMatchObject({
+            presence: { id: "online" },
+            since: 5_000,
+        });
+        expect(store.state().changesAt).toBeUndefined();
         store.close();
     });
 

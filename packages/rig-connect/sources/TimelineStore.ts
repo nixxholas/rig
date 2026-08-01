@@ -149,11 +149,18 @@ export class TimelineStore {
             record.spans.push(span);
             return [{ kind: "asking", sessionId, type: "span_started" }];
         }
-        if (event.type === "user_input_resolved") {
+        if (event.type === "user_input_resolved" || event.type === "user_input_detached") {
             const resolution = event.data as { requestId: string; status: string };
             const span = record.asking.get(resolution.requestId);
             if (span === undefined) return [];
-            close(record, span, at, resolution.status === "answered" ? "answered" : "cancelled");
+            close(
+                record,
+                span,
+                at,
+                event.type === "user_input_resolved" && resolution.status === "answered"
+                    ? "answered"
+                    : "cancelled",
+            );
             record.asking.delete(resolution.requestId);
             return [{ kind: "asking", sessionId, type: "span_ended" }];
         }

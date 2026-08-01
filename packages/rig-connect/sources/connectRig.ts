@@ -1826,7 +1826,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         if (entry === undefined || entry.inFlight || closed) return;
         entry.inFlight = true;
         try {
-            const { data } = await requestJson("/provider-usage", { signal: entry.controller.signal });
+            const { data } = await requestJson("/provider-usage", {
+                signal: entry.controller.signal,
+            });
             if (providerUsageEntry !== entry) return;
             const providers = (data as ListProviderUsageResponse | null)?.providers ?? [];
             publishProviderUsage(entry.store.applyProviders(providers, now()));
@@ -1859,8 +1861,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         providerUsageEntry ??= {
             controller: new AbortController(),
             inFlight: false,
-            refreshIntervalMs:
-                subscription.refreshIntervalMs ?? DEFAULT_PROVIDER_USAGE_REFRESH_MS,
+            refreshIntervalMs: subscription.refreshIntervalMs ?? DEFAULT_PROVIDER_USAGE_REFRESH_MS,
             store: new ProviderUsageStore(),
             subscribers: new Set(),
             timer: undefined,
@@ -2889,6 +2890,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 groupsEntry.detachRoot();
                 groupsEntry.subscribers.clear();
                 groupsEntry = undefined;
+            }
+            if (providerUsageEntry !== undefined) {
+                if (providerUsageEntry.timer !== undefined) {
+                    clearTimeout(providerUsageEntry.timer);
+                }
+                providerUsageEntry.controller.abort();
+                providerUsageEntry.subscribers.clear();
+                providerUsageEntry = undefined;
             }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;

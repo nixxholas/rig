@@ -128,12 +128,65 @@ describe("presence and questions", () => {
             await session.waitForRun(submitted.runId);
 
             expect(inference.requests).toHaveLength(2);
+            expect(JSON.stringify(inference.requests[0])).toContain(
+                "The user is away and cannot be reached",
+            );
             const toolResultText = JSON.stringify(inference.requests.at(-1));
             expect(toolResultText).toContain("the user is Away");
             expect(toolResultText).toContain("cancel_ask");
             const open = store.listDurableUserInputs().filter((call) => isOpenQuestion(call));
             expect(open).toHaveLength(1);
             expect(open[0]?.detachedAt).toBeTypeOf("number");
+        } finally {
+            inference.restore();
+        }
+    });
+
+    it("releases an open question when the user goes Away", async () => {
+        const inference = installGymInference();
+        const presence = new PresenceStore({ presences: resolvePresences() });
+        const store = new InMemorySessionStore({
+            modelCatalog: catalog,
+            presence,
+        });
+        try {
+            const session = createSession(store);
+            const submitted = session.submit({ text: "Choose a database." });
+            await waitForOpenQuestion(session);
+
+            await presence.setPresence({ presenceId: "away" });
+            await session.waitForRun(submitted.runId);
+
+            expect(JSON.stringify(inference.requests.at(-1))).toContain("the user is Away");
+            expect(
+                store.listDurableUserInputs().filter((call) => isOpenQuestion(call)),
+            ).toHaveLength(1);
+        } finally {
+            inference.restore();
+        }
+    });
+
+    it("notifies an existing agent when presence changes", async () => {
+        const inference = installGymInference();
+        const presence = new PresenceStore({ presences: resolvePresences() });
+        const store = new InMemorySessionStore({
+            modelCatalog: catalog,
+            presence,
+        });
+        try {
+            const session = createSession(store);
+            const first = session.submit({ text: "Choose a database." });
+            const requestId = await waitForOpenQuestion(session);
+            session.answerUserInput(requestId, { answers: { database: ["SQLite"] } });
+            await session.waitForRun(first.runId);
+
+            await presence.setPresence({ presenceId: "away" });
+            const second = session.submit({ text: "Keep going." });
+            await session.waitForRun(second.runId);
+
+            const latest = JSON.stringify(inference.requests.at(-1));
+            expect(latest).toContain("The user's presence changed to Away");
+            expect(latest).toContain("Do not wait for an answer");
         } finally {
             inference.restore();
         }

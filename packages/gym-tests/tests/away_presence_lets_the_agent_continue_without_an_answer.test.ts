@@ -60,6 +60,9 @@ describe("presence decides whether a question blocks the agent", () => {
         const agentRequests = gym.inference.requests.filter(
             (request) => !request.options.sessionId?.endsWith(":title"),
         );
+        expect(JSON.stringify(agentRequests[0])).toContain(
+            "The user is away and cannot be reached",
+        );
         const toolResult = JSON.stringify(agentRequests[1]?.context.messages.at(-1));
         expect(toolResult).toContain("the user is Away");
         expect(toolResult).toContain("cancel_ask");

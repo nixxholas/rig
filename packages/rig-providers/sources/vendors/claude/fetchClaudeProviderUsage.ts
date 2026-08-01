@@ -1,6 +1,7 @@
 import type { ProviderUsage, ProviderUsageCredits } from "@/core/ProviderUsage.js";
 import {
     epochMsFromIso,
+    optionalResponseJson,
     providerPlanName,
     providerUsageWindow,
     usagePercent,
@@ -77,11 +78,12 @@ async function fetchFromUsageEndpoint(
         request("/api/oauth/profile").catch(() => null),
     ]);
     if (usage === null || !usage.ok) return null;
+    const profilePayload = await optionalResponseJson(profile);
 
     return parseClaudeProviderUsage(await usage.json(), {
         capturedAt: now(),
         providerId: options.providerId ?? "claude",
-        profile: profile !== null && profile.ok ? await profile.json() : null,
+        profile: profilePayload,
     });
 }
 

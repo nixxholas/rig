@@ -64,7 +64,6 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
             cursor,
             event,
         });
-        this.#head = cursor;
         return entry;
     }
 
@@ -73,7 +72,15 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     }
 
     publish(entry: GlobalEventQueueEntry): void {
-        for (const listener of this.#listeners) listener(entry);
+        if (entry.cursor > this.#head) this.#head = entry.cursor;
+        for (const listener of this.#listeners) {
+            try {
+                listener(entry);
+            } catch {
+                // Stored events are already committed. One failed subscriber
+                // must not prevent every later subscriber from receiving them.
+            }
+        }
     }
 
     publishLive(event: GlobalLiveEvent): boolean {

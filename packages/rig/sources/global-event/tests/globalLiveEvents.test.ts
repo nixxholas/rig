@@ -61,6 +61,27 @@ describe("live global events", () => {
 
                 expect(queue.list()?.map((stored) => stored.cursor)).toEqual([entry?.cursor]);
             });
+
+            it("keeps delivering stored events after one subscriber throws", () => {
+                const queue = create();
+                const delivered: GlobalEventDelivery[] = [];
+                queue.subscribe(() => {
+                    throw new Error("subscriber failed");
+                });
+                queue.subscribe((delivery) => delivered.push(delivery));
+                const entry = queue.append({
+                    createdAt: 1,
+                    data: { project: { id: "p1" } as never },
+                    id: "e1" as never,
+                    projectId: "p1",
+                    type: "project_created",
+                });
+                if (entry === undefined) throw new Error("Expected a stored event.");
+
+                queue.publish(entry);
+
+                expect(delivered).toEqual([entry]);
+            });
         });
     }
 
@@ -101,7 +122,7 @@ describe("live global events", () => {
             }),
         ).toThrow("roll back caller");
 
-        expect(queue.cursor() > before).toBe(true);
+        expect(queue.cursor()).toBe(before);
         expect(queue.list()).toEqual([]);
     });
 });

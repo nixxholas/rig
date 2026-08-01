@@ -1,6 +1,6 @@
 import type { ProviderUsage } from "@slopus/rig-providers";
 
-import { forever, type GracefulShutdown } from "../concurrency/index.js";
+import { asyncQueue, forever, type GracefulShutdown } from "../concurrency/index.js";
 
 /** How often each provider is asked for its usage. */
 export const PROVIDER_USAGE_POLL_INTERVAL_MS = 15 * 60 * 1_000;
@@ -53,28 +53,34 @@ export function createProviderUsageTracker(
             { providerId, usage: null, checkedAt: null, error: null },
         ]),
     );
+    const pollingQueues = new Map(
+        [...entries.keys()].map((providerId) => [providerId, asyncQueue()]),
+    );
     let started = false;
 
     async function poll(providerId: string): Promise<ProviderUsageEntry | undefined> {
         const entry = entries.get(providerId);
-        if (entry === undefined) return undefined;
-        try {
-            const usage = await options.loadUsage(providerId);
-            entry.checkedAt = now();
-            // A provider that cannot answer keeps its previous reading, which
-            // stays honest because every reading carries its own capture time.
-            if (usage !== null) {
-                entry.usage = usage;
-                entry.error = null;
-            } else {
-                entry.error = "The provider did not report usage.";
+        const queue = pollingQueues.get(providerId);
+        if (entry === undefined || queue === undefined) return undefined;
+        return queue.runInLock(async () => {
+            try {
+                const usage = await options.loadUsage(providerId);
+                entry.checkedAt = now();
+                // A provider that cannot answer keeps its previous reading, which
+                // stays honest because every reading carries its own capture time.
+                if (usage !== null) {
+                    entry.usage = usage;
+                    entry.error = null;
+                } else {
+                    entry.error = "The provider did not report usage.";
+                }
+            } catch (error) {
+                entry.checkedAt = now();
+                entry.error = error instanceof Error ? error.message : String(error);
+                options.onError?.(providerId, error);
             }
-        } catch (error) {
-            entry.checkedAt = now();
-            entry.error = error instanceof Error ? error.message : String(error);
-            options.onError?.(providerId, error);
-        }
-        return entry;
+            return entry;
+        });
     }
 
     return {

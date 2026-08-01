@@ -45,7 +45,12 @@ function usageDaemon(answers: readonly (readonly ProviderUsageEntry[] | Error)[]
             new Response(JSON.stringify({ providers: answer }), { status: 200 }),
         );
     };
-    return { fetch, get reads() { return reads.length; } };
+    return {
+        fetch,
+        get reads() {
+            return reads.length;
+        },
+    };
 }
 
 async function settle(): Promise<void> {
@@ -150,10 +155,7 @@ describe("connectProviderUsage", () => {
     });
 
     it("keeps the readings it has when a read fails", async () => {
-        const daemon = usageDaemon([
-            [entry("codex", 42)],
-            new Error("the daemon is unreachable"),
-        ]);
+        const daemon = usageDaemon([[entry("codex", 42)], new Error("the daemon is unreachable")]);
         const rig = connectRig({
             endpoint: "http://daemon.test",
             token: "t",
@@ -268,6 +270,29 @@ describe("connectProviderUsage", () => {
 
             expect(daemon.reads).toBe(afterClose);
             rig.close();
+        } finally {
+            vi.useRealTimers();
+        }
+    });
+
+    it("stops polling when the whole Rig connection closes", async () => {
+        vi.useFakeTimers();
+        try {
+            const daemon = usageDaemon([[entry("codex", 42)]]);
+            const rig = connectRig({
+                endpoint: "http://daemon.test",
+                token: "t",
+                fetch: daemon.fetch as typeof globalThis.fetch,
+            });
+            rig.connectProviderUsage({
+                onChange: () => {},
+                refreshIntervalMs: 1_000,
+            });
+            await vi.advanceTimersByTimeAsync(0);
+
+            rig.close();
+
+            expect(vi.getTimerCount()).toBe(0);
         } finally {
             vi.useRealTimers();
         }

@@ -37,6 +37,41 @@ describe("InboxStore", () => {
 
         expect(store.items()).toEqual([]);
     });
+
+    it("announces authoritative session reconciliation to subscribers", () => {
+        const store = new InboxStore();
+        const request = requested("session-1", "question-1", 10);
+        store.apply(request);
+        const questions = (request.data as { questions: unknown }).questions;
+
+        const deltas = store.apply({
+            createdAt: 20,
+            data: {
+                session: {
+                    id: "session-1",
+                    inboxItems: [
+                        {
+                            createdAt: 10,
+                            questions,
+                            requestId: "question-1",
+                            status: "pending",
+                        },
+                    ],
+                    projectId: "project-1",
+                    title: "Choose storage",
+                },
+            },
+            id: "event-2",
+            sessionId: "session-1",
+            type: "session_current",
+        } as unknown as GlobalEvent);
+
+        expect(deltas.map((delta) => delta.type)).toContain("item_changed");
+        expect(store.items()[0]).toMatchObject({
+            projectId: "project-1",
+            title: "Choose storage",
+        });
+    });
 });
 
 function requested(sessionId: string, requestId: string, createdAt: number): GlobalEvent {

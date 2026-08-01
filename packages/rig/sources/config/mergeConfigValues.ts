@@ -103,11 +103,18 @@ export function mergeConfigValues(
         }
         if (config.network !== undefined) network = config.network;
         if (config.presence !== undefined) {
-            if (config.presence.current !== undefined) presence.current = config.presence.current;
-            if (config.presence.fallback !== undefined) {
-                presence.fallback = config.presence.fallback;
+            if (config.presence.current !== undefined) {
+                presence.current = config.presence.current;
+                if (config.presence.fallback === undefined) delete presence.fallback;
+                else presence.fallback = config.presence.fallback;
+                if (config.presence.until === undefined) delete presence.until;
+                else presence.until = config.presence.until;
+            } else {
+                if (config.presence.fallback !== undefined) {
+                    presence.fallback = config.presence.fallback;
+                }
+                if (config.presence.until !== undefined) presence.until = config.presence.until;
             }
-            if (config.presence.until !== undefined) presence.until = config.presence.until;
             for (const [id, state] of Object.entries(config.presence.states ?? {})) {
                 presence.states = {
                     ...presence.states,

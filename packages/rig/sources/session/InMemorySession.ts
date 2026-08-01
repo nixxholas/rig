@@ -2201,6 +2201,27 @@ export class InMemorySession {
         return response;
     }
 
+    /** Applies a daemon-wide presence change to this agent and anything awaiting the user. */
+    presenceChanged(state: PresenceState): void {
+        const runtime = this.#runtime;
+        if (runtime !== undefined) {
+            const message: SystemMessage = {
+                blocks: [{ type: "text", text: modelPresenceInstruction(state, true) }],
+                id: createId(),
+                internal: true,
+                role: "system",
+            };
+            if (this.#activeRun !== undefined && runtime.agent.status === "running") {
+                runtime.agent.steerMessage(message);
+            } else {
+                runtime.agent.enqueueMessage(message);
+            }
+        }
+        for (const pending of [...this.#pendingUserInputs.values()]) {
+            this.#applyPresenceToUserInput(pending.request.requestId, pending.durable?.kind, state);
+        }
+    }
+
     /**
      * Questions follow the user's presence: Online waits indefinitely, Away never waits, and a
      * custom state waits for however long it allows. When presence ends the wait the question
@@ -2209,10 +2230,12 @@ export class InMemorySession {
     #applyPresenceToUserInput(
         requestId: string,
         kind: DurableUserInputCall["kind"] | undefined,
+        currentState?: PresenceState,
     ): void {
         if (kind !== "question") return;
         if (!this.#pendingUserInputs.has(requestId)) return;
-        const state = this.#presence?.state();
+        this.#clearUserInputPresenceTimer(requestId);
+        const state = currentState ?? this.#presence?.state();
         if (state === undefined) return;
         const answerWaitMs = state.presence.answerWaitMs;
         if (answerWaitMs === null) return;
@@ -5573,6 +5596,14 @@ export class InMemorySession {
         }
 
         const agentManager = this.#agentManager;
+        const appendSystemPrompt = [
+            this.#appendSystemPrompt,
+            this.#presence === undefined
+                ? undefined
+                : modelPresenceInstruction(this.#presence.state(), false),
+        ]
+            .filter((value): value is string => value !== undefined && value.length > 0)
+            .join("\n\n");
         const options: CreateCodingAssistantAgentOptions = {
             agentId: this.#agentId,
             ...(agentManager === undefined
@@ -5580,9 +5611,7 @@ export class InMemorySession {
                 : {
                       agentCommunication: agentManager.communicationContext(this.id),
                   }),
-            ...(this.#appendSystemPrompt !== undefined
-                ? { appendSystemPrompt: this.#appendSystemPrompt }
-                : {}),
+            ...(appendSystemPrompt.length === 0 ? {} : { appendSystemPrompt }),
             cwd: this.#request.cwd,
             ...(this.#executor === undefined ? {} : { executor: this.#executor }),
             ...(agentManager === undefined
@@ -6364,6 +6393,7 @@ export class InMemorySession {
         const draining = this.#taskDrain?.run(drain) ?? drain();
         this.#draining = draining.finally(() => {
             this.#draining = undefined;
+            if (this.#queue.length > 0) this.#startDrainQueue();
         });
         void this.#draining.catch(rethrowDatabaseFailure);
     }
@@ -6692,6 +6722,23 @@ function cloneWorkflowRun(run: WorkflowRun): WorkflowRun {
         ...run,
         logs: [...run.logs],
     };
+}
+
+function modelPresenceInstruction(state: PresenceState, changed: boolean): string {
+    const presence = state.presence;
+    const lines = [
+        changed
+            ? `The user's presence changed to ${presence.title} ${presence.emoji}.`
+            : `The user's current presence is ${presence.title} ${presence.emoji}.`,
+        presence.prompt.trim(),
+    ];
+    if (state.changesAt !== undefined) {
+        lines.push(
+            `This presence is scheduled to change at ${new Date(state.changesAt).toISOString()}.`,
+        );
+    }
+    lines.push("Follow these presence instructions until Rig tells you they changed.");
+    return lines.filter((line) => line.length > 0).join(" ");
 }
 
 function usageGroupKey(group: SessionUsageGroup): string {

@@ -1,6 +1,7 @@
 import type { ProviderUsage, ProviderUsageCredits } from "@/core/ProviderUsage.js";
 import {
     epochMsFromIso,
+    optionalResponseJson,
     providerPlanName,
     providerUsageWindow,
     usagePercent,
@@ -68,12 +69,12 @@ export async function fetchGrokProviderUsage(
             request("/user?include=subscription").catch(() => null),
         ]);
         if (!billing.ok) return null;
+        const userPayload = await optionalResponseJson(user);
 
-        return parseGrokProviderUsage(
-            await billing.json(),
-            user !== null && user.ok ? await user.json() : null,
-            { capturedAt: now(), providerId: options.providerId ?? "grok" },
-        );
+        return parseGrokProviderUsage(await billing.json(), userPayload, {
+            capturedAt: now(),
+            providerId: options.providerId ?? "grok",
+        });
     } catch {
         return null;
     }

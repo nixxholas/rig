@@ -1,5 +1,6 @@
 import type { ConfigPresence } from "../config/types.js";
 import { writePresenceSelection } from "../config/writePresenceSelection.js";
+import { ONLINE_PRESENCE_ID } from "./builtInPresences.js";
 import { PresenceStore, type PresenceSelection } from "./PresenceStore.js";
 import { resolvePresences } from "./resolvePresences.js";
 
@@ -12,18 +13,20 @@ export function createConfiguredPresenceStore(
     options: { now?: () => number; persist?: (selection: PresenceSelection) => Promise<void> } = {},
 ): PresenceStore {
     const now = options.now ?? (() => Date.now());
+    const currentTime = now();
+    const expired = presence.until !== undefined && presence.until <= currentTime;
     const selection: PresenceSelection | undefined =
         presence.current === undefined
             ? undefined
             : {
-                  ...(presence.fallback === undefined
-                      ? {}
-                      : { fallbackPresenceId: presence.fallback }),
-                  presenceId: presence.current,
-                  since: now(),
-                  ...(presence.until === undefined || presence.until <= now()
-                      ? {}
-                      : { until: presence.until }),
+                  ...(!expired && presence.fallback !== undefined
+                      ? { fallbackPresenceId: presence.fallback }
+                      : {}),
+                  presenceId: expired
+                      ? (presence.fallback ?? ONLINE_PRESENCE_ID)
+                      : presence.current,
+                  since: expired ? presence.until! : currentTime,
+                  ...(expired || presence.until === undefined ? {} : { until: presence.until }),
               };
     return new PresenceStore({
         now,

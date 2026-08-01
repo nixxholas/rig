@@ -116,6 +116,35 @@ describe("TimelineStore", () => {
         ]);
     });
 
+    it("closes an asking span when presence lets the agent continue", () => {
+        const store = new TimelineStore({ kind: "session", sessionId: "s" });
+        store.applySnapshot(snapshot([agent({ sessionId: "s" })]));
+        store.apply(event("user_input_requested", MINUTE, { questions: [], requestId: "ask-1" }));
+
+        const deltas = store.apply(
+            event("user_input_detached", 2 * MINUTE, {
+                presenceId: "away",
+                reason: "away",
+                requestId: "ask-1",
+            }),
+        );
+
+        expect(deltas).toContainEqual({
+            kind: "asking",
+            sessionId: "s",
+            type: "span_ended",
+        });
+        expect(store.agents()[0]!.spans).toEqual([
+            {
+                endedAt: 2 * MINUTE,
+                kind: "asking",
+                outcome: "cancelled",
+                requestId: "ask-1",
+                startedAt: MINUTE,
+            },
+        ]);
+    });
+
     it("adds a chat that appears while the chart is open", () => {
         const store = new TimelineStore({ kind: "project", projectId: "p1" });
         store.applySnapshot(snapshot([]));
@@ -231,6 +260,15 @@ describe("TimelineStore", () => {
             lifecycle("user_input_resolved", 3 * MINUTE, {
                 requestId: "ask-1",
                 status: "answered",
+            }),
+            lifecycle("user_input_requested", 3 * MINUTE, {
+                questions: [],
+                requestId: "ask-2",
+            }),
+            lifecycle("user_input_detached", 3.5 * MINUTE, {
+                presenceId: "away",
+                reason: "away",
+                requestId: "ask-2",
             }),
             lifecycle("run_finished", 4 * MINUTE, { runId: "run-1", stopReason: "stop" }),
             lifecycle("message_submitted", 9 * MINUTE, { runId: "run-2" }),

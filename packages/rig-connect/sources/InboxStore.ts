@@ -27,19 +27,25 @@ export class InboxStore {
 
     applyHello(hello: GlobalStreamHello): InboxDelta[] {
         this.#sessions = new Map(hello.sessions.map((session) => [session.id, session]));
-        const next = sortItems(hello.sessions.flatMap(itemsForSession));
+        return this.#replaceItems(sortItems(hello.sessions.flatMap(itemsForSession)));
+    }
+
+    #replaceItems(next: readonly InboxItem[]): InboxDelta[] {
         const previous = new Map(this.#items.map((item) => [item.id, item]));
         const deltas: InboxDelta[] = [];
-        for (const item of next) {
+        const retained = next.map((item) => {
             const before = previous.get(item.id);
             if (before === undefined) deltas.push({ item, type: "item_added" });
             else if (JSON.stringify(before) !== JSON.stringify(item)) {
                 deltas.push({ item, type: "item_changed" });
             }
             previous.delete(item.id);
-        }
+            return before !== undefined && JSON.stringify(before) === JSON.stringify(item)
+                ? before
+                : item;
+        });
         for (const id of previous.keys()) deltas.push({ id, type: "item_removed" });
-        this.#items = next;
+        this.#items = retained;
         return deltas;
     }
 
@@ -106,7 +112,7 @@ export class InboxStore {
                 ),
                 ...itemsForSession(current.session),
             ];
-            this.#items = sortItems(dedupe(next));
+            return this.#replaceItems(sortItems(dedupe(next)));
         }
         return [];
     }

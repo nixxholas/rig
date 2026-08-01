@@ -86,6 +86,42 @@ describe("createProviderUsageTracker", () => {
         expect(onError).toHaveBeenCalledOnce();
     });
 
+    it("runs only one read per provider when refresh overlaps polling", async () => {
+        const shutdown = gracefulShutdown();
+        let calls = 0;
+        let active = 0;
+        let maximumActive = 0;
+        let releaseFirst!: () => void;
+        const firstCanFinish = new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+        });
+        const tracker = createProviderUsageTracker({
+            loadUsage: async (providerId) => {
+                calls += 1;
+                active += 1;
+                maximumActive = Math.max(maximumActive, active);
+                if (calls === 1) await firstCanFinish;
+                active -= 1;
+                return usage(providerId, calls);
+            },
+            providerIds: ["codex"],
+            shutdown,
+        });
+
+        const first = tracker.refresh("codex");
+        await vi.waitFor(() => expect(calls).toBe(1));
+        const second = tracker.refresh("codex");
+        await Promise.resolve();
+
+        expect(calls).toBe(1);
+        releaseFirst();
+        await Promise.all([first, second]);
+
+        expect(calls).toBe(2);
+        expect(maximumActive).toBe(1);
+        expect(tracker.get("codex")?.usage?.windows.weekly?.usedPercent).toBe(2);
+    });
+
     it("polls every provider in parallel and keeps polling on a schedule", async () => {
         const shutdown = gracefulShutdown();
         const calls: string[] = [];

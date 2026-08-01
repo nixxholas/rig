@@ -129,6 +129,7 @@ export class InMemorySessionStore implements SessionStore {
         });
         this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
         this.presence.onChange((state) => {
+            for (const session of this.#sessions.values()) session.presenceChanged(state);
             const event = {
                 createdAt: Date.now(),
                 data: { presence: state },

@@ -1,17 +1,24 @@
 import type { Bash } from "just-bash";
 
 import { errorToMessage } from "../../errorToMessage.js";
-import type { BashContext, BashRunResult, BashSessionSnapshot } from "./BashContext.js";
+import type {
+    BashContext,
+    BashRunResult,
+    BashSessionExit,
+    BashSessionSnapshot,
+} from "./BashContext.js";
 import { capOutput } from "./capOutput.js";
 import { MAX_ACTIVE_BASH_SESSIONS, MAX_RETAINED_BASH_SESSIONS } from "./bashSessionLimits.js";
 
 interface JustBashSession {
     command: string;
     completion: Promise<BashRunResult>;
+    consumingWaiters: number;
     controller: AbortController;
     cwd: string;
     /** Stopped to make room for a newer command, but still readable. */
     evicted?: true;
+    exitObserved: boolean;
     killed: boolean;
     maxOutputBytes?: number;
     result?: BashRunResult;
@@ -25,6 +32,20 @@ interface JustBashSession {
 export function createJustBashBashContext(bash: Bash, cwd: string): BashContext {
     const sessions = new Map<number, JustBashSession>();
     let nextSessionId = 1;
+    let onActiveSessionCountChange: ((count: number) => void) | undefined;
+    let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
+    const activeSessionCount = () =>
+        [...sessions.values()].filter((session) => session.result === undefined && !session.evicted)
+            .length;
+    const activeSessions = () =>
+        [...sessions.values()]
+            .filter((session) => session.result === undefined && !session.evicted)
+            .map((session) => ({
+                command: session.command,
+                cwd: session.cwd,
+                sessionId: session.sessionId,
+                status: "running" as const,
+            }));
     const trimSessions = () => {
         while (sessions.size > MAX_RETAINED_BASH_SESSIONS) {
             const completed = [...sessions.values()].find(
@@ -63,31 +84,38 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
         const session = sessions.get(sessionId);
         if (session === undefined) return undefined;
         const waitMs = Math.max(0, readOptions.waitMs ?? 0);
+        const peeking = readOptions.peek === true;
         if (session.result === undefined && waitMs > 0 && !readOptions.signal?.aborted) {
-            await new Promise<void>((resolveWait) => {
-                let settled = false;
-                let timer: ReturnType<typeof setTimeout> | undefined;
-                const finish = () => {
-                    if (settled) return;
-                    settled = true;
-                    if (timer !== undefined) clearTimeout(timer);
-                    readOptions.signal?.removeEventListener("abort", finish);
-                    resolveWait();
-                };
-                timer = setTimeout(finish, waitMs);
-                readOptions.signal?.addEventListener("abort", finish, { once: true });
-                void session.completion.then(finish);
-                if (readOptions.signal?.aborted) finish();
-            });
+            if (!peeking) session.consumingWaiters += 1;
+            try {
+                await new Promise<void>((resolveWait) => {
+                    let settled = false;
+                    let timer: ReturnType<typeof setTimeout> | undefined;
+                    const finish = () => {
+                        if (settled) return;
+                        settled = true;
+                        if (timer !== undefined) clearTimeout(timer);
+                        readOptions.signal?.removeEventListener("abort", finish);
+                        resolveWait();
+                    };
+                    timer = setTimeout(finish, waitMs);
+                    readOptions.signal?.addEventListener("abort", finish, { once: true });
+                    void session.completion.then(finish);
+                    if (readOptions.signal?.aborted) finish();
+                });
+            } finally {
+                if (!peeking) session.consumingWaiters -= 1;
+            }
         }
         const result = session.result;
         const stdout = result?.stdout ?? "";
         const stderr = result?.stderr ?? "";
         const stdoutDelta = stdout.slice(session.stdoutOffset);
         const stderrDelta = stderr.slice(session.stderrOffset);
-        if (readOptions.peek !== true) {
+        if (!peeking) {
             session.stdoutOffset = stdout.length;
             session.stderrOffset = stderr.length;
+            if (result !== undefined) session.exitObserved = true;
         }
         return {
             command: session.command,
@@ -104,10 +132,23 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
     };
 
     return {
+        activeSessionCount,
+        activeSessions,
         cwd,
+        async killAllSessions() {
+            const active = [...sessions.values()].filter((session) => session.result === undefined);
+            for (const session of active) {
+                session.exitObserved = true;
+                session.killed = true;
+                session.controller.abort();
+            }
+            await Promise.all(active.map((session) => session.completion));
+            return active.length;
+        },
         async killSession(sessionId) {
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
+            session.exitObserved = true;
             session.killed = true;
             session.controller.abort();
             await session.completion;
@@ -154,8 +195,10 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
                     stdout: "",
                     timedOut: false,
                 }),
+                consumingWaiters: 0,
                 controller,
                 cwd: runOptions.cwd ?? cwd,
+                exitObserved: false,
                 killed: false,
                 ...(runOptions.maxOutputBytes === undefined
                     ? {}
@@ -183,6 +226,7 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
                     timedOut: session.timedOut,
                 }));
             sessions.set(sessionId, session);
+            onActiveSessionCountChange?.(activeSessionCount());
             if (runOptions.timeoutMs !== undefined) {
                 session.timeout = setTimeout(() => {
                     session.timedOut = true;
@@ -193,10 +237,27 @@ export function createJustBashBashContext(bash: Bash, cwd: string): BashContext 
             void session.completion.then((result) => {
                 session.result = result;
                 if (session.timeout !== undefined) clearTimeout(session.timeout);
+                const awaited = session.consumingWaiters > 0;
+                onActiveSessionCountChange?.(activeSessionCount());
                 trimSessions();
+                if (!awaited && !session.exitObserved) {
+                    onSessionExit?.({
+                        command: session.command,
+                        exitCode: result.exitCode,
+                        sessionId,
+                        status: session.killed || result.exitCode === null ? "killed" : "completed",
+                    });
+                }
             });
             trimSessions();
             return sessionId;
+        },
+        setActiveSessionCountListener(listener) {
+            onActiveSessionCountChange = listener;
+            listener?.(activeSessionCount());
+        },
+        setSessionExitListener(listener) {
+            onSessionExit = listener;
         },
         supportsSessionInput: false,
         async writeSession() {

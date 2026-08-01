@@ -3,8 +3,10 @@ import { PassThrough } from "node:stream";
 import type Dockerode from "dockerode";
 import { describe, expect, it, vi } from "vitest";
 
+import type { BashSessionExit } from "../agent/context/BashContext.js";
 import { createPermissionContext } from "../permissions/index.js";
 import { SecretRegistry, SessionSecretContext } from "../secrets/index.js";
+import { BASH_SESSION_STOP_GRACE_MS } from "../agent/context/bashSessionLimits.js";
 import { createDockerBashContext } from "./createDockerBashContext.js";
 import type { DockerEnvironment } from "./DockerEnvironment.js";
 
@@ -204,6 +206,66 @@ describe("createDockerBashContext", () => {
 
         fake.foregroundStreams[0]?.end();
         await context.readSession(1, { waitMs: 1_000 });
+    });
+
+    it("reports an unobserved background command exit", async () => {
+        const fake = createFakeDockerEnvironment();
+        const context = createDockerBashContext(
+            fake.environment,
+            createPermissionContext("full_access"),
+        );
+        const exits: BashSessionExit[] = [];
+        context.setSessionExitListener?.((exit) => exits.push(exit));
+
+        await context.startSession({ command: "background command" });
+        fake.foregroundStreams[0]?.end();
+
+        await vi.waitFor(() =>
+            expect(exits).toEqual([
+                {
+                    command: "background command",
+                    exitCode: 0,
+                    sessionId: 1,
+                    status: "completed",
+                },
+            ]),
+        );
+    });
+
+    it("does not report an exit a consuming reader is waiting to observe", async () => {
+        const fake = createFakeDockerEnvironment();
+        const context = createDockerBashContext(
+            fake.environment,
+            createPermissionContext("full_access"),
+        );
+        const exits: BashSessionExit[] = [];
+        context.setSessionExitListener?.((exit) => exits.push(exit));
+
+        await context.startSession({ command: "observed command" });
+        const reading = context.readSession(1, { waitMs: 1_000 });
+        fake.foregroundStreams[0]?.end();
+
+        await expect(reading).resolves.toMatchObject({ status: "completed" });
+        expect(exits).toEqual([]);
+    });
+
+    it("uses the shared graceful-stop interval before forcing a Docker command", async () => {
+        const fake = createFakeDockerEnvironment();
+        const context = createDockerBashContext(
+            fake.environment,
+            createPermissionContext("full_access"),
+        );
+        const timeoutSpy = vi.spyOn(globalThis, "setTimeout");
+        try {
+            await context.startSession({ command: "background command" });
+            await context.killSession(1);
+
+            expect(
+                timeoutSpy.mock.calls.some(([, delay]) => delay === BASH_SESSION_STOP_GRACE_MS),
+            ).toBe(true);
+        } finally {
+            timeoutSpy.mockRestore();
+        }
     });
 
     it("handles container lookup failures while aborting a foreground run", async () => {

@@ -193,6 +193,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     constructor(options: PersistentSessionStoreOptions) {
         this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
         this.presence.onChange((state) => {
+            for (const session of this.#cachedSessions()) session.presenceChanged(state);
             const event = {
                 createdAt: this.#now(),
                 data: { presence: state },

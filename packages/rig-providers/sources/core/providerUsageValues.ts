@@ -1,5 +1,15 @@
 import type { ProviderUsageWindow } from "@/core/ProviderUsage.js";
 
+/** Reads optional JSON metadata without letting it invalidate a primary response. */
+export async function optionalResponseJson(response: Response | null): Promise<unknown | null> {
+    if (response === null || !response.ok) return null;
+    try {
+        return await response.json();
+    } catch {
+        return null;
+    }
+}
+
 /** A percentage a vendor reported, or null when the value is missing or absurd. */
 export function usagePercent(value: unknown): number | null {
     return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100

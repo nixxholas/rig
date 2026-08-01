@@ -1,6 +1,7 @@
 import { Bash } from "just-bash";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
+import type { BashSessionExit } from "./BashContext.js";
 import { createJustBashBashContext } from "./createJustBashBashContext.js";
 import { MAX_ACTIVE_BASH_SESSIONS } from "./bashSessionLimits.js";
 
@@ -42,5 +43,24 @@ describe("createJustBashBashContext", () => {
         });
         expect(context.supportsSessionInput).toBe(false);
         await expect(context.writeSession(65, "input")).resolves.toBe(false);
+    });
+
+    it("reports an unobserved background command exit", async () => {
+        const context = createJustBashBashContext(new Bash({ cwd: "/workspace" }), "/workspace");
+        const exits: BashSessionExit[] = [];
+        context.setSessionExitListener?.((exit) => exits.push(exit));
+
+        await context.startSession({ command: "echo finished" });
+
+        await vi.waitFor(() =>
+            expect(exits).toEqual([
+                {
+                    command: "echo finished",
+                    exitCode: 0,
+                    sessionId: 1,
+                    status: "completed",
+                },
+            ]),
+        );
     });
 });

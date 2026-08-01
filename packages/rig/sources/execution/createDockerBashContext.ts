@@ -9,10 +9,12 @@ import type Dockerode from "dockerode";
 import type {
     BashContext,
     BashRunOptions,
+    BashSessionExit,
     BashSessionSnapshot,
 } from "../agent/context/BashContext.js";
 import { assertCanUseCustomShell } from "../agent/context/assertCanUseCustomShell.js";
 import {
+    BASH_SESSION_STOP_GRACE_MS,
     MAX_ACTIVE_BASH_SESSIONS,
     MAX_RETAINED_BASH_SESSIONS,
 } from "../agent/context/bashSessionLimits.js";
@@ -53,11 +55,13 @@ import { prepareDockerNetworkBridgeContainerRoot } from "./prepareDockerNetworkB
 interface DockerBashSession {
     command: string;
     completion: Promise<void>;
+    consumingWaiters: number;
     cwd: string;
     /** Stopped to make room for a newer command, but still readable. */
     evicted?: true;
     exec: Dockerode.Exec;
     exitCode: number | null;
+    exitObserved: boolean;
     finished: boolean;
     killed: boolean;
     managedNetwork?: DockerManagedNetwork;
@@ -107,13 +111,17 @@ export function createDockerBashContext(
     const cwd = environment.config.workingDirectory;
     let nextSessionId = 1;
     let onActiveSessionCountChange: ((count: number) => void) | undefined;
+    let onSessionExit: ((exit: BashSessionExit) => void) | undefined;
     let ambientEnvironmentVariables: Promise<readonly string[]> | undefined;
     let canonicalWorkspace: Promise<string> | undefined;
     let sandboxRuntime: Promise<PreparedDockerSandbox> | undefined;
     const activeSessionCount = () =>
         [...sessions.values()].filter((session) => !session.finished && !session.evicted).length;
 
-    const start = async (options: Omit<BashRunOptions, "signal">): Promise<DockerBashSession> => {
+    const start = async (
+        options: Omit<BashRunOptions, "signal">,
+        exitObserved = false,
+    ): Promise<DockerBashSession> => {
         const permissionMode = permissions.mode;
         const permissionRevision = permissions.revision;
         assertCanUseCustomShell(permissionMode, options.shell);
@@ -345,9 +353,11 @@ export function createDockerBashContext(
         const session: DockerBashSession = {
             command: options.command,
             completion: Promise.resolve(),
+            consumingWaiters: 0,
             cwd: runCwd,
             exec,
             exitCode: null,
+            exitObserved,
             finished: false,
             killed: false,
             ...(managedNetwork === undefined ? {} : { managedNetwork }),
@@ -430,9 +440,19 @@ export function createDockerBashContext(
                 }
                 session.finished = true;
                 if (session.timeout !== undefined) clearTimeout(session.timeout);
+                const awaited = session.consumingWaiters > 0;
                 onActiveSessionCountChange?.(activeSessionCount());
                 trimFinishedSessions();
                 resolve();
+                if (!awaited && !session.exitObserved) {
+                    onSessionExit?.({
+                        command: session.command,
+                        exitCode: session.exitCode,
+                        sessionId,
+                        status:
+                            session.killed || session.exitCode === null ? "killed" : "completed",
+                    });
+                }
             };
             stream.once("error", (error) => void finish(error));
             stream.once("end", () => void finish());
@@ -510,7 +530,7 @@ export function createDockerBashContext(
         session.stream.end();
         await Promise.race([
             session.completion,
-            new Promise<void>((resolve) => setTimeout(resolve, 500)),
+            new Promise<void>((resolve) => setTimeout(resolve, BASH_SESSION_STOP_GRACE_MS)),
         ]);
         if (!session.finished) {
             await runDockerExec(container, [
@@ -597,6 +617,7 @@ export function createDockerBashContext(
         if (!peek) {
             session.stdoutOffset = session.stdout.length;
             session.stderrOffset = session.stderr.length;
+            if (session.finished) session.exitObserved = true;
         }
         return {
             command: session.command,
@@ -635,12 +656,14 @@ export function createDockerBashContext(
         },
         async killAllSessions() {
             const active = [...sessions.values()].filter((session) => !session.finished);
+            for (const session of active) session.exitObserved = true;
             await Promise.all(active.map(kill));
             return active.length;
         },
         async killSession(sessionId) {
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
+            session.exitObserved = true;
             await kill(session);
             // Stopping reports status; it must not swallow unread output.
             return snapshot(session, true);
@@ -649,29 +672,38 @@ export function createDockerBashContext(
             const session = sessions.get(sessionId);
             if (session === undefined) return undefined;
             const waitMs = Math.max(0, options.waitMs ?? 0);
+            const peeking = options.peek === true;
             if (!session.finished && waitMs > 0 && !options.signal?.aborted) {
-                await new Promise<void>((resolve) => {
-                    let settled = false;
-                    const finish = () => {
-                        if (settled) return;
-                        settled = true;
-                        clearTimeout(timer);
-                        options.signal?.removeEventListener("abort", finish);
-                        resolve();
-                    };
-                    const timer = setTimeout(finish, waitMs);
-                    options.signal?.addEventListener("abort", finish, { once: true });
-                    void session.completion.then(finish);
-                });
+                if (!peeking) session.consumingWaiters += 1;
+                try {
+                    await new Promise<void>((resolve) => {
+                        let settled = false;
+                        const finish = () => {
+                            if (settled) return;
+                            settled = true;
+                            clearTimeout(timer);
+                            options.signal?.removeEventListener("abort", finish);
+                            resolve();
+                        };
+                        const timer = setTimeout(finish, waitMs);
+                        options.signal?.addEventListener("abort", finish, { once: true });
+                        void session.completion.then(finish);
+                    });
+                } finally {
+                    if (!peeking) session.consumingWaiters -= 1;
+                }
             }
-            return snapshot(session, options.peek === true);
+            return snapshot(session, peeking);
         },
         async run(options) {
             const { signal, ...startOptions } = options;
-            const session = await start({
-                ...startOptions,
-                timeoutMs: startOptions.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
-            });
+            const session = await start(
+                {
+                    ...startOptions,
+                    timeoutMs: startOptions.timeoutMs ?? DEFAULT_RUN_TIMEOUT_MS,
+                },
+                true,
+            );
             const abort = () => requestKill(session);
             signal?.addEventListener("abort", abort, { once: true });
             if (signal?.aborted) abort();
@@ -691,6 +723,9 @@ export function createDockerBashContext(
         setActiveSessionCountListener(listener) {
             onActiveSessionCountChange = listener;
             listener?.(activeSessionCount());
+        },
+        setSessionExitListener(listener) {
+            onSessionExit = listener;
         },
         async startSession(options) {
             makeRoomForSession();

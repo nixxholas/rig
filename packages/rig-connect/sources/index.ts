@@ -27,10 +27,7 @@ export type {
 } from "./connectRig.js";
 export { InboxStore } from "./InboxStore.js";
 export { ProviderUsageStore } from "./ProviderUsageStore.js";
-export type {
-    ProviderUsageDelta,
-    ProviderUsageState,
-} from "./ProviderUsageElement.js";
+export type { ProviderUsageDelta, ProviderUsageState } from "./ProviderUsageElement.js";
 export type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
 export { ChatStore } from "./ChatStore.js";
 export { GroupStore } from "./GroupStore.js";
