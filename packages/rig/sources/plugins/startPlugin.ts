@@ -9,44 +9,52 @@ import { createSandboxedCommand } from "../agent/context/createSandboxedCommand.
 import { createToolEnvironment } from "../agent/context/createToolEnvironment.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
-import { buildExtension, type BuildExtensionOptions } from "./buildExtension.js";
-import { createExtensionApiServer } from "./createExtensionApiServer.js";
-import { ExtensionLog } from "./ExtensionLog.js";
-import { fileSystemErrorSchema, type RegisteredExtension } from "./types.js";
+import { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
+import { createPluginApiServer } from "./createPluginApiServer.js";
+import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
+import { PluginLog } from "./PluginLog.js";
+import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 
 const STOP_GRACE_MS = 2_000;
 
-export interface RunningExtension {
+export interface RunningPlugin {
     readonly completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+    readonly dataDirectory: string;
     readonly logPath: string;
     readonly name: string;
     readonly pid: number | undefined;
     close(): Promise<void>;
 }
 
-export interface StartExtensionOptions extends BuildExtensionOptions {
+export interface StartPluginOptions extends BuildPluginOptions {
+    dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
     store: SessionStore;
 }
 
-export async function startExtension(
-    extension: RegisteredExtension,
-    options: StartExtensionOptions,
-): Promise<RunningExtension> {
-    const built = await buildExtension(extension, options);
+export async function startPlugin(
+    plugin: RegisteredPlugin,
+    options: StartPluginOptions,
+): Promise<RunningPlugin> {
+    const built = await buildPlugin(plugin, options);
     const environment = options.environment ?? process.env;
-    const runtimeSocketDirectory = join(built.runtimeDirectory, "runtime");
+    // The plugin's code lives in Rig's managed folder, so everything it writes at runtime — its own
+    // state and the socket it connects back through — belongs in the folder a person can open.
+    const dataDirectory =
+        options.dataDirectory ?? getPluginDataDirectory(plugin.folderName, environment);
+    const runtimeSocketDirectory = join(dataDirectory, ".runtime");
     const socketPath = join(runtimeSocketDirectory, "plugin.sock");
-    const logPath = join(built.runtimeDirectory, "extension.log");
+    const logPath = join(built.runtimeDirectory, "plugin.log");
+    await mkdir(dataDirectory, { mode: 0o755, recursive: true });
     await mkdir(runtimeSocketDirectory, { mode: 0o700, recursive: true });
     await chmod(runtimeSocketDirectory, 0o700);
     await Promise.all([rm(logPath, { force: true }), rm(socketPath, { force: true })]);
 
     const token = randomBytes(32).toString("base64url");
-    const server = createExtensionApiServer({
+    const server = createPluginApiServer({
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
-        extensionName: extension.manifest.name,
+        pluginName: plugin.manifest.name,
         store: options.store,
         token,
     });
@@ -66,23 +74,23 @@ export async function startExtension(
     }
 
     let child: ChildProcess;
-    const log = new ExtensionLog({ path: logPath });
+    const log = new PluginLog({ path: logPath });
     try {
         const command = await createSandboxedCommand({
             argv: [process.execPath, built.builtEntryPath],
             command: process.execPath,
-            commandCwd: extension.directory,
-            cwd: extension.directory,
+            commandCwd: dataDirectory,
+            cwd: dataDirectory,
             mode: "workspace_write",
             shell: environment.SHELL?.trim() || "/bin/sh",
         });
         child = spawn(command.command, command.args ?? [], {
-            cwd: extension.directory,
+            cwd: dataDirectory,
             env: {
                 ...(await createToolEnvironment("workspace_write", environment, {
-                    cwd: extension.directory,
+                    cwd: dataDirectory,
                 })),
-                HAPPY_PLUGIN_DIRECTORY: extension.directory,
+                HAPPY_PLUGIN_DIRECTORY: dataDirectory,
                 HAPPY_PLUGIN_SOCKET_PATH: socketPath,
                 HAPPY_PLUGIN_TOKEN: token,
             },
@@ -118,8 +126,9 @@ export async function startExtension(
 
     return {
         completion,
+        dataDirectory,
         logPath,
-        name: extension.manifest.name,
+        name: plugin.manifest.name,
         pid: child.pid,
         async close() {
             if (child.exitCode === null && child.signalCode === null) {
@@ -154,7 +163,7 @@ async function restrictSocketAccess(socketPath: string): Promise<void> {
     }
 }
 
-function closeServer(server: ReturnType<typeof createExtensionApiServer>): Promise<void> {
+function closeServer(server: ReturnType<typeof createPluginApiServer>): Promise<void> {
     if (!server.listening) return Promise.resolve();
     return new Promise<void>((resolve) => {
         server.close(() => resolve());

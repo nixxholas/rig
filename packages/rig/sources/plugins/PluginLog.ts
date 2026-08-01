@@ -1,11 +1,11 @@
 import { createWriteStream, type WriteStream } from "node:fs";
 
-const DEFAULT_MAX_EXTENSION_LOG_BYTES = 1024 * 1024;
+const DEFAULT_MAX_PLUGIN_LOG_BYTES = 1024 * 1024;
 const TRUNCATION_NOTICE = Buffer.from(
-    "\n[Rig stopped recording this extension after 1 MiB of output.]\n",
+    "\n[Rig stopped recording this plugin after 1 MiB of output.]\n",
 );
 
-export class ExtensionLog {
+export class PluginLog {
     readonly path: string;
 
     readonly #maximumBytes: number;
@@ -16,7 +16,7 @@ export class ExtensionLog {
 
     constructor(options: { maximumBytes?: number; path: string }) {
         this.path = options.path;
-        this.#maximumBytes = options.maximumBytes ?? DEFAULT_MAX_EXTENSION_LOG_BYTES;
+        this.#maximumBytes = options.maximumBytes ?? DEFAULT_MAX_PLUGIN_LOG_BYTES;
         this.#stream = createWriteStream(options.path, { flags: "wx", mode: 0o600 });
         this.#stream.on("error", () => {
             this.#failed = true;

@@ -48,7 +48,7 @@ import type { HappySyncService } from "../happy/index.js";
 import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDirectory.js";
 import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
-import { ExtensionManager } from "../extensions/index.js";
+import { PluginManager } from "../plugins/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -448,27 +448,27 @@ async function runOwnedLocalProtocolServer(
             },
             taskDrain,
         });
-        const extensionManager = new ExtensionManager({
+        const pluginManager = new PluginManager({
             daemonLog,
             ...(loadedConfig.config.docker === undefined
                 ? {}
                 : { defaultDocker: loadedConfig.config.docker }),
             store,
         });
-        const extensionsStarted = extensionManager.start().catch((error: unknown) => {
+        const pluginsStarted = pluginManager.start().catch((error: unknown) => {
             daemonLog.record(
                 "error",
-                "extensions_unavailable",
-                "Rig could not load the extensions folder.",
+                "plugins_unavailable",
+                "Rig could not load the plugins folder.",
                 {
                     error: errorToMessage(error),
-                    extensionsDirectory: extensionManager.directory,
+                    pluginsDirectory: pluginManager.directory,
                 },
             );
         });
-        shutdown.register("extensions", async () => {
-            await extensionManager.close();
-            await extensionsStarted;
+        shutdown.register("plugins", async () => {
+            await pluginManager.close();
+            await pluginsStarted;
         });
         if (stopping) return;
         if (happyModule !== undefined && happyConfiguration !== undefined) {

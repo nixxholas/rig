@@ -41,5 +41,5 @@ export {
 
 import { createHappyPluginClient } from "./createHappyPluginClient.js";
 
-/** The extension's ready-to-use connection to its owning Happy daemon. */
+/** The plugin's ready-to-use connection to its owning Happy daemon. */
 export const happy = createHappyPluginClient();

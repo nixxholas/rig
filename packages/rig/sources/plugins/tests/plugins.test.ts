@@ -5,12 +5,13 @@ import { dirname, join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { buildExtension } from "../buildExtension.js";
-import { discoverExtensions } from "../discoverExtensions.js";
-import { ExtensionBuildError } from "../ExtensionBuildError.js";
-import { ExtensionLog } from "../ExtensionLog.js";
-import { getExtensionsDirectory } from "../getExtensionsDirectory.js";
-import { readExtensionManifest } from "../readExtensionManifest.js";
+import { buildPlugin } from "../buildPlugin.js";
+import { discoverPlugins } from "../discoverPlugins.js";
+import { PluginBuildError } from "../PluginBuildError.js";
+import { PluginLog } from "../PluginLog.js";
+import { getPluginDataDirectory } from "../getPluginDataDirectory.js";
+import { getPluginsDirectory } from "../getPluginsDirectory.js";
+import { readPluginManifest } from "../readPluginManifest.js";
 
 const require = createRequire(import.meta.url);
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
@@ -24,27 +25,39 @@ afterEach(async () => {
     );
 });
 
-describe("extensions", () => {
-    it("uses a user-visible extensions directory with an absolute override", () => {
-        expect(getExtensionsDirectory({}, "/Users/steve", "darwin")).toBe(
-            "/Users/steve/Happy/Extensions",
-        );
-        expect(getExtensionsDirectory({}, "/home/steve", "linux")).toBe(
-            "/home/steve/happy/extensions",
+describe("plugins", () => {
+    it("installs plugins inside Rig's managed home", () => {
+        expect(getPluginsDirectory({}, "/Users/steve")).toBe("/Users/steve/.happy/rig/plugins");
+        expect(getPluginsDirectory({ RIG_HOME: "/tmp/isolated-home/rig" }, "/home/steve")).toBe(
+            "/tmp/isolated-home/rig/plugins",
         );
         expect(
-            getExtensionsDirectory(
-                { HAPPY_EXTENSIONS_DIRECTORY: "/srv/rig-extensions" },
+            getPluginsDirectory({ HAPPY_PLUGINS_DIRECTORY: "/srv/plugins" }, "/home/steve"),
+        ).toBe("/srv/plugins");
+        expect(() =>
+            getPluginsDirectory({ HAPPY_PLUGINS_DIRECTORY: "relative" }, "/home/steve"),
+        ).toThrow("must be an absolute path");
+    });
+
+    it("gives each plugin a writable folder a person can open", () => {
+        expect(getPluginDataDirectory("clock", {}, "/Users/steve", "darwin")).toBe(
+            "/Users/steve/Happy/Plugins/clock",
+        );
+        expect(getPluginDataDirectory("clock", {}, "/home/steve", "linux")).toBe(
+            "/home/steve/happy/plugins/clock",
+        );
+        expect(
+            getPluginDataDirectory(
+                "clock",
+                { HAPPY_PLUGIN_DATA_DIRECTORY: "/srv/plugin-data" },
                 "/home/steve",
                 "linux",
             ),
-        ).toBe("/srv/rig-extensions");
-        expect(
-            getExtensionsDirectory({ RIG_HOME: "/tmp/isolated-home/.rig" }, "/home/steve", "linux"),
-        ).toBe("/tmp/isolated-home/extensions");
+        ).toBe("/srv/plugin-data/clock");
         expect(() =>
-            getExtensionsDirectory(
-                { HAPPY_EXTENSIONS_DIRECTORY: "relative" },
+            getPluginDataDirectory(
+                "clock",
+                { HAPPY_PLUGIN_DATA_DIRECTORY: "relative" },
                 "/home/steve",
                 "linux",
             ),
@@ -53,10 +66,10 @@ describe("extensions", () => {
 
     it("registers only folders with a TypeBox-valid manifest and PNG icon", async () => {
         const root = await temporaryDirectory();
-        await createExtensionFixture(join(root, "clock"), {
+        await createPluginFixture(join(root, "clock"), {
             source: 'console.log("tick");\n',
         });
-        await createExtensionFixture(join(root, "broken"), {
+        await createPluginFixture(join(root, "broken"), {
             manifest: {
                 description: "Has an unexpected field",
                 entry: "index.ts",
@@ -66,8 +79,8 @@ describe("extensions", () => {
             },
         });
 
-        const discovery = await discoverExtensions(root);
-        expect(discovery.extensions.map((extension) => extension.manifest.name)).toEqual(["Clock"]);
+        const discovery = await discoverPlugins(root);
+        expect(discovery.plugins.map((plugin) => plugin.manifest.name)).toEqual(["Clock"]);
         expect(discovery.failures).toHaveLength(1);
         expect(discovery.failures[0]?.error).toContain("happy.plugin.json is invalid");
     });
@@ -76,20 +89,20 @@ describe("extensions", () => {
         const root = await temporaryDirectory();
         const directory = join(root, "linked");
         const externalEntry = join(root, "outside.ts");
-        await createExtensionFixture(directory, {});
+        await createPluginFixture(directory, {});
         await writeFile(externalEntry, 'console.log("outside");\n');
         await rm(join(directory, "index.ts"));
         await symlink(externalEntry, join(directory, "index.ts"));
 
-        await expect(readExtensionManifest(directory)).rejects.toThrow(
-            "The extension entry must be a file.",
+        await expect(readPluginManifest(directory)).rejects.toThrow(
+            "The plugin entry must be a file.",
         );
     });
 
-    it("keeps captured extension output within its configured bound", async () => {
+    it("keeps captured plugin output within its configured bound", async () => {
         const root = await temporaryDirectory();
-        const logPath = join(root, "extension.log");
-        const log = new ExtensionLog({ maximumBytes: 64, path: logPath });
+        const logPath = join(root, "plugin.log");
+        const log = new PluginLog({ maximumBytes: 64, path: logPath });
         log.append("stdout", Buffer.alloc(1024, "x"));
         await log.close();
 
@@ -99,7 +112,7 @@ describe("extensions", () => {
     it("builds with TypeScript 7 against Rig's SDK and rejects incompatible calls", async () => {
         const root = await temporaryDirectory();
         const directory = join(root, "builder");
-        await createExtensionFixture(directory, {
+        await createPluginFixture(directory, {
             source: [
                 'import { happy } from "happy-plugins";',
                 "const projects = await happy.projects.list();",
@@ -107,34 +120,35 @@ describe("extensions", () => {
                 "",
             ].join("\n"),
         });
-        const extension = await readExtensionManifest(directory);
+        const plugin = await readPluginManifest(directory);
         const sdkModuleDirectory = dirname(require.resolve("happy-plugins"));
-        const built = await buildExtension(extension, { sdkModuleDirectory });
+        const built = await buildPlugin(plugin, { sdkModuleDirectory });
         await expect(readFile(built.builtEntryPath, "utf8")).resolves.toContain(
             'from "happy-plugins"',
         );
+        expect(built.runtimeDirectory).toBe(join(directory, ".build"));
 
         await writeFile(
-            extension.entryPath,
+            plugin.entryPath,
             [
                 'import { happy } from "happy-plugins";',
                 'await happy.workspaces.create({ name: 42, projectId: "project" });',
                 "",
             ].join("\n"),
         );
-        await expect(buildExtension(extension, { sdkModuleDirectory })).rejects.toBeInstanceOf(
-            ExtensionBuildError,
+        await expect(buildPlugin(plugin, { sdkModuleDirectory })).rejects.toBeInstanceOf(
+            PluginBuildError,
         );
     });
 });
 
 async function temporaryDirectory(): Promise<string> {
-    const directory = await mkdtemp(join(tmpdir(), "rig-extensions-"));
+    const directory = await mkdtemp(join(tmpdir(), "rig-plugins-"));
     temporaryDirectories.push(directory);
     return directory;
 }
 
-async function createExtensionFixture(
+async function createPluginFixture(
     directory: string,
     options: {
         manifest?: Record<string, unknown>;

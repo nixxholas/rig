@@ -36,9 +36,9 @@ export class HappyPluginApiError extends Error {
 }
 
 /**
- * Creates a Happy extension API client.
+ * Creates a Happy plugin API client.
  *
- * Normal extensions should use the exported `happy` singleton. Supplying a socket path and token is
+ * Normal plugins should use the exported `happy` singleton. Supplying a socket path and token is
  * useful for tests and custom harnesses.
  */
 export function createHappyPluginClient(
@@ -142,7 +142,7 @@ export function createHappyPluginClient(
 
 function requiredSetting(value: string | undefined, name: string): string {
     if (Value.Check(requiredSettingSchema, value)) return value;
-    throw new Error(`Happy did not provide ${name} to this extension.`);
+    throw new Error(`Happy did not provide ${name} to this plugin.`);
 }
 
 function requestJson<TSchema_ extends TSchema>(options: {
@@ -178,9 +178,7 @@ function requestJson<TSchema_ extends TSchema>(options: {
                     length += chunk.length;
                     if (length > MAX_RESPONSE_BYTES) {
                         request.destroy(
-                            new Error(
-                                "Happy returned more extension data than the SDK can accept.",
-                            ),
+                            new Error("Happy returned more plugin data than the SDK can accept."),
                         );
                         return;
                     }
@@ -194,7 +192,7 @@ function requestJson<TSchema_ extends TSchema>(options: {
                         if (status < 200 || status >= 300) {
                             const message = Value.Check(errorResponseSchema, payload)
                                 ? payload.error
-                                : `Happy rejected the extension request with HTTP ${String(status)}.`;
+                                : `Happy rejected the plugin request with HTTP ${String(status)}.`;
                             reject(new HappyPluginApiError(status, message));
                             return;
                         }

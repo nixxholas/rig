@@ -10,23 +10,24 @@ afterEach(async () => {
     running.clear();
 });
 
-describe("TypeScript extensions", () => {
-    it("builds an installed extension and lets its sandboxed process call Rig", async () => {
-        const extensionDirectory = "/home/rig/happy/extensions/project-counter";
+describe("TypeScript plugins", () => {
+    it("builds an installed plugin and lets its sandboxed process call Rig", async () => {
+        const installDirectory = "/home/rig/.happy/rig/plugins/project-counter";
+        const dataDirectory = "/home/rig/happy/plugins/project-counter";
         const gym = await createGym({
             homeFiles: {
-                "happy/extensions/project-counter/icon.png": PNG_SIGNATURE,
-                "happy/extensions/project-counter/index.ts": [
+                ".happy/rig/plugins/project-counter/icon.png": PNG_SIGNATURE,
+                ".happy/rig/plugins/project-counter/index.ts": [
                     'import { writeFile } from "node:fs/promises";',
                     'import { happy } from "happy-plugins";',
                     "",
                     "const projects = await happy.projects.list();",
                     'await writeFile("started.txt", `ready:${projects.length}\\n`);',
-                    'console.log("Extension API ready");',
+                    'console.log("Plugin API ready");',
                     "await new Promise<void>(() => {});",
                     "",
                 ].join("\n"),
-                "happy/extensions/project-counter/happy.plugin.json": `${JSON.stringify(
+                ".happy/rig/plugins/project-counter/happy.plugin.json": `${JSON.stringify(
                     {
                         description: "Records how many projects Rig knows.",
                         entry: "index.ts",
@@ -42,17 +43,21 @@ describe("TypeScript extensions", () => {
         });
         running.add(gym);
 
+        // The plugin writes into the folder it owns rather than where Rig installed its code.
         const started = await gym.runInContainer(
             "bash",
             [
                 "-lc",
-                `for attempt in $(seq 1 200); do test -f ${extensionDirectory}/started.txt && break; sleep 0.05; done; if ! test -f ${extensionDirectory}/started.txt; then cat ${extensionDirectory}/.happy/extension.log 2>/dev/null || true; cat /tmp/rig-1000/server.log; exit 1; fi; cat ${extensionDirectory}/started.txt`,
+                `for attempt in $(seq 1 200); do test -f ${dataDirectory}/started.txt && break; sleep 0.05; done; if ! test -f ${dataDirectory}/started.txt; then cat ${installDirectory}/.build/plugin.log 2>/dev/null || true; cat /tmp/rig-1000/server.log; exit 1; fi; cat ${dataDirectory}/started.txt`,
             ],
             { timeoutMs: 15_000 },
         );
         expect(started.stdout).toMatch(/ready:\d+\n/u);
 
-        const log = await gym.runInContainer("cat", [`${extensionDirectory}/.happy/extension.log`]);
-        expect(log.stdout).toContain("[stdout] Extension API ready");
+        const log = await gym.runInContainer("cat", [`${installDirectory}/.build/plugin.log`]);
+        expect(log.stdout).toContain("[stdout] Plugin API ready");
+
+        const installed = await gym.runInContainer("ls", ["-a", installDirectory]);
+        expect(installed.stdout).not.toContain("started.txt");
     }, 30_000);
 });

@@ -1,8 +1,8 @@
 import { type Static, Type } from "@sinclair/typebox";
 
-export const EXTENSION_MANIFEST_FILE_NAME = "happy.plugin.json";
+export const PLUGIN_MANIFEST_FILE_NAME = "happy.plugin.json";
 
-export const extensionManifestSchema = Type.Object(
+export const pluginManifestSchema = Type.Object(
     {
         description: Type.String({ minLength: 1 }),
         entry: Type.String({ pattern: "^(?!.*\\.d\\.ts$).+\\.ts$" }),
@@ -11,33 +11,33 @@ export const extensionManifestSchema = Type.Object(
     },
     { additionalProperties: false },
 );
-export type ExtensionManifest = Static<typeof extensionManifestSchema>;
+export type PluginManifest = Static<typeof pluginManifestSchema>;
 
 export const fileSystemErrorSchema = Type.Object({
     code: Type.String(),
 });
 
-export interface RegisteredExtension {
+export interface RegisteredPlugin {
     directory: string;
     entryPath: string;
     folderName: string;
     iconPath: string;
-    manifest: ExtensionManifest;
+    manifest: PluginManifest;
     manifestPath: string;
 }
 
-export interface ExtensionRegistrationFailure {
+export interface PluginRegistrationFailure {
     directory: string;
     error: string;
     folderName: string;
 }
 
-export interface ExtensionDiscovery {
-    extensions: readonly RegisteredExtension[];
-    failures: readonly ExtensionRegistrationFailure[];
+export interface PluginDiscovery {
+    plugins: readonly RegisteredPlugin[];
+    failures: readonly PluginRegistrationFailure[];
 }
 
-export interface BuiltExtension extends RegisteredExtension {
+export interface BuiltPlugin extends RegisteredPlugin {
     buildDirectory: string;
     builtEntryPath: string;
     runtimeDirectory: string;

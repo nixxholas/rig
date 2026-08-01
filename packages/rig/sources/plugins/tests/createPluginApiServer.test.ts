@@ -6,7 +6,7 @@ import { createHappyPluginClient } from "happy-plugins";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
-import { createExtensionApiServer } from "../createExtensionApiServer.js";
+import { createPluginApiServer } from "../createPluginApiServer.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
 
@@ -14,9 +14,9 @@ afterEach(async () => {
     await Promise.all(cleanup.splice(0).map((dispose) => dispose()));
 });
 
-describe("extension API server", () => {
-    it("requires its extension token and serves SDK requests over its Unix socket", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-extension-api-"));
+describe("plugin API server", () => {
+    it("requires its plugin token and serves SDK requests over its Unix socket", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
         const store = new InMemorySessionStore({
@@ -28,10 +28,10 @@ describe("extension API server", () => {
             },
         });
         cleanup.push(() => store.close());
-        const server = createExtensionApiServer({
-            extensionName: "Test Extension",
+        const server = createPluginApiServer({
+            pluginName: "Test Plugin",
             store,
-            token: "private-extension-token",
+            token: "private-plugin-token",
         });
         cleanup.push(
             () =>
@@ -51,7 +51,7 @@ describe("extension API server", () => {
         await expect(
             createHappyPluginClient({
                 socketPath,
-                token: "private-extension-token",
+                token: "private-plugin-token",
             }).projects.list(),
         ).resolves.toEqual([]);
         await expect(unauthorizedStatus(socketPath)).resolves.toBe(401);

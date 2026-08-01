@@ -156,10 +156,10 @@ export const createHappyPluginClientOptionsSchema = Type.Object(
 export type CreateHappyPluginClientOptions = Static<typeof createHappyPluginClientOptionsSchema>;
 
 /**
- * The public API available to a running Happy extension.
+ * The public API available to a running Happy plugin.
  *
- * Use the exported {@link happy} singleton in normal extension code. Happy injects and authenticates
- * its transport when the extension process starts.
+ * Use the exported {@link happy} singleton in normal plugin code. Happy injects and authenticates
+ * its transport when the plugin process starts.
  */
 export interface HappyPluginClient {
     /** Send a durable notification to an agent identified by a session's stable Agent ID. */

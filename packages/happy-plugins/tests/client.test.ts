@@ -32,7 +32,7 @@ describe("happy-plugins client", () => {
         temporaryDirectories.push(directory);
         const socketPath = join(directory, "api.sock");
         const server = createServer((request, response) => {
-            expect(request.headers.authorization).toBe("Bearer extension-token");
+            expect(request.headers.authorization).toBe("Bearer plugin-token");
             expect(request.method).toBe("GET");
             expect(request.url).toBe("/projects");
             const body = JSON.stringify({
@@ -47,7 +47,7 @@ describe("happy-plugins client", () => {
         servers.push(server);
         await listen(server, socketPath);
 
-        const client = createHappyPluginClient({ socketPath, token: "extension-token" });
+        const client = createHappyPluginClient({ socketPath, token: "plugin-token" });
         await expect(client.projects.list()).resolves.toEqual([
             { id: "project-1", name: "Happy", path: "/workspace" },
         ]);
@@ -63,7 +63,7 @@ describe("happy-plugins client", () => {
         servers.push(server);
         await listen(server, socketPath);
 
-        const client = createHappyPluginClient({ socketPath, token: "extension-token" });
+        const client = createHappyPluginClient({ socketPath, token: "plugin-token" });
         await expect(client.projects.list()).rejects.toThrow();
     });
 
@@ -78,7 +78,7 @@ describe("happy-plugins client", () => {
         servers.push(server);
         await listen(server, socketPath);
 
-        const client = createHappyPluginClient({ socketPath, token: "extension-token" });
+        const client = createHappyPluginClient({ socketPath, token: "plugin-token" });
         await expect(client.projects.list()).rejects.toEqual(
             new HappyPluginApiError(409, "The workspace already exists."),
         );

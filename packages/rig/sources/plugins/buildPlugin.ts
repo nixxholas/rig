@@ -6,23 +6,23 @@ import { fileURLToPath } from "node:url";
 
 import { Value } from "@sinclair/typebox/value";
 
-import { ExtensionBuildError } from "./ExtensionBuildError.js";
-import { fileSystemErrorSchema, type BuiltExtension, type RegisteredExtension } from "./types.js";
+import { PluginBuildError } from "./PluginBuildError.js";
+import { fileSystemErrorSchema, type BuiltPlugin, type RegisteredPlugin } from "./types.js";
 
 const require = createRequire(import.meta.url);
 const MAX_COMPILER_OUTPUT_BYTES = 4 * 1024 * 1024;
 const TYPE_CHECK_TIMEOUT_MS = 30_000;
 
-export interface BuildExtensionOptions {
+export interface BuildPluginOptions {
     nodeTypesRoot?: string;
     sdkModuleDirectory?: string;
 }
 
-export async function buildExtension(
-    extension: RegisteredExtension,
-    options: BuildExtensionOptions = {},
-): Promise<BuiltExtension> {
-    const runtimeDirectory = join(extension.directory, ".happy");
+export async function buildPlugin(
+    plugin: RegisteredPlugin,
+    options: BuildPluginOptions = {},
+): Promise<BuiltPlugin> {
+    const runtimeDirectory = join(plugin.directory, ".build");
     await prepareRuntimeDirectory(runtimeDirectory);
     const buildDirectory = join(runtimeDirectory, "build");
     const sdkInstallDirectory = join(runtimeDirectory, "node_modules", "happy-plugins");
@@ -89,7 +89,7 @@ export async function buildExtension(
                     },
                     resolveJsonModule: true,
                     rewriteRelativeImportExtensions: true,
-                    rootDir: extension.directory,
+                    rootDir: plugin.directory,
                     skipLibCheck: true,
                     sourceMap: true,
                     strict: true,
@@ -98,7 +98,7 @@ export async function buildExtension(
                     types: ["node"],
                     verbatimModuleSyntax: true,
                 },
-                files: [extension.entryPath],
+                files: [plugin.entryPath],
             },
             null,
             2,
@@ -109,13 +109,13 @@ export async function buildExtension(
     await runTypeScriptCompiler(
         join(typeScriptPackageDirectory, "bin", "tsc"),
         compilerConfigPath,
-        extension,
+        plugin,
     );
 
-    const relativeEntry = relative(extension.directory, extension.entryPath);
+    const relativeEntry = relative(plugin.directory, plugin.entryPath);
     const builtEntryPath = join(buildDirectory, relativeEntry.replace(/\.ts$/u, ".js"));
     return {
-        ...extension,
+        ...plugin,
         buildDirectory,
         builtEntryPath,
         runtimeDirectory,
@@ -135,14 +135,14 @@ async function resolveShippedSdkModuleDirectory(): Promise<string> {
 function runTypeScriptCompiler(
     executable: string,
     configPath: string,
-    extension: RegisteredExtension,
+    plugin: RegisteredPlugin,
 ): Promise<void> {
     return new Promise<void>((resolve, reject) => {
         execFile(
             executable,
             ["--project", configPath, "--pretty", "false"],
             {
-                cwd: extension.directory,
+                cwd: plugin.directory,
                 maxBuffer: MAX_COMPILER_OUTPUT_BYTES,
                 timeout: TYPE_CHECK_TIMEOUT_MS,
             },
@@ -155,7 +155,7 @@ function runTypeScriptCompiler(
                     .map((value) => value.trim())
                     .filter(Boolean)
                     .join("\n");
-                reject(new ExtensionBuildError(extension.manifest.name, diagnostics));
+                reject(new PluginBuildError(plugin.manifest.name, diagnostics));
             },
         );
     });
@@ -165,7 +165,7 @@ async function prepareRuntimeDirectory(directory: string): Promise<void> {
     try {
         const info = await lstat(directory);
         if (info.isSymbolicLink() || !info.isDirectory()) {
-            throw new Error("The extension's .happy runtime path must be an ordinary directory.");
+            throw new Error("The plugin's .build path must be an ordinary directory.");
         }
     } catch (error) {
         if (isMissingPath(error)) {

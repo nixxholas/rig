@@ -28,22 +28,22 @@ import { sendJson } from "../server/sendJson.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
-export interface CreateExtensionApiServerOptions {
+export interface CreatePluginApiServerOptions {
     defaultDocker?: DockerExecutionConfig;
-    extensionName: string;
+    pluginName: string;
     store: SessionStore;
     token: string;
 }
 
-export function createExtensionApiServer(options: CreateExtensionApiServerOptions): Server {
+export function createPluginApiServer(options: CreatePluginApiServerOptions): Server {
     return createServer((request, response) => {
         if (!isAuthorizedProtocolRequest(request, options.token)) {
-            sendJson(response, 401, { error: "This extension connection is not authorized." });
+            sendJson(response, 401, { error: "This plugin connection is not authorized." });
             return;
         }
         void handleRequest(request, response, options).catch((error: unknown) => {
             if (isDatabaseFailure(error)) throw error;
-            sendJson(response, error instanceof ExtensionApiRequestError ? 400 : 500, {
+            sendJson(response, error instanceof PluginApiRequestError ? 400 : 500, {
                 error: errorToMessage(error),
             });
         });
@@ -53,9 +53,9 @@ export function createExtensionApiServer(options: CreateExtensionApiServerOption
 async function handleRequest(
     request: IncomingMessage,
     response: ServerResponse,
-    options: CreateExtensionApiServerOptions,
+    options: CreatePluginApiServerOptions,
 ): Promise<void> {
-    const url = new URL(request.url ?? "/", "http://rig-extension.local");
+    const url = new URL(request.url ?? "/", "http://rig-plugin.local");
     if (request.method === "GET" && url.pathname === "/projects") {
         sendJson<{ projects: readonly HappyProject[] }>(response, 200, {
             projects: options.store.listProjects().map(toHappyProject),
@@ -105,9 +105,9 @@ async function handleRequest(
             return;
         }
         const delivered = target.deliverNotification({
-            displayText: `${options.extensionName}: ${body.message}`,
+            displayText: `${options.pluginName}: ${body.message}`,
             text: [
-                `Message from the Rig extension ${JSON.stringify(options.extensionName)}.`,
+                `Message from the Rig plugin ${JSON.stringify(options.pluginName)}.`,
                 "",
                 body.message,
             ].join("\n"),
@@ -191,7 +191,7 @@ async function handleRequest(
         }
     }
 
-    sendJson(response, 404, { error: "This Rig extension API action does not exist." });
+    sendJson(response, 404, { error: "This Rig plugin API action does not exist." });
 }
 
 function toHappyProject(project: Project): HappyProject {
@@ -251,7 +251,7 @@ async function readJson<TSchema_ extends TSchema>(
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         length += bytes.length;
         if (length > MAX_REQUEST_BYTES) {
-            throw new ExtensionApiRequestError("The extension request is too large.");
+            throw new PluginApiRequestError("The plugin request is too large.");
         }
         chunks.push(bytes);
     }
@@ -259,7 +259,7 @@ async function readJson<TSchema_ extends TSchema>(
     try {
         value = JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown;
     } catch {
-        throw new ExtensionApiRequestError("The extension request is not valid JSON.");
+        throw new PluginApiRequestError("The plugin request is not valid JSON.");
     }
     return parseValue(schema, value, subject);
 }
@@ -274,13 +274,13 @@ function parseValue<TSchema_ extends TSchema>(
     } catch {
         const first = Value.Errors(schema, value).First();
         const detail = first === undefined ? "" : ` ${first.path || "value"}: ${first.message}`;
-        throw new ExtensionApiRequestError(`${subject} are invalid.${detail}`);
+        throw new PluginApiRequestError(`${subject} are invalid.${detail}`);
     }
 }
 
-class ExtensionApiRequestError extends Error {
+class PluginApiRequestError extends Error {
     constructor(message: string) {
         super(message);
-        this.name = "ExtensionApiRequestError";
+        this.name = "PluginApiRequestError";
     }
 }
