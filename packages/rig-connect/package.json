@@ -28,6 +28,9 @@
         "check": "tsc --noEmit",
         "test": "vitest run"
     },
+    "dependencies": {
+        "@sinclair/typebox": "^0.34.49"
+    },
     "devDependencies": {
         "@slopus/rig": "workspace:*",
         "@slopus/rig-execution": "workspace:*",

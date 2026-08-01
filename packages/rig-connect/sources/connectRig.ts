@@ -1,3 +1,6 @@
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+
 import type {
     ChatDelta,
     ChatElement,
@@ -17,6 +20,13 @@ import type {
     ProviderUsageState,
 } from "./ProviderUsageElement.js";
 import { ProviderUsageStore } from "./ProviderUsageStore.js";
+import type {
+    LoadedPluginApplicationResource,
+    LocalPlugin,
+    PluginApplication,
+    PluginsState,
+} from "./PluginElement.js";
+import { PluginStore } from "./PluginElement.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -64,6 +74,13 @@ const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
 const DEFAULT_PROVIDER_USAGE_REFRESH_MS = 60_000;
 const GIT_WATCH_RENEWAL_MS = 4 * 60 * 1_000;
 const GIT_WATCH_RETRY_MS = 5_000;
+const MAXIMUM_PLUGIN_APPLICATION_ACTION_REQUEST_BYTES = 1024 * 1024;
+const MAXIMUM_PLUGIN_APPLICATION_ACTION_RESPONSE_BYTES = 1024 * 1024;
+const MAXIMUM_PLUGIN_APPLICATION_RESOURCE_BYTES = 256 * 1024;
+const pluginApplicationActionResponseSchema = Type.Object(
+    { result: Type.Unknown() },
+    { additionalProperties: false },
+);
 
 export interface ConnectRigOptions {
     endpoint: string;
@@ -81,8 +98,6 @@ export interface ConnectRigOptions {
     onMutationRejected?: (delta: MutationRejectedDelta) => void;
     /** Reports the result of the daemon protocol handshake. */
     onCompatibilityChange?: (compatibility: ServerCompatibility) => void;
-    /** Receives live plugin lifecycle changes without polling the plugin catalog or logs. */
-    onPluginsChanged?: (plugins: readonly PluginSummary[]) => void;
     /**
      * Fires the moment a chat starts waiting for the person.
      *
@@ -138,6 +153,15 @@ export interface RigProviderUsageSubscriptionOptions {
     refreshIntervalMs?: number;
 }
 
+export interface RigPluginsSubscriptionOptions {
+    onChange: (
+        applications: readonly PluginApplication[],
+        plugins: readonly LocalPlugin[],
+        state: PluginsState,
+    ) => void;
+    onError?: (error: unknown) => void;
+}
+
 export interface RigTimelineSubscriptionOptions {
     /** Leave archived chats out, as the daemon does by default. */
     includeArchived?: boolean;
@@ -174,6 +198,24 @@ export interface RigProviderUsageConnection {
     state: () => ProviderUsageState;
     /** Reads the daemon now and restarts the interval from this moment. */
     refresh: () => Promise<void>;
+    close: () => void;
+}
+
+export interface RigPluginsConnection {
+    applications: () => readonly PluginApplication[];
+    plugins: () => readonly LocalPlugin[];
+    state: () => PluginsState;
+    loadResource: (
+        application: Pick<PluginApplication, "generation" | "id" | "resources">,
+        path: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<LoadedPluginApplicationResource>;
+    invokeAction: (
+        application: Pick<PluginApplication, "actions" | "generation" | "id">,
+        action: string,
+        input: unknown,
+        options?: { signal?: AbortSignal },
+    ) => Promise<unknown>;
     close: () => void;
 }
 
@@ -274,6 +316,8 @@ export interface RigConnection {
     connectProviderUsage: (
         options: RigProviderUsageSubscriptionOptions,
     ) => RigProviderUsageConnection;
+    /** Follows the complete local plugin and application catalog. */
+    connectPlugins: (options: RigPluginsSubscriptionOptions) => RigPluginsConnection;
     connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
     /** Reads the current plugin catalog once. Lifecycle changes are also announced live. */
     listPlugins: (options?: { signal?: AbortSignal }) => Promise<{
@@ -372,6 +416,26 @@ interface ProviderUsageEntryState {
     store: ProviderUsageStore;
     subscribers: Set<ProviderUsageSubscriber>;
     timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+interface PluginsSubscriber extends RigPluginsSubscriptionOptions {
+    closed: boolean;
+}
+
+interface BufferedPluginsEvent {
+    cursor: string;
+    data: Extract<GlobalEvent, { type: "plugins_changed" }>["data"];
+}
+
+interface PluginsEntry {
+    bootstrapVersion: number;
+    bootstrapping: boolean;
+    controller: AbortController;
+    detachRoot: () => void;
+    pending?: BufferedPluginsEvent;
+    started: boolean;
+    store: PluginStore;
+    subscribers: Set<PluginsSubscriber>;
 }
 
 interface TimelineSubscriber extends RigTimelineSubscriptionOptions {
@@ -490,6 +554,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
+    let pluginsEntry: PluginsEntry | undefined;
     let providerUsageEntry: ProviderUsageEntryState | undefined;
     const timelineEntries = new Map<string, TimelineEntry>();
     let liveStreamStarted = false;
@@ -525,6 +590,18 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             if (subscriber.closed) continue;
             subscriber.onChange(inboxEntry.store.items(), inboxEntry.store.state());
             for (const delta of deltas) subscriber.onDelta?.(delta);
+        }
+    };
+
+    const publishPlugins = (changed: boolean): void => {
+        if (closed || !changed || pluginsEntry === undefined) return;
+        for (const subscriber of [...pluginsEntry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(
+                pluginsEntry.store.applications(),
+                pluginsEntry.store.plugins(),
+                pluginsEntry.store.state(),
+            );
         }
     };
 
@@ -1266,6 +1343,62 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
+    const createPluginsEntry = (): PluginsEntry => {
+        if (pluginsEntry !== undefined) return pluginsEntry;
+        const linked = linkedController(rootController.signal);
+        const entry: PluginsEntry = {
+            bootstrapVersion: 0,
+            bootstrapping: false,
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            started: false,
+            store: new PluginStore(),
+            subscribers: new Set(),
+        };
+        pluginsEntry = entry;
+        return entry;
+    };
+
+    const loadPlugins = async (entry: PluginsEntry): Promise<void> => {
+        const version = ++entry.bootstrapVersion;
+        entry.bootstrapping = true;
+        let snapshot: ListPluginsResponse;
+        try {
+            snapshot = await fetchPluginCatalog(
+                options.endpoint,
+                options.token,
+                request,
+                entry.controller.signal,
+            );
+        } catch (error) {
+            if (version !== entry.bootstrapVersion) return;
+            entry.bootstrapping = false;
+            delete entry.pending;
+            throw error;
+        }
+        if (version !== entry.bootstrapVersion) return;
+        const pending = entry.pending;
+        delete entry.pending;
+        entry.bootstrapping = false;
+        const catalog =
+            pending !== undefined && pending.data.version > snapshot.version
+                ? pending.data
+                : snapshot;
+        publishPlugins(entry.store.replace(catalog.plugins, catalog.failures, "live"));
+    };
+
+    const startPluginsEntry = (entry: PluginsEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (!liveStreamOpen) return;
+        void loadPlugins(entry).catch((error: unknown) => {
+            if (closed || entry.controller.signal.aborted) return;
+            publishPlugins(entry.store.setConnection("closed"));
+            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        });
+    };
+
     const createTimelineEntry = (subscription: RigTimelineSubscriptionOptions): TimelineEntry => {
         const key = timelineKey(subscription);
         const existing = timelineEntries.get(key);
@@ -1365,6 +1498,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (inboxEntry !== undefined) {
                         publishInbox(inboxEntry.store.setConnection("live"));
                     }
+                    if (pluginsEntry !== undefined) {
+                        publishPlugins(pluginsEntry.store.setConnection("live"));
+                    }
                     setTimelineConnection("live");
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
@@ -1379,6 +1515,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     void loadCatalog(groups).catch((error: unknown) => {
                         if (closed || groups.controller.signal.aborted) return;
                         for (const subscriber of [...groups.subscribers]) {
+                            subscriber.onError?.(error);
+                        }
+                    });
+                }
+                const plugins = pluginsEntry;
+                if (plugins !== undefined && plugins.started) {
+                    void loadPlugins(plugins).catch((error: unknown) => {
+                        if (closed || plugins.controller.signal.aborted) return;
+                        publishPlugins(plugins.store.setConnection("closed"));
+                        for (const subscriber of [...plugins.subscribers]) {
                             subscriber.onError?.(error);
                         }
                     });
@@ -1409,9 +1555,22 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             onEvent: (event, cursor) => {
                 rememberGlobalIdentity(event);
                 if (event.type === "plugins_changed") {
-                    options.onPluginsChanged?.(
-                        (event as Extract<GlobalEvent, { type: "plugins_changed" }>).data.plugins,
-                    );
+                    const entry = pluginsEntry;
+                    if (entry === undefined || !entry.started) return;
+                    const update = {
+                        cursor,
+                        data: (event as Extract<GlobalEvent, { type: "plugins_changed" }>).data,
+                    };
+                    if (entry.bootstrapping) {
+                        if (entry.pending === undefined || cursor > entry.pending.cursor) {
+                            entry.pending = update;
+                        }
+                    } else {
+                        publishPlugins(
+                            entry.store.replace(update.data.plugins, update.data.failures, "live"),
+                        );
+                    }
+                    return;
                 }
                 if (
                     event.type === "project_git_changed" ||
@@ -1488,6 +1647,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (inboxEntry !== undefined) {
                     publishInbox(inboxEntry.store.setConnection("reconnecting"));
                 }
+                if (pluginsEntry !== undefined) {
+                    publishPlugins(pluginsEntry.store.setConnection("reconnecting"));
+                }
                 setTimelineConnection("reconnecting");
                 for (const entry of [...sessionEntries.values()]) {
                     if (entry.started) {
@@ -1510,6 +1672,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         subscriber.onError?.(error);
                     }
                 }
+                if (pluginsEntry !== undefined) {
+                    publishPlugins(pluginsEntry.store.setConnection("closed"));
+                    for (const subscriber of [...pluginsEntry.subscribers]) {
+                        subscriber.onError?.(error);
+                    }
+                }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
@@ -1526,6 +1694,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (inboxEntry !== undefined) {
                     publishInbox(inboxEntry.store.setConnection("closed"));
+                }
+                if (pluginsEntry !== undefined) {
+                    publishPlugins(pluginsEntry.store.setConnection("closed"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
@@ -1916,6 +2087,142 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (providerUsageEntry === entry) providerUsageEntry = undefined;
                 }
             },
+        };
+    };
+
+    const connectPlugins = (subscription: RigPluginsSubscriptionOptions): RigPluginsConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createPluginsEntry();
+        const subscriber: PluginsSubscriber = { ...subscription, closed: false };
+        const calls = linkedController(entry.controller.signal);
+        entry.subscribers.add(subscriber);
+        subscriber.onChange(entry.store.applications(), entry.store.plugins(), entry.store.state());
+        startPluginsEntry(entry);
+
+        const loadResource: RigPluginsConnection["loadResource"] = async (
+            application,
+            path,
+            readOptions = {},
+        ) => {
+            if (subscriber.closed) throw new Error("This plugin connection is closed.");
+            const expected = application.resources.find((resource) => resource.path === path);
+            if (expected === undefined) {
+                throw new Error("That resource is not declared by this plugin application.");
+            }
+            if (expected.size > MAXIMUM_PLUGIN_APPLICATION_RESOURCE_BYTES) {
+                throw new Error("That plugin application resource exceeds the host limit.");
+            }
+            const resourcePath = path.split("/").map(encodeURIComponent).join("/");
+            const requestSignal = combinedSignal(calls.controller.signal, readOptions.signal);
+            try {
+                const response = await request(
+                    endpointUrl(
+                        options.endpoint,
+                        `plugin-applications/${encodeURIComponent(application.id)}/generations/${encodeURIComponent(application.generation)}/resources/${resourcePath}`,
+                    ),
+                    {
+                        headers: {
+                            accept: expected.mediaType,
+                            authorization: `Bearer ${options.token}`,
+                        },
+                        signal: requestSignal.signal,
+                    },
+                );
+                const body = await readBoundedResponseBytes(
+                    response,
+                    MAXIMUM_PLUGIN_APPLICATION_RESOURCE_BYTES,
+                );
+                if (!response.ok) throw responseError(response.status, body);
+                const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim();
+                if (mediaType !== expected.mediaType) {
+                    throw new Error("Rig returned a different plugin resource type than declared.");
+                }
+                if (body.byteLength !== expected.size) {
+                    throw new Error("Rig returned a different plugin resource size than declared.");
+                }
+                return { body, mediaType: expected.mediaType };
+            } finally {
+                requestSignal.detach();
+            }
+        };
+
+        const invokeAction: RigPluginsConnection["invokeAction"] = async (
+            application,
+            action,
+            input,
+            invokeOptions = {},
+        ) => {
+            if (subscriber.closed) throw new Error("This plugin connection is closed.");
+            if (!application.actions.includes(action)) {
+                throw new Error("That action is not declared by this plugin application.");
+            }
+            let body: string;
+            try {
+                if (JSON.stringify(input) === undefined) throw new Error();
+                body = JSON.stringify({ input });
+            } catch {
+                throw new Error("Plugin application action input must be JSON serializable.");
+            }
+            if (
+                new TextEncoder().encode(body).byteLength >
+                MAXIMUM_PLUGIN_APPLICATION_ACTION_REQUEST_BYTES
+            ) {
+                throw new Error("Plugin application action input exceeds the host limit.");
+            }
+            const requestSignal = combinedSignal(calls.controller.signal, invokeOptions.signal);
+            try {
+                const response = await request(
+                    endpointUrl(
+                        options.endpoint,
+                        `plugin-applications/${encodeURIComponent(application.id)}/generations/${encodeURIComponent(application.generation)}/actions/${encodeURIComponent(action)}`,
+                    ),
+                    {
+                        body,
+                        headers: {
+                            accept: "application/json",
+                            authorization: `Bearer ${options.token}`,
+                            "content-type": "application/json",
+                        },
+                        method: "POST",
+                        signal: requestSignal.signal,
+                    },
+                );
+                const bytes = await readBoundedResponseBytes(
+                    response,
+                    MAXIMUM_PLUGIN_APPLICATION_ACTION_RESPONSE_BYTES,
+                );
+                if (!response.ok) throw responseError(response.status, bytes);
+                try {
+                    return Value.Decode(
+                        pluginApplicationActionResponseSchema,
+                        JSON.parse(new TextDecoder().decode(bytes)) as unknown,
+                    ).result;
+                } catch {
+                    throw new Error("Rig returned an invalid plugin application action response.");
+                }
+            } finally {
+                requestSignal.detach();
+            }
+        };
+
+        return {
+            applications: () => entry.store.applications(),
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                calls.controller.abort();
+                calls.detach();
+                if (entry.subscribers.size === 0 && pluginsEntry === entry) {
+                    entry.controller.abort();
+                    entry.detachRoot();
+                    pluginsEntry = undefined;
+                }
+            },
+            invokeAction,
+            loadResource,
+            plugins: () => entry.store.plugins(),
+            state: () => entry.store.state(),
         };
     };
 
@@ -2919,8 +3226,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     // Finish notifications are told from the catalog, so a caller that wants
     // them gets it loaded and followed without opening a view of its own.
     if (options.onSessionFinished !== undefined) startGroupEntry(createGroupEntry());
-    if (options.onPluginsChanged !== undefined) ensureLiveStream();
-
     return {
         archiveWorkspace,
         compatibility: () => compatibility,
@@ -2956,6 +3261,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 providerUsageEntry.subscribers.clear();
                 providerUsageEntry = undefined;
             }
+            if (pluginsEntry !== undefined) {
+                pluginsEntry.controller.abort();
+                pluginsEntry.detachRoot();
+                pluginsEntry.subscribers.clear();
+                pluginsEntry = undefined;
+            }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;
             for (const entry of timelineEntries.values()) {
@@ -2972,6 +3283,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         compactSession,
         connectGroups,
         connectInbox,
+        connectPlugins,
         connectProviderUsage,
         connectSession,
         connectTerminalPresence,
@@ -3082,6 +3394,27 @@ function linkedController(parent: AbortSignal): {
     };
 }
 
+function combinedSignal(
+    parent: AbortSignal,
+    additional: AbortSignal | undefined,
+): { detach: () => void; signal: AbortSignal } {
+    if (additional === undefined) return { detach: () => undefined, signal: parent };
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (parent.aborted || additional.aborted) controller.abort();
+    else {
+        parent.addEventListener("abort", abort, { once: true });
+        additional.addEventListener("abort", abort, { once: true });
+    }
+    return {
+        detach: () => {
+            parent.removeEventListener("abort", abort);
+            additional.removeEventListener("abort", abort);
+        },
+        signal: controller.signal,
+    };
+}
+
 async function readResponseBody(response: Response): Promise<unknown> {
     const text = await response.text();
     if (text.length === 0) return undefined;
@@ -3090,6 +3423,55 @@ async function readResponseBody(response: Response): Promise<unknown> {
     } catch {
         return text;
     }
+}
+
+async function readBoundedResponseBytes(
+    response: Response,
+    maximumBytes: number,
+): Promise<Uint8Array> {
+    const declaredLength = Number(response.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("Rig returned more plugin application data than the host can accept.");
+    }
+    if (response.body === null) return new Uint8Array();
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let length = 0;
+    try {
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            length += value.byteLength;
+            if (length > maximumBytes) {
+                await reader.cancel().catch(() => undefined);
+                throw new Error(
+                    "Rig returned more plugin application data than the host can accept.",
+                );
+            }
+            chunks.push(value);
+        }
+    } finally {
+        reader.releaseLock();
+    }
+    const body = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of chunks) {
+        body.set(chunk, offset);
+        offset += chunk.byteLength;
+    }
+    return body;
+}
+
+function responseError(status: number, body: Uint8Array): Error {
+    const text = new TextDecoder().decode(body);
+    try {
+        const payload = JSON.parse(text) as { error?: unknown };
+        if (typeof payload.error === "string") return new Error(payload.error);
+    } catch {
+        // A non-JSON refusal still gets a deterministic host-facing fallback.
+    }
+    return new Error(`Rig rejected the plugin application request (${String(status)}).`);
 }
 
 class MutationHttpError extends Error {
@@ -3232,6 +3614,22 @@ async function fetchCatalog(
     });
     if (!response.ok) throw new Error(`Rig answered with ${String(response.status)}.`);
     return (await response.json()) as GlobalStreamHello;
+}
+
+async function fetchPluginCatalog(
+    endpoint: string,
+    token: string,
+    request: typeof globalThis.fetch,
+    signal: AbortSignal,
+): Promise<ListPluginsResponse> {
+    const response = await request(endpointUrl(endpoint, "plugins"), {
+        headers: { accept: "application/json", authorization: `Bearer ${token}` },
+        signal,
+    });
+    if (!response.ok) {
+        throw new Error(`Rig could not load the plugin catalog (${String(response.status)}).`);
+    }
+    return (await response.json()) as ListPluginsResponse;
 }
 
 async function fetchGitWatch(

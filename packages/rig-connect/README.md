@@ -13,34 +13,51 @@ It is the only place in the product where sync is reasoned about. A UI embeds it
 never asks the daemon a follow-up question to understand what it was just told. The single
 exception is paging back beyond the opening transcript window, described under The protocol.
 
-The library depends on nothing but plain Web APIs — `fetch`, streams, `AbortController`, and
-standard timers — so the same build runs in Node, in a browser, and in any runtime that provides
-them. It has no runtime dependency on the `rig` package, and a browser bundle carries no daemon
-code.
+The transport uses plain Web APIs — `fetch`, streams, `AbortController`, and standard timers — so
+the same build runs in Node, in a browser, and in any runtime that provides them. Runtime boundary
+validation uses TypeBox. The package has no runtime dependency on `rig`, and a browser bundle
+carries no daemon code.
 
-Local plugin interfaces can read Rig's explicit plugin states and bounded current logs through the
-same authenticated endpoint:
-
-```ts
-const plugins = await rig.listPlugins();
-const log = await rig.readPluginLog("Project tools");
-```
-
-`status` is `running`, `stopped`, or `build_failed`; the log reports whether it came from the
-current run or build diagnostics and whether its newest 16 KiB snapshot omitted older output.
-These are request-response snapshots. Plugin lifecycle changes travel on the shared live event
-stream, so a UI can render the event or refresh deliberately instead of running a log polling
-loop:
+Local plugin interfaces read the complete plugin and application catalog through one live
+subscription:
 
 ```ts
-const rig = connectRig({
-    endpoint,
-    token,
-    onPluginsChanged(plugins) {
-        renderPluginStates(plugins);
+const plugins = rig.connectPlugins({
+    onChange(applications, installed, state) {
+        renderPluginNavigation(applications, state);
     },
 });
 ```
+
+Applications are in deterministic navigation order: order, label, plugin identity, then
+application identity. Unchanged objects preserve reference identity. The stable `id` is
+`<plugin-folder>:<application-id>`; `generation` changes whenever the owning process restarts or is
+replaced.
+
+```ts
+const application = plugins.applications()[0]!;
+const entry = await plugins.loadResource(application, application.entry);
+const result = await plugins.invokeAction(application, "refresh", {});
+```
+
+Only declared resources and actions can be called. Every call includes the rendered generation,
+so stale views reject after replacement or uninstall. Resources are checked against declared media
+type and byte size and bounded to 256 KiB. Action inputs and responses are bounded to 1 MiB, and
+successful envelopes are runtime-validated. An optional `AbortSignal` cancels either operation;
+`plugins.close()` aborts operations owned by that handle and prevents new ones.
+
+The stream opens before `GET /plugins`. Snapshots and full-catalog events carry an ordered catalog
+version, so either side of their race can be newer without moving the view backward. A clean
+cursor resume reuses the catalog; a gap reloads it. `state.connection` is `connecting`, `live`,
+`reconnecting`, or `closed`, and discovery failures remain in `state.failures`.
+
+`listPlugins()` remains available for one-shot diagnostics. `readPluginLog()` returns the newest
+bounded 16 KiB snapshot, its source, and whether older output was omitted. Installed plugin
+`status` is `running`, `stopped`, or `build_failed`.
+
+Application mounting is a host concern. To make clicking instant, prefetch every declared resource
+by generation as soon as it enters the catalog, then expose navigation only when that bounded
+bundle is ready. The Happy2 Electron bridge contract is in the repository `INTEGRATIONS.md`.
 
 ## Creating a connection
 

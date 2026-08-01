@@ -97,7 +97,7 @@ function hello(overrides: Partial<GlobalStreamHello> = {}): GlobalStreamHello {
             ],
             since: 0,
         },
-        protocolVersion: 1,
+        protocolVersion: 2,
         projects: [project("p1")],
         sessions: [session("s1", "p1")],
         sessionsComplete: true,

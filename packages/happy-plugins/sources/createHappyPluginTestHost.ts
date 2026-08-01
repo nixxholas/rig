@@ -12,6 +12,8 @@ import { happyMcpCompletionToResult } from "./happyMcpCompletionToResult.js";
 import type {
     HappyMcpServerRegistration,
     HappyMcpToolResult,
+    HappyPluginApplicationRegistration,
+    HappyPluginApplicationResource,
     HappyPluginClient,
     HappyPluginTestRequest,
     HappyPluginTestSeed,
@@ -23,6 +25,8 @@ import {
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
+    happyPluginApplicationActionCompletionSchema,
+    happyPluginApplicationRegistrationSchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     happyPluginTestSeedSchema,
@@ -60,6 +64,19 @@ export interface HappyPluginTestHost {
     };
     readonly requests: readonly HappyPluginTestRequest[];
     readonly rootDirectory: string;
+    readonly ui: {
+        /** Simulates an unexpected host bridge loss for application recovery tests. */
+        disconnectApplications(mode?: "close" | "end" | "error"): void;
+        invokeAction(
+            applicationId: string,
+            action: string,
+            input?: unknown,
+            options?: { signal?: AbortSignal; timeoutMs?: number },
+        ): Promise<unknown>;
+        listApplications(): readonly HappyPluginApplicationRegistration[];
+        readResource(applicationId: string, path: string): HappyPluginApplicationResource;
+        waitForApplications(count?: number, timeoutMs?: number): Promise<void>;
+    };
     close(): Promise<void>;
 }
 
@@ -76,10 +93,16 @@ interface TestRegistration {
     server: HappyMcpServerRegistration;
 }
 
-interface TestCall {
+interface TestApplicationRegistration {
+    application: HappyPluginApplicationRegistration;
+    id: string;
+    response?: ServerResponse;
+}
+
+interface TestCall<T> {
     cleanup(): void;
     reject(error: Error): void;
-    resolve(result: HappyMcpToolResult): void;
+    resolve(result: T): void;
 }
 
 /** Starts an in-memory, Unix-socket Happy host for plugin tests and local authoring. */
@@ -99,12 +122,16 @@ export async function createHappyPluginTestHost(
     const projects: HappyProject[] = structuredClone(seed.projects ?? []);
     const workspaces: HappyWorkspace[] = structuredClone(seed.workspaces ?? []);
     const sessions: HappySession[] = structuredClone(seed.sessions ?? []);
+    const providerUsage = structuredClone(seed.providerUsage ?? []);
     const requests: HappyPluginTestRequest[] = [];
     const registrations = new Map<string, TestRegistration>();
-    const calls = new Map<string, TestCall>();
+    const calls = new Map<string, TestCall<HappyMcpToolResult>>();
+    const applications = new Map<string, TestApplicationRegistration>();
+    const applicationCalls = new Map<string, TestCall<unknown>>();
     let nextId = 1;
     let closed = false;
     const toolWaiters = new Set<() => void>();
+    const applicationWaiters = new Set<() => void>();
     const activeToolCount = () =>
         [...registrations.values()]
             .filter((registration) => registration.response !== undefined)
@@ -154,6 +181,10 @@ export async function createHappyPluginTestHost(
                 send(response, 200, { sessions });
                 return;
             }
+            if (request.method === "GET" && url.pathname === "/provider-usage") {
+                send(response, 200, { providers: providerUsage });
+                return;
+            }
             if (request.method === "POST" && url.pathname === "/sessions") {
                 const input = Value.Decode(createSessionInputSchema, body);
                 const session: HappySession = {
@@ -190,8 +221,92 @@ export async function createHappyPluginTestHost(
                 send(response, 201, { registrationId: registration.id });
                 return;
             }
+            if (request.method === "POST" && url.pathname === "/ui/applications") {
+                const application = Value.Decode(happyPluginApplicationRegistrationSchema, body);
+                if (
+                    [...applications.values()].some(
+                        (registration) => registration.application.id === application.id,
+                    )
+                ) {
+                    throw new Error(
+                        `The fake Happy host already has an application named "${application.id}".`,
+                    );
+                }
+                const registration: TestApplicationRegistration = {
+                    application,
+                    id: `test-application-${String(nextId++)}`,
+                };
+                applications.set(registration.id, registration);
+                send(response, 201, {
+                    generation: "test-plugin-generation",
+                    registrationId: registration.id,
+                });
+                return;
+            }
 
             const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+            if (
+                request.method === "GET" &&
+                parts.length === 4 &&
+                parts[0] === "ui" &&
+                parts[1] === "applications" &&
+                parts[2] !== undefined &&
+                parts[3] === "events"
+            ) {
+                const registration = applications.get(parts[2]);
+                if (registration === undefined) {
+                    send(response, 404, { error: "That application registration is not active." });
+                    return;
+                }
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                registration.response = response;
+                response.once("close", () => {
+                    if (registration.response === response) applications.delete(registration.id);
+                });
+                for (const notify of applicationWaiters) notify();
+                applicationWaiters.clear();
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length === 5 &&
+                parts[0] === "ui" &&
+                parts[1] === "applications" &&
+                parts[2] !== undefined &&
+                parts[3] === "actions" &&
+                parts[4] !== undefined
+            ) {
+                const call = applicationCalls.get(parts[4]);
+                if (call === undefined) {
+                    send(response, 409, { error: "That application action is no longer active." });
+                    return;
+                }
+                applicationCalls.delete(parts[4]);
+                const completion = Value.Decode(happyPluginApplicationActionCompletionSchema, body);
+                if ("error" in completion) {
+                    call.reject(new Error(completion.error));
+                } else {
+                    call.resolve(completion.result);
+                }
+                send(response, 200, {});
+                return;
+            }
+            if (
+                request.method === "DELETE" &&
+                parts.length === 3 &&
+                parts[0] === "ui" &&
+                parts[1] === "applications" &&
+                parts[2] !== undefined
+            ) {
+                applications.get(parts[2])?.response?.end();
+                applications.delete(parts[2]);
+                send(response, 200, {});
+                return;
+            }
             if (
                 request.method === "GET" &&
                 parts.length === 4 &&
@@ -460,6 +575,138 @@ export async function createHappyPluginTestHost(
                 });
             },
         },
+        ui: {
+            disconnectApplications(mode = "end") {
+                for (const registration of applications.values()) {
+                    if (mode === "error") {
+                        registration.response?.destroy(
+                            new Error("The fake Happy application stream disconnected."),
+                        );
+                    } else if (mode === "close") {
+                        registration.response?.destroy();
+                    } else {
+                        registration.response?.end();
+                    }
+                }
+            },
+            invokeAction(applicationId, action, input = {}, options = {}) {
+                const registration = [...applications.values()].find(
+                    (candidate) =>
+                        candidate.application.id === applicationId &&
+                        candidate.response !== undefined,
+                );
+                if (registration === undefined) {
+                    return Promise.reject(
+                        new Error(`No active fake application is named "${applicationId}".`),
+                    );
+                }
+                if (!registration.application.actions.includes(action)) {
+                    return Promise.reject(
+                        new Error(
+                            `The fake application "${applicationId}" has no action named "${action}".`,
+                        ),
+                    );
+                }
+                const requestId = `test-application-call-${String(nextId++)}`;
+                return new Promise<unknown>((resolve, reject) => {
+                    const timeoutMs = options.timeoutMs ?? CALL_TIMEOUT_MS;
+                    let settled = false;
+                    const cleanup = () => {
+                        clearTimeout(timer);
+                        options.signal?.removeEventListener("abort", abort);
+                    };
+                    const finishReject = (error: Error) => {
+                        if (settled) return;
+                        settled = true;
+                        applicationCalls.delete(requestId);
+                        cleanup();
+                        reject(error);
+                    };
+                    const finishResolve = (result: unknown) => {
+                        if (settled) return;
+                        settled = true;
+                        cleanup();
+                        resolve(result);
+                    };
+                    const timer = setTimeout(() => {
+                        registration.response?.write(
+                            `${JSON.stringify({ requestId, type: "cancel" })}\n`,
+                        );
+                        finishReject(
+                            new Error(
+                                `The fake application action timed out after ${String(timeoutMs)}ms.`,
+                            ),
+                        );
+                    }, timeoutMs);
+                    timer.unref();
+                    const abort = () => {
+                        registration.response?.write(
+                            `${JSON.stringify({ requestId, type: "cancel" })}\n`,
+                        );
+                        finishReject(new Error("The fake application action was cancelled."));
+                    };
+                    applicationCalls.set(requestId, {
+                        cleanup,
+                        reject: finishReject,
+                        resolve: finishResolve,
+                    });
+                    if (options.signal?.aborted === true) {
+                        abort();
+                        return;
+                    }
+                    options.signal?.addEventListener("abort", abort, { once: true });
+                    registration.response?.write(
+                        `${JSON.stringify({
+                            action,
+                            input,
+                            requestId,
+                            type: "request",
+                        })}\n`,
+                    );
+                });
+            },
+            listApplications: () =>
+                [...applications.values()]
+                    .filter((registration) => registration.response !== undefined)
+                    .map((registration) => structuredClone(registration.application)),
+            readResource(applicationId, path) {
+                const application = [...applications.values()].find(
+                    (registration) =>
+                        registration.application.id === applicationId &&
+                        registration.response !== undefined,
+                )?.application;
+                const resource = application?.resources.find(
+                    (candidate) => candidate.path === path,
+                );
+                if (resource === undefined) {
+                    throw new Error(
+                        `The fake application "${applicationId}" has no resource at "${path}".`,
+                    );
+                }
+                return structuredClone(resource);
+            },
+            waitForApplications(count = 1, timeoutMs = CALL_TIMEOUT_MS) {
+                const activeCount = () =>
+                    [...applications.values()].filter(
+                        (registration) => registration.response !== undefined,
+                    ).length;
+                if (activeCount() >= count) return Promise.resolve();
+                return new Promise<void>((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        applicationWaiters.delete(notify);
+                        reject(new Error("The fake host timed out waiting for applications."));
+                    }, timeoutMs);
+                    timer.unref();
+                    const notify = () => {
+                        if (activeCount() < count) return;
+                        clearTimeout(timer);
+                        applicationWaiters.delete(notify);
+                        resolve();
+                    };
+                    applicationWaiters.add(notify);
+                });
+            },
+        },
         async close() {
             if (closed) return;
             closed = true;
@@ -468,8 +715,15 @@ export async function createHappyPluginTestHost(
                 call.reject(new Error("The fake Happy host closed."));
             }
             calls.clear();
+            for (const call of applicationCalls.values()) {
+                call.cleanup();
+                call.reject(new Error("The fake Happy host closed."));
+            }
+            applicationCalls.clear();
             for (const registration of registrations.values()) registration.response?.end();
             registrations.clear();
+            for (const registration of applications.values()) registration.response?.end();
+            applications.clear();
             await new Promise<void>((resolve) => {
                 server.close(() => resolve());
                 server.closeAllConnections();

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
     createHappyPluginTestHost,
     createHappyMcpToolName,
+    defineHappyPluginApplicationAction,
     defineMcpTool,
     type HappyPluginTestHost,
     Type,
@@ -115,6 +116,70 @@ describe("Happy plugin test host", () => {
 
         await host.close();
         await expect(access(host.rootDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("mirrors provider usage and application resources and actions", async () => {
+        const host = await createHappyPluginTestHost(
+            {
+                providerUsage: [
+                    {
+                        checkedAt: 42,
+                        error: null,
+                        providerId: "provider-work",
+                        usage: {
+                            capturedAt: 40,
+                            credits: null,
+                            exhausted: false,
+                            planName: "Team",
+                            providerId: "provider-work",
+                            vendor: "codex",
+                            windows: { fiveHour: null, monthly: null, weekly: null },
+                        },
+                    },
+                ],
+            },
+            { temporaryDirectory: process.cwd() },
+        );
+        hosts.push(host);
+
+        await expect(host.client.providers.usage()).resolves.toMatchObject([
+            { providerId: "provider-work", usage: { planName: "Team" } },
+        ]);
+        const application = await host.client.ui.startApplication({
+            actions: [
+                defineHappyPluginApplicationAction({
+                    execute: ({ value }) => ({ value: value.toUpperCase() }),
+                    inputSchema: Type.Object({ value: Type.String() }),
+                    name: "uppercase",
+                    outputSchema: Type.Object({ value: Type.String() }),
+                }),
+            ],
+            entry: "index.html",
+            id: "catalog",
+            navigation: { label: "Catalog", order: 10 },
+            resources: [
+                {
+                    body: "<h1>Catalog</h1>",
+                    encoding: "utf8",
+                    mediaType: "text/html",
+                    path: "index.html",
+                },
+            ],
+            title: "Catalog",
+        });
+
+        await host.ui.waitForApplications();
+        expect(host.ui.listApplications()).toMatchObject([{ id: "catalog" }]);
+        expect(host.ui.readResource("catalog", "index.html")).toMatchObject({
+            body: "<h1>Catalog</h1>",
+            mediaType: "text/html",
+        });
+        await expect(
+            host.ui.invokeAction("catalog", "uppercase", { value: "ready" }),
+        ).resolves.toEqual({ value: "READY" });
+
+        await application.close();
+        await expect.poll(() => host.ui.listApplications()).toEqual([]);
     });
 
     it("validates data and resolves plugin failures as MCP error results", async () => {

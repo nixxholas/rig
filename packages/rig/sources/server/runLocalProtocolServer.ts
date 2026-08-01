@@ -414,7 +414,11 @@ async function runOwnedLocalProtocolServer(
         let pluginManager: PluginManager | undefined;
         const plugins: PluginContext = {
             install: (request) => requirePluginManager(pluginManager).install(request),
+            invokeApplication: (...parameters) =>
+                requirePluginManager(pluginManager).invokeApplication(...parameters),
             list: () => requirePluginManager(pluginManager).list(),
+            readApplicationResource: (...parameters) =>
+                requirePluginManager(pluginManager).readApplicationResource(...parameters),
             readLog: (name) => requirePluginManager(pluginManager).readLog(name),
             uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
         };
@@ -472,6 +476,7 @@ async function runOwnedLocalProtocolServer(
             ...(loadedConfig.config.docker === undefined
                 ? {}
                 : { defaultDocker: loadedConfig.config.docker }),
+            listProviderUsage: () => providerUsageTracker?.all() ?? [],
             mcpRegistry: pluginMcpRegistry,
             store,
         }));

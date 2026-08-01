@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
-import type { PluginLogSnapshot, PluginSummary } from "../protocol/index.js";
+import type { EventId, PluginLogSnapshot, PluginSummary } from "../protocol/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
@@ -15,16 +15,22 @@ import { PluginBuildError } from "./PluginBuildError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { RegisteredPlugin } from "./types.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
+import {
+    PluginApplicationRegistry,
+    type PluginApplicationResource,
+} from "./PluginApplicationRegistry.js";
 import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
 
 export interface PluginManagerOptions {
+    applicationRegistry?: PluginApplicationRegistry;
     daemonLog: DaemonLog;
     defaultDocker?: DockerExecutionConfig;
     directory?: string;
     environment?: NodeJS.ProcessEnv;
     now?: () => number;
     mcpRegistry?: PluginMcpRegistry;
+    listProviderUsage?: StartPluginOptions["listProviderUsage"];
     /** How a registered plugin is started. Tests replace the real sandboxed process. */
     start?: (plugin: RegisteredPlugin, options: StartPluginOptions) => Promise<RunningPlugin>;
     store: SessionStore;
@@ -54,12 +60,15 @@ interface PluginRuntimeState {
 export class PluginManager {
     readonly directory: string;
 
+    readonly #applicationRegistry: PluginApplicationRegistry;
     readonly #createEventId = createEventIdFactory();
+    #catalogVersion: EventId = this.#createEventId();
     readonly #daemonLog: DaemonLog;
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #environment: NodeJS.ProcessEnv;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
+    readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
     readonly #running = new Map<string, RunningPlugin>();
     readonly #states = new Map<string, PluginRuntimeState>();
     readonly #start: (
@@ -67,18 +76,25 @@ export class PluginManager {
         options: StartPluginOptions,
     ) => Promise<RunningPlugin>;
     readonly #store: SessionStore;
+    readonly #unsubscribeApplications: () => void;
     #closed = false;
+    #publication = Promise.resolve();
     #started = false;
 
     constructor(options: PluginManagerOptions) {
+        this.#applicationRegistry = options.applicationRegistry ?? new PluginApplicationRegistry();
         this.#daemonLog = options.daemonLog;
         this.#defaultDocker = options.defaultDocker;
         this.#environment = options.environment ?? process.env;
         this.#now = options.now ?? Date.now;
         this.#mcpRegistry = options.mcpRegistry;
+        this.#listProviderUsage = options.listProviderUsage;
         this.#start = options.start ?? startPlugin;
         this.#store = options.store;
         this.directory = options.directory ?? getPluginsDirectory(this.#environment);
+        this.#unsubscribeApplications = this.#applicationRegistry.subscribe(() => {
+            void this.#publishChanged();
+        });
     }
 
     async start(): Promise<void> {
@@ -116,7 +132,7 @@ export class PluginManager {
             sourceDirectory: options.sourceDirectory,
         });
         // Replacing an installed plugin retires the process built from the previous code.
-        await this.#stopRunning(installed.folder);
+        await this.#stopRunning(installed.folder, true);
         await this.#startRegistered(installed.folder);
         await this.#publishChanged();
         return installed;
@@ -168,30 +184,40 @@ export class PluginManager {
     async list(): Promise<{
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];
+        version: EventId;
     }> {
-        const discovery = await discoverPlugins(this.directory);
-        return {
-            failures: discovery.failures.map((failure) => ({
-                error: failure.error,
-                folder: failure.folderName,
-            })),
-            plugins: discovery.plugins.map((plugin) => {
-                const state = this.#states.get(plugin.folderName) ?? {
-                    status: "stopped" as const,
-                    updatedAt: this.#now(),
-                };
-                return {
-                    dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
-                    description: plugin.manifest.description,
-                    directory: plugin.directory,
-                    ...(state.error === undefined ? {} : { error: state.error }),
-                    folder: plugin.folderName,
-                    logAvailable: state.error !== undefined || state.logPath !== undefined,
-                    name: plugin.manifest.name,
-                    status: state.status,
-                };
-            }),
-        };
+        for (;;) {
+            const version = this.#catalogVersion;
+            const discovery = await discoverPlugins(this.directory);
+            const catalog = {
+                failures: discovery.failures.map((failure) => ({
+                    error: failure.error,
+                    folder: failure.folderName,
+                })),
+                plugins: discovery.plugins.map((plugin) => {
+                    const state = this.#states.get(plugin.folderName) ?? {
+                        status: "stopped" as const,
+                        updatedAt: this.#now(),
+                    };
+                    return {
+                        applications:
+                            state.status === "running"
+                                ? this.#applicationRegistry.list(plugin.folderName)
+                                : [],
+                        dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
+                        description: plugin.manifest.description,
+                        directory: plugin.directory,
+                        ...(state.error === undefined ? {} : { error: state.error }),
+                        folder: plugin.folderName,
+                        logAvailable: state.error !== undefined || state.logPath !== undefined,
+                        name: plugin.manifest.name,
+                        status: state.status,
+                    };
+                }),
+                version,
+            };
+            if (version === this.#catalogVersion) return catalog;
+        }
     }
 
     /** Reads at most the current plugin log's fixed retention bound. */
@@ -229,11 +255,31 @@ export class PluginManager {
         };
     }
 
+    readApplicationResource(
+        applicationId: string,
+        generation: string,
+        resourcePath: string,
+    ): PluginApplicationResource {
+        return this.#applicationRegistry.readResource(applicationId, generation, resourcePath);
+    }
+
+    invokeApplication(
+        applicationId: string,
+        generation: string,
+        action: string,
+        input: unknown,
+        signal?: AbortSignal,
+    ): Promise<unknown> {
+        return this.#applicationRegistry.invoke(applicationId, generation, action, input, signal);
+    }
+
     async close(): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
         await Promise.all([...this.#running.values()].map((plugin) => plugin.close()));
         this.#running.clear();
+        this.#unsubscribeApplications();
+        this.#applicationRegistry.close();
     }
 
     #assertOpen(): void {
@@ -247,10 +293,14 @@ export class PluginManager {
             const plugin = await readPluginManifest(directory);
             name = plugin.manifest.name;
             const running = await this.#start(plugin, {
+                applicationRegistry: this.#applicationRegistry,
                 ...(this.#defaultDocker === undefined
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),
                 environment: this.#environment,
+                ...(this.#listProviderUsage === undefined
+                    ? {}
+                    : { listProviderUsage: this.#listProviderUsage }),
                 ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
                 store: this.#store,
             });
@@ -325,7 +375,7 @@ export class PluginManager {
         }
     }
 
-    async #stopRunning(folderName: string): Promise<void> {
+    async #stopRunning(folderName: string, publishStopped = false): Promise<void> {
         const running = this.#running.get(folderName);
         if (running === undefined) return;
         this.#running.delete(folderName);
@@ -335,6 +385,7 @@ export class PluginManager {
             status: "stopped",
             updatedAt: this.#now(),
         });
+        if (publishStopped) await this.#publishChanged();
     }
 
     /** A plugin that ends on its own leaves the running set, and clients see it stop. */
@@ -355,26 +406,34 @@ export class PluginManager {
     }
 
     async #publishChanged(): Promise<void> {
-        if (this.#closed) return;
-        let plugins: readonly PluginSummary[];
-        try {
-            ({ plugins } = await this.list());
-        } catch (error) {
-            this.#daemonLog.record(
-                "warning",
-                "plugins_unreadable",
-                "Rig could not read the plugins folder to announce a change.",
-                { error: errorToMessage(error) },
-            );
-            return;
-        }
-        const event = {
-            createdAt: this.#now(),
-            data: { plugins },
-            id: this.#createEventId(),
-            type: "plugins_changed" as const,
+        const eventId = this.#createEventId();
+        this.#catalogVersion = eventId;
+        const publish = async () => {
+            if (this.#closed) return;
+            let catalog: Awaited<ReturnType<PluginManager["list"]>>;
+            try {
+                catalog = await this.list();
+            } catch (error) {
+                this.#daemonLog.record(
+                    "warning",
+                    "plugins_unreadable",
+                    "Rig could not read the plugins folder to announce a change.",
+                    { error: errorToMessage(error) },
+                );
+                return;
+            }
+            if (this.#closed || catalog.version !== eventId) return;
+            const event = {
+                createdAt: this.#now(),
+                data: catalog,
+                id: eventId,
+                type: "plugins_changed" as const,
+            };
+            this.#store.globalEventQueue.publishLive(event);
+            this.#store.liveEvents.publish(event);
         };
-        this.#store.globalEventQueue.publishLive(event);
-        this.#store.liveEvents.publish(event);
+        const next = this.#publication.then(publish, publish);
+        this.#publication = next.catch(() => undefined);
+        await next;
     }
 }

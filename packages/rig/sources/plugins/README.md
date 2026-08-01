@@ -46,6 +46,18 @@ retires that generation and rejects pending calls before stale completions can l
 this provider through the same composite MCP path as configured servers, so provider tool assembly
 and `AgentContext`/`PermissionContext` behavior stay shared.
 
+`PluginApplicationRegistry` owns bounded static bundles and typed action streams. A contribution
+becomes visible only after its private NDJSON stream attaches. Stable identity combines the plugin
+folder and authored application ID; generation is unique to the process. Resource and action
+routes require both, so replacement, exit, disconnect, restart, or uninstall retires stale views.
+Resource, bundle, registration-body, action-body, action-count, and concurrent-action limits keep
+memory and work bounded.
+
+The `/plugins` snapshot and `plugins_changed` events carry the same ordered catalog version in
+addition to the global cursor. The manager assigns it synchronously when state changes and retries
+an asynchronous folder read if the version moves underneath it. `rig-connect` can therefore settle
+both directions of the stream-before-snapshot race without using arrival order.
+
 The manager records one authoritative state for every registered plugin: `running`, `stopped`, or
 `build_failed`. The current-run file retains the most recent 1 MiB and resets for each process
 generation. `readLog` returns its newest 16 KiB, or the newest 16 KiB of the build diagnostic, and

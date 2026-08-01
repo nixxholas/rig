@@ -222,6 +222,44 @@ same local-or-Docker filesystem, current permission mode, shell sandbox,
 network boundary, process accounting, output limits, and abort lifecycle as the
 TUI agent. File writes retain Happy's SHA-256 optimistic-concurrency contract.
 
+## Happy2 local plugin applications
+
+Happy2 consumes local applications through `@slopus/rig-connect`. Its Electron main process passes
+the daemon endpoint and bearer token to `connectRig`, then calls `connectPlugins`. Never send those
+credentials to a renderer or open a second event stream. Protocol version 2 is required.
+
+`onChange(applications, plugins, state)` supplies the complete catalog in navigation order. Key
+logical navigation by `application.id`, but key loaded code and caches by both `application.id` and
+`application.generation`. A generation change is replacement, never an in-place update.
+
+Mounting must be instant at click time:
+
+1. As soon as a live catalog exposes a generation, load every declared path through
+   `connection.loadResource(application, path)`.
+2. Verify the whole bounded bundle completed and is still the current generation.
+3. Only then publish it as clickable navigation. A click performs no daemon read.
+4. Serve cached bytes from a generation-specific isolated Electron origin or protocol so relative
+   HTML, scripts, stylesheets, fonts, and images resolve inside the bundle. Mount a dedicated
+   isolated `WebContentsView`, not a remote page.
+5. Preserve the daemon policy at that origin: no default network, frames, objects, base navigation,
+   or forms; bundle scripts, styles, images, and fonts are allowed, with inline styles and data
+   images. Keep context isolation on and Node integration off.
+
+The renderer bridge exposes one operation: invoke a name from the application's declared
+`actions`. Electron main checks that name against the current catalog and calls
+`connection.invokeAction(application, action, input, { signal })`. Do not expose arbitrary daemon
+paths, raw fetch, credentials, plugin sockets, or undeclared action names.
+
+Unmounting, removing navigation, or closing the subscription aborts prefetch and actions, destroys
+the isolated view, and releases object URLs or custom-protocol mappings for that generation. A
+stale-generation error retires the old view: unmount it, drop its bundle, and wait for the current
+catalog. Never retry the old generation. Ordinary action failures stay inside the application UI.
+
+A clean reconnect keeps cached current generations. After a gap, retain unchanged generation keys,
+prefetch new ones, and dispose missing ones. Happy2 tests should cover an event on each side of the
+opening snapshot, clean resume, gap reload, replacement, uninstall, stale actions, partial-prefetch
+cancellation, and last-subscriber disposal.
+
 ## HTTP proxy
 
 The authenticated daemon connection exposes a project- or workspace-scoped

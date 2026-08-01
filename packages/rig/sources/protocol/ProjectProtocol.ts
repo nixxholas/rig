@@ -1,3 +1,5 @@
+import type { HappyPluginApplicationContribution } from "happy-plugins";
+
 import type { EventId } from "./EventId.js";
 import type {
     BaseSessionEvent,
@@ -301,6 +303,8 @@ export interface SetPresenceRequestBody {
 
 /** One plugin installed on this machine, as a client should show it. */
 export interface PluginSummary {
+    /** Running local applications, ordered exactly as a navigation host should present them. */
+    applications: readonly HappyPluginApplicationContribution[];
     /** The folder the plugin writes to, which the user can open. */
     dataDirectory: string;
     description: string;
@@ -330,8 +334,12 @@ export interface PluginLogSnapshot {
 }
 
 export interface ListPluginsResponse {
+    /** The live-stream position read immediately before this catalog was assembled. */
+    cursor: EventId;
     failures: readonly { error: string; folder: string }[];
     plugins: readonly PluginSummary[];
+    /** Ordered identity of the exact catalog state in this response. */
+    version: EventId;
 }
 
 export interface PluginLogResponse {
@@ -345,7 +353,11 @@ export interface PluginLogResponse {
  */
 export interface PluginsChangedEvent {
     createdAt: number;
-    data: { plugins: readonly PluginSummary[] };
+    data: {
+        failures: readonly { error: string; folder: string }[];
+        plugins: readonly PluginSummary[];
+        version: EventId;
+    };
     id: EventId;
     type: "plugins_changed";
 }

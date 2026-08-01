@@ -39,6 +39,7 @@ describe("plugin registration", () => {
         const afterInstall = await harness.manager.list();
         expect(afterInstall.plugins).toEqual([
             {
+                applications: [],
                 dataDirectory: join(harness.dataRoot, "clock"),
                 description: "A small clock.",
                 directory: installed.directory,
@@ -89,6 +90,37 @@ describe("plugin registration", () => {
             expect(event.createdAt).toEqual(expect.any(Number));
         }
         expect(new Set(harness.events.map((event) => event.id)).size).toBe(harness.events.length);
+    });
+
+    it("removes application contributions on replacement and uninstall and restores a new generation", async () => {
+        const harness = await createHarness({ registerApplication: true });
+        await harness.manager.start();
+        const source = join(harness.workspace, "clock");
+        await createPluginSource(source);
+
+        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        const first = (await harness.manager.list()).plugins[0]?.applications[0];
+        expect(first).toMatchObject({ id: "clock:dashboard", title: "Dashboard" });
+
+        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        const replacement = (await harness.manager.list()).plugins[0]?.applications[0];
+        expect(replacement).toMatchObject({ id: "clock:dashboard", title: "Dashboard" });
+        expect(replacement?.generation).not.toBe(first?.generation);
+
+        const contributionSnapshots = harness.events.map((event) =>
+            event.data.plugins.flatMap((plugin) => plugin.applications),
+        );
+        const replacementIndex = contributionSnapshots.findLastIndex(
+            (applications) => applications[0]?.generation === replacement?.generation,
+        );
+        expect(
+            contributionSnapshots
+                .slice(0, replacementIndex)
+                .some((applications, index) => index > 0 && applications.length === 0),
+        ).toBe(true);
+
+        await harness.manager.uninstall({ fs: harness.fs, name: "Clock" });
+        expect(lastPlugins(harness.events)).toEqual([]);
     });
 
     it("keeps a running plugin when a replacement fails to build", async () => {
@@ -179,7 +211,9 @@ function lastPlugins(events: readonly PluginsChangedEvent[]): unknown {
     return events.at(-1)?.data.plugins;
 }
 
-async function createHarness(options: { startError?: Error } = {}): Promise<{
+async function createHarness(
+    options: { registerApplication?: boolean; startError?: Error } = {},
+): Promise<{
     dataRoot: string;
     events: PluginsChangedEvent[];
     fs: FileSystemContext;
@@ -215,9 +249,31 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
         daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
         directory: join(root, "plugins"),
         environment: { HAPPY_PLUGIN_DATA_DIRECTORY: dataRoot } as NodeJS.ProcessEnv,
-        start: async (plugin) => {
+        start: async (plugin, startOptions) => {
             started.push(plugin.manifest.name);
             if (options.startError !== undefined) throw options.startError;
+            const applications = startOptions.applicationRegistry?.createConnection({
+                folder: plugin.folderName,
+                name: plugin.manifest.name,
+            });
+            if (options.registerApplication === true && applications !== undefined) {
+                const registration = applications.register({
+                    actions: ["read"],
+                    entry: "index.html",
+                    id: "dashboard",
+                    navigation: { label: "Dashboard", order: 10 },
+                    resources: [
+                        {
+                            body: "<h1>Clock</h1>",
+                            encoding: "utf8",
+                            mediaType: "text/html",
+                            path: "index.html",
+                        },
+                    ],
+                    title: "Dashboard",
+                });
+                applications.attach(registration.registrationId, () => true);
+            }
             let finish = () => {};
             const completion = new Promise<{
                 code: number | null;
@@ -235,6 +291,7 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
                 name: plugin.manifest.name,
                 pid: 1234,
                 close: () => {
+                    applications?.close();
                     stopped.push(plugin.manifest.name);
                     finish();
                     return Promise.resolve();

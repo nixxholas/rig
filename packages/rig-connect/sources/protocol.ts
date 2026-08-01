@@ -1184,7 +1184,39 @@ export interface PresenceSnapshot {
 }
 
 /** One plugin installed on this machine, as a client should show it. */
+export type PluginResourceMediaType =
+    | "application/json"
+    | "font/woff2"
+    | "image/jpeg"
+    | "image/png"
+    | "image/svg+xml"
+    | "image/webp"
+    | "text/css"
+    | "text/html"
+    | "text/javascript";
+
+export interface PluginApplicationContribution {
+    actions: readonly string[];
+    applicationId: string;
+    entry: string;
+    generation: string;
+    id: string;
+    navigation: {
+        icon?: string;
+        label: string;
+        order: number;
+    };
+    pluginFolder: string;
+    resources: readonly {
+        mediaType: PluginResourceMediaType;
+        path: string;
+        size: number;
+    }[];
+    title: string;
+}
+
 export interface PluginSummary {
+    applications: readonly PluginApplicationContribution[];
     /** The folder the plugin writes to, which the user can open. */
     dataDirectory: string;
     description: string;
@@ -1209,8 +1241,10 @@ export interface PluginLogSnapshot {
 }
 
 export interface ListPluginsResponse {
+    cursor: string;
     failures: readonly { error: string; folder: string }[];
     plugins: readonly PluginSummary[];
+    version: string;
 }
 
 export interface PluginLogResponse {
@@ -1312,7 +1346,11 @@ export type GlobalEvent =
       }
     | {
           createdAt: number;
-          data: { plugins: readonly PluginSummary[] };
+          data: {
+              failures: readonly { error: string; folder: string }[];
+              plugins: readonly PluginSummary[];
+              version: string;
+          };
           id: string;
           type: "plugins_changed";
       }

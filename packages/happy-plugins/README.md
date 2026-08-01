@@ -17,7 +17,7 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 ## Status
 
 The SDK is an early preview. The current surface covers projects, workspaces, sessions, messages
-to agents, and MCP tool contributions. Embedded UI plugin points come later.
+to agents, provider usage, MCP tool contributions, and local application contributions.
 
 ## How authoring and runtime versions work
 
@@ -150,7 +150,10 @@ try {
 ```
 
 `host.mcp.waitForTools()`, `host.mcp.listTools()`, and `host.mcp.callTool()` let a test observe and
-exercise the plugin contribution without reaching into Rig internals. The host creates
+exercise an MCP contribution without reaching into Rig internals. `host.ui.waitForApplications()`,
+`host.ui.listApplications()`, `host.ui.readResource()`, and `host.ui.invokeAction()` do the same
+for local applications. Seed `providerUsage` to exercise `happy.providers.usage()` without a real
+account. The host creates
 `host.environment.HAPPY_PLUGIN_DIRECTORY` before the plugin starts, so tests can use it for
 persistent state exactly as they use the production directory. `host.rootDirectory` identifies the
 temporary root and `host.close()` removes it. Pass `{ temporaryDirectory }` as the second argument
@@ -379,6 +382,82 @@ happy.agents.sendMessage(input: {
 }>
 ```
 
+### Provider usage
+
+Applications can read every configured account without knowing which providers exist:
+
+```ts
+const providers = await happy.providers.usage();
+
+for (const entry of providers) {
+    console.log(entry.providerId, entry.usage?.windows.weekly?.usedPercent, entry.error);
+}
+```
+
+`happy.providers.usage()` returns `readonly HappyProviderUsageEntry[]`. Each entry identifies the
+configured account, last check, and error, plus a provider-neutral snapshot or `null`. A snapshot
+has a canonical vendor kind, plan name, exhaustion state, optional credits, and optional
+five-hour, weekly, and monthly windows. Render the entries received rather than assuming a
+provider or plan exists.
+
+### Local applications
+
+A plugin registers static resources and typed actions as one host-mounted application:
+
+```ts
+import { defineHappyPluginApplicationAction, happy, Type } from "happy-plugins";
+
+const application = await happy.ui.startApplication({
+    id: "account-overview",
+    title: "Account overview",
+    entry: "index.html",
+    navigation: { label: "Accounts", order: 10 },
+    resources: [
+        {
+            path: "index.html",
+            mediaType: "text/html",
+            encoding: "utf8",
+            body: `<!doctype html><main id="app"></main><script src="app.js"></script>`,
+        },
+        {
+            path: "app.js",
+            mediaType: "text/javascript",
+            encoding: "utf8",
+            body: `window.happy.invoke("refresh", {}).then(console.log)`,
+        },
+    ],
+    actions: [
+        defineHappyPluginApplicationAction({
+            name: "refresh",
+            inputSchema: Type.Object({}, { additionalProperties: false }),
+            outputSchema: Type.Object({ providers: Type.Number() }),
+            async execute(_input, { signal }) {
+                signal.throwIfAborted();
+                return { providers: (await happy.providers.usage()).length };
+            },
+        }),
+    ],
+});
+```
+
+The authored `id` is stable. Rig exposes `<plugin-folder>:<application-id>` to hosts and gives
+every plugin process an opaque `generation`. Every resource and action request includes that
+generation, so a stale view fails after replacement or uninstall. The handle reports `connected`,
+`reconnecting`, or `closed`. A stream loss aborts active actions and re-registers with bounded
+backoff; `registrationId` changes but the process generation does not. `close()` is terminal.
+
+Paths are relative and normalized. The entry must be registered HTML, and an optional navigation
+icon must be a registered image. Supported media types are JSON, WOFF2, JPEG, PNG, SVG, WebP, CSS,
+HTML, and JavaScript. One plugin may register 8 applications; each has at most 32 actions and 64
+resources. One resource is at most 256 KiB and one application's decoded bundle totals at most
+1 MiB.
+
+Action inputs and outputs are JSON values validated by their TypeBox schemas. Cancellation reaches
+the handler's `AbortSignal`. Rig permits 64 concurrent actions per application, applies a
+30-second daemon timeout, and bounds action request and response bodies to 1 MiB. The renderer
+never receives the plugin socket or daemon token. Happy2 owns resource caching, isolated mounting,
+and the narrow declared-action bridge described in the repository `INTEGRATIONS.md`.
+
 ### MCP tools
 
 No MCP server package or other author dependency is needed. Reuse the `Type` export from
@@ -442,6 +521,10 @@ The primary schema exports are:
 - `sendAgentMessageInputSchema` and `agentMessageDeliverySchema`
 - `happyMcpServerRegistrationSchema`, `happyMcpEventSchema`,
   `happyMcpCallCompletionSchema`, and `happyMcpToolResultSchema`
+- `happyPluginApplicationRegistrationSchema`, `happyPluginApplicationContributionSchema`,
+  `happyPluginApplicationEventSchema`, and `happyPluginApplicationActionCompletionSchema`
+- `happyProviderUsageEntrySchema`, `happyProviderUsageSchema`,
+  `happyProviderUsageWindowSchema`, and `happyProviderUsageCreditsSchema`
 - `happyPluginTestSeedSchema` and `happyPluginTestRequestSchema`
 
 Request-body and response-envelope schemas are also exported for test harnesses implementing the

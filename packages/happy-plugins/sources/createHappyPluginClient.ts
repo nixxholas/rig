@@ -4,6 +4,7 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { startHappyMcpServer } from "./startHappyMcpServer.js";
+import { startHappyPluginApplication } from "./startHappyPluginApplication.js";
 import type { CreateHappyPluginClientOptions, HappyPluginClient } from "./types.js";
 import {
     agentMessageDeliverySchema,
@@ -12,6 +13,7 @@ import {
     createSessionInputSchema,
     createWorkspaceInputSchema,
     listProjectsResponseSchema,
+    listHappyProviderUsageResponseSchema,
     listSessionsResponseSchema,
     listWorkspacesInputSchema,
     listWorkspacesResponseSchema,
@@ -96,6 +98,11 @@ export function createHappyPluginClient(
                     },
                 }),
         },
+        providers: {
+            usage: async () =>
+                (await request("GET", "/provider-usage", listHappyProviderUsageResponseSchema))
+                    .providers,
+        },
         sessions: {
             create: async (input) => {
                 Value.Assert(createSessionInputSchema, input);
@@ -103,6 +110,18 @@ export function createHappyPluginClient(
             },
             list: async () =>
                 (await request("GET", "/sessions", listSessionsResponseSchema)).sessions,
+        },
+        ui: {
+            startApplication: (applicationOptions) =>
+                startHappyPluginApplication(applicationOptions, {
+                    request,
+                    get socketPath() {
+                        return socketPath();
+                    },
+                    get token() {
+                        return token();
+                    },
+                }),
         },
         workspaces: {
             archive: async (input) => {

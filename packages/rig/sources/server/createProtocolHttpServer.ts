@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { isCuid } from "@paralleldrive/cuid2";
+import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import type {
@@ -160,6 +161,11 @@ import type {
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
+import {
+    PluginApplicationActionError,
+    PluginApplicationNotFoundError,
+    PluginApplicationStaleGenerationError,
+} from "../plugins/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
@@ -195,7 +201,10 @@ export interface ProtocolHttpServerOptions {
     onShutdown?: () => void;
     onReloadHappy?: () => boolean | Promise<boolean>;
     onStartInspector?: () => StartInspectorResponse | Promise<StartInspectorResponse>;
-    plugins?: Pick<PluginContext, "list" | "readLog">;
+    plugins?: Pick<
+        PluginContext,
+        "invokeApplication" | "list" | "readApplicationResource" | "readLog"
+    >;
     store?: SessionStore;
     taskDrain?: TaskDrain;
     secrets?: readonly SecretRegistration[];
@@ -300,7 +309,9 @@ interface ProtocolServerRuntimeConfig {
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
-    plugins: Pick<PluginContext, "list" | "readLog"> | undefined;
+    plugins:
+        | Pick<PluginContext, "invokeApplication" | "list" | "readApplicationResource" | "readLog">
+        | undefined;
 }
 
 interface AppliedDaemonSettings {
@@ -309,6 +320,10 @@ interface AppliedDaemonSettings {
 }
 
 const GLOBAL_SECURITY_POLICY_REQUEST_MAX_BYTES = GLOBAL_SECURITY_MD_MAX_BYTES * 6 + 1024;
+const pluginApplicationActionBodySchema = Type.Object(
+    { input: Type.Unknown() },
+    { additionalProperties: false },
+);
 
 async function handleRequest(
     request: IncomingMessage,
@@ -362,7 +377,8 @@ async function handleRequest(
             sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
             return;
         }
-        sendJson(response, 200, await runtimeConfig.plugins.list());
+        const cursor = store.liveEvents.cursor();
+        sendJson(response, 200, { cursor, ...(await runtimeConfig.plugins.list()) });
         return;
     }
     if (request.method === "GET" && route.name === "plugin-log") {
@@ -371,6 +387,75 @@ async function handleRequest(
             return;
         }
         sendJson(response, 200, { log: await runtimeConfig.plugins.readLog(route.pluginName) });
+        return;
+    }
+    if (request.method === "GET" && route.name === "plugin-application-resource") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
+            return;
+        }
+        try {
+            const resource = plugins.readApplicationResource(
+                route.applicationId,
+                route.generation,
+                route.resourcePath,
+            );
+            response.writeHead(200, {
+                "cache-control": "no-store",
+                "content-length": String(resource.body.byteLength),
+                "content-security-policy":
+                    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
+                "content-type": resourceContentType(resource.mediaType),
+                "x-content-type-options": "nosniff",
+            });
+            response.end(resource.body);
+        } catch (error) {
+            sendPluginApplicationError(response, error);
+        }
+        return;
+    }
+    if (request.method === "POST" && route.name === "plugin-application-action") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
+            return;
+        }
+        let body: { input: unknown };
+        try {
+            body = Value.Decode(
+                pluginApplicationActionBodySchema,
+                await readJson<unknown>(request, 1024 * 1024),
+            );
+        } catch (error) {
+            if (
+                error instanceof InvalidJsonBodyError ||
+                error instanceof RequestBodyTooLargeError
+            ) {
+                throw error;
+            }
+            sendJson(response, 400, { error: "Plugin application action input is invalid." });
+            return;
+        }
+        const controller = new AbortController();
+        const abort = () => {
+            if (!response.writableEnded) controller.abort();
+        };
+        response.once("close", abort);
+        try {
+            const result = await plugins.invokeApplication(
+                route.applicationId,
+                route.generation,
+                route.action,
+                body.input,
+                controller.signal,
+            );
+            sendJson(response, 200, { result });
+        } catch (error) {
+            if (!response.destroyed) sendPluginApplicationError(response, error);
+        } finally {
+            response.off("close", abort);
+        }
         return;
     }
 
@@ -2442,6 +2527,20 @@ function matchRoute(pathname: string):
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | { name: "plugin-log"; pluginName: string; sessionId?: undefined }
     | {
+          action: string;
+          applicationId: string;
+          generation: string;
+          name: "plugin-application-action";
+          sessionId?: undefined;
+      }
+    | {
+          applicationId: string;
+          generation: string;
+          name: "plugin-application-resource";
+          resourcePath: string;
+          sessionId?: undefined;
+      }
+    | {
           name:
               | "project"
               | "project-archive"
@@ -2554,6 +2653,38 @@ function matchRoute(pathname: string):
     if (pathname === "/shutdown") return { name: "shutdown" };
 
     const globalParts = pathname.split("/").filter(Boolean);
+    const applicationResource =
+        /^\/plugin-applications\/([^/]+)\/generations\/([^/]+)\/resources\/(.+)$/u.exec(pathname);
+    if (applicationResource !== null) {
+        const applicationId = decodeUrlComponent(applicationResource[1]);
+        const generation = decodeUrlComponent(applicationResource[2]);
+        const resourceParts = applicationResource[3]?.split("/").map(decodeUrlComponent);
+        if (
+            applicationId === undefined ||
+            generation === undefined ||
+            resourceParts === undefined ||
+            resourceParts.some((part) => part === undefined)
+        ) {
+            return undefined;
+        }
+        return {
+            applicationId,
+            generation,
+            name: "plugin-application-resource",
+            resourcePath: resourceParts.join("/"),
+        };
+    }
+    const applicationAction =
+        /^\/plugin-applications\/([^/]+)\/generations\/([^/]+)\/actions\/([^/]+)$/u.exec(pathname);
+    if (applicationAction !== null) {
+        const applicationId = decodeUrlComponent(applicationAction[1]);
+        const generation = decodeUrlComponent(applicationAction[2]);
+        const action = decodeUrlComponent(applicationAction[3]);
+        if (applicationId === undefined || generation === undefined || action === undefined) {
+            return undefined;
+        }
+        return { action, applicationId, generation, name: "plugin-application-action" };
+    }
     if (
         globalParts.length === 3 &&
         globalParts[0] === "plugins" &&
@@ -2763,6 +2894,37 @@ function matchRoute(pathname: string):
     return undefined;
 }
 
+function decodeUrlComponent(value: string | undefined): string | undefined {
+    if (value === undefined) return undefined;
+    try {
+        return decodeURIComponent(value);
+    } catch {
+        return undefined;
+    }
+}
+
+function resourceContentType(mediaType: string): string {
+    return mediaType.startsWith("text/") || mediaType === "application/json"
+        ? `${mediaType}; charset=utf-8`
+        : mediaType;
+}
+
+function sendPluginApplicationError(response: ServerResponse, error: unknown): void {
+    if (error instanceof PluginApplicationStaleGenerationError) {
+        sendJson(response, 409, { error: error.message });
+        return;
+    }
+    if (error instanceof PluginApplicationNotFoundError) {
+        sendJson(response, 404, { error: error.message });
+        return;
+    }
+    if (error instanceof PluginApplicationActionError) {
+        sendJson(response, 502, { error: error.message });
+        return;
+    }
+    throw error;
+}
+
 function isSessionMutation(routeName: string, method: string | undefined): boolean {
     return (
         (method === "PATCH" && routeName === "session") ||
@@ -2808,6 +2970,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "debug-inspector") return request.method === "POST";
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
+    if (route.name === "plugin-application-action") return request.method === "POST";
     if (route.name === "secret-registrations") return request.method === "POST";
     if (route.name === "secret-registration") return request.method === "DELETE";
     if (route.name === "messages" && route.sessionId === undefined) {

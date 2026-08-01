@@ -3243,8 +3243,18 @@ describe("CodingAssistantApp", () => {
             async install() {
                 throw new Error("Unused in this test.");
             },
+            async invokeApplication() {
+                throw new Error("Unused in this test.");
+            },
             async list() {
-                return { failures: [], plugins: [] };
+                return {
+                    failures: [],
+                    plugins: [],
+                    version: "01900000-0000-7000-8000-000000000001",
+                };
+            },
+            readApplicationResource() {
+                throw new Error("Unused in this test.");
             },
             readLog,
             async uninstall() {

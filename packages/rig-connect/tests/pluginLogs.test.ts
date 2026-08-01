@@ -64,26 +64,35 @@ describe("plugin logs", () => {
             },
         });
         const changed = vi.fn();
-        const fetch = vi.fn<typeof globalThis.fetch>(async (input) =>
-            String(input).endsWith("/events/live")
-                ? new Response(stream, {
-                      headers: { "content-type": "text/event-stream" },
-                      status: 200,
-                  })
-                : new Response("not found", { status: 404 }),
-        );
+        const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+            if (String(input).endsWith("/events/live")) {
+                return new Response(stream, {
+                    headers: { "content-type": "text/event-stream" },
+                    status: 200,
+                });
+            }
+            if (String(input).endsWith("/plugins")) {
+                return Response.json({
+                    cursor: "01900000-0000-7000-8000-000000000001",
+                    failures: [],
+                    plugins: [],
+                    version: "01900000-0000-7000-8000-000000000001",
+                });
+            }
+            return new Response("not found", { status: 404 });
+        });
         const rig = connectRig({
             endpoint: "http://rig.test",
             fetch,
-            onPluginsChanged: changed,
             token: "secret",
         });
+        const connection = rig.connectPlugins({ onChange: changed });
         controller.enqueue(
             encoder.encode(
                 sse("hello", {
                     cursor: "01900000-0000-7000-8000-000000000001",
                     gap: false,
-                    protocolVersion: 1,
+                    protocolVersion: 2,
                     resumed: false,
                 }),
             ),
@@ -95,8 +104,10 @@ describe("plugin logs", () => {
                     event: {
                         createdAt: 2,
                         data: {
+                            failures: [],
                             plugins: [
                                 {
+                                    applications: [],
                                     dataDirectory: "/plugins/clock",
                                     description: "A clock.",
                                     directory: "/managed/clock",
@@ -106,6 +117,7 @@ describe("plugin logs", () => {
                                     status: "running",
                                 },
                             ],
+                            version: "01900000-0000-7000-8000-000000000002",
                         },
                         id: "01900000-0000-7000-8000-000000000002",
                         type: "plugins_changed",
@@ -115,12 +127,15 @@ describe("plugin logs", () => {
         );
 
         await vi.waitFor(() => {
-            expect(changed).toHaveBeenCalledWith([
-                expect.objectContaining({ name: "Clock", status: "running" }),
-            ]);
+            expect(changed).toHaveBeenLastCalledWith(
+                [],
+                [expect.objectContaining({ name: "Clock", status: "running" })],
+                expect.objectContaining({ connection: "live" }),
+            );
         });
-        expect(fetch).toHaveBeenCalledOnce();
+        expect(fetch).toHaveBeenCalledTimes(2);
 
+        connection.close();
         rig.close();
         controller.close();
     });

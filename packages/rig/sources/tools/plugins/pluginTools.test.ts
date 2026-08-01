@@ -81,6 +81,7 @@ describe("plugin tools", () => {
                 failures: [{ error: "happy.plugin.json is invalid.", folder: "broken" }],
                 plugins: [
                     {
+                        applications: [],
                         dataDirectory: "/home/steve/Happy/Plugins/clock",
                         description: "A small clock.",
                         directory: "/home/steve/.happy/rig/plugins/clock",
@@ -90,6 +91,7 @@ describe("plugin tools", () => {
                         status: "running",
                     },
                 ],
+                version: "01900000-0000-7000-8000-000000000001",
             }),
         });
 

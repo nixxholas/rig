@@ -4,6 +4,7 @@ import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type {
     AgentMessageDelivery,
+    HappyProviderUsageEntry,
     HappyProject,
     HappySession,
     HappyWorkspace,
@@ -12,6 +13,8 @@ import {
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
+    happyPluginApplicationActionCompletionSchema,
+    happyPluginApplicationRegistrationSchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     listWorkspacesInputSchema,
@@ -28,11 +31,15 @@ import type { SessionStore } from "../session/SessionStore.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
+import type { PluginApplicationConnection } from "./PluginApplicationRegistry.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_APPLICATION_REGISTRATION_REQUEST_BYTES = 2 * 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
+    applications?: PluginApplicationConnection;
     defaultDocker?: DockerExecutionConfig;
+    listProviderUsage?: () => readonly HappyProviderUsageEntry[];
     mcp?: PluginMcpConnection;
     pluginName: string;
     store: SessionStore;
@@ -47,9 +54,17 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
         }
         void handleRequest(request, response, options).catch((error: unknown) => {
             if (isDatabaseFailure(error)) throw error;
-            sendJson(response, error instanceof PluginApiRequestError ? 400 : 500, {
-                error: errorToMessage(error),
-            });
+            sendJson(
+                response,
+                error instanceof PluginApiRequestTooLargeError
+                    ? 413
+                    : error instanceof PluginApiRequestError
+                      ? 400
+                      : 500,
+                {
+                    error: errorToMessage(error),
+                },
+            );
         });
     });
 }
@@ -93,8 +108,91 @@ async function handleRequest(
         });
         return;
     }
+    if (request.method === "GET" && url.pathname === "/provider-usage") {
+        sendJson<{ providers: readonly HappyProviderUsageEntry[] }>(response, 200, {
+            providers: options.listProviderUsage?.() ?? [],
+        });
+        return;
+    }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (request.method === "POST" && url.pathname === "/ui/applications") {
+        const applications = requireApplications(options);
+        const application = await readJson(
+            request,
+            happyPluginApplicationRegistrationSchema,
+            "Application registration",
+            MAX_APPLICATION_REGISTRATION_REQUEST_BYTES,
+        );
+        sendJson(response, 201, applications.register(application));
+        return;
+    }
+    if (
+        parts.length === 4 &&
+        parts[0] === "ui" &&
+        parts[1] === "applications" &&
+        parts[2] !== undefined &&
+        parts[3] === "events" &&
+        request.method === "GET"
+    ) {
+        const applications = requireApplications(options);
+        let detach = () => {};
+        detach = applications.attach(parts[2], (event) => {
+            if (response.destroyed || response.writableEnded) {
+                throw new Error("The plugin application connection is closed.");
+            }
+            response.write(`${JSON.stringify(event)}\n`);
+        });
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        response.once("close", detach);
+        return;
+    }
+    if (
+        parts.length === 5 &&
+        parts[0] === "ui" &&
+        parts[1] === "applications" &&
+        parts[2] !== undefined &&
+        parts[3] === "actions" &&
+        parts[4] !== undefined &&
+        request.method === "POST"
+    ) {
+        const applications = requireApplications(options);
+        let completion;
+        try {
+            completion = await readJson(
+                request,
+                happyPluginApplicationActionCompletionSchema,
+                "Application action result",
+            );
+        } catch (error) {
+            try {
+                applications.complete(parts[2], parts[4], {
+                    error: `Rig rejected the plugin application result: ${errorToMessage(error)}`,
+                });
+            } catch {
+                // The request may already have been cancelled or its generation retired.
+            }
+            throw error;
+        }
+        applications.complete(parts[2], parts[4], completion);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length === 3 &&
+        parts[0] === "ui" &&
+        parts[1] === "applications" &&
+        parts[2] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        requireApplications(options).unregister(parts[2]);
+        sendJson(response, 200, {});
+        return;
+    }
     if (request.method === "POST" && url.pathname === "/mcp/servers") {
         const mcp = requireMcp(options);
         const registration = await readJson(
@@ -321,14 +419,15 @@ async function readJson<TSchema_ extends TSchema>(
     request: IncomingMessage,
     schema: TSchema_,
     subject: string,
+    maximumBytes = MAX_REQUEST_BYTES,
 ): Promise<Static<TSchema_>> {
     const chunks: Buffer[] = [];
     let length = 0;
     for await (const chunk of request) {
         const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         length += bytes.length;
-        if (length > MAX_REQUEST_BYTES) {
-            throw new PluginApiRequestError("The plugin request is too large.");
+        if (length > maximumBytes) {
+            throw new PluginApiRequestTooLargeError("The plugin request is too large.");
         }
         chunks.push(bytes);
     }
@@ -339,6 +438,13 @@ async function readJson<TSchema_ extends TSchema>(
         throw new PluginApiRequestError("The plugin request is not valid JSON.");
     }
     return parseValue(schema, value, subject);
+}
+
+function requireApplications(options: CreatePluginApiServerOptions): PluginApplicationConnection {
+    if (options.applications === undefined) {
+        throw new PluginApiRequestError("Application contributions are unavailable.");
+    }
+    return options.applications;
 }
 
 function parseValue<TSchema_ extends TSchema>(
@@ -359,6 +465,13 @@ class PluginApiRequestError extends Error {
     constructor(message: string) {
         super(message);
         this.name = "PluginApiRequestError";
+    }
+}
+
+class PluginApiRequestTooLargeError extends PluginApiRequestError {
+    constructor(message: string) {
+        super(message);
+        this.name = "PluginApiRequestTooLargeError";
     }
 }
 

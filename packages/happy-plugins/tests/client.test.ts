@@ -59,6 +59,50 @@ describe("happy-plugins client", () => {
         await expect(client.projects.list()).rejects.toThrow();
     });
 
+    it("reads provider-neutral usage for application actions", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        temporaryDirectories.push(directory);
+        const socketPath = join(directory, "s");
+        const server = createServer((request, response) => {
+            expect(request.url).toBe("/provider-usage");
+            response.end(
+                JSON.stringify({
+                    providers: [
+                        {
+                            checkedAt: 42,
+                            error: null,
+                            providerId: "codex-work",
+                            usage: {
+                                capturedAt: 40,
+                                credits: null,
+                                exhausted: false,
+                                planName: "Team",
+                                providerId: "codex-work",
+                                vendor: "codex",
+                                windows: {
+                                    fiveHour: {
+                                        durationMs: 18_000_000,
+                                        resetsAt: 100,
+                                        startsAt: 0,
+                                        usedPercent: 25,
+                                    },
+                                    monthly: null,
+                                    weekly: null,
+                                },
+                            },
+                        },
+                    ],
+                }),
+            );
+        });
+        servers.push(server);
+        await listen(server, socketPath);
+
+        await expect(
+            createHappyPluginClient({ socketPath, token: "plugin-token" }).providers.usage(),
+        ).resolves.toMatchObject([{ providerId: "codex-work", usage: { vendor: "codex" } }]);
+    });
+
     it("surfaces daemon errors and missing injected settings in human language", async () => {
         const directory = await mkdtemp(join(process.cwd(), ".c-"));
         temporaryDirectories.push(directory);

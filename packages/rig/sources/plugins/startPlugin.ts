@@ -10,10 +10,14 @@ import { createToolEnvironment } from "../agent/context/createToolEnvironment.js
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
-import { createPluginApiServer } from "./createPluginApiServer.js";
+import {
+    createPluginApiServer,
+    type CreatePluginApiServerOptions,
+} from "./createPluginApiServer.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
+import type { PluginApplicationRegistry } from "./PluginApplicationRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 
 const STOP_GRACE_MS = 2_000;
@@ -28,9 +32,11 @@ export interface RunningPlugin {
 }
 
 export interface StartPluginOptions extends BuildPluginOptions {
+    applicationRegistry?: PluginApplicationRegistry;
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
+    listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     mcpRegistry?: PluginMcpRegistry;
     store: SessionStore;
 }
@@ -62,8 +68,16 @@ export async function startPlugin(
         folder: plugin.folderName,
         name: plugin.manifest.name,
     });
+    const applications = options.applicationRegistry?.createConnection({
+        folder: plugin.folderName,
+        name: plugin.manifest.name,
+    });
     const server = createPluginApiServer({
+        ...(applications === undefined ? {} : { applications }),
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
+        ...(options.listProviderUsage === undefined
+            ? {}
+            : { listProviderUsage: options.listProviderUsage }),
         ...(mcp === undefined ? {} : { mcp }),
         pluginName: plugin.manifest.name,
         store: options.store,
@@ -79,6 +93,7 @@ export async function startPlugin(
         });
         await restrictSocketAccess(socketPath);
     } catch (error) {
+        applications?.close();
         mcp?.close();
         await closeServer(server);
         await rm(socketPath, { force: true });
@@ -109,6 +124,7 @@ export async function startPlugin(
             stdio: ["ignore", "pipe", "pipe"],
         });
     } catch (error) {
+        applications?.close();
         mcp?.close();
         await Promise.allSettled([closeServer(server), log.close()]);
         await rm(socketPath, { force: true });
@@ -124,6 +140,7 @@ export async function startPlugin(
             log.close(),
             rm(socketPath, { force: true }),
         ]).then(() => {
+            applications?.close();
             mcp?.close();
         }));
     const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(

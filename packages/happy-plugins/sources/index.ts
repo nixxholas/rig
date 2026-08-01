@@ -8,6 +8,10 @@ export {
     type HappyPluginTestHost,
 } from "./createHappyPluginTestHost.js";
 export { defineMcpTool } from "./startHappyMcpServer.js";
+export {
+    defineHappyPluginApplicationAction,
+    startHappyPluginApplication,
+} from "./startHappyPluginApplication.js";
 export { Type } from "@sinclair/typebox";
 export type { Static, TSchema } from "@sinclair/typebox";
 export type {
@@ -17,6 +21,18 @@ export type {
     CreateSessionInput,
     CreateWorkspaceInput,
     HappyPluginClient,
+    HappyPluginApplication,
+    HappyPluginApplicationAction,
+    HappyPluginApplicationActionCompletion,
+    HappyPluginApplicationActionContext,
+    HappyPluginApplicationContribution,
+    HappyPluginApplicationEvent,
+    HappyPluginApplicationNavigation,
+    HappyPluginApplicationRegistration,
+    HappyPluginApplicationResource,
+    HappyPluginApplicationResourceSummary,
+    HappyPluginApplicationStatus,
+    HappyPluginResourceMediaType,
     HappyMcpCallCompletion,
     HappyMcpContent,
     HappyMcpEvent,
@@ -31,6 +47,10 @@ export type {
     HappyPluginTestRequest,
     HappyPluginTestSeed,
     HappyProject,
+    HappyProviderUsage,
+    HappyProviderUsageCredits,
+    HappyProviderUsageEntry,
+    HappyProviderUsageWindow,
     HappySession,
     HappyWorkspace,
     HappyWorkspaceStatus,
@@ -38,6 +58,7 @@ export type {
     RenameWorkspaceInput,
     SendAgentMessageInput,
     StartHappyMcpServerOptions,
+    StartHappyPluginApplicationOptions,
 } from "./types.js";
 export {
     agentMessageDeliverySchema,
@@ -48,6 +69,22 @@ export {
     createWorkspaceBodySchema,
     createWorkspaceInputSchema,
     happyProjectSchema,
+    happyPluginApplicationActionCancelEventSchema,
+    happyPluginApplicationActionCompletionSchema,
+    happyPluginApplicationActionRequestEventSchema,
+    happyPluginApplicationContributionSchema,
+    happyPluginApplicationEventSchema,
+    happyPluginApplicationIdSchema,
+    happyPluginApplicationNavigationSchema,
+    happyPluginApplicationRegistrationSchema,
+    happyPluginApplicationResourceSchema,
+    happyPluginApplicationResourceSummarySchema,
+    happyPluginResourceMediaTypeSchema,
+    happyPluginResourcePathSchema,
+    happyProviderUsageCreditsSchema,
+    happyProviderUsageEntrySchema,
+    happyProviderUsageSchema,
+    happyProviderUsageWindowSchema,
     happyMcpCallCompletionSchema,
     happyMcpCallEventSchema,
     happyMcpCancelEventSchema,
@@ -65,16 +102,25 @@ export {
     happyWorkspaceSchema,
     happyWorkspaceStatusSchema,
     listProjectsResponseSchema,
+    listHappyProviderUsageResponseSchema,
     listSessionsResponseSchema,
     listWorkspacesInputSchema,
     listWorkspacesResponseSchema,
     renameWorkspaceInputSchema,
     renameWorkspaceBodySchema,
     registerHappyMcpServerResponseSchema,
+    registerHappyPluginApplicationResponseSchema,
     sendAgentMessageInputSchema,
     sendAgentMessageBodySchema,
     sessionResponseSchema,
     workspaceResponseSchema,
+} from "./types.js";
+export {
+    HAPPY_PLUGIN_MAX_APPLICATIONS,
+    HAPPY_PLUGIN_MAX_APPLICATION_ACTIONS,
+    HAPPY_PLUGIN_MAX_APPLICATION_RESOURCES,
+    HAPPY_PLUGIN_MAX_APPLICATION_RESOURCE_BYTES,
+    HAPPY_PLUGIN_MAX_RESOURCE_BYTES,
 } from "./types.js";
 
 import { createHappyPluginClient } from "./createHappyPluginClient.js";

@@ -14,6 +14,8 @@ export type {
     RigInboxSubscriptionOptions,
     RigProviderUsageConnection,
     RigProviderUsageSubscriptionOptions,
+    RigPluginsConnection,
+    RigPluginsSubscriptionOptions,
     RigSessionConnection,
     RigSessionSubscriptionOptions,
     RigTimelineConnection,
@@ -25,6 +27,15 @@ export type {
     TerminalPresence,
     UserInputAnswers,
 } from "./connectRig.js";
+export { PluginStore } from "./PluginElement.js";
+export type {
+    LoadedPluginApplicationResource,
+    LocalPlugin,
+    PluginApplication,
+    PluginApplicationResource,
+    PluginCatalogFailure,
+    PluginsState,
+} from "./PluginElement.js";
 export { InboxStore } from "./InboxStore.js";
 export { ProviderUsageStore } from "./ProviderUsageStore.js";
 export type { ProviderUsageDelta, ProviderUsageState } from "./ProviderUsageElement.js";
