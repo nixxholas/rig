@@ -202,11 +202,8 @@ function classifyCommand(
     }
 
     if (name === "sed") {
-        if (tail.some((token) => token === "-i" || token.startsWith("-i"))) return undefined;
-        const operands = positionalOperands(tail, ["-e", "-f", "--expression", "--file"]);
-        const rangeIndex = operands.findIndex((operand) => isSedRange(operand));
-        if (!tail.includes("-n") || rangeIndex < 0) return undefined;
-        return readOperation(operands.slice(rangeIndex + 1), cwd);
+        const operands = sedReadOperands(tail);
+        return operands === undefined ? undefined : readOperation(operands, cwd);
     }
 
     return undefined;
@@ -329,17 +326,36 @@ function isFormattingCommand(tokens: readonly string[]): boolean {
         return positionalOperands(tail, ["-c", "-n"]).length === 0;
     }
     if (name === "sed") {
-        return !tail.some((token) => token === "-i" || token.startsWith("-i"));
+        return (
+            !tail.some((token) => token === "-i" || token.startsWith("-i")) &&
+            sedReadOperands(tail) === undefined
+        );
     }
     return false;
 }
 
 function hasVisibleRedirection(command: SimpleCommandNode): boolean {
-    return command.redirections.length > 0;
+    return command.redirections.some((redirection) => {
+        const discardsStandardError =
+            redirection.fd === 2 &&
+            (redirection.operator === ">" || redirection.operator === ">>") &&
+            redirection.target.type === "Word" &&
+            staticWord(redirection.target) === "/dev/null";
+        return !discardsStandardError;
+    });
 }
 
 function isSedRange(value: string): boolean {
     return /^\d+(?:,\d+)?p$/u.test(value);
+}
+
+function sedReadOperands(args: readonly string[]): string[] | undefined {
+    if (args.some((token) => token === "-i" || token.startsWith("-i"))) return undefined;
+    const operands = positionalOperands(args, ["-e", "-f", "--expression", "--file"]);
+    const rangeIndex = operands.findIndex((operand) => isSedRange(operand));
+    if (!args.includes("-n") || rangeIndex < 0) return undefined;
+    const files = operands.slice(rangeIndex + 1);
+    return files.length === 1 ? files : undefined;
 }
 
 function shortDisplayPath(path: string): string {
