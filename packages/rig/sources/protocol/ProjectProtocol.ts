@@ -1,4 +1,4 @@
-import type { HappyPluginApplicationContribution } from "happy-plugins";
+import type { HappyPluginAppContribution } from "happy-plugins";
 
 import type { EventId } from "./EventId.js";
 import type {
@@ -303,8 +303,8 @@ export interface SetPresenceRequestBody {
 
 /** One plugin installed on this machine, as a client should show it. */
 export interface PluginSummary {
-    /** Running local applications, ordered exactly as a navigation host should present them. */
-    applications: readonly HappyPluginApplicationContribution[];
+    /** Running local MCP Apps, ordered exactly as a navigation host should present them. */
+    apps: readonly HappyPluginAppContribution[];
     /** The folder the plugin writes to, which the user can open. */
     dataDirectory: string;
     description: string;

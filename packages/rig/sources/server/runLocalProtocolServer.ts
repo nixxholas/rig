@@ -412,13 +412,21 @@ async function runOwnedLocalProtocolServer(
         // handle rather than a captured instance.
         let pluginManager: PluginManager | undefined;
         const plugins: PluginContext = {
+            callAppTool: (...parameters) =>
+                requirePluginManager(pluginManager).callAppTool(...parameters),
             install: (request) => requirePluginManager(pluginManager).install(request),
-            invokeApplication: (...parameters) =>
-                requirePluginManager(pluginManager).invokeApplication(...parameters),
             list: () => requirePluginManager(pluginManager).list(),
-            readApplicationResource: (...parameters) =>
-                requirePluginManager(pluginManager).readApplicationResource(...parameters),
+            readAppResource: (...parameters) =>
+                requirePluginManager(pluginManager).readAppResource(...parameters),
             readLog: (name) => requirePluginManager(pluginManager).readLog(name),
+            storageDelete: (...parameters) =>
+                requirePluginManager(pluginManager).storageDelete(...parameters),
+            storageGet: (...parameters) =>
+                requirePluginManager(pluginManager).storageGet(...parameters),
+            storageList: (...parameters) =>
+                requirePluginManager(pluginManager).storageList(...parameters),
+            storageSet: (...parameters) =>
+                requirePluginManager(pluginManager).storageSet(...parameters),
             uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
         };
         store = new PersistentSessionStore({

@@ -27,14 +27,14 @@ export type {
     TerminalPresence,
     UserInputAnswers,
 } from "./connectRig.js";
-export { PluginStore } from "./PluginElement.js";
+export { PluginAppRequestError, PluginStore } from "./PluginElement.js";
 export type {
-    LoadedPluginApplicationResource,
     LocalPlugin,
-    PluginApplication,
-    PluginApplicationResource,
+    PluginApp,
+    PluginAppResource,
     PluginCatalogFailure,
     PluginsState,
+    ReadPluginAppResourceResult,
 } from "./PluginElement.js";
 export { InboxStore } from "./InboxStore.js";
 export { ProviderUsageStore } from "./ProviderUsageStore.js";

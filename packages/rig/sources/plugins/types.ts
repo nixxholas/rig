@@ -1,17 +1,19 @@
-import { type Static, Type } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
+
+import {
+    happyPluginManifestSchema,
+    type HappyPluginAppManifest,
+    type HappyPluginManifest,
+    type HappyPluginAppSidebar,
+    type HappyPluginResourceMediaType,
+} from "happy-plugins";
+
+export type PluginAppManifest = HappyPluginAppManifest;
 
 export const PLUGIN_MANIFEST_FILE_NAME = "happy.plugin.json";
 
-export const pluginManifestSchema = Type.Object(
-    {
-        description: Type.String({ minLength: 1 }),
-        entry: Type.String({ pattern: "^(?!.*\\.d\\.ts$).+\\.ts$" }),
-        icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
-        name: Type.String({ minLength: 1 }),
-    },
-    { additionalProperties: false },
-);
-export type PluginManifest = Static<typeof pluginManifestSchema>;
+export const pluginManifestSchema = happyPluginManifestSchema;
+export type PluginManifest = HappyPluginManifest;
 
 export const fileSystemErrorSchema = Type.Object({
     code: Type.String(),
@@ -26,6 +28,21 @@ export interface RegisteredPlugin {
     manifestPath: string;
 }
 
+export interface PluginAppResourceSnapshot {
+    body: Buffer;
+    mediaType: HappyPluginResourceMediaType;
+    path: string;
+}
+
+export interface PluginAppSnapshot {
+    id: string;
+    page: string;
+    resources: readonly PluginAppResourceSnapshot[];
+    resourceUri: string;
+    sidebar: HappyPluginAppSidebar;
+    title: string;
+}
+
 export interface PluginRegistrationFailure {
     directory: string;
     error: string;
@@ -38,6 +55,7 @@ export interface PluginDiscovery {
 }
 
 export interface BuiltPlugin extends RegisteredPlugin {
+    apps: readonly PluginAppSnapshot[];
     buildDirectory: string;
     builtEntryPath: string;
     runtimeDirectory: string;

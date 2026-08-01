@@ -3240,10 +3240,10 @@ describe("CodingAssistantApp", () => {
                 updatedAt: 2,
             });
         const plugins: PluginContext = {
-            async install() {
+            async callAppTool() {
                 throw new Error("Unused in this test.");
             },
-            async invokeApplication() {
+            async install() {
                 throw new Error("Unused in this test.");
             },
             async list() {
@@ -3253,10 +3253,18 @@ describe("CodingAssistantApp", () => {
                     version: "01900000-0000-7000-8000-000000000001",
                 };
             },
-            readApplicationResource() {
+            readAppResource() {
                 throw new Error("Unused in this test.");
             },
             readLog,
+            async storageDelete() {},
+            async storageGet() {
+                return undefined;
+            },
+            async storageList() {
+                return [];
+            },
+            async storageSet() {},
             async uninstall() {
                 throw new Error("Unused in this test.");
             },

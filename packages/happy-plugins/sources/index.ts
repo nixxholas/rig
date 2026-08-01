@@ -3,15 +3,21 @@ export { createHappyPluginClient as connectHappy } from "./createHappyPluginClie
 export { createHappyMcpToolName, normalizeHappyMcpName } from "./createHappyMcpToolName.js";
 export { happyMcpCompletionToResult } from "./happyMcpCompletionToResult.js";
 export {
+    assertHappyPluginStorageKey,
+    assertHappyPluginStorageQuota,
+    decodeHappyPluginStorageValue,
+    encodeHappyPluginStorageValue,
+} from "./pluginAppStorage.js";
+export {
+    happyPluginAppResourceMediaType,
+    isHappyPluginImageMediaType,
+} from "./pluginAppResources.js";
+export {
     createHappyPluginTestHost,
     type CreateHappyPluginTestHostOptions,
     type HappyPluginTestHost,
 } from "./createHappyPluginTestHost.js";
 export { defineMcpTool } from "./startHappyMcpServer.js";
-export {
-    defineHappyPluginApplicationAction,
-    startHappyPluginApplication,
-} from "./startHappyPluginApplication.js";
 export { Type } from "@sinclair/typebox";
 export type { Static, TSchema } from "@sinclair/typebox";
 export type {
@@ -21,17 +27,12 @@ export type {
     CreateSessionInput,
     CreateWorkspaceInput,
     HappyPluginClient,
-    HappyPluginApplication,
-    HappyPluginApplicationAction,
-    HappyPluginApplicationActionCompletion,
-    HappyPluginApplicationActionContext,
-    HappyPluginApplicationContribution,
-    HappyPluginApplicationEvent,
-    HappyPluginApplicationNavigation,
-    HappyPluginApplicationRegistration,
-    HappyPluginApplicationResource,
-    HappyPluginApplicationResourceSummary,
-    HappyPluginApplicationStatus,
+    HappyPluginAppContribution,
+    HappyPluginAppManifest,
+    HappyPluginManifest,
+    HappyPluginAppResourceSummary,
+    HappyPluginAppSidebar,
+    HappyPluginAppToolSummary,
     HappyPluginResourceMediaType,
     HappyMcpCallCompletion,
     HappyMcpContent,
@@ -58,7 +59,6 @@ export type {
     RenameWorkspaceInput,
     SendAgentMessageInput,
     StartHappyMcpServerOptions,
-    StartHappyPluginApplicationOptions,
 } from "./types.js";
 export {
     agentMessageDeliverySchema,
@@ -69,18 +69,16 @@ export {
     createWorkspaceBodySchema,
     createWorkspaceInputSchema,
     happyProjectSchema,
-    happyPluginApplicationActionCancelEventSchema,
-    happyPluginApplicationActionCompletionSchema,
-    happyPluginApplicationActionRequestEventSchema,
-    happyPluginApplicationContributionSchema,
-    happyPluginApplicationEventSchema,
-    happyPluginApplicationIdSchema,
-    happyPluginApplicationNavigationSchema,
-    happyPluginApplicationRegistrationSchema,
-    happyPluginApplicationResourceSchema,
-    happyPluginApplicationResourceSummarySchema,
+    happyPluginAppContributionSchema,
+    happyPluginAppIdSchema,
+    happyPluginAppManifestSchema,
+    happyPluginManifestSchema,
+    happyPluginAppResourceSummarySchema,
+    happyPluginAppSidebarSchema,
+    happyPluginAppToolSummarySchema,
     happyPluginResourceMediaTypeSchema,
     happyPluginResourcePathSchema,
+    happyPluginResourceUriSchema,
     happyProviderUsageCreditsSchema,
     happyProviderUsageEntrySchema,
     happyProviderUsageSchema,
@@ -109,18 +107,19 @@ export {
     renameWorkspaceInputSchema,
     renameWorkspaceBodySchema,
     registerHappyMcpServerResponseSchema,
-    registerHappyPluginApplicationResponseSchema,
     sendAgentMessageInputSchema,
     sendAgentMessageBodySchema,
     sessionResponseSchema,
     workspaceResponseSchema,
 } from "./types.js";
 export {
-    HAPPY_PLUGIN_MAX_APPLICATIONS,
-    HAPPY_PLUGIN_MAX_APPLICATION_ACTIONS,
-    HAPPY_PLUGIN_MAX_APPLICATION_RESOURCES,
-    HAPPY_PLUGIN_MAX_APPLICATION_RESOURCE_BYTES,
+    HAPPY_PLUGIN_MAX_APPS,
+    HAPPY_PLUGIN_MAX_APP_BYTES,
+    HAPPY_PLUGIN_MAX_APP_RESOURCES,
     HAPPY_PLUGIN_MAX_RESOURCE_BYTES,
+    HAPPY_PLUGIN_MAX_STORAGE_BYTES,
+    HAPPY_PLUGIN_MAX_STORAGE_KEYS,
+    HAPPY_PLUGIN_MAX_STORAGE_VALUE_BYTES,
 } from "./types.js";
 
 import { createHappyPluginClient } from "./createHappyPluginClient.js";

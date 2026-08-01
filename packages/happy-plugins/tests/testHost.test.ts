@@ -6,8 +6,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
     createHappyPluginTestHost,
     createHappyMcpToolName,
-    defineHappyPluginApplicationAction,
     defineMcpTool,
+    HAPPY_PLUGIN_MAX_STORAGE_KEYS,
     type HappyPluginTestHost,
     Type,
 } from "../sources/index.js";
@@ -118,7 +118,7 @@ describe("Happy plugin test host", () => {
         await expect(access(host.rootDirectory)).rejects.toMatchObject({ code: "ENOENT" });
     });
 
-    it("mirrors provider usage and application resources and actions", async () => {
+    it("mirrors provider usage plus app tool and storage access", async () => {
         const host = await createHappyPluginTestHost(
             {
                 providerUsage: [
@@ -145,41 +145,42 @@ describe("Happy plugin test host", () => {
         await expect(host.client.providers.usage()).resolves.toMatchObject([
             { providerId: "provider-work", usage: { planName: "Team" } },
         ]);
-        const application = await host.client.ui.startApplication({
-            actions: [
-                defineHappyPluginApplicationAction({
-                    execute: ({ value }) => ({ value: value.toUpperCase() }),
+        await host.client.mcp.startServer({
+            name: "App backend",
+            tools: [
+                defineMcpTool({
+                    description: "Uppercase a string for the app.",
+                    execute: ({ value }) => ({
+                        content: [{ text: value.toUpperCase(), type: "text" }],
+                    }),
                     inputSchema: Type.Object({ value: Type.String() }),
                     name: "uppercase",
-                    outputSchema: Type.Object({ value: Type.String() }),
+                    visibility: ["app"],
                 }),
             ],
-            entry: "index.html",
-            id: "catalog",
-            navigation: { label: "Catalog", order: 10 },
-            resources: [
-                {
-                    body: "<h1>Catalog</h1>",
-                    encoding: "utf8",
-                    mediaType: "text/html",
-                    path: "index.html",
-                },
-            ],
-            title: "Catalog",
         });
-
-        await host.ui.waitForApplications();
-        expect(host.ui.listApplications()).toMatchObject([{ id: "catalog" }]);
-        expect(host.ui.readResource("catalog", "index.html")).toMatchObject({
-            body: "<h1>Catalog</h1>",
-            mediaType: "text/html",
-        });
+        await host.mcp.waitForTools();
+        expect(host.mcp.listTools()).toEqual([]);
         await expect(
-            host.ui.invokeAction("catalog", "uppercase", { value: "ready" }),
-        ).resolves.toEqual({ value: "READY" });
-
-        await application.close();
-        await expect.poll(() => host.ui.listApplications()).toEqual([]);
+            host.mcp.callTool("App backend", "uppercase", { value: "blocked" }),
+        ).rejects.toThrow("model-visible");
+        await expect(
+            host.apps.callTool("App backend", "uppercase", { value: "ready" }),
+        ).resolves.toMatchObject({ content: [{ text: "READY", type: "text" }] });
+        await host.apps.storage.set("view", { mode: "compact" });
+        await expect(host.apps.storage.get("view")).resolves.toEqual({ mode: "compact" });
+        await expect(host.apps.storage.list()).resolves.toEqual(["view"]);
+        await expect(host.apps.storage.set("Bad Key", null)).rejects.toThrow("lowercase");
+        await expect(host.apps.storage.set("bigint", 1n)).rejects.toThrow("JSON serializable");
+        await expect(host.apps.storage.set("large", "x".repeat(70 * 1024))).rejects.toThrow(
+            "cannot exceed 65536",
+        );
+        for (let index = 1; index < HAPPY_PLUGIN_MAX_STORAGE_KEYS; index += 1) {
+            await host.apps.storage.set(`key-${String(index).padStart(4, "0")}`, null);
+        }
+        await expect(host.apps.storage.set("overflow", null)).rejects.toThrow("too many");
+        await host.apps.storage.delete("view");
+        await expect(host.apps.storage.get("view")).resolves.toBeUndefined();
     });
 
     it("validates data and resolves plugin failures as MCP error results", async () => {

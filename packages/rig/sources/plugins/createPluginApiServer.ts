@@ -13,8 +13,6 @@ import {
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
-    happyPluginApplicationActionCompletionSchema,
-    happyPluginApplicationRegistrationSchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     listWorkspacesInputSchema,
@@ -31,13 +29,10 @@ import type { SessionStore } from "../session/SessionStore.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
-import type { PluginApplicationConnection } from "./PluginApplicationRegistry.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
-const MAX_APPLICATION_REGISTRATION_REQUEST_BYTES = 2 * 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
-    applications?: PluginApplicationConnection;
     defaultDocker?: DockerExecutionConfig;
     listProviderUsage?: () => readonly HappyProviderUsageEntry[];
     mcp?: PluginMcpConnection;
@@ -116,83 +111,6 @@ async function handleRequest(
     }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-    if (request.method === "POST" && url.pathname === "/ui/applications") {
-        const applications = requireApplications(options);
-        const application = await readJson(
-            request,
-            happyPluginApplicationRegistrationSchema,
-            "Application registration",
-            MAX_APPLICATION_REGISTRATION_REQUEST_BYTES,
-        );
-        sendJson(response, 201, applications.register(application));
-        return;
-    }
-    if (
-        parts.length === 4 &&
-        parts[0] === "ui" &&
-        parts[1] === "applications" &&
-        parts[2] !== undefined &&
-        parts[3] === "events" &&
-        request.method === "GET"
-    ) {
-        const applications = requireApplications(options);
-        let detach = () => {};
-        detach = applications.attach(parts[2], (event) => {
-            if (response.destroyed || response.writableEnded) {
-                throw new Error("The plugin application connection is closed.");
-            }
-            response.write(`${JSON.stringify(event)}\n`);
-        });
-        response.writeHead(200, {
-            "cache-control": "no-store",
-            "content-type": "application/x-ndjson",
-        });
-        response.flushHeaders();
-        response.once("close", detach);
-        return;
-    }
-    if (
-        parts.length === 5 &&
-        parts[0] === "ui" &&
-        parts[1] === "applications" &&
-        parts[2] !== undefined &&
-        parts[3] === "actions" &&
-        parts[4] !== undefined &&
-        request.method === "POST"
-    ) {
-        const applications = requireApplications(options);
-        let completion;
-        try {
-            completion = await readJson(
-                request,
-                happyPluginApplicationActionCompletionSchema,
-                "Application action result",
-            );
-        } catch (error) {
-            try {
-                applications.complete(parts[2], parts[4], {
-                    error: `Rig rejected the plugin application result: ${errorToMessage(error)}`,
-                });
-            } catch {
-                // The request may already have been cancelled or its generation retired.
-            }
-            throw error;
-        }
-        applications.complete(parts[2], parts[4], completion);
-        sendJson(response, 200, {});
-        return;
-    }
-    if (
-        parts.length === 3 &&
-        parts[0] === "ui" &&
-        parts[1] === "applications" &&
-        parts[2] !== undefined &&
-        request.method === "DELETE"
-    ) {
-        requireApplications(options).unregister(parts[2]);
-        sendJson(response, 200, {});
-        return;
-    }
     if (request.method === "POST" && url.pathname === "/mcp/servers") {
         const mcp = requireMcp(options);
         const registration = await readJson(
@@ -438,13 +356,6 @@ async function readJson<TSchema_ extends TSchema>(
         throw new PluginApiRequestError("The plugin request is not valid JSON.");
     }
     return parseValue(schema, value, subject);
-}
-
-function requireApplications(options: CreatePluginApiServerOptions): PluginApplicationConnection {
-    if (options.applications === undefined) {
-        throw new PluginApiRequestError("Application contributions are unavailable.");
-    }
-    return options.applications;
 }
 
 function parseValue<TSchema_ extends TSchema>(

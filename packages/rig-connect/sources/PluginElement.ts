@@ -1,14 +1,17 @@
+import { Value } from "@sinclair/typebox/value";
+
 import type { ConnectionState } from "./ChatElement.js";
-import type {
-    PluginApplicationContribution,
-    PluginResourceMediaType,
-    PluginSummary,
+import {
+    pluginAppContributionSchema,
+    type PluginAppContribution,
+    type PluginSummary,
 } from "./protocol.js";
 
-export interface PluginApplicationResource {
-    mediaType: PluginResourceMediaType;
+export interface PluginAppResource {
+    mimeType: string;
     path: string;
     size: number;
+    uri: string;
 }
 
 /**
@@ -17,24 +20,25 @@ export interface PluginApplicationResource {
  * `generation` changes when plugin code is replaced or restarted. Hosts must include the
  * generation they rendered in resource and action calls so stale views fail closed.
  */
-export interface PluginApplication {
-    actions: readonly string[];
-    applicationId: string;
-    entry: string;
+export interface PluginApp {
+    appId: string;
     generation: string;
     id: string;
-    navigation: {
+    page: string;
+    pluginId: string;
+    resourceUri: string;
+    resources: readonly PluginAppResource[];
+    sidebar: {
         icon?: string;
         label: string;
         order: number;
     };
-    pluginId: string;
-    resources: readonly PluginApplicationResource[];
     title: string;
+    tools: PluginAppContribution["tools"];
 }
 
 export interface LocalPlugin {
-    applications: readonly PluginApplication[];
+    apps: readonly PluginApp[];
     dataDirectory: string;
     description: string;
     directory: string;
@@ -50,24 +54,39 @@ export interface PluginCatalogFailure {
     pluginId: string;
 }
 
+export class PluginAppRequestError extends Error {
+    constructor(
+        readonly code: string,
+        readonly status: number,
+        message: string,
+    ) {
+        super(message);
+        this.name = "PluginAppRequestError";
+    }
+}
+
 export interface PluginsState {
     connection: ConnectionState;
     failures: readonly PluginCatalogFailure[];
 }
 
-export interface LoadedPluginApplicationResource {
-    body: Uint8Array;
-    mediaType: PluginResourceMediaType;
+export interface ReadPluginAppResourceResult {
+    contents: readonly {
+        blob?: string;
+        mimeType: string;
+        text?: string;
+        uri: string;
+    }[];
 }
 
 /** Immutable, reference-stable projection of the daemon's plugin catalog. */
 export class PluginStore {
-    #applications: readonly PluginApplication[] = [];
+    #apps: readonly PluginApp[] = [];
     #plugins: readonly LocalPlugin[] = [];
     #state: PluginsState = { connection: "connecting", failures: [] };
 
-    applications(): readonly PluginApplication[] {
-        return this.#applications;
+    apps(): readonly PluginApp[] {
+        return this.#apps;
     }
 
     plugins(): readonly LocalPlugin[] {
@@ -92,20 +111,18 @@ export class PluginStore {
                     ? previous.get(plugin.folder)!
                     : projected;
             });
-        const nextApplications = nextPlugins
-            .flatMap((plugin) => plugin.applications)
-            .sort(compareApplications);
+        const nextApps = nextPlugins.flatMap((plugin) => plugin.apps).sort(compareApps);
         const nextFailures = failures
             .map((failure) => ({ error: failure.error, pluginId: failure.folder }))
             .sort((left, right) => compareText(left.pluginId, right.pluginId));
         const unchanged =
             sameReferences(this.#plugins, nextPlugins) &&
-            sameReferences(this.#applications, nextApplications) &&
+            sameReferences(this.#apps, nextApps) &&
             this.#state.connection === connection &&
             sameFailures(this.#state.failures, nextFailures);
         if (unchanged) return false;
         this.#plugins = nextPlugins;
-        this.#applications = nextApplications;
+        this.#apps = nextApps;
         this.#state = {
             connection,
             failures: sameFailures(this.#state.failures, nextFailures)
@@ -123,19 +140,14 @@ export class PluginStore {
 }
 
 function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined): LocalPlugin {
-    const previousApplications = new Map(
-        previous?.applications.map((application) => [application.id, application]) ?? [],
-    );
-    const applications = plugin.applications.map((application) => {
-        const projected = projectApplication(application);
-        const before = previousApplications.get(projected.id);
-        return sameApplication(before, projected) ? before! : projected;
+    const previousApps = new Map(previous?.apps.map((app) => [app.id, app]) ?? []);
+    const apps = plugin.apps.map((app) => {
+        const projected = projectApp(Value.Decode(pluginAppContributionSchema, app));
+        const before = previousApps.get(projected.id);
+        return sameApp(before, projected) ? before! : projected;
     });
     return {
-        applications:
-            previous !== undefined && sameReferences(previous.applications, applications)
-                ? previous.applications
-                : applications,
+        apps: previous !== undefined && sameReferences(previous.apps, apps) ? previous.apps : apps,
         dataDirectory: plugin.dataDirectory,
         description: plugin.description,
         directory: plugin.directory,
@@ -147,24 +159,25 @@ function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined)
     };
 }
 
-function projectApplication(application: PluginApplicationContribution): PluginApplication {
+function projectApp(app: PluginAppContribution): PluginApp {
     return {
-        actions: application.actions,
-        applicationId: application.applicationId,
-        entry: application.entry,
-        generation: application.generation,
-        id: application.id,
-        navigation: application.navigation,
-        pluginId: application.pluginFolder,
-        resources: application.resources,
-        title: application.title,
+        appId: app.appId,
+        generation: app.generation,
+        id: app.id,
+        page: app.page,
+        pluginId: app.pluginFolder,
+        resourceUri: app.resourceUri,
+        resources: app.resources,
+        sidebar: app.sidebar,
+        title: app.title,
+        tools: app.tools,
     };
 }
 
 function samePlugin(left: LocalPlugin | undefined, right: LocalPlugin): boolean {
     return (
         left !== undefined &&
-        left.applications === right.applications &&
+        left.apps === right.apps &&
         left.dataDirectory === right.dataDirectory &&
         left.description === right.description &&
         left.directory === right.directory &&
@@ -176,40 +189,38 @@ function samePlugin(left: LocalPlugin | undefined, right: LocalPlugin): boolean 
     );
 }
 
-function sameApplication(left: PluginApplication | undefined, right: PluginApplication): boolean {
+function sameApp(left: PluginApp | undefined, right: PluginApp): boolean {
     return (
         left !== undefined &&
-        sameStrings(left.actions, right.actions) &&
-        left.applicationId === right.applicationId &&
-        left.entry === right.entry &&
+        left.appId === right.appId &&
         left.generation === right.generation &&
         left.id === right.id &&
-        left.navigation.icon === right.navigation.icon &&
-        left.navigation.label === right.navigation.label &&
-        left.navigation.order === right.navigation.order &&
+        left.page === right.page &&
         left.pluginId === right.pluginId &&
+        left.resourceUri === right.resourceUri &&
+        left.sidebar.icon === right.sidebar.icon &&
+        left.sidebar.label === right.sidebar.label &&
+        left.sidebar.order === right.sidebar.order &&
         sameResources(left.resources, right.resources) &&
-        left.title === right.title
+        left.title === right.title &&
+        JSON.stringify(left.tools) === JSON.stringify(right.tools)
     );
 }
 
 function sameResources(
-    left: readonly PluginApplicationResource[],
-    right: readonly PluginApplicationResource[],
+    left: readonly PluginAppResource[],
+    right: readonly PluginAppResource[],
 ): boolean {
     return (
         left.length === right.length &&
         left.every(
             (resource, index) =>
-                resource.mediaType === right[index]?.mediaType &&
+                resource.mimeType === right[index]?.mimeType &&
                 resource.path === right[index]?.path &&
-                resource.size === right[index]?.size,
+                resource.size === right[index]?.size &&
+                resource.uri === right[index]?.uri,
         )
     );
-}
-
-function sameStrings(left: readonly string[], right: readonly string[]): boolean {
-    return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
 function sameFailures(
@@ -230,12 +241,12 @@ function sameReferences<T>(left: readonly T[], right: readonly T[]): boolean {
     return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
-function compareApplications(left: PluginApplication, right: PluginApplication): number {
+function compareApps(left: PluginApp, right: PluginApp): number {
     return (
-        left.navigation.order - right.navigation.order ||
-        compareText(left.navigation.label, right.navigation.label) ||
+        left.sidebar.order - right.sidebar.order ||
+        compareText(left.sidebar.label, right.sidebar.label) ||
         compareText(left.pluginId, right.pluginId) ||
-        compareText(left.applicationId, right.applicationId)
+        compareText(left.appId, right.appId)
     );
 }
 

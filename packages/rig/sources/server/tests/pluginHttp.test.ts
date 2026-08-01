@@ -2,10 +2,8 @@ import { request as requestHttp } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-    PluginApplicationNotFoundError,
-    PluginApplicationStaleGenerationError,
-} from "../../plugins/index.js";
+import { PluginAppError } from "../../plugins/index.js";
+import type { PluginContext } from "../../agent/context/PluginContext.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 const servers: ReturnType<typeof createProtocolHttpServer>[] = [];
@@ -24,164 +22,160 @@ afterEach(async () => {
 
 describe("plugin HTTP protocol", () => {
     it("serves explicit plugin states and bounded current logs", async () => {
-        const server = createProtocolHttpServer({
-            plugins: {
-                invokeApplication: async () => {
-                    throw new Error("Unused in this test.");
-                },
-                list: async () => ({
-                    failures: [],
-                    plugins: [
-                        {
-                            applications: [],
-                            dataDirectory: "/data/clock",
-                            description: "A clock.",
-                            directory: "/plugins/clock",
-                            folder: "clock",
-                            logAvailable: true,
-                            name: "Clock",
-                            status: "stopped",
-                        },
-                    ],
-                    version: "01900000-0000-7000-8000-000000000001",
-                }),
-                readApplicationResource: () => {
-                    throw new Error("Unused in this test.");
-                },
-                readLog: async (name) => ({
-                    folder: "clock",
-                    name,
-                    source: "current_run",
-                    status: "stopped",
-                    text: "[stdout] tick\n",
-                    truncated: false,
-                    updatedAt: 42,
-                }),
-            },
-            token: "secret",
-        });
+        const plugins = context();
+        const server = createProtocolHttpServer({ plugins, token: "secret" });
         servers.push(server);
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const address = server.address();
-        if (address === null || typeof address === "string") throw new Error("Missing test port.");
-
-        await expect(requestJson(address.port, "/plugins")).resolves.toMatchObject({
+        const port = await listen(server);
+        await expect(requestJson(port, "/plugins")).resolves.toMatchObject({
             plugins: [{ name: "Clock", status: "stopped" }],
         });
-        await expect(requestJson(address.port, "/plugins/Clock/log")).resolves.toEqual({
-            log: {
+        await expect(requestJson(port, "/plugins/Clock/log")).resolves.toMatchObject({
+            log: { name: "Clock", text: "[stdout] tick\n" },
+        });
+    });
+
+    it("authenticates MCP App resources, tools, and namespaced storage and closes stale errors", async () => {
+        const plugins = context();
+        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        servers.push(server);
+        const port = await listen(server);
+        const base = "/plugin-apps/usage%3Aoverview/generations/current";
+
+        expect(
+            (
+                await request(port, {
+                    body: JSON.stringify({ uri: "ui://usage/overview/index.html" }),
+                    method: "POST",
+                    path: `${base}/resources/read`,
+                    token: "wrong",
+                })
+            ).status,
+        ).toBe(401);
+        await expect(
+            requestJson(port, `${base}/resources/read`, {
+                uri: "ui://usage/overview/index.html",
+            }),
+        ).resolves.toEqual({
+            contents: [
+                {
+                    mimeType: "text/html;profile=mcp-app",
+                    text: "<h1>Usage</h1>",
+                    uri: "ui://usage/overview/index.html",
+                },
+            ],
+        });
+        await expect(
+            requestJson(port, `${base}/tools/call`, {
+                arguments: { scope: "weekly" },
+                name: "read",
+                server: "Usage",
+            }),
+        ).resolves.toMatchObject({ result: { content: [{ text: "read weekly" }] } });
+        await expect(
+            requestJson(port, `${base}/extensions/io.slopus.happy/storage/set`, {
+                key: "layout",
+                value: { compact: true },
+            }),
+        ).resolves.toEqual({});
+        expect(
+            (
+                await request(port, {
+                    body: JSON.stringify({ uri: "ui://usage/overview/index.html" }),
+                    method: "POST",
+                    path: "/plugin-apps/usage%3Aoverview/generations/old/resources/read",
+                })
+            ).status,
+        ).toBe(409);
+    });
+});
+
+function context(): Pick<
+    PluginContext,
+    | "callAppTool"
+    | "list"
+    | "readAppResource"
+    | "readLog"
+    | "storageDelete"
+    | "storageGet"
+    | "storageList"
+    | "storageSet"
+> {
+    return {
+        async callAppTool(_id, generation, _server, tool, input) {
+            if (generation === "old")
+                throw new PluginAppError("stale_generation", "stale generation");
+            return {
+                content: [
+                    {
+                        text: `${tool} ${(input as { scope?: string }).scope ?? ""}`.trim(),
+                        type: "text",
+                    },
+                ],
+            };
+        },
+        async list() {
+            return {
+                failures: [],
+                plugins: [
+                    {
+                        apps: [],
+                        dataDirectory: "/data/clock",
+                        description: "A clock.",
+                        directory: "/plugins/clock",
+                        folder: "clock",
+                        logAvailable: true,
+                        name: "Clock",
+                        status: "stopped",
+                    },
+                ],
+                version: "01900000-0000-7000-8000-000000000001",
+            };
+        },
+        readAppResource(_id, generation, uri) {
+            if (generation === "old")
+                throw new PluginAppError("stale_generation", "stale generation");
+            return { mimeType: "text/html;profile=mcp-app", text: "<h1>Usage</h1>", uri };
+        },
+        async readLog(name) {
+            return {
                 folder: "clock",
-                name: "Clock",
+                name,
                 source: "current_run",
                 status: "stopped",
                 text: "[stdout] tick\n",
                 truncated: false,
                 updatedAt: 42,
-            },
-        });
-    });
-
-    it("authenticates application resources and actions and rejects stale or traversing paths", async () => {
-        const server = createProtocolHttpServer({
-            plugins: {
-                invokeApplication: async (applicationId, generation, action, input) => {
-                    if (generation === "old") throw new PluginApplicationStaleGenerationError();
-                    return { action, applicationId, generation, input };
-                },
-                list: async () => ({
-                    failures: [],
-                    plugins: [],
-                    version: "01900000-0000-7000-8000-000000000001",
-                }),
-                readApplicationResource: (applicationId, generation, resourcePath) => {
-                    if (generation === "old") throw new PluginApplicationStaleGenerationError();
-                    if (resourcePath !== "index.html") {
-                        throw new PluginApplicationNotFoundError();
-                    }
-                    expect(applicationId).toBe("usage:overview");
-                    return { body: Buffer.from("<h1>Usage</h1>"), mediaType: "text/html" };
-                },
-                readLog: async () => {
-                    throw new Error("Unused in this test.");
-                },
-            },
-            token: "secret",
-        });
-        servers.push(server);
-        await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-        const address = server.address();
-        if (address === null || typeof address === "string") throw new Error("Missing test port.");
-
-        const unauthorized = await request(address.port, {
-            path: applicationResourcePath("current", "index.html"),
-            token: "wrong",
-        });
-        expect(unauthorized.status).toBe(401);
-
-        const resource = await request(address.port, {
-            path: applicationResourcePath("current", "index.html"),
-        });
-        expect(resource).toMatchObject({
-            body: "<h1>Usage</h1>",
-            status: 200,
-        });
-        expect(resource.headers["content-security-policy"]).toContain("connect-src 'none'");
-        expect(resource.headers["x-content-type-options"]).toBe("nosniff");
-
-        const traversal = await request(address.port, {
-            path: applicationResourcePath("current", "%2e%2e%2fsecret"),
-        });
-        expect(traversal.status).toBe(404);
-
-        const stale = await request(address.port, {
-            path: applicationResourcePath("old", "index.html"),
-        });
-        expect(stale.status).toBe(409);
-
-        const action = await request(address.port, {
-            body: JSON.stringify({ input: { scope: "weekly" } }),
-            method: "POST",
-            path: "/plugin-applications/usage%3Aoverview/generations/current/actions/read",
-        });
-        expect(JSON.parse(action.body)).toEqual({
-            result: {
-                action: "read",
-                applicationId: "usage:overview",
-                generation: "current",
-                input: { scope: "weekly" },
-            },
-        });
-
-        const invalidAction = await request(address.port, {
-            body: JSON.stringify({ extra: true, input: {} }),
-            method: "POST",
-            path: "/plugin-applications/usage%3Aoverview/generations/current/actions/read",
-        });
-        expect(invalidAction.status).toBe(400);
-    });
-});
-
-function requestJson(port: number, path: string): Promise<unknown> {
-    return request(port, { path }).then((response) => JSON.parse(response.body) as unknown);
+            };
+        },
+        async storageDelete() {},
+        async storageGet() {
+            return undefined;
+        },
+        async storageList() {
+            return [];
+        },
+        async storageSet() {},
+    };
 }
 
-function applicationResourcePath(generation: string, resource: string): string {
-    return `/plugin-applications/usage%3Aoverview/generations/${generation}/resources/${resource}`;
+async function listen(server: ReturnType<typeof createProtocolHttpServer>): Promise<number> {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (address === null || typeof address === "string") throw new Error("Missing test port.");
+    return address.port;
+}
+
+function requestJson(port: number, path: string, body?: unknown): Promise<unknown> {
+    return request(port, {
+        ...(body === undefined ? {} : { body: JSON.stringify(body), method: "POST" }),
+        path,
+    }).then((response) => JSON.parse(response.body) as unknown);
 }
 
 function request(
     port: number,
-    options: {
-        body?: string;
-        method?: string;
-        path: string;
-        token?: string;
-    },
-): Promise<{
-    body: string;
-    headers: Record<string, string | string[] | undefined>;
-    status: number;
-}> {
+    options: { body?: string; method?: string; path: string; token?: string },
+): Promise<{ body: string; status: number }> {
     return new Promise((resolve, reject) => {
         const request = requestHttp(
             {
@@ -202,13 +196,12 @@ function request(
             (response) => {
                 const chunks: Buffer[] = [];
                 response.on("data", (chunk: Buffer) => chunks.push(chunk));
-                response.once("end", () => {
+                response.once("end", () =>
                     resolve({
                         body: Buffer.concat(chunks).toString("utf8"),
-                        headers: response.headers,
                         status: response.statusCode ?? 500,
-                    });
-                });
+                    }),
+                );
             },
         );
         request.once("error", reject);

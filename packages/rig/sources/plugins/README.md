@@ -46,12 +46,20 @@ retires that generation and rejects pending calls before stale completions can l
 this provider through the same composite MCP path as configured servers, so provider tool assembly
 and `AgentContext`/`PermissionContext` behavior stay shared.
 
-`PluginApplicationRegistry` owns bounded static bundles and typed action streams. A contribution
-becomes visible only after its private NDJSON stream attaches. Stable identity combines the plugin
-folder and authored application ID; generation is unique to the process. Resource and action
+`PluginAppRegistry` owns bounded manifest-declared static bundles, app-scoped MCP calls, and
+plugin-private JSON storage. Static contributions become visible as soon as the plugin process
+starts, including apps with no tools. The catalog is republished when an MCP stream later attaches,
+so app-visible tools appear without hiding or remounting the static app. Stable identity combines
+the plugin folder and authored app ID; generation is unique to the process. Resource and tool
 routes require both, so replacement, exit, disconnect, restart, or uninstall retires stale views.
-Resource, bundle, registration-body, action-body, action-count, and concurrent-action limits keep
+Resource, bundle, registration-body, tool-call body, storage, and concurrent-call limits keep
 memory and work bounded.
+
+The build snapshots at most 8 apps, 64 resources per app, 256 KiB per resource, and 1 MiB per app.
+It ignores hidden authoring debris, validates every published path and contribution against the
+public TypeBox schemas, and rejects symlinks, traversal, unsupported media, and incomplete pages or
+icons. Plugin-private storage is JSON-only and bounded to 1,024 safe keys, 64 KiB per value, and
+5 MiB total. Atomic-write leftovers are removed on the next storage operation.
 
 The `/plugins` snapshot and `plugins_changed` events carry the same ordered catalog version in
 addition to the global cursor. The manager assigns it synchronously when state changes and retries

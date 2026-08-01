@@ -253,7 +253,9 @@ export async function startHappyMcpServer(
 const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
 
 function serializableTool(tool: HappyMcpTool) {
+    const visibility = tool.visibility ?? ["model", "app"];
     return {
+        _meta: { ui: { visibility } },
         description: tool.description,
         inputSchema: JSON.parse(JSON.stringify(tool.inputSchema)) as unknown,
         name: tool.name,

@@ -347,6 +347,9 @@ importers:
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
       tsc-alias:
         specifier: ^1.8.16
         version: 1.9.1

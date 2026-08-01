@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -81,6 +81,59 @@ describe("happy-plugin development runner", () => {
         expect(stdout).toContain('\\"name\\":\\"Rig\\"');
         expect(stdout).toContain('\\"persisted\\":\\"persisted by plugin\\"');
         expect(await readdir(directory)).toEqual(["index.ts", "seed.json"]);
+
+        await mkdir(join(directory, "app"));
+        await writeFile(join(directory, "app", "index.html"), "<h1>App</h1>");
+        await writeFile(
+            join(directory, "happy.plugin.json"),
+            JSON.stringify({
+                apps: [
+                    {
+                        id: "app",
+                        page: "missing.html",
+                        root: "app",
+                        sidebar: { label: "App", order: 0 },
+                        title: "App",
+                    },
+                ],
+                description: "Development fixture",
+                entry: "index.ts",
+                icon: "icon.png",
+                name: "Development fixture",
+            }),
+        );
+        await expect(
+            execFileAsync(
+                process.execPath,
+                [join(process.cwd(), "dist", "developmentRunner.js"), "dev", entryPath],
+                { env: { ...process.env, TMPDIR: temporaryDirectory }, timeout: 15_000 },
+            ),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("page must name an HTML") });
+        await writeFile(
+            join(directory, "happy.plugin.json"),
+            JSON.stringify({
+                apps: [
+                    {
+                        id: "app",
+                        page: "index.html",
+                        root: "app",
+                        sidebar: { icon: "index.html", label: "App", order: 0 },
+                        title: "App",
+                    },
+                ],
+                description: "Development fixture",
+                entry: "index.ts",
+                icon: "icon.png",
+                name: "Development fixture",
+            }),
+        );
+        await expect(
+            execFileAsync(
+                process.execPath,
+                [join(process.cwd(), "dist", "developmentRunner.js"), "dev", entryPath],
+                { env: { ...process.env, TMPDIR: temporaryDirectory }, timeout: 15_000 },
+            ),
+        ).rejects.toMatchObject({ stderr: expect.stringContaining("icon must be an image") });
 
         const packageJson = JSON.parse(
             await readFile(join(process.cwd(), "package.json"), "utf8"),

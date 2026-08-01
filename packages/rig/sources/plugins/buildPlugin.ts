@@ -8,6 +8,7 @@ import { Value } from "@sinclair/typebox/value";
 
 import { PluginBuildError } from "./PluginBuildError.js";
 import { fileSystemErrorSchema, type BuiltPlugin, type RegisteredPlugin } from "./types.js";
+import { snapshotPluginApps } from "./snapshotPluginApps.js";
 
 const require = createRequire(import.meta.url);
 const MAX_COMPILER_OUTPUT_BYTES = 4 * 1024 * 1024;
@@ -114,8 +115,10 @@ export async function buildPlugin(
 
     const relativeEntry = relative(plugin.directory, plugin.entryPath);
     const builtEntryPath = join(buildDirectory, relativeEntry.replace(/\.ts$/u, ".js"));
+    const apps = await snapshotPluginApps(plugin);
     return {
         ...plugin,
+        apps,
         buildDirectory,
         builtEntryPath,
         runtimeDirectory,

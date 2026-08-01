@@ -15,15 +15,12 @@ import { PluginBuildError } from "./PluginBuildError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { RegisteredPlugin } from "./types.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
-import {
-    PluginApplicationRegistry,
-    type PluginApplicationResource,
-} from "./PluginApplicationRegistry.js";
+import { PluginAppRegistry, type PluginAppResource } from "./PluginAppRegistry.js";
 import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
 
 export interface PluginManagerOptions {
-    applicationRegistry?: PluginApplicationRegistry;
+    appRegistry?: PluginAppRegistry;
     daemonLog: DaemonLog;
     defaultDocker?: DockerExecutionConfig;
     directory?: string;
@@ -60,7 +57,7 @@ interface PluginRuntimeState {
 export class PluginManager {
     readonly directory: string;
 
-    readonly #applicationRegistry: PluginApplicationRegistry;
+    readonly #appRegistry: PluginAppRegistry;
     readonly #createEventId = createEventIdFactory();
     #catalogVersion: EventId = this.#createEventId();
     readonly #daemonLog: DaemonLog;
@@ -76,13 +73,17 @@ export class PluginManager {
         options: StartPluginOptions,
     ) => Promise<RunningPlugin>;
     readonly #store: SessionStore;
-    readonly #unsubscribeApplications: () => void;
+    readonly #unsubscribeApps: () => void;
+    readonly #unsubscribeMcp: () => void;
     #closed = false;
     #publication = Promise.resolve();
     #started = false;
 
     constructor(options: PluginManagerOptions) {
-        this.#applicationRegistry = options.applicationRegistry ?? new PluginApplicationRegistry();
+        if (options.mcpRegistry === undefined && options.appRegistry === undefined) {
+            throw new Error("PluginManager requires the shared MCP registry.");
+        }
+        this.#appRegistry = options.appRegistry ?? new PluginAppRegistry(options.mcpRegistry!);
         this.#daemonLog = options.daemonLog;
         this.#defaultDocker = options.defaultDocker;
         this.#environment = options.environment ?? process.env;
@@ -92,9 +93,13 @@ export class PluginManager {
         this.#start = options.start ?? startPlugin;
         this.#store = options.store;
         this.directory = options.directory ?? getPluginsDirectory(this.#environment);
-        this.#unsubscribeApplications = this.#applicationRegistry.subscribe(() => {
+        this.#unsubscribeApps = this.#appRegistry.subscribe(() => {
             void this.#publishChanged();
         });
+        this.#unsubscribeMcp =
+            options.mcpRegistry?.subscribe(() => {
+                void this.#publishChanged();
+            }) ?? (() => {});
     }
 
     async start(): Promise<void> {
@@ -200,9 +205,9 @@ export class PluginManager {
                         updatedAt: this.#now(),
                     };
                     return {
-                        applications:
+                        apps:
                             state.status === "running"
-                                ? this.#applicationRegistry.list(plugin.folderName)
+                                ? this.#appRegistry.list(plugin.folderName)
                                 : [],
                         dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
                         description: plugin.manifest.description,
@@ -255,22 +260,36 @@ export class PluginManager {
         };
     }
 
-    readApplicationResource(
+    readAppResource(
         applicationId: string,
         generation: string,
-        resourcePath: string,
-    ): PluginApplicationResource {
-        return this.#applicationRegistry.readResource(applicationId, generation, resourcePath);
+        resourceUri: string,
+    ): PluginAppResource {
+        return this.#appRegistry.readResource(applicationId, generation, resourceUri);
     }
 
-    invokeApplication(
+    callAppTool(
         applicationId: string,
         generation: string,
-        action: string,
+        server: string,
+        tool: string,
         input: unknown,
         signal?: AbortSignal,
-    ): Promise<unknown> {
-        return this.#applicationRegistry.invoke(applicationId, generation, action, input, signal);
+    ) {
+        return this.#appRegistry.callTool(applicationId, generation, server, tool, input, signal);
+    }
+
+    storageGet(applicationId: string, generation: string, key: string) {
+        return this.#appRegistry.storageGet(applicationId, generation, key);
+    }
+    storageList(applicationId: string, generation: string) {
+        return this.#appRegistry.storageList(applicationId, generation);
+    }
+    storageSet(applicationId: string, generation: string, key: string, value: unknown) {
+        return this.#appRegistry.storageSet(applicationId, generation, key, value);
+    }
+    storageDelete(applicationId: string, generation: string, key: string) {
+        return this.#appRegistry.storageDelete(applicationId, generation, key);
     }
 
     async close(): Promise<void> {
@@ -278,8 +297,8 @@ export class PluginManager {
         this.#closed = true;
         await Promise.all([...this.#running.values()].map((plugin) => plugin.close()));
         this.#running.clear();
-        this.#unsubscribeApplications();
-        this.#applicationRegistry.close();
+        this.#unsubscribeApps();
+        this.#unsubscribeMcp();
     }
 
     #assertOpen(): void {
@@ -293,7 +312,7 @@ export class PluginManager {
             const plugin = await readPluginManifest(directory);
             name = plugin.manifest.name;
             const running = await this.#start(plugin, {
-                applicationRegistry: this.#applicationRegistry,
+                appRegistry: this.#appRegistry,
                 ...(this.#defaultDocker === undefined
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),

@@ -173,6 +173,35 @@ describe("PluginMcpRegistry", () => {
             ]);
         }
     });
+
+    it("never offers app-only tools to an ordinary model session", async () => {
+        const registry = new PluginMcpRegistry();
+        const connection = registry.createConnection({ folder: "usage", name: "Usage" });
+        const registrationId = connection.register({
+            name: "Backend",
+            tools: [
+                {
+                    _meta: { ui: { visibility: ["app"] } },
+                    description: "Only the mounted MCP App may call this.",
+                    inputSchema: { additionalProperties: false, properties: {}, type: "object" },
+                    name: "private_refresh",
+                },
+                {
+                    _meta: { ui: { visibility: ["model", "app"] } },
+                    description: "Both audiences may call this.",
+                    inputSchema: { additionalProperties: false, properties: {}, type: "object" },
+                    name: "read_usage",
+                },
+            ],
+        });
+        connection.attach(registrationId, () => true);
+
+        const loaded = await registry.load("/workspace", "auto");
+        expect(loaded.tools.map((tool) => tool.name)).toEqual(["mcp__Usage___Backend__read_usage"]);
+        expect(
+            registry.listAppTools("usage", connection.generation).map((tool) => tool.name),
+        ).toEqual(["private_refresh", "read_usage"]);
+    });
 });
 
 function server(name: string, tools: readonly string[]): HappyMcpServerRegistration {

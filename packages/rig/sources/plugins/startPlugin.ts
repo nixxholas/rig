@@ -17,7 +17,7 @@ import {
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
-import type { PluginApplicationRegistry } from "./PluginApplicationRegistry.js";
+import type { PluginAppRegistry } from "./PluginAppRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 
 const STOP_GRACE_MS = 2_000;
@@ -32,7 +32,7 @@ export interface RunningPlugin {
 }
 
 export interface StartPluginOptions extends BuildPluginOptions {
-    applicationRegistry?: PluginApplicationRegistry;
+    appRegistry?: PluginAppRegistry;
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
@@ -68,12 +68,17 @@ export async function startPlugin(
         folder: plugin.folderName,
         name: plugin.manifest.name,
     });
-    const applications = options.applicationRegistry?.createConnection({
-        folder: plugin.folderName,
-        name: plugin.manifest.name,
-    });
+    let unregisterApps: (() => void) | undefined;
+    try {
+        unregisterApps =
+            mcp === undefined
+                ? undefined
+                : options.appRegistry?.register(built, mcp.generation, dataDirectory);
+    } catch (error) {
+        mcp?.close();
+        throw error;
+    }
     const server = createPluginApiServer({
-        ...(applications === undefined ? {} : { applications }),
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
         ...(options.listProviderUsage === undefined
             ? {}
@@ -93,7 +98,7 @@ export async function startPlugin(
         });
         await restrictSocketAccess(socketPath);
     } catch (error) {
-        applications?.close();
+        unregisterApps?.();
         mcp?.close();
         await closeServer(server);
         await rm(socketPath, { force: true });
@@ -124,7 +129,7 @@ export async function startPlugin(
             stdio: ["ignore", "pipe", "pipe"],
         });
     } catch (error) {
-        applications?.close();
+        unregisterApps?.();
         mcp?.close();
         await Promise.allSettled([closeServer(server), log.close()]);
         await rm(socketPath, { force: true });
@@ -140,7 +145,7 @@ export async function startPlugin(
             log.close(),
             rm(socketPath, { force: true }),
         ]).then(() => {
-            applications?.close();
+            unregisterApps?.();
             mcp?.close();
         }));
     const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(

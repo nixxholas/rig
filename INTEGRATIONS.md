@@ -222,20 +222,20 @@ same local-or-Docker filesystem, current permission mode, shell sandbox,
 network boundary, process accounting, output limits, and abort lifecycle as the
 TUI agent. File writes retain Happy's SHA-256 optimistic-concurrency contract.
 
-## Happy2 local plugin applications
+## Happy2 local MCP Apps
 
-Happy2 consumes local applications through `@slopus/rig-connect`. Its Electron main process passes
+Happy2 consumes local MCP Apps through `@slopus/rig-connect`. Its Electron main process passes
 the daemon endpoint and bearer token to `connectRig`, then calls `connectPlugins`. Never send those
-credentials to a renderer or open a second event stream. Protocol version 2 is required.
+credentials to a renderer or open a second event stream. Protocol version 3 is required.
 
-`onChange(applications, plugins, state)` supplies the complete catalog in navigation order. Key
-logical navigation by `application.id`, but key loaded code and caches by both `application.id` and
-`application.generation`. A generation change is replacement, never an in-place update.
+`onChange(apps, plugins, state)` supplies the complete catalog in navigation order. Key logical
+navigation by `app.id`, but key loaded code and caches by both `app.id` and `app.generation`. A
+generation change is replacement, never an in-place update.
 
 Mounting must be instant at click time:
 
 1. As soon as a live catalog exposes a generation, load every declared path through
-   `connection.loadResource(application, path)`.
+   `connection.readResource(app, uri)`.
 2. Verify the whole bounded bundle completed and is still the current generation.
 3. Only then publish it as clickable navigation. A click performs no daemon read.
 4. Serve cached bytes from a generation-specific isolated Electron origin or protocol so relative
@@ -245,15 +245,22 @@ Mounting must be instant at click time:
    or forms; bundle scripts, styles, images, and fonts are allowed, with inline styles and data
    images. Keep context isolation on and Node integration off.
 
-The renderer bridge exposes one operation: invoke a name from the application's declared
-`actions`. Electron main checks that name against the current catalog and calls
-`connection.invokeAction(application, action, input, { signal })`. Do not expose arbitrary daemon
-paths, raw fetch, credentials, plugin sockets, or undeclared action names.
+The renderer implements the MCP Apps 2026-01-26 JSON-RPC 2.0 `postMessage` bridge:
+`ui/initialize`, `ui/notifications/initialized`, `resources/read`, and `tools/call`. Do not inject a
+global API object. Electron main derives the caller from its committed origin and calls
+`connection.callTool(app, server, name, arguments, { signal })`. It may advertise the explicit
+`io.slopus.happy/storage/*` extension. Do not expose arbitrary daemon paths, raw fetch, credentials,
+plugin sockets, or tools absent from the app catalog.
 
-Unmounting, removing navigation, or closing the subscription aborts prefetch and actions, destroys
+The daemon has already bounded and validated the catalog: at most 8 apps per plugin, 64 resources
+per app, 256 KiB per resource, and 1 MiB per app. Storage is JSON-only and limited to 1,024 keys,
+64 KiB per value, and 5 MiB per plugin. Happy2 must still bound its own decoded/object-URL caches
+to the catalog it received and must not broaden those limits.
+
+Unmounting, removing navigation, or closing the subscription aborts prefetch and tool calls, destroys
 the isolated view, and releases object URLs or custom-protocol mappings for that generation. A
 stale-generation error retires the old view: unmount it, drop its bundle, and wait for the current
-catalog. Never retry the old generation. Ordinary action failures stay inside the application UI.
+catalog. Never retry the old generation. Ordinary tool failures stay inside the app UI.
 
 A clean reconnect keeps cached current generations. After a gap, retain unchanged generation keys,
 prefetch new ones, and dispose missing ones. Happy2 tests should cover an event on each side of the

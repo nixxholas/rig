@@ -23,26 +23,27 @@ subscription:
 
 ```ts
 const plugins = rig.connectPlugins({
-    onChange(applications, installed, state) {
-        renderPluginNavigation(applications, state);
+    onChange(apps, installed, state) {
+        renderPluginNavigation(apps, state);
     },
 });
 ```
 
-Applications are in deterministic navigation order: order, label, plugin identity, then
-application identity. Unchanged objects preserve reference identity. The stable `id` is
-`<plugin-folder>:<application-id>`; `generation` changes whenever the owning process restarts or is
+Apps are in deterministic navigation order: order, label, plugin identity, then app identity.
+Unchanged objects preserve reference identity. The stable `id` is
+`<plugin-folder>:<app-id>`; `generation` changes whenever the owning process restarts or is
 replaced.
 
 ```ts
-const application = plugins.applications()[0]!;
-const entry = await plugins.loadResource(application, application.entry);
-const result = await plugins.invokeAction(application, "refresh", {});
+const app = plugins.apps()[0]!;
+const page = await plugins.readResource(app, app.resourceUri);
+const result = await plugins.callTool(app, "Usage", "refresh", {});
+await plugins.storageSet(app, "layout", { compact: true });
 ```
 
-Only declared resources and actions can be called. Every call includes the rendered generation,
+Only declared resources and app-visible MCP tools can be called. Every call includes the rendered generation,
 so stale views reject after replacement or uninstall. Resources are checked against declared media
-type and byte size and bounded to 256 KiB. Action inputs and responses are bounded to 1 MiB, and
+type and byte size and bounded to 256 KiB. Tool inputs and responses are bounded to 1 MiB, and
 successful envelopes are runtime-validated. An optional `AbortSignal` cancels either operation;
 `plugins.close()` aborts operations owned by that handle and prevents new ones.
 
@@ -55,7 +56,7 @@ cursor resume reuses the catalog; a gap reloads it. `state.connection` is `conne
 bounded 16 KiB snapshot, its source, and whether older output was omitted. Installed plugin
 `status` is `running`, `stopped`, or `build_failed`.
 
-Application mounting is a host concern. To make clicking instant, prefetch every declared resource
+MCP App mounting is a host concern. To make clicking instant, prefetch every declared resource
 by generation as soon as it enters the catalog, then expose navigation only when that bounded
 bundle is ready. The Happy2 Electron bridge contract is in the repository `INTEGRATIONS.md`.
 

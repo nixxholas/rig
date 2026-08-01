@@ -60,16 +60,27 @@ The manifest is intentionally small and exact:
     "name": "Project Counter",
     "description": "Reports how many projects Happy knows about.",
     "entry": "index.ts",
-    "icon": "icon.png"
+    "icon": "icon.png",
+    "apps": [
+        {
+            "id": "overview",
+            "title": "Project overview",
+            "root": "app",
+            "page": "index.html",
+            "sidebar": { "label": "Projects", "order": 10 }
+        }
+    ]
 }
 ```
 
-All four fields are required. Extra fields are rejected.
+The first four fields are required. `apps` is optional. Extra fields are rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
 - `entry`: a relative path to a `.ts` file inside the plugin folder.
 - `icon`: a relative path to a PNG file inside the plugin folder.
+- `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
+  sidebar metadata, and optional image icon.
 
 Entry and icon paths must remain inside the plugin folder. The entry and icon themselves must be
 ordinary files rather than symbolic links. Happy does not register a plugin whose manifest or
@@ -150,10 +161,11 @@ try {
 ```
 
 `host.mcp.waitForTools()`, `host.mcp.listTools()`, and `host.mcp.callTool()` let a test observe and
-exercise an MCP contribution without reaching into Rig internals. `host.ui.waitForApplications()`,
-`host.ui.listApplications()`, `host.ui.readResource()`, and `host.ui.invokeAction()` do the same
-for local applications. Seed `providerUsage` to exercise `happy.providers.usage()` without a real
-account. The host creates
+exercise model-visible MCP contributions without reaching into Rig internals.
+`host.apps.callTool()` exercises app-visible tools, while `host.apps.storage` mirrors the bounded
+JSON storage extension. The development runner validates a colocated `happy.plugin.json` and all
+declared app bundles before it starts plugin code. Seed `providerUsage` to exercise
+`happy.providers.usage()` without a real account. The host creates
 `host.environment.HAPPY_PLUGIN_DIRECTORY` before the plugin starts, so tests can use it for
 persistent state exactly as they use the production directory. `host.rootDirectory` identifies the
 temporary root and `host.close()` removes it. Pass `{ temporaryDirectory }` as the second argument
@@ -400,63 +412,52 @@ has a canonical vendor kind, plan name, exhaustion state, optional credits, and 
 five-hour, weekly, and monthly windows. Render the entries received rather than assuming a
 provider or plan exists.
 
-### Local applications
+### MCP Apps
 
-A plugin registers static resources and typed actions as one host-mounted application:
+Apps are static resources declared in `happy.plugin.json`; plugin code does not start or register
+them. Rig validates and snapshots each folder before starting the plugin:
+
+```json
+"apps": [{
+    "id": "account-overview",
+    "title": "Account overview",
+    "root": "app",
+    "page": "index.html",
+    "sidebar": { "label": "Accounts", "order": 10 }
+}]
+```
+
+Rig derives an official `ui://` URI and serves the page as
+`text/html;profile=mcp-app`. The page uses the MCP Apps 2026-01-26 JSON-RPC bridge: `ui/initialize`,
+`ui/notifications/initialized`, `resources/read`, and `tools/call`. There is no injected global API.
+
+Backend behavior is an ordinary MCP tool. Set its official visibility when only the app should see
+it; omitting `visibility` defaults to both audiences:
 
 ```ts
-import { defineHappyPluginApplicationAction, happy, Type } from "happy-plugins";
-
-const application = await happy.ui.startApplication({
-    id: "account-overview",
-    title: "Account overview",
-    entry: "index.html",
-    navigation: { label: "Accounts", order: 10 },
-    resources: [
-        {
-            path: "index.html",
-            mediaType: "text/html",
-            encoding: "utf8",
-            body: `<!doctype html><main id="app"></main><script src="app.js"></script>`,
-        },
-        {
-            path: "app.js",
-            mediaType: "text/javascript",
-            encoding: "utf8",
-            body: `window.happy.invoke("refresh", {}).then(console.log)`,
-        },
-    ],
-    actions: [
-        defineHappyPluginApplicationAction({
-            name: "refresh",
-            inputSchema: Type.Object({}, { additionalProperties: false }),
-            outputSchema: Type.Object({ providers: Type.Number() }),
-            async execute(_input, { signal }) {
-                signal.throwIfAborted();
-                return { providers: (await happy.providers.usage()).length };
-            },
-        }),
-    ],
+defineMcpTool({
+    name: "refresh",
+    description: "Refresh account usage for the mounted app.",
+    visibility: ["app"],
+    inputSchema: Type.Object({}, { additionalProperties: false }),
+    async execute() {
+        return { content: [{ type: "text", text: "ready" }] };
+    },
 });
 ```
 
-The authored `id` is stable. Rig exposes `<plugin-folder>:<application-id>` to hosts and gives
-every plugin process an opaque `generation`. Every resource and action request includes that
-generation, so a stale view fails after replacement or uninstall. The handle reports `connected`,
-`reconnecting`, or `closed`. A stream loss aborts active actions and re-registers with bounded
-backoff; `registrationId` changes but the process generation does not. `close()` is terminal.
+The host also advertises explicit `io.slopus.happy/storage/{get,set,delete,list}` methods. Those
+methods are a Happy extension, not part of standard MCP Apps.
 
-Paths are relative and normalized. The entry must be registered HTML, and an optional navigation
-icon must be a registered image. Supported media types are JSON, WOFF2, JPEG, PNG, SVG, WebP, CSS,
-HTML, and JavaScript. One plugin may register 8 applications; each has at most 32 actions and 64
-resources. One resource is at most 256 KiB and one application's decoded bundle totals at most
-1 MiB.
+Each plugin may declare at most 8 apps. An app contains at most 64 published resources, each at
+most 256 KiB, and at most 1 MiB in total. Hidden authoring debris such as `.DS_Store` is ignored;
+symlinks, unsafe resource paths, unsupported media types, missing pages/icons, and non-image icons
+are rejected before plugin code starts.
 
-Action inputs and outputs are JSON values validated by their TypeBox schemas. Cancellation reaches
-the handler's `AbortSignal`. Rig permits 64 concurrent actions per application, applies a
-30-second daemon timeout, and bounds action request and response bodies to 1 MiB. The renderer
-never receives the plugin socket or daemon token. Happy2 owns resource caching, isolated mounting,
-and the narrow declared-action bridge described in the repository `INTEGRATIONS.md`.
+Storage keys are safe lowercase IDs (128 characters maximum). A plugin may hold at most 1,024
+keys, 64 KiB per JSON value, and 5 MiB in total. Values use JSON semantics—`undefined`, `bigint`,
+cycles, and other non-JSON values are rejected. Writes are atomic, crash leftovers are cleaned,
+and storage survives plugin restarts in the plugin's writable folder.
 
 ### MCP tools
 
@@ -521,8 +522,8 @@ The primary schema exports are:
 - `sendAgentMessageInputSchema` and `agentMessageDeliverySchema`
 - `happyMcpServerRegistrationSchema`, `happyMcpEventSchema`,
   `happyMcpCallCompletionSchema`, and `happyMcpToolResultSchema`
-- `happyPluginApplicationRegistrationSchema`, `happyPluginApplicationContributionSchema`,
-  `happyPluginApplicationEventSchema`, and `happyPluginApplicationActionCompletionSchema`
+- `happyPluginAppContributionSchema`, `happyPluginAppResourceSummarySchema`, and
+  `happyPluginAppToolSummarySchema`
 - `happyProviderUsageEntrySchema`, `happyProviderUsageSchema`,
   `happyProviderUsageWindowSchema`, and `happyProviderUsageCreditsSchema`
 - `happyPluginTestSeedSchema` and `happyPluginTestRequestSchema`

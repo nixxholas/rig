@@ -92,7 +92,7 @@ describe("plugin logs", () => {
                 sse("hello", {
                     cursor: "01900000-0000-7000-8000-000000000001",
                     gap: false,
-                    protocolVersion: 2,
+                    protocolVersion: 3,
                     resumed: false,
                 }),
             ),
@@ -107,7 +107,7 @@ describe("plugin logs", () => {
                             failures: [],
                             plugins: [
                                 {
-                                    applications: [],
+                                    apps: [],
                                     dataDirectory: "/plugins/clock",
                                     description: "A clock.",
                                     directory: "/managed/clock",

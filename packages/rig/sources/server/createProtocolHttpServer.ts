@@ -161,11 +161,7 @@ import type {
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
-import {
-    PluginApplicationActionError,
-    PluginApplicationNotFoundError,
-    PluginApplicationStaleGenerationError,
-} from "../plugins/index.js";
+import { PluginAppError } from "../plugins/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
@@ -203,7 +199,14 @@ export interface ProtocolHttpServerOptions {
     onStartInspector?: () => StartInspectorResponse | Promise<StartInspectorResponse>;
     plugins?: Pick<
         PluginContext,
-        "invokeApplication" | "list" | "readApplicationResource" | "readLog"
+        | "callAppTool"
+        | "list"
+        | "readAppResource"
+        | "readLog"
+        | "storageDelete"
+        | "storageGet"
+        | "storageList"
+        | "storageSet"
     >;
     store?: SessionStore;
     taskDrain?: TaskDrain;
@@ -310,7 +313,17 @@ interface ProtocolServerRuntimeConfig {
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
     plugins:
-        | Pick<PluginContext, "invokeApplication" | "list" | "readApplicationResource" | "readLog">
+        | Pick<
+              PluginContext,
+              | "callAppTool"
+              | "list"
+              | "readAppResource"
+              | "readLog"
+              | "storageDelete"
+              | "storageGet"
+              | "storageList"
+              | "storageSet"
+          >
         | undefined;
 }
 
@@ -320,10 +333,23 @@ interface AppliedDaemonSettings {
 }
 
 const GLOBAL_SECURITY_POLICY_REQUEST_MAX_BYTES = GLOBAL_SECURITY_MD_MAX_BYTES * 6 + 1024;
-const pluginApplicationActionBodySchema = Type.Object(
-    { input: Type.Unknown() },
+const pluginAppResourceReadBodySchema = Type.Object(
+    { uri: Type.String({ minLength: 1 }) },
     { additionalProperties: false },
 );
+const pluginAppToolCallBodySchema = Type.Object(
+    {
+        arguments: Type.Unknown(),
+        name: Type.String({ minLength: 1 }),
+        server: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+);
+const pluginAppStorageBodySchema = Type.Object(
+    { key: Type.String({ minLength: 1 }), value: Type.Optional(Type.Unknown()) },
+    { additionalProperties: false },
+);
+const emptyObjectSchema = Type.Object({}, { additionalProperties: false });
 
 async function handleRequest(
     request: IncomingMessage,
@@ -389,42 +415,34 @@ async function handleRequest(
         sendJson(response, 200, { log: await runtimeConfig.plugins.readLog(route.pluginName) });
         return;
     }
-    if (request.method === "GET" && route.name === "plugin-application-resource") {
+    if (request.method === "POST" && route.name === "plugin-app-resource-read") {
         const plugins = runtimeConfig.plugins;
         if (plugins === undefined) {
             sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
             return;
         }
         try {
-            const resource = plugins.readApplicationResource(
-                route.applicationId,
-                route.generation,
-                route.resourcePath,
+            const body = Value.Decode(
+                pluginAppResourceReadBodySchema,
+                await readJson<unknown>(request, 64 * 1024),
             );
-            response.writeHead(200, {
-                "cache-control": "no-store",
-                "content-length": String(resource.body.byteLength),
-                "content-security-policy":
-                    "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'",
-                "content-type": resourceContentType(resource.mediaType),
-                "x-content-type-options": "nosniff",
-            });
-            response.end(resource.body);
+            const resource = plugins.readAppResource(route.appId, route.generation, body.uri);
+            sendJson(response, 200, { contents: [resource] });
         } catch (error) {
-            sendPluginApplicationError(response, error);
+            sendPluginAppError(response, error);
         }
         return;
     }
-    if (request.method === "POST" && route.name === "plugin-application-action") {
+    if (request.method === "POST" && route.name === "plugin-app-tool-call") {
         const plugins = runtimeConfig.plugins;
         if (plugins === undefined) {
             sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
             return;
         }
-        let body: { input: unknown };
+        let body: { arguments: unknown; name: string; server: string };
         try {
             body = Value.Decode(
-                pluginApplicationActionBodySchema,
+                pluginAppToolCallBodySchema,
                 await readJson<unknown>(request, 1024 * 1024),
             );
         } catch (error) {
@@ -434,7 +452,7 @@ async function handleRequest(
             ) {
                 throw error;
             }
-            sendJson(response, 400, { error: "Plugin application action input is invalid." });
+            sendJson(response, 400, { error: "MCP App tool input is invalid." });
             return;
         }
         const controller = new AbortController();
@@ -443,18 +461,54 @@ async function handleRequest(
         };
         response.once("close", abort);
         try {
-            const result = await plugins.invokeApplication(
-                route.applicationId,
+            const result = await plugins.callAppTool(
+                route.appId,
                 route.generation,
-                route.action,
-                body.input,
+                body.server,
+                body.name,
+                body.arguments,
                 controller.signal,
             );
             sendJson(response, 200, { result });
         } catch (error) {
-            if (!response.destroyed) sendPluginApplicationError(response, error);
+            if (!response.destroyed) sendPluginAppError(response, error);
         } finally {
             response.off("close", abort);
+        }
+        return;
+    }
+    if (request.method === "POST" && route.name === "plugin-app-storage") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
+            return;
+        }
+        try {
+            const rawBody = await readJson<unknown>(request, 128 * 1024);
+            if (route.operation === "list") {
+                Value.Decode(emptyObjectSchema, rawBody);
+                sendJson(response, 200, {
+                    keys: await plugins.storageList(route.appId, route.generation),
+                });
+                return;
+            }
+            const body = Value.Decode(pluginAppStorageBodySchema, rawBody);
+            if (route.operation === "get") {
+                sendJson(response, 200, {
+                    value: await plugins.storageGet(route.appId, route.generation, body.key),
+                });
+            } else if (route.operation === "set") {
+                if (!Object.hasOwn(body, "value")) {
+                    throw new PluginAppError("invalid_input", "Storage set requires a value.");
+                }
+                await plugins.storageSet(route.appId, route.generation, body.key, body.value);
+                sendJson(response, 200, {});
+            } else {
+                await plugins.storageDelete(route.appId, route.generation, body.key);
+                sendJson(response, 200, {});
+            }
+        } catch (error) {
+            sendPluginAppError(response, error);
         }
         return;
     }
@@ -2523,17 +2577,16 @@ function matchRoute(pathname: string):
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | { name: "plugin-log"; pluginName: string; sessionId?: undefined }
     | {
-          action: string;
-          applicationId: string;
+          appId: string;
           generation: string;
-          name: "plugin-application-action";
+          name: "plugin-app-resource-read" | "plugin-app-tool-call";
           sessionId?: undefined;
       }
     | {
-          applicationId: string;
+          appId: string;
           generation: string;
-          name: "plugin-application-resource";
-          resourcePath: string;
+          name: "plugin-app-storage";
+          operation: "delete" | "get" | "list" | "set";
           sessionId?: undefined;
       }
     | {
@@ -2649,37 +2702,23 @@ function matchRoute(pathname: string):
     if (pathname === "/shutdown") return { name: "shutdown" };
 
     const globalParts = pathname.split("/").filter(Boolean);
-    const applicationResource =
-        /^\/plugin-applications\/([^/]+)\/generations\/([^/]+)\/resources\/(.+)$/u.exec(pathname);
-    if (applicationResource !== null) {
-        const applicationId = decodeUrlComponent(applicationResource[1]);
-        const generation = decodeUrlComponent(applicationResource[2]);
-        const resourceParts = applicationResource[3]?.split("/").map(decodeUrlComponent);
-        if (
-            applicationId === undefined ||
-            generation === undefined ||
-            resourceParts === undefined ||
-            resourceParts.some((part) => part === undefined)
-        ) {
-            return undefined;
+    const appOperation =
+        /^\/plugin-apps\/([^/]+)\/generations\/([^/]+)\/(resources\/read|tools\/call|extensions\/io\.slopus\.happy\/storage\/(get|set|delete|list))$/u.exec(
+            pathname,
+        );
+    if (appOperation !== null) {
+        const appId = decodeUrlComponent(appOperation[1]);
+        const generation = decodeUrlComponent(appOperation[2]);
+        if (appId === undefined || generation === undefined) return undefined;
+        if (appOperation[3] === "resources/read") {
+            return { appId, generation, name: "plugin-app-resource-read" };
         }
-        return {
-            applicationId,
-            generation,
-            name: "plugin-application-resource",
-            resourcePath: resourceParts.join("/"),
-        };
-    }
-    const applicationAction =
-        /^\/plugin-applications\/([^/]+)\/generations\/([^/]+)\/actions\/([^/]+)$/u.exec(pathname);
-    if (applicationAction !== null) {
-        const applicationId = decodeUrlComponent(applicationAction[1]);
-        const generation = decodeUrlComponent(applicationAction[2]);
-        const action = decodeUrlComponent(applicationAction[3]);
-        if (applicationId === undefined || generation === undefined || action === undefined) {
-            return undefined;
+        if (appOperation[3] === "tools/call") {
+            return { appId, generation, name: "plugin-app-tool-call" };
         }
-        return { action, applicationId, generation, name: "plugin-application-action" };
+        const operation = appOperation[4] as "delete" | "get" | "list" | "set" | undefined;
+        if (operation === undefined) return undefined;
+        return { appId, generation, name: "plugin-app-storage", operation };
     }
     if (
         globalParts.length === 3 &&
@@ -2899,23 +2938,19 @@ function decodeUrlComponent(value: string | undefined): string | undefined {
     }
 }
 
-function resourceContentType(mediaType: string): string {
-    return mediaType.startsWith("text/") || mediaType === "application/json"
-        ? `${mediaType}; charset=utf-8`
-        : mediaType;
-}
-
-function sendPluginApplicationError(response: ServerResponse, error: unknown): void {
-    if (error instanceof PluginApplicationStaleGenerationError) {
-        sendJson(response, 409, { error: error.message });
-        return;
-    }
-    if (error instanceof PluginApplicationNotFoundError) {
-        sendJson(response, 404, { error: error.message });
-        return;
-    }
-    if (error instanceof PluginApplicationActionError) {
-        sendJson(response, 502, { error: error.message });
+function sendPluginAppError(response: ServerResponse, error: unknown): void {
+    if (error instanceof PluginAppError) {
+        const status =
+            error.code === "stale_generation"
+                ? 409
+                : error.code === "plugin_not_running" || error.code === "tool_not_found"
+                  ? 404
+                  : error.code === "storage_full"
+                    ? 507
+                    : error.code === "timeout"
+                      ? 504
+                      : 400;
+        sendJson(response, status, { error: { code: error.code, message: error.message } });
         return;
     }
     throw error;
@@ -2966,7 +3001,9 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "debug-inspector") return request.method === "POST";
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
-    if (route.name === "plugin-application-action") return request.method === "POST";
+    if (route.name === "plugin-app-tool-call" || route.name === "plugin-app-storage") {
+        return request.method === "POST";
+    }
     if (route.name === "secret-registrations") return request.method === "POST";
     if (route.name === "secret-registration") return request.method === "DELETE";
     if (route.name === "messages" && route.sessionId === undefined) {

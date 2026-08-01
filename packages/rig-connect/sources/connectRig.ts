@@ -21,12 +21,12 @@ import type {
 } from "./ProviderUsageElement.js";
 import { ProviderUsageStore } from "./ProviderUsageStore.js";
 import type {
-    LoadedPluginApplicationResource,
     LocalPlugin,
-    PluginApplication,
+    PluginApp,
     PluginsState,
+    ReadPluginAppResourceResult,
 } from "./PluginElement.js";
-import { PluginStore } from "./PluginElement.js";
+import { PluginAppRequestError, PluginStore } from "./PluginElement.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -74,13 +74,37 @@ const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
 const DEFAULT_PROVIDER_USAGE_REFRESH_MS = 60_000;
 const GIT_WATCH_RENEWAL_MS = 4 * 60 * 1_000;
 const GIT_WATCH_RETRY_MS = 5_000;
-const MAXIMUM_PLUGIN_APPLICATION_ACTION_REQUEST_BYTES = 1024 * 1024;
-const MAXIMUM_PLUGIN_APPLICATION_ACTION_RESPONSE_BYTES = 1024 * 1024;
-const MAXIMUM_PLUGIN_APPLICATION_RESOURCE_BYTES = 256 * 1024;
-const pluginApplicationActionResponseSchema = Type.Object(
+const MAXIMUM_PLUGIN_APP_REQUEST_BYTES = 1024 * 1024;
+const MAXIMUM_PLUGIN_APP_RESPONSE_BYTES = 2 * 1024 * 1024;
+const pluginAppToolResponseSchema = Type.Object(
     { result: Type.Unknown() },
     { additionalProperties: false },
 );
+const pluginAppResourceResponseSchema = Type.Object(
+    {
+        contents: Type.Array(
+            Type.Object(
+                {
+                    blob: Type.Optional(Type.String()),
+                    mimeType: Type.String(),
+                    text: Type.Optional(Type.String()),
+                    uri: Type.String(),
+                },
+                { additionalProperties: false },
+            ),
+        ),
+    },
+    { additionalProperties: false },
+);
+const pluginAppStorageGetResponseSchema = Type.Object(
+    { value: Type.Optional(Type.Unknown()) },
+    { additionalProperties: false },
+);
+const pluginAppStorageListResponseSchema = Type.Object(
+    { keys: Type.Array(Type.String(), { maxItems: 1_024 }) },
+    { additionalProperties: false },
+);
+const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
 
 export interface ConnectRigOptions {
     endpoint: string;
@@ -155,7 +179,7 @@ export interface RigProviderUsageSubscriptionOptions {
 
 export interface RigPluginsSubscriptionOptions {
     onChange: (
-        applications: readonly PluginApplication[],
+        apps: readonly PluginApp[],
         plugins: readonly LocalPlugin[],
         state: PluginsState,
     ) => void;
@@ -202,20 +226,32 @@ export interface RigProviderUsageConnection {
 }
 
 export interface RigPluginsConnection {
-    applications: () => readonly PluginApplication[];
+    apps: () => readonly PluginApp[];
     plugins: () => readonly LocalPlugin[];
     state: () => PluginsState;
-    loadResource: (
-        application: Pick<PluginApplication, "generation" | "id" | "resources">,
-        path: string,
+    readResource: (
+        app: Pick<PluginApp, "generation" | "id" | "resources">,
+        uri: string,
         options?: { signal?: AbortSignal },
-    ) => Promise<LoadedPluginApplicationResource>;
-    invokeAction: (
-        application: Pick<PluginApplication, "actions" | "generation" | "id">,
-        action: string,
-        input: unknown,
+    ) => Promise<ReadPluginAppResourceResult>;
+    callTool: (
+        app: Pick<PluginApp, "generation" | "id" | "tools">,
+        server: string,
+        name: string,
+        argumentsValue: unknown,
         options?: { signal?: AbortSignal },
     ) => Promise<unknown>;
+    storageDelete(app: Pick<PluginApp, "generation" | "id">, key: string): Promise<void>;
+    storageGet(
+        app: Pick<PluginApp, "generation" | "id">,
+        key: string,
+    ): Promise<unknown | undefined>;
+    storageList(app: Pick<PluginApp, "generation" | "id">): Promise<readonly string[]>;
+    storageSet(
+        app: Pick<PluginApp, "generation" | "id">,
+        key: string,
+        value: unknown,
+    ): Promise<void>;
     close: () => void;
 }
 
@@ -598,7 +634,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         for (const subscriber of [...pluginsEntry.subscribers]) {
             if (subscriber.closed) continue;
             subscriber.onChange(
-                pluginsEntry.store.applications(),
+                pluginsEntry.store.apps(),
                 pluginsEntry.store.plugins(),
                 pluginsEntry.store.state(),
             );
@@ -2096,85 +2132,31 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const subscriber: PluginsSubscriber = { ...subscription, closed: false };
         const calls = linkedController(entry.controller.signal);
         entry.subscribers.add(subscriber);
-        subscriber.onChange(entry.store.applications(), entry.store.plugins(), entry.store.state());
+        subscriber.onChange(entry.store.apps(), entry.store.plugins(), entry.store.state());
         startPluginsEntry(entry);
 
-        const loadResource: RigPluginsConnection["loadResource"] = async (
-            application,
-            path,
-            readOptions = {},
+        const postApp = async <TSchema_ extends ReturnType<typeof Type.Object>>(
+            app: Pick<PluginApp, "generation" | "id">,
+            operation: string,
+            bodyValue: unknown,
+            schema: TSchema_,
+            signal?: AbortSignal,
         ) => {
-            if (subscriber.closed) throw new Error("This plugin connection is closed.");
-            const expected = application.resources.find((resource) => resource.path === path);
-            if (expected === undefined) {
-                throw new Error("That resource is not declared by this plugin application.");
-            }
-            if (expected.size > MAXIMUM_PLUGIN_APPLICATION_RESOURCE_BYTES) {
-                throw new Error("That plugin application resource exceeds the host limit.");
-            }
-            const resourcePath = path.split("/").map(encodeURIComponent).join("/");
-            const requestSignal = combinedSignal(calls.controller.signal, readOptions.signal);
-            try {
-                const response = await request(
-                    endpointUrl(
-                        options.endpoint,
-                        `plugin-applications/${encodeURIComponent(application.id)}/generations/${encodeURIComponent(application.generation)}/resources/${resourcePath}`,
-                    ),
-                    {
-                        headers: {
-                            accept: expected.mediaType,
-                            authorization: `Bearer ${options.token}`,
-                        },
-                        signal: requestSignal.signal,
-                    },
-                );
-                const body = await readBoundedResponseBytes(
-                    response,
-                    MAXIMUM_PLUGIN_APPLICATION_RESOURCE_BYTES,
-                );
-                if (!response.ok) throw responseError(response.status, body);
-                const mediaType = response.headers.get("content-type")?.split(";", 1)[0]?.trim();
-                if (mediaType !== expected.mediaType) {
-                    throw new Error("Rig returned a different plugin resource type than declared.");
-                }
-                if (body.byteLength !== expected.size) {
-                    throw new Error("Rig returned a different plugin resource size than declared.");
-                }
-                return { body, mediaType: expected.mediaType };
-            } finally {
-                requestSignal.detach();
-            }
-        };
-
-        const invokeAction: RigPluginsConnection["invokeAction"] = async (
-            application,
-            action,
-            input,
-            invokeOptions = {},
-        ) => {
-            if (subscriber.closed) throw new Error("This plugin connection is closed.");
-            if (!application.actions.includes(action)) {
-                throw new Error("That action is not declared by this plugin application.");
-            }
             let body: string;
             try {
-                if (JSON.stringify(input) === undefined) throw new Error();
-                body = JSON.stringify({ input });
+                body = JSON.stringify(bodyValue);
             } catch {
-                throw new Error("Plugin application action input must be JSON serializable.");
+                throw new Error("MCP App input must be JSON serializable.");
             }
-            if (
-                new TextEncoder().encode(body).byteLength >
-                MAXIMUM_PLUGIN_APPLICATION_ACTION_REQUEST_BYTES
-            ) {
-                throw new Error("Plugin application action input exceeds the host limit.");
+            if (new TextEncoder().encode(body).byteLength > MAXIMUM_PLUGIN_APP_REQUEST_BYTES) {
+                throw new Error("MCP App input exceeds the host limit.");
             }
-            const requestSignal = combinedSignal(calls.controller.signal, invokeOptions.signal);
+            const requestSignal = combinedSignal(calls.controller.signal, signal);
             try {
                 const response = await request(
                     endpointUrl(
                         options.endpoint,
-                        `plugin-applications/${encodeURIComponent(application.id)}/generations/${encodeURIComponent(application.generation)}/actions/${encodeURIComponent(action)}`,
+                        `plugin-apps/${encodeURIComponent(app.id)}/generations/${encodeURIComponent(app.generation)}/${operation}`,
                     ),
                     {
                         body,
@@ -2189,24 +2171,59 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 );
                 const bytes = await readBoundedResponseBytes(
                     response,
-                    MAXIMUM_PLUGIN_APPLICATION_ACTION_RESPONSE_BYTES,
+                    MAXIMUM_PLUGIN_APP_RESPONSE_BYTES,
                 );
                 if (!response.ok) throw responseError(response.status, bytes);
-                try {
-                    return Value.Decode(
-                        pluginApplicationActionResponseSchema,
-                        JSON.parse(new TextDecoder().decode(bytes)) as unknown,
-                    ).result;
-                } catch {
-                    throw new Error("Rig returned an invalid plugin application action response.");
-                }
+                return Value.Decode(schema, JSON.parse(new TextDecoder().decode(bytes)) as unknown);
             } finally {
                 requestSignal.detach();
             }
         };
 
+        const readResource: RigPluginsConnection["readResource"] = async (
+            app,
+            uri,
+            readOptions = {},
+        ) => {
+            if (subscriber.closed) throw new Error("This plugin connection is closed.");
+            const expected = app.resources.find((resource) => resource.uri === uri);
+            if (expected === undefined) {
+                throw new Error("That resource is not declared by this MCP App.");
+            }
+            return postApp(
+                app,
+                "resources/read",
+                { uri },
+                pluginAppResourceResponseSchema,
+                readOptions.signal,
+            );
+        };
+
+        const callTool: RigPluginsConnection["callTool"] = async (
+            app,
+            server,
+            name,
+            argumentsValue,
+            invokeOptions = {},
+        ) => {
+            if (subscriber.closed) throw new Error("This plugin connection is closed.");
+            if (!app.tools.some((tool) => tool.server === server && tool.name === name)) {
+                throw new Error("That tool is not declared for this MCP App.");
+            }
+            return (
+                await postApp(
+                    app,
+                    "tools/call",
+                    { arguments: argumentsValue, name, server },
+                    pluginAppToolResponseSchema,
+                    invokeOptions.signal,
+                )
+            ).result;
+        };
+
         return {
-            applications: () => entry.store.applications(),
+            apps: () => entry.store.apps(),
+            callTool,
             close: () => {
                 if (subscriber.closed) return;
                 subscriber.closed = true;
@@ -2219,10 +2236,49 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     pluginsEntry = undefined;
                 }
             },
-            invokeAction,
-            loadResource,
             plugins: () => entry.store.plugins(),
+            readResource,
             state: () => entry.store.state(),
+            storageDelete: async (app, key) => {
+                if (subscriber.closed) throw new Error("This plugin connection is closed.");
+                await postApp(
+                    app,
+                    "extensions/io.slopus.happy/storage/delete",
+                    { key },
+                    emptyResponseSchema,
+                );
+            },
+            storageGet: async (app, key) => {
+                if (subscriber.closed) throw new Error("This plugin connection is closed.");
+                return (
+                    await postApp(
+                        app,
+                        "extensions/io.slopus.happy/storage/get",
+                        { key },
+                        pluginAppStorageGetResponseSchema,
+                    )
+                ).value;
+            },
+            storageList: async (app) => {
+                if (subscriber.closed) throw new Error("This plugin connection is closed.");
+                return (
+                    await postApp(
+                        app,
+                        "extensions/io.slopus.happy/storage/list",
+                        {},
+                        pluginAppStorageListResponseSchema,
+                    )
+                ).keys;
+            },
+            storageSet: async (app, key, value) => {
+                if (subscriber.closed) throw new Error("This plugin connection is closed.");
+                await postApp(
+                    app,
+                    "extensions/io.slopus.happy/storage/set",
+                    { key, value },
+                    emptyResponseSchema,
+                );
+            },
         };
     };
 
@@ -3466,12 +3522,17 @@ async function readBoundedResponseBytes(
 function responseError(status: number, body: Uint8Array): Error {
     const text = new TextDecoder().decode(body);
     try {
-        const payload = JSON.parse(text) as { error?: unknown };
+        const payload = JSON.parse(text) as {
+            error?: { code?: unknown; message?: unknown } | string;
+        };
         if (typeof payload.error === "string") return new Error(payload.error);
+        if (typeof payload.error?.code === "string" && typeof payload.error.message === "string") {
+            return new PluginAppRequestError(payload.error.code, status, payload.error.message);
+        }
     } catch {
         // A non-JSON refusal still gets a deterministic host-facing fallback.
     }
-    return new Error(`Rig rejected the plugin application request (${String(status)}).`);
+    return new Error(`Rig rejected the MCP App request (${String(status)}).`);
 }
 
 class MutationHttpError extends Error {

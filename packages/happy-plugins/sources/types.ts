@@ -193,6 +193,22 @@ export type HappyMcpInputSchema = Static<typeof happyMcpInputSchemaSchema>;
 
 export const happyMcpToolRegistrationSchema = Type.Object(
     {
+        _meta: Type.Optional(
+            Type.Object(
+                {
+                    ui: Type.Object(
+                        {
+                            visibility: Type.Array(
+                                Type.Union([Type.Literal("model"), Type.Literal("app")]),
+                                { maxItems: 2, minItems: 1, uniqueItems: true },
+                            ),
+                        },
+                        exact,
+                    ),
+                },
+                exact,
+            ),
+        ),
         description: Type.String({ minLength: 1 }),
         inputSchema: happyMcpInputSchemaSchema,
         name: nonEmptyText,
@@ -248,6 +264,10 @@ export interface HappyMcpTool<TInputSchema extends TSchema = TSchema> {
     readonly description: string;
     readonly inputSchema: TInputSchema;
     readonly name: string;
+    /**
+     * Official MCP Apps visibility. Omit it to make the tool available to both models and apps.
+     */
+    readonly visibility?: readonly ("app" | "model")[];
     execute(
         input: Static<TInputSchema>,
         context: HappyMcpToolContext,
@@ -271,13 +291,15 @@ export interface HappyMcpServer {
 }
 export type HappyMcpServerStatus = "closed" | "connected" | "reconnecting";
 
-export const HAPPY_PLUGIN_MAX_APPLICATIONS = 8;
-export const HAPPY_PLUGIN_MAX_APPLICATION_ACTIONS = 32;
-export const HAPPY_PLUGIN_MAX_APPLICATION_RESOURCES = 64;
+export const HAPPY_PLUGIN_MAX_APPS = 8;
+export const HAPPY_PLUGIN_MAX_APP_RESOURCES = 64;
 export const HAPPY_PLUGIN_MAX_RESOURCE_BYTES = 256 * 1024;
-export const HAPPY_PLUGIN_MAX_APPLICATION_RESOURCE_BYTES = 1024 * 1024;
+export const HAPPY_PLUGIN_MAX_APP_BYTES = 1024 * 1024;
+export const HAPPY_PLUGIN_MAX_STORAGE_KEYS = 1_024;
+export const HAPPY_PLUGIN_MAX_STORAGE_VALUE_BYTES = 64 * 1024;
+export const HAPPY_PLUGIN_MAX_STORAGE_BYTES = 5 * 1024 * 1024;
 
-export const happyPluginApplicationIdSchema = Type.String({
+export const happyPluginAppIdSchema = Type.String({
     maxLength: 64,
     minLength: 1,
     pattern: "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$",
@@ -286,6 +308,9 @@ export const happyPluginResourcePathSchema = Type.String({
     maxLength: 160,
     minLength: 1,
     pattern: "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[A-Za-z0-9][A-Za-z0-9._/-]*$",
+});
+export const happyPluginResourceUriSchema = Type.String({
+    pattern: "^ui://[^/?#]+/[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?/[A-Za-z0-9][A-Za-z0-9._/-]*$",
 });
 export const happyPluginResourceMediaTypeSchema = Type.Union([
     Type.Literal("application/json"),
@@ -300,18 +325,7 @@ export const happyPluginResourceMediaTypeSchema = Type.Union([
 ]);
 export type HappyPluginResourceMediaType = Static<typeof happyPluginResourceMediaTypeSchema>;
 
-export const happyPluginApplicationResourceSchema = Type.Object(
-    {
-        body: Type.String({ maxLength: Math.ceil((HAPPY_PLUGIN_MAX_RESOURCE_BYTES * 4) / 3) + 4 }),
-        encoding: Type.Union([Type.Literal("base64"), Type.Literal("utf8")]),
-        mediaType: happyPluginResourceMediaTypeSchema,
-        path: happyPluginResourcePathSchema,
-    },
-    exact,
-);
-export type HappyPluginApplicationResource = Static<typeof happyPluginApplicationResourceSchema>;
-
-export const happyPluginApplicationNavigationSchema = Type.Object(
+export const happyPluginAppSidebarSchema = Type.Object(
     {
         icon: Type.Optional(happyPluginResourcePathSchema),
         label: Type.String({ maxLength: 64, minLength: 1 }),
@@ -319,42 +333,72 @@ export const happyPluginApplicationNavigationSchema = Type.Object(
     },
     exact,
 );
-export type HappyPluginApplicationNavigation = Static<
-    typeof happyPluginApplicationNavigationSchema
->;
+export type HappyPluginAppSidebar = Static<typeof happyPluginAppSidebarSchema>;
 
-export const happyPluginApplicationRegistrationSchema = Type.Object(
+export const happyPluginAppManifestSchema = Type.Object(
     {
-        actions: Type.Array(happyPluginApplicationIdSchema, {
-            maxItems: HAPPY_PLUGIN_MAX_APPLICATION_ACTIONS,
-            uniqueItems: true,
-        }),
-        entry: happyPluginResourcePathSchema,
-        id: happyPluginApplicationIdSchema,
-        navigation: happyPluginApplicationNavigationSchema,
-        resources: Type.Array(happyPluginApplicationResourceSchema, {
-            maxItems: HAPPY_PLUGIN_MAX_APPLICATION_RESOURCES,
-            minItems: 1,
-        }),
+        id: happyPluginAppIdSchema,
+        page: happyPluginResourcePathSchema,
+        root: happyPluginResourcePathSchema,
+        sidebar: happyPluginAppSidebarSchema,
         title: Type.String({ maxLength: 128, minLength: 1 }),
     },
     exact,
 );
-export type HappyPluginApplicationRegistration = Static<
-    typeof happyPluginApplicationRegistrationSchema
->;
+export type HappyPluginAppManifest = Static<typeof happyPluginAppManifestSchema>;
 
-export const happyPluginApplicationResourceSummarySchema = Type.Object(
+export const happyPluginManifestSchema = Type.Object(
     {
-        mediaType: happyPluginResourceMediaTypeSchema,
-        path: happyPluginResourcePathSchema,
-        size: Type.Integer({ maximum: HAPPY_PLUGIN_MAX_RESOURCE_BYTES, minimum: 0 }),
+        apps: Type.Optional(
+            Type.Array(happyPluginAppManifestSchema, {
+                maxItems: HAPPY_PLUGIN_MAX_APPS,
+                uniqueItems: true,
+            }),
+        ),
+        description: Type.String({ minLength: 1 }),
+        entry: Type.String({ pattern: "^(?!.*\\.d\\.ts$).+\\.ts$" }),
+        icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
+        name: Type.String({ minLength: 1 }),
     },
     exact,
 );
-export type HappyPluginApplicationResourceSummary = Static<
-    typeof happyPluginApplicationResourceSummarySchema
->;
+export type HappyPluginManifest = Static<typeof happyPluginManifestSchema>;
+
+export const happyPluginAppResourceSummarySchema = Type.Object(
+    {
+        mimeType: Type.String(),
+        path: happyPluginResourcePathSchema,
+        size: Type.Integer({ maximum: HAPPY_PLUGIN_MAX_RESOURCE_BYTES, minimum: 0 }),
+        uri: happyPluginResourceUriSchema,
+    },
+    exact,
+);
+export type HappyPluginAppResourceSummary = Static<typeof happyPluginAppResourceSummarySchema>;
+
+export const happyPluginAppToolSummarySchema = Type.Object(
+    {
+        _meta: Type.Object(
+            {
+                ui: Type.Object(
+                    {
+                        resourceUri: Type.String({ pattern: "^ui://" }),
+                        visibility: Type.Array(
+                            Type.Union([Type.Literal("model"), Type.Literal("app")]),
+                            { maxItems: 2, minItems: 1, uniqueItems: true },
+                        ),
+                    },
+                    exact,
+                ),
+            },
+            exact,
+        ),
+        description: nonEmptyText,
+        name: nonEmptyText,
+        server: nonEmptyText,
+    },
+    exact,
+);
+export type HappyPluginAppToolSummary = Static<typeof happyPluginAppToolSummarySchema>;
 
 /**
  * One host-visible application.
@@ -362,108 +406,25 @@ export type HappyPluginApplicationResourceSummary = Static<
  * `id` is stable across restarts and replacements. `generation` is deliberately not: every plugin
  * process receives a new opaque value so an old renderer cannot address replacement code.
  */
-export const happyPluginApplicationContributionSchema = Type.Object(
+export const happyPluginAppContributionSchema = Type.Object(
     {
-        actions: Type.Array(happyPluginApplicationIdSchema, {
-            maxItems: HAPPY_PLUGIN_MAX_APPLICATION_ACTIONS,
-            uniqueItems: true,
-        }),
-        applicationId: happyPluginApplicationIdSchema,
-        entry: happyPluginResourcePathSchema,
+        appId: happyPluginAppIdSchema,
         generation: nonEmptyText,
         id: nonEmptyText,
-        navigation: happyPluginApplicationNavigationSchema,
+        page: happyPluginResourcePathSchema,
         pluginFolder: nonEmptyText,
-        resources: Type.Array(happyPluginApplicationResourceSummarySchema, {
-            maxItems: HAPPY_PLUGIN_MAX_APPLICATION_RESOURCES,
+        resourceUri: happyPluginResourceUriSchema,
+        resources: Type.Array(happyPluginAppResourceSummarySchema, {
+            maxItems: HAPPY_PLUGIN_MAX_APP_RESOURCES,
             minItems: 1,
         }),
+        sidebar: happyPluginAppSidebarSchema,
         title: Type.String({ maxLength: 128, minLength: 1 }),
+        tools: Type.Array(happyPluginAppToolSummarySchema),
     },
     exact,
 );
-export type HappyPluginApplicationContribution = Static<
-    typeof happyPluginApplicationContributionSchema
->;
-
-export const registerHappyPluginApplicationResponseSchema = Type.Object(
-    {
-        generation: nonEmptyText,
-        registrationId: nonEmptyText,
-    },
-    exact,
-);
-export type RegisterHappyPluginApplicationResponse = Static<
-    typeof registerHappyPluginApplicationResponseSchema
->;
-
-export const happyPluginApplicationActionRequestEventSchema = Type.Object(
-    {
-        action: happyPluginApplicationIdSchema,
-        input: Type.Unknown(),
-        requestId: nonEmptyText,
-        type: Type.Literal("request"),
-    },
-    exact,
-);
-export const happyPluginApplicationActionCancelEventSchema = Type.Object(
-    {
-        requestId: nonEmptyText,
-        type: Type.Literal("cancel"),
-    },
-    exact,
-);
-export const happyPluginApplicationEventSchema = Type.Union([
-    happyPluginApplicationActionRequestEventSchema,
-    happyPluginApplicationActionCancelEventSchema,
-]);
-export type HappyPluginApplicationEvent = Static<typeof happyPluginApplicationEventSchema>;
-
-export const happyPluginApplicationActionCompletionSchema = Type.Union([
-    Type.Object({ result: Type.Unknown() }, exact),
-    Type.Object({ error: nonEmptyText }, exact),
-]);
-export type HappyPluginApplicationActionCompletion = Static<
-    typeof happyPluginApplicationActionCompletionSchema
->;
-
-export interface HappyPluginApplicationActionContext {
-    /** Aborted when the host request ends or this plugin generation is retired. */
-    readonly signal: AbortSignal;
-}
-
-export interface HappyPluginApplicationAction<
-    TInputSchema extends TSchema = TSchema,
-    TOutputSchema extends TSchema = TSchema,
-> {
-    readonly inputSchema: TInputSchema;
-    readonly name: string;
-    readonly outputSchema: TOutputSchema;
-    execute(
-        input: Static<TInputSchema>,
-        context: HappyPluginApplicationActionContext,
-    ): Static<TOutputSchema> | Promise<Static<TOutputSchema>>;
-}
-
-export interface StartHappyPluginApplicationOptions {
-    actions?: readonly HappyPluginApplicationAction[];
-    entry: string;
-    id: string;
-    navigation: HappyPluginApplicationNavigation;
-    resources: readonly HappyPluginApplicationResource[];
-    title: string;
-}
-
-export interface HappyPluginApplication {
-    readonly failure: string | undefined;
-    /** Changes only when the owning plugin process changes. */
-    readonly generation: string;
-    readonly id: string;
-    readonly registrationId: string;
-    readonly status: HappyPluginApplicationStatus;
-    close(): Promise<void>;
-}
-export type HappyPluginApplicationStatus = "closed" | "connected" | "reconnecting";
+export type HappyPluginAppContribution = Static<typeof happyPluginAppContributionSchema>;
 
 export const happyProviderUsageWindowSchema = Type.Object(
     {
@@ -583,12 +544,6 @@ export interface HappyPluginClient {
     readonly sessions: {
         create(input: CreateSessionInput): Promise<HappySession>;
         list(): Promise<readonly HappySession[]>;
-    };
-    /** Register local applications rendered by the Happy host. */
-    readonly ui: {
-        startApplication(
-            options: StartHappyPluginApplicationOptions,
-        ): Promise<HappyPluginApplication>;
     };
     /** Inspect and mutate Happy-managed Git workspaces. */
     readonly workspaces: {

@@ -7,6 +7,8 @@
  * type-check rather than a runtime surprise.
  */
 
+import { Type } from "@sinclair/typebox";
+
 export type EventId = string;
 export type MutationId = string;
 
@@ -1163,40 +1165,119 @@ export interface PresenceSnapshot {
     since: number;
 }
 
-/** One plugin installed on this machine, as a client should show it. */
-export type PluginResourceMediaType =
-    | "application/json"
-    | "font/woff2"
-    | "image/jpeg"
-    | "image/png"
-    | "image/svg+xml"
-    | "image/webp"
-    | "text/css"
-    | "text/html"
-    | "text/javascript";
-
-export interface PluginApplicationContribution {
-    actions: readonly string[];
-    applicationId: string;
-    entry: string;
+export interface PluginAppContribution {
+    appId: string;
     generation: string;
     id: string;
-    navigation: {
+    page: string;
+    pluginFolder: string;
+    resourceUri: string;
+    resources: readonly {
+        mimeType: string;
+        path: string;
+        size: number;
+        uri: string;
+    }[];
+    sidebar: {
         icon?: string;
         label: string;
         order: number;
     };
-    pluginFolder: string;
-    resources: readonly {
-        mediaType: PluginResourceMediaType;
-        path: string;
-        size: number;
-    }[];
     title: string;
+    tools: readonly {
+        _meta: {
+            ui: {
+                resourceUri: string;
+                visibility: readonly ("app" | "model")[];
+            };
+        };
+        description: string;
+        name: string;
+        server: string;
+    }[];
 }
 
+const exact = { additionalProperties: false } as const;
+const pluginResourcePathSchema = Type.String({
+    maxLength: 160,
+    minLength: 1,
+    pattern: "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*\\\\)[A-Za-z0-9][A-Za-z0-9._/-]*$",
+});
+const pluginResourceUriSchema = Type.String({
+    pattern: "^ui://[^/?#]+/[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?/[A-Za-z0-9][A-Za-z0-9._/-]*$",
+});
+
+/**
+ * Browser-safe runtime boundary for the locally re-declared plugin catalog.
+ *
+ * `protocolConformance.test.ts` pins the corresponding TypeScript interface to Rig's daemon
+ * declaration. This schema deliberately lives here rather than importing the Node-oriented plugin
+ * SDK into the browser client.
+ */
+export const pluginAppContributionSchema = Type.Object(
+    {
+        appId: Type.String({
+            maxLength: 64,
+            minLength: 1,
+            pattern: "^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$",
+        }),
+        generation: Type.String({ minLength: 1 }),
+        id: Type.String({ minLength: 1 }),
+        page: pluginResourcePathSchema,
+        pluginFolder: Type.String({ minLength: 1 }),
+        resourceUri: pluginResourceUriSchema,
+        resources: Type.Array(
+            Type.Object(
+                {
+                    mimeType: Type.String(),
+                    path: pluginResourcePathSchema,
+                    size: Type.Integer({ maximum: 256 * 1024, minimum: 0 }),
+                    uri: pluginResourceUriSchema,
+                },
+                exact,
+            ),
+            { maxItems: 64, minItems: 1 },
+        ),
+        sidebar: Type.Object(
+            {
+                icon: Type.Optional(pluginResourcePathSchema),
+                label: Type.String({ maxLength: 64, minLength: 1 }),
+                order: Type.Integer({ maximum: 1_000, minimum: -1_000 }),
+            },
+            exact,
+        ),
+        title: Type.String({ maxLength: 128, minLength: 1 }),
+        tools: Type.Array(
+            Type.Object(
+                {
+                    _meta: Type.Object(
+                        {
+                            ui: Type.Object(
+                                {
+                                    resourceUri: pluginResourceUriSchema,
+                                    visibility: Type.Array(
+                                        Type.Union([Type.Literal("model"), Type.Literal("app")]),
+                                        { maxItems: 2, minItems: 1, uniqueItems: true },
+                                    ),
+                                },
+                                exact,
+                            ),
+                        },
+                        exact,
+                    ),
+                    description: Type.String({ minLength: 1 }),
+                    name: Type.String({ minLength: 1 }),
+                    server: Type.String({ minLength: 1 }),
+                },
+                exact,
+            ),
+        ),
+    },
+    exact,
+);
+
 export interface PluginSummary {
-    applications: readonly PluginApplicationContribution[];
+    apps: readonly PluginAppContribution[];
     /** The folder the plugin writes to, which the user can open. */
     dataDirectory: string;
     description: string;

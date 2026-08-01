@@ -10,6 +10,7 @@ const PLUGIN_ICON = new Uint8Array(
     ),
 );
 const PLUGIN_TOOL_NAME = "mcp__Project_Tools___Catalog__list_projects";
+const APP_ONLY_TOOL_NAME = "mcp__Project_Tools___Catalog__refresh_app";
 const PLUGIN_MANIFEST = `${JSON.stringify(
     {
         description: "Contributes a project catalog tool.",
@@ -39,6 +40,15 @@ const PLUGIN_SOURCE = [
     '                        { text: JSON.stringify(projects), type: "text" },',
     "                    ],",
     "                };",
+    "            },",
+    "        }),",
+    "        defineMcpTool({",
+    '            description: "Refresh only the mounted MCP App.",',
+    "            inputSchema: Type.Object({}),",
+    '            name: "refresh_app",',
+    '            visibility: ["app"],',
+    "            execute() {",
+    '                return { content: [{ text: "refreshed", type: "text" }] };',
     "            },",
     "        }),",
     "    ],",
@@ -87,6 +97,7 @@ describe("plugin MCP contributions", () => {
                 }
                 if (callIndex === 2) {
                     expect(toolNames).toContain(PLUGIN_TOOL_NAME);
+                    expect(toolNames).not.toContain(APP_ONLY_TOOL_NAME);
                     return {
                         content: [
                             {
@@ -165,9 +176,9 @@ describe("plugin MCP contributions", () => {
                     };
                 }
                 if (callIndex === 0) {
-                    expect(request.context.tools?.map((tool) => tool.name)).toContain(
-                        PLUGIN_TOOL_NAME,
-                    );
+                    const toolNames = request.context.tools?.map((tool) => tool.name) ?? [];
+                    expect(toolNames).toContain(PLUGIN_TOOL_NAME);
+                    expect(toolNames).not.toContain(APP_ONLY_TOOL_NAME);
                     return {
                         content: [
                             {

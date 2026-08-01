@@ -9,13 +9,11 @@ export { installPluginFromPath, type InstalledPlugin } from "./installPluginFrom
 export { PluginBuildError } from "./PluginBuildError.js";
 export { PluginLog } from "./PluginLog.js";
 export {
-    PluginApplicationActionError,
-    PluginApplicationNotFoundError,
-    PluginApplicationRegistry,
-    PluginApplicationStaleGenerationError,
-    type PluginApplicationConnection,
-    type PluginApplicationResource,
-} from "./PluginApplicationRegistry.js";
+    PluginAppError,
+    PluginAppRegistry,
+    type PluginAppErrorCode,
+    type PluginAppResource,
+} from "./PluginAppRegistry.js";
 export {
     PluginMcpRegistry,
     type PluginMcpConnection,

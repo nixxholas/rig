@@ -51,11 +51,28 @@ interface PluginMcpOwner {
 }
 
 export interface PluginMcpConnection {
+    readonly generation: string;
     attach(registrationId: string, send: (event: HappyMcpEvent) => boolean): () => void;
     close(): void;
     complete(registrationId: string, callId: string, completion: HappyMcpCallCompletion): void;
     register(server: HappyMcpServerRegistration): string;
     unregister(registrationId: string): void;
+}
+
+export class PluginMcpNotRunningError extends Error {
+    readonly code = "plugin_not_running";
+}
+
+export class PluginMcpToolNotFoundError extends Error {
+    readonly code = "tool_not_found";
+}
+
+export class PluginMcpStaleGenerationError extends Error {
+    readonly code = "stale_generation";
+}
+
+export class PluginMcpCallTimeoutError extends Error {
+    readonly code = "timeout";
 }
 
 export interface PluginMcpRegistryOptions {
@@ -72,6 +89,7 @@ export interface PluginMcpRegistryOptions {
 export class PluginMcpRegistry implements McpToolProvider {
     readonly #callTimeoutMs: number;
     readonly #registrations = new Map<string, PluginMcpRegistration>();
+    readonly #listeners = new Set<() => void>();
     #closed = false;
 
     constructor(options: PluginMcpRegistryOptions = {}) {
@@ -94,6 +112,7 @@ export class PluginMcpRegistry implements McpToolProvider {
             return registration;
         };
         return {
+            generation: owner.id,
             attach: (registrationId, send) => {
                 const registration = requireOwned(registrationId);
                 if (registration.active) {
@@ -101,6 +120,7 @@ export class PluginMcpRegistry implements McpToolProvider {
                 }
                 registration.active = true;
                 registration.send = send;
+                this.#notify();
                 let attached = true;
                 return () => {
                     if (!attached) return;
@@ -145,6 +165,7 @@ export class PluginMcpRegistry implements McpToolProvider {
                     pendingCalls: new Map(),
                     server: decoded,
                 });
+                this.#notify();
                 return id;
             },
             unregister: (registrationId) => {
@@ -172,16 +193,74 @@ export class PluginMcpRegistry implements McpToolProvider {
         const tools: AnyDefinedTool[] = [];
         const servers: McpServerSummary[] = [];
         for (const registration of registrations) {
-            for (const tool of registration.server.tools) {
+            const modelTools = registration.server.tools.filter((tool) =>
+                toolVisibility(tool).includes("model"),
+            );
+            for (const tool of modelTools) {
                 tools.push(this.#createTool(registration, tool));
             }
             servers.push({
                 name: displayServerName(registration),
                 status: "connected",
-                toolCount: registration.server.tools.length,
+                toolCount: modelTools.length,
             });
         }
         return { servers, tools };
+    }
+
+    subscribe(listener: () => void): () => void {
+        this.#listeners.add(listener);
+        return () => this.#listeners.delete(listener);
+    }
+
+    listAppTools(folder: string, generation: string) {
+        return this.#activeRegistrations()
+            .filter(
+                (registration) =>
+                    registration.owner.folder === folder && registration.owner.id === generation,
+            )
+            .flatMap((registration) =>
+                registration.server.tools
+                    .filter((tool) => toolVisibility(tool).includes("app"))
+                    .map((tool) => ({
+                        _meta: { ui: { visibility: [...toolVisibility(tool)] } },
+                        description: tool.description,
+                        name: tool.name,
+                        server: registration.server.name,
+                    })),
+            )
+            .sort(
+                (left, right) =>
+                    left.server.localeCompare(right.server) || left.name.localeCompare(right.name),
+            );
+    }
+
+    callAppTool(
+        folder: string,
+        generation: string,
+        serverName: string,
+        toolName: string,
+        input: unknown,
+        signal?: AbortSignal,
+    ): Promise<HappyMcpToolResult> {
+        const samePlugin = this.#activeRegistrations().filter(
+            (registration) => registration.owner.folder === folder,
+        );
+        if (samePlugin.length === 0) {
+            throw new PluginMcpNotRunningError("The plugin is not running.");
+        }
+        const current = samePlugin.filter((registration) => registration.owner.id === generation);
+        if (current.length === 0) {
+            throw new PluginMcpStaleGenerationError("That plugin generation is no longer current.");
+        }
+        const registration = current.find((candidate) => candidate.server.name === serverName);
+        const tool = registration?.server.tools.find(
+            (candidate) => candidate.name === toolName && toolVisibility(candidate).includes("app"),
+        );
+        if (registration === undefined || tool === undefined) {
+            throw new PluginMcpToolNotFoundError("That app tool is not available.");
+        }
+        return this.#invoke(registration, tool.name, input, signal);
     }
 
     close(): Promise<void> {
@@ -304,7 +383,7 @@ export class PluginMcpRegistry implements McpToolProvider {
             const timer = setTimeout(() => {
                 registration.send?.({ callId, type: "cancel" });
                 fail(
-                    new Error(
+                    new PluginMcpCallTimeoutError(
                         `The plugin MCP tool timed out after ${String(this.#callTimeoutMs)}ms.`,
                     ),
                 );
@@ -348,7 +427,18 @@ export class PluginMcpRegistry implements McpToolProvider {
             call.reject(new Error(reason));
         }
         registration.pendingCalls.clear();
+        this.#notify();
     }
+
+    #notify(): void {
+        for (const listener of this.#listeners) listener();
+    }
+}
+
+function toolVisibility(
+    tool: HappyMcpServerRegistration["tools"][number],
+): readonly ("app" | "model")[] {
+    return tool._meta?.ui.visibility ?? ["model", "app"];
 }
 
 function displayServerName(registration: PluginMcpRegistration): string {

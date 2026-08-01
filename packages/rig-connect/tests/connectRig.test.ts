@@ -133,7 +133,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
             since: 0,
         },
         identity: { version: "test" },
-        protocolVersion: 2,
+        protocolVersion: 3,
         projects: [
             {
                 createdAt: 1,
@@ -183,7 +183,7 @@ function liveHello(
     return `event: hello\ndata: ${JSON.stringify({
         cursor,
         gap: options.gap ?? false,
-        protocolVersion: 2,
+        protocolVersion: 3,
         resumed: options.resumed ?? false,
     })}\n\n`;
 }
