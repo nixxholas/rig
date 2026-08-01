@@ -8,5 +8,8 @@ export class Deferred<T> {
             this.resolve = resolve;
             this.reject = reject;
         });
+        // A host failure can reject a pending operation before anything awaits it, so keep the
+        // rejection observed instead of surfacing an unhandled rejection.
+        this.promise.catch(() => undefined);
     }
 }
