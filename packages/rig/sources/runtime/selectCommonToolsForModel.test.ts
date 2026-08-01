@@ -10,6 +10,9 @@ describe("selectCommonToolsForModel", () => {
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
+            "plugin_install",
+            "plugin_uninstall",
+            "plugin_list",
         ]);
     });
 
@@ -18,6 +21,9 @@ describe("selectCommonToolsForModel", () => {
             "wait",
             "wait_until",
             "get_provider_usage",
+            "plugin_install",
+            "plugin_uninstall",
+            "plugin_list",
         ]);
     });
 });
