@@ -16,6 +16,11 @@ the plumbing. What we need first is a library with an API good enough to build
 an application against, and a runtime that starts it, isolates it, keeps its
 logs, and shuts it down.
 
+The idea behind all of it: starting a plugin is simpler than building some
+elaborate orchestration system. It is far easier to tell a model to write a
+plugin that does exactly what is needed than to try to balance everything
+with prompts.
+
 ## The library
 
 A package — `happy-plugins` — is the plugin author's whole view of Rig. It
@@ -53,6 +58,59 @@ The daemon tracks each plugin's logs and makes them viewable, and it looks
 good in the interface. A plugin author debugging their code should reach
 for Rig's log view, not for a container log.
 
+## Startup and readiness
+
+A plugin does not just start — it reports back. On start, and on install, it
+has a window of time — say ten seconds — to come up, register its name and
+its tools, put its hooks in place, and declare itself ready. Rig records what
+the plugin registered. A plugin that does not report ready in time did not
+start.
+
+The daemon waits for all plugins to finish starting before it begins doing
+anything. All plugins start concurrently — one slow or broken plugin must not
+serialize the others or push the daemon into timeouts.
+
+A plugin also has a status: a string it can write at any time, shown in the
+interface — working, loading, will be ready soon, broken. The status is the
+plugin's own words about itself.
+
+## Events
+
+Plugins can subscribe to events: a session started, a session ended, and a
+large list beyond that. These events are most likely the same things we put
+into durable events — one stream, not a parallel invention.
+
+A plugin can register a hook at registration time, simply reacting to an
+event, and it can subscribe and unsubscribe dynamically while it runs. There
+is one synthetic event — OnReady — fired when the daemon has started and
+every plugin has initialized.
+
+## Dependencies
+
+Plugins can call each other, but only through declared dependencies. A plugin
+that wants to create documents through a documents plugin must declare that
+it depends on it. It does not install if the dependency is not installed, and
+it does not start if the dependency is not running. Failure cascades: if a
+dependency fails to start, everything depending on it does not start either,
+down the chain.
+
+None of this blocks anyone else's startup. All plugins launch at the same
+time; dependency failure takes out its own chain and nothing more.
+
+## Settings
+
+A plugin can have settings: key-value pairs, each with a type. For now the
+types are text and secret — nothing more yet. Some settings are required and
+the plugin does not start until they are set; others are optional. All of it
+is described in the plugin's JSON manifest.
+
+## Docker
+
+A plugin can request Docker access in its manifest, and then it gets the
+Docker socket, on any platform. Since a plugin itself is just JavaScript, the
+strong recommendation is: anything heavy or unusual it needs to run should go
+into containers, not onto the system.
+
 ## Installation
 
 A plugin is installed into a folder. Not into a private, hidden internal
@@ -80,14 +138,23 @@ Jobs-era iPhone icons.
 
 The first plugin point is MCP. A plugin can start an MCP server and
 expose whatever tools it wants — an MCP for computer use, for instance. That is
-a simple thing to build and immediately useful.
+a simple thing to build and immediately useful. One plugin has exactly one
+MCP server, no more. Its tools are named `mcp_<plugin>_<tool>` — the prefix,
+then the plugin's name, then the tool.
 
 Those MCP servers get forwarded into projects. For now we simply offer them
 everywhere and leave it up to the model to work with them sensibly.
 
-The second plugin point is UI. A plugin can contribute an interface that
-drives a browser. In effect these plugins are MCP Apps: the plugin returns
-static HTML and Rig embeds it.
+The second plugin point is UI. A plugin can contribute a static, built web
+application, and Rig serves it as static files. The application gets an API
+it can use to talk to the system from inside. It can call its own plugin's
+MCP, and the MCPs of the plugins it depends on — from the UI, and from plugin
+code alike.
+
+The kinds of applications we mean: a kanban board, usage tracking, a
+Linear-style triage of incoming tasks, a monitoring system. A GitHub plugin
+that puts a watcher on repositories and says when something broke. Things
+like that.
 
 The one thing that matters about embedding is that it is instant. The user
 presses a button and the application is mounted at that same moment. Not an
@@ -124,13 +191,35 @@ whoever is building a plugin inside Rig. Done when an author gets the skill
 without asking for it and the icons produced across plugins look like they
 belong together.
 
-**B. MCP servers.** A plugin starts an MCP server; Rig forwards its tools
-into projects, everywhere by default. Done when a plugin-provided MCP tool
-can be called by a model in a normal session.
+**B. Readiness and status.** The startup handshake: a plugin gets its window
+to register tools and hooks and report ready, the daemon waits for all
+plugins before doing anything, all of them starting concurrently, and the
+plugin's status string shows in the interface. Done when a slow plugin times
+out cleanly without delaying the others, and the user can see each plugin's
+readiness and status.
 
-**C. UI.** A plugin contributes static HTML that Rig mounts instantly on a
-button press, isolated properly under Electron. Done when pressing the button
-shows the plugin's application with no loading step.
+**C. MCP servers.** A plugin starts its one MCP server; Rig forwards its
+tools — named `mcp_<plugin>_<tool>` — into projects, everywhere by default.
+Done when a plugin-provided MCP tool can be called by a model in a normal
+session.
+
+**D. Events.** Subscription to the durable-event stream, hooks registered at
+registration, dynamic subscribe and unsubscribe, and the synthetic OnReady.
+Done when a plugin reacts to a session starting and ending, and OnReady fires
+once after the daemon and all plugins are up.
+
+**E. Dependencies, settings, Docker.** Declared dependencies with cascading
+failure that never blocks unrelated plugins; key-value settings typed text or
+secret, required and optional, in the manifest; Docker access on request.
+Done when a plugin refuses to install without its dependency, refuses to
+start without a required setting, and a plugin that asked for Docker can
+reach the socket.
+
+**F. UI.** A plugin contributes a static built web application that Rig
+serves and mounts instantly on a button press, isolated properly under
+Electron, with an API to the system and to the MCPs of its dependencies. Done
+when pressing the button shows the plugin's application with no loading step
+and the application can call an MCP tool.
 
 ## Criteria for the whole plan
 
@@ -145,5 +234,19 @@ shows the plugin's application with no loading step.
 - Each plugin lives in its own folder inside a user-visible folder and can
   write there.
 - Their logs are captured by the daemon and pleasant to read in the interface.
+- A plugin reports ready within its window or is treated as not started; the
+  daemon waits for all plugins, which start concurrently, before doing
+  anything.
+- One MCP server per plugin, tools named `mcp_<plugin>_<tool>`, offered
+  everywhere.
+- Plugins react to the same events we keep as durable events, can subscribe
+  dynamically, and get one synthetic OnReady.
+- Dependencies are declared; a missing or failed dependency takes out its own
+  chain and nothing else.
+- Settings are typed key-value pairs — text or secret — with required ones
+  gating startup, all in the manifest.
+- A plugin that requests Docker gets the socket; heavy software belongs in
+  containers, not on the system.
 - A plugin can add MCP tools that models actually use, and a UI that mounts
-  the instant the user asks for it.
+  the instant the user asks for it and can talk to the system and its
+  dependencies' MCPs.
