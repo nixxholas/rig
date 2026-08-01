@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import type { ProviderQuota } from "@slopus/rig-providers";
+import { describe, expect, it, vi } from "vitest";
 
 import { createNodeAgentContext } from "../agent/index.js";
 import { NativeProcessManager } from "../processes/index.js";
@@ -39,5 +40,32 @@ describe("createExecutor", () => {
         result.executor?.selectProvider("grok");
         expect(result.executor?.id).toBe("grok");
         expect(result.executor?.models.map((model) => model.id)).toContain("xai/grok-build");
+    });
+
+    it("routes Claude session quota reads through the daemon-owned loader", async () => {
+        const quota: ProviderQuota = {
+            capturedAt: 1,
+            source: "claude",
+            windows: {
+                fiveHour: { status: "unavailable" },
+                weekly: { status: "unavailable" },
+            },
+        };
+        const loadProviderQuota = vi.fn(async () => quota);
+        const result = createExecutor({
+            agentContext: createNodeAgentContext({
+                cwd: "/tmp/rig-executor-test",
+                processManager: new NativeProcessManager(),
+            }),
+            env: {},
+            loadProviderQuota,
+            providers: {
+                claude: { enabled: true, type: "claude" },
+            },
+        });
+
+        result.executor?.selectProvider("claude");
+        await expect(result.executor?.quota?.({ fresh: true })).resolves.toBe(quota);
+        expect(loadProviderQuota).toHaveBeenCalledWith("claude", { fresh: true });
     });
 });

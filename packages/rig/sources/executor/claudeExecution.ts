@@ -4,6 +4,8 @@ import {
     ClaudeCodeCredential,
     ClaudeOAuthCredential,
     ClaudeProvider,
+    type ProviderQuota,
+    unavailableProviderQuota,
 } from "@slopus/rig-providers";
 import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
@@ -14,6 +16,7 @@ export function claudeExecution(options: {
     config: ConfigClaudeProvider;
     env: NodeJS.ProcessEnv;
     id: string;
+    loadQuota?: (options?: { fresh?: boolean }) => Promise<ProviderQuota | undefined>;
     sessionId?: string;
 }): ExecutorProvider {
     const executable = options.config.executable ?? options.env.RIG_CLAUDE_CODE_EXECUTABLE;
@@ -29,6 +32,13 @@ export function claudeExecution(options: {
             ...(environment.SHELL === undefined ? {} : { shell: environment.SHELL }),
         }),
         profiles: builtinModelProfiles(options.id, "claude"),
+        ...(options.loadQuota === undefined
+            ? {}
+            : {
+                  quota: async (quotaOptions?: { fresh?: boolean }) =>
+                      (await options.loadQuota?.(quotaOptions)) ??
+                      unavailableProviderQuota("claude", Date.now()),
+              }),
         sessionId: options.sessionId ?? options.id,
         native: async () => {
             const credential =

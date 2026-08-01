@@ -38,6 +38,7 @@ export function loadConfiguredProviderUsage(
     }
     if (provider.type === "claude") {
         return fetchClaudeProviderUsage({
+            ...(env.ANTHROPIC_BASE_URL === undefined ? {} : { baseUrl: env.ANTHROPIC_BASE_URL }),
             ...(provider.configDir === undefined ? {} : { configDir: provider.configDir }),
             ...(provider.oauthToken === undefined ? {} : { oauthToken: provider.oauthToken }),
             env,

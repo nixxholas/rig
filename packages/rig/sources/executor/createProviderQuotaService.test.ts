@@ -1,19 +1,13 @@
+import type { ProviderQuota, ProviderQuotaSource, ProviderUsage } from "@slopus/rig-providers";
 import { describe, expect, it, vi } from "vitest";
 
-import {
-    createProviderQuotaService,
-    type CreateProviderQuotaServiceOptions,
-} from "./createProviderQuotaService.js";
-import type { ProviderQuota, ProviderQuotaSource } from "@slopus/rig-providers";
+import { createProviderQuotaService } from "./createProviderQuotaService.js";
 
 describe("createProviderQuotaService", () => {
-    it("keeps independent provider caches and exposes both account windows", async () => {
+    it("caches Codex quota until an explicit refresh", async () => {
         let now = 1_000;
         const loadCodexQuota = vi.fn(async () => quota("codex", now, 30, 10));
-        const loadClaudeQuota = vi.fn(async () => quota("claude", now, 40, 20));
         const service = createProviderQuotaService({
-            cwd: "/tmp/quota-service",
-            loadClaudeQuota,
             loadCodexQuota,
             now: () => now,
         });
@@ -24,104 +18,71 @@ describe("createProviderQuotaService", () => {
                 weekly: { usedPercent: 10 },
             },
         });
-        await expect(service.get("claude")).resolves.toMatchObject({
-            windows: {
-                fiveHour: { usedPercent: 40 },
-                weekly: { usedPercent: 20 },
-            },
-        });
         now += 1;
         await service.get("codex");
-        await service.get("claude", { fresh: true });
+        await service.get("codex", { fresh: true });
 
-        expect(loadCodexQuota).toHaveBeenCalledOnce();
-        expect(loadClaudeQuota).toHaveBeenCalledTimes(2);
+        expect(loadCodexQuota).toHaveBeenCalledTimes(2);
         await expect(service.get("gym")).resolves.toBeUndefined();
     });
 
-    it("loads Claude quota for a named provider configured with the Claude type", async () => {
-        const loadClaudeQuota = vi.fn(async () => quota("claude", 1_000, 40, 20));
-        const service = createProviderQuotaService({
-            cwd: "/tmp/quota-service",
-            loadClaudeQuota,
-            providers: {
-                kirill_claude: {
-                    enabled: true,
-                    oauthToken: "named-claude-token",
-                    type: "claude",
+    it("derives named Claude quota from the shared account usage source", async () => {
+        const loadClaudeUsage = vi.fn(
+            async (providerId: string): Promise<ProviderUsage> => ({
+                providerId,
+                vendor: "claude",
+                capturedAt: 1_000,
+                planName: "Max",
+                exhausted: false,
+                windows: {
+                    fiveHour: {
+                        durationMs: 5 * 60 * 60 * 1_000,
+                        resetsAt: 10_000,
+                        startsAt: 1,
+                        usedPercent: 40,
+                    },
+                    weekly: {
+                        durationMs: 7 * 24 * 60 * 60 * 1_000,
+                        resetsAt: 20_000,
+                        startsAt: 2,
+                        usedPercent: 20,
+                    },
+                    monthly: null,
                 },
-            },
-        });
-
-        await expect(service.get("kirill_claude")).resolves.toMatchObject({
-            source: "claude",
-            windows: {
-                fiveHour: { usedPercent: 40 },
-                weekly: { usedPercent: 20 },
-            },
-        });
-        expect(loadClaudeQuota).toHaveBeenCalledOnce();
-    });
-
-    it("scopes a named Claude quota probe to that provider's credentials", async () => {
-        const close = vi.fn();
-        const createClaudeQuery = vi.fn<
-            NonNullable<CreateProviderQuotaServiceOptions["createClaudeQuery"]>
-        >(
-            () =>
-                ({
-                    close,
-                    usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: vi
-                        .fn()
-                        .mockResolvedValue({
-                            rate_limits_available: true,
-                            rate_limits: {
-                                five_hour: {
-                                    resets_at: "2026-07-21T01:00:00.000Z",
-                                    utilization: 40,
-                                },
-                                seven_day: {
-                                    resets_at: "2026-07-27T01:00:00.000Z",
-                                    utilization: 20,
-                                },
-                            },
-                        }),
-                }) as never,
+                credits: null,
+            }),
         );
         const service = createProviderQuotaService({
-            createClaudeQuery,
-            cwd: "/tmp/quota-service",
-            env: {
-                ANTHROPIC_API_KEY: "default-api-key",
-                CLAUDE_CODE_OAUTH_TOKEN: "default-oauth-token",
-            },
+            loadClaudeUsage,
             providers: {
                 kirill_claude: {
-                    configDir: "/tmp/kirill-claude",
                     enabled: true,
-                    executable: "/tmp/claude",
-                    oauthToken: "named-claude-token",
                     type: "claude",
                 },
             },
         });
 
-        await expect(service.get("kirill_claude")).resolves.toMatchObject({
+        await expect(service.get("kirill_claude", { fresh: true })).resolves.toEqual({
+            capturedAt: 1_000,
             source: "claude",
             windows: {
-                fiveHour: { usedPercent: 40 },
-                weekly: { usedPercent: 20 },
+                fiveHour: {
+                    capturedAt: 1_000,
+                    durationMs: 5 * 60 * 60 * 1_000,
+                    resetsAt: 10_000,
+                    status: "available",
+                    usedPercent: 40,
+                },
+                weekly: {
+                    capturedAt: 1_000,
+                    durationMs: 7 * 24 * 60 * 60 * 1_000,
+                    resetsAt: 20_000,
+                    status: "available",
+                    usedPercent: 20,
+                },
             },
         });
-        expect(createClaudeQuery).toHaveBeenCalledOnce();
-        const queryOptions = createClaudeQuery.mock.calls[0]?.[0]?.options;
-        expect(queryOptions?.env).toMatchObject({
-            CLAUDE_CODE_OAUTH_TOKEN: "named-claude-token",
-            CLAUDE_CONFIG_DIR: "/tmp/kirill-claude",
-        });
-        expect(queryOptions?.env).not.toHaveProperty("ANTHROPIC_API_KEY");
-        expect(queryOptions?.pathToClaudeCodeExecutable).toBe("/tmp/claude");
-        expect(close).toHaveBeenCalledOnce();
+        expect(loadClaudeUsage).toHaveBeenCalledWith("kirill_claude", { fresh: true });
     });
 });
 

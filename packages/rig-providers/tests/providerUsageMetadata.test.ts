@@ -1,4 +1,4 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -55,6 +55,70 @@ describe("provider usage metadata", () => {
         });
 
         expect(usage?.windows.fiveHour?.usedPercent).toBe(42);
+    });
+
+    it("surfaces Claude usage throttling without spending a fallback inference", async () => {
+        const paths: string[] = [];
+        const fixture = JSON.parse(
+            await readFile(
+                new URL("./vendors/fixtures/claude-usage-rate-limit-429.json", import.meta.url),
+                "utf8",
+            ),
+        ) as {
+            body: unknown;
+            headers: Record<string, string>;
+            status: number;
+        };
+        const request = fetchClaudeProviderUsage({
+            oauthToken: "test-token",
+            now: () => 1_000,
+            fetch: async (input) => {
+                const path = new URL(String(input)).pathname;
+                paths.push(path);
+                if (path === "/api/oauth/usage") {
+                    return Response.json(fixture.body, {
+                        status: fixture.status,
+                        headers: fixture.headers,
+                    });
+                }
+                if (path === "/api/oauth/profile") return Response.json({});
+                throw new Error(`Unexpected request ${path}`);
+            },
+        });
+
+        await expect(request).rejects.toMatchObject({
+            message: "Claude usage returned HTTP 429. Retry after 3600 seconds.",
+            name: "ProviderUsageRequestError",
+            retryAt: 3_601_000,
+            status: 429,
+        });
+        expect(paths).toEqual(["/api/oauth/usage", "/api/oauth/profile"]);
+    });
+
+    it("falls back to inference headers for a scoped Claude setup token", async () => {
+        const usage = await fetchClaudeProviderUsage({
+            oauthToken: "test-token",
+            now: () => 1_000,
+            fetch: async (input) => {
+                const path = new URL(String(input)).pathname;
+                if (path === "/api/oauth/usage") return new Response(null, { status: 403 });
+                if (path === "/api/oauth/profile") return Response.json({});
+                if (path === "/v1/messages") {
+                    return Response.json(
+                        {},
+                        {
+                            headers: {
+                                "anthropic-ratelimit-unified-5h-utilization": "0.25",
+                                "anthropic-ratelimit-unified-status": "allowed",
+                            },
+                        },
+                    );
+                }
+                throw new Error(`Unexpected request ${path}`);
+            },
+        });
+
+        expect(usage?.windows.fiveHour?.usedPercent).toBe(25);
     });
 
     it("keeps valid Grok billing when the optional user body is malformed", async () => {

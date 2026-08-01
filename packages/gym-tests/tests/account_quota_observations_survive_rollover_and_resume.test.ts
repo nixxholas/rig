@@ -8,7 +8,6 @@ import { createGym, type Gym } from "@slopus/rig-gym";
 const running = new Set<Gym>();
 const artifacts = resolve(import.meta.dirname, "../../artifacts/session-usage");
 const rig = "node /app/packages/rig/dist/main.js";
-const claudeQuotaExecutable = "fake-claude-quota.mjs";
 
 afterEach(async () => {
     await Promise.all([...running].map((gym) => gym.dispose()));
@@ -22,9 +21,9 @@ describe("account quota observations", () => {
         const nextEpoch = epoch + 18_000;
         const claudeSnapshots = [
             claudeQuota(40, 20, epoch),
-            claudeQuota(42, 22, epoch),
+            claudeQuota(43, 23, epoch),
             claudeQuota(45, 25, epoch),
-            claudeQuota(42, 22, epoch),
+            claudeQuota(2, 1, nextEpoch),
             claudeQuota(2, 1, nextEpoch),
             claudeQuota(2, 1, nextEpoch),
             claudeQuota(4, 2, nextEpoch),
@@ -35,18 +34,18 @@ describe("account quota observations", () => {
             codexQuota(30, 15, epoch),
         ];
         let codexQuotaIndex = 0;
+        let claudeQuotaIndex = 0;
         const gym = await createGym({
             cols: 64,
             mode: "docker",
             entrypoint: ["bash", "-lc", `${rig}; echo QUOTA_RESUMED; exec ${rig} resume --last`],
             environment: {
                 ANTHROPIC_API_KEY: "claude-test-key",
+                ANTHROPIC_BASE_URL: "{{HTTP_PROXY_URL}}",
+                CLAUDE_CODE_OAUTH_TOKEN: "claude-test-token",
                 NO_PROXY: "host.docker.internal",
-                RIG_CLAUDE_CODE_EXECUTABLE: `/workspace/${claudeQuotaExecutable}`,
                 RIG_CODEX_BASE_URL: "{{HTTP_PROXY_URL}}/backend-api",
-                RIG_FAKE_CLAUDE_QUOTAS: JSON.stringify(claudeSnapshots),
             },
-            files: { [claudeQuotaExecutable]: fakeClaudeQuotaExecutable() },
             homeFiles: {
                 ".codex/auth.json": JSON.stringify({
                     auth_mode: "chatgpt",
@@ -55,10 +54,29 @@ describe("account quota observations", () => {
             },
             httpProxy: {
                 handler(request) {
-                    if (
-                        request.method === "GET" &&
-                        new URL(request.url).pathname === "/backend-api/wham/usage"
-                    ) {
+                    const path = new URL(request.url).pathname;
+                    if (request.method === "GET" && path === "/api/oauth/usage") {
+                        const snapshot =
+                            claudeSnapshots[Math.min(claudeQuotaIndex, claudeSnapshots.length - 1)];
+                        claudeQuotaIndex += 1;
+                        return {
+                            response: {
+                                body: JSON.stringify(snapshot),
+                                headers: { "content-type": "application/json" },
+                                status: 200,
+                            },
+                        };
+                    }
+                    if (request.method === "GET" && path === "/api/oauth/profile") {
+                        return {
+                            response: {
+                                body: JSON.stringify({ account: { has_claude_max: true } }),
+                                headers: { "content-type": "application/json" },
+                                status: 200,
+                            },
+                        };
+                    }
+                    if (request.method === "GET" && path === "/backend-api/wham/usage") {
                         const snapshot =
                             codexSnapshots[Math.min(codexQuotaIndex, codexSnapshots.length - 1)];
                         codexQuotaIndex += 1;
@@ -102,8 +120,8 @@ describe("account quota observations", () => {
         );
 
         await submitAndWait(gym, "Record Claude quota movement.");
-        await waitForQuotaRequests(gym, 2);
-        await expect(gym.readFile("claude-quota-requests.log")).resolves.toContain('"fiveHour":42');
+        await waitForQuotaRequests(() => claudeQuotaIndex, 3);
+        expect(claudeQuotaIndex).toBeGreaterThanOrEqual(3);
         submit(gym, "/usage");
         const bothProviders = await gym.terminal.waitUntil(
             (screen) => {
@@ -117,7 +135,7 @@ describe("account quota observations", () => {
                     text.includes("Weekly: 75% left") &&
                     text.includes("Observed remaining: 5h -7% · week -4% (approx.)") &&
                     text.includes("Observed remaining: 5h -2% · week -2% (approx.)") &&
-                    text.includes("Session tokens: 200") &&
+                    text.includes("Session tokens: 300") &&
                     !screen.synchronizedOutputActive
                 );
             },
@@ -151,7 +169,7 @@ describe("account quota observations", () => {
         const resumed = await gym.terminal.waitUntil(
             (screen) =>
                 screen.text.lastIndexOf("Usage") > screen.text.lastIndexOf("QUOTA_TURN_1") &&
-                screen.text.includes("Session tokens: 200"),
+                screen.text.includes("Session tokens: 300"),
             "resumed quota report",
             30_000,
         );
@@ -164,15 +182,15 @@ describe("account quota observations", () => {
         await repaint(gym);
 
         await submitAndWait(gym, "Cross the account window reset.");
-        await waitForQuotaRequests(gym, 5);
+        await waitForQuotaRequests(() => claudeQuotaIndex, 5);
         await submitAndWait(gym, "Confirm the new window baseline.");
-        await waitForQuotaRequests(gym, 7);
+        await waitForQuotaRequests(() => claudeQuotaIndex, 7);
         submit(gym, "/usage");
         const rollover = await gym.terminal.waitUntil(
             (screen) => {
                 const text = normalizeTerminalText(screen.text);
                 return (
-                    text.includes("Session tokens: 200") &&
+                    text.includes("Session tokens: 375") &&
                     text.includes("5-hour: 96% left") &&
                     text.includes("Weekly: 98% left") &&
                     text.includes("Observed remaining: 5h -4% · week -3% (approx.)") &&
@@ -222,17 +240,15 @@ async function repaint(gym: Gym, rows = 45): Promise<void> {
     );
 }
 
-async function waitForQuotaRequests(gym: Gym, expected: number): Promise<void> {
+async function waitForQuotaRequests(count: () => number, expected: number): Promise<void> {
     const deadline = Date.now() + 30_000;
     while (Date.now() < deadline) {
-        const count = await gym
-            .readFile("claude-quota-requests.log")
-            .then((text) => text.trim().split("\n").length)
-            .catch(() => 0);
-        if (count >= expected) return;
+        if (count() >= expected) return;
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    throw new Error(`Timed out waiting for ${expected} Claude quota requests.`);
+    throw new Error(
+        `Timed out waiting for ${expected} Claude quota requests; observed ${count()}.`,
+    );
 }
 
 function usage(output: number) {
@@ -265,63 +281,16 @@ function codexQuota(fiveHour: number, weekly: number, resetAt: number) {
 
 function claudeQuota(fiveHour: number, weekly: number, resetAt: number) {
     return {
-        rate_limits_available: true,
-        rate_limits: {
-            five_hour: {
-                resets_at: new Date(resetAt * 1_000).toISOString(),
-                utilization: fiveHour,
-            },
-            seven_day: {
-                resets_at: new Date((resetAt + 604_800) * 1_000).toISOString(),
-                utilization: weekly,
-            },
+        five_hour: {
+            resets_at: new Date(resetAt * 1_000).toISOString(),
+            utilization: fiveHour,
         },
-        session: {
-            model_usage: {},
-            total_api_duration_ms: 0,
-            total_cost_usd: 0,
-            total_duration_ms: 0,
-            total_lines_added: 0,
-            total_lines_removed: 0,
+        seven_day: {
+            resets_at: new Date((resetAt + 604_800) * 1_000).toISOString(),
+            utilization: weekly,
         },
-        subscription_type: "pro",
+        subscription_type: "max",
     };
-}
-
-function fakeClaudeQuotaExecutable(): string {
-    return String.raw`
-import { appendFile, readFile, writeFile } from "node:fs/promises";
-import { createInterface } from "node:readline";
-
-const counterPath = "/tmp/rig-fake-claude-quota-counter";
-const snapshots = JSON.parse(process.env.RIG_FAKE_CLAUDE_QUOTAS ?? "[]");
-const lines = createInterface({ input: process.stdin, crlfDelay: Infinity });
-for await (const line of lines) {
-    if (!line.trim()) continue;
-    const message = JSON.parse(line);
-    if (message.type !== "control_request") continue;
-    let response = {};
-    if (message.request?.subtype === "get_usage") {
-        let index = 0;
-        try { index = Number(await readFile(counterPath, "utf8")); } catch {}
-        response = snapshots[Math.min(index, snapshots.length - 1)];
-        await writeFile(counterPath, String(index + 1));
-        await appendFile("/workspace/claude-quota-requests.log", JSON.stringify({
-            fiveHour: response?.rate_limits?.five_hour?.utilization,
-            index,
-            weekly: response?.rate_limits?.seven_day?.utilization,
-        }) + "\n");
-    }
-    process.stdout.write(JSON.stringify({
-        type: "control_response",
-        response: {
-            subtype: "success",
-            request_id: message.request_id,
-            response,
-        },
-    }) + "\n");
-}
-`;
 }
 
 function fakeJwt(): string {

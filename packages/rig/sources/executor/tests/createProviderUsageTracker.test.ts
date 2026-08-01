@@ -51,7 +51,7 @@ describe("createProviderUsageTracker", () => {
         expect(tracker.get("codex")?.error).toBeNull();
     });
 
-    it("keeps the previous reading when a provider stops answering", async () => {
+    it("keeps the previous reading visible when a provider stops answering", async () => {
         const shutdown = gracefulShutdown();
         let answer: ProviderUsage | null = usage("codex", 10);
         const tracker = createProviderUsageTracker({
@@ -67,7 +67,32 @@ describe("createProviderUsageTracker", () => {
         // The stale reading is still the best thing we know, and it carries its
         // own capture time so a reader can judge it.
         expect(tracker.get("codex")?.usage?.windows.weekly?.usedPercent).toBe(10);
-        expect(tracker.get("codex")?.error).toBe("The provider did not report usage.");
+        expect(tracker.get("codex")?.error).toBeNull();
+    });
+
+    it("keeps the previous reading visible while reporting a refresh failure", async () => {
+        const shutdown = gracefulShutdown();
+        const onError = vi.fn();
+        const loadUsage = vi
+            .fn<() => Promise<ProviderUsage | null>>()
+            .mockResolvedValueOnce(usage("claude", 10))
+            .mockRejectedValueOnce(new Error("Claude usage returned HTTP 429."));
+        const tracker = createProviderUsageTracker({
+            loadUsage,
+            onError,
+            providerIds: ["claude"],
+            shutdown,
+        });
+
+        await tracker.refresh("claude");
+        await tracker.refresh("claude");
+
+        expect(tracker.get("claude")?.usage?.windows.weekly?.usedPercent).toBe(10);
+        expect(tracker.get("claude")?.error).toBeNull();
+        expect(onError).toHaveBeenCalledWith(
+            "claude",
+            expect.objectContaining({ message: "Claude usage returned HTTP 429." }),
+        );
     });
 
     it("records a thrown failure without losing the entry", async () => {

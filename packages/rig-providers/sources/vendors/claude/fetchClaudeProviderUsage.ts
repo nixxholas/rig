@@ -1,4 +1,5 @@
 import type { ProviderUsage, ProviderUsageCredits } from "@/core/ProviderUsage.js";
+import { ProviderUsageRequestError } from "@/core/ProviderUsageRequestError.js";
 import {
     epochMsFromIso,
     optionalResponseJson,
@@ -40,22 +41,19 @@ export interface FetchClaudeProviderUsageOptions {
  * a full `claude auth login` grants, and it is itself rate limited. Tokens from
  * `claude setup-token` are inference-only and never satisfy it.
  *
- * So when that endpoint cannot answer, the account is measured by the unified
- * rate-limit headers instead, which ride along on any inference response.
+ * An inference-only token falls back to the unified rate-limit headers on an
+ * inference response. Transient account-endpoint failures are surfaced so the
+ * daemon can retain its cached reading and honor the provider's retry boundary.
  */
 export async function fetchClaudeProviderUsage(
     options: FetchClaudeProviderUsageOptions = {},
 ): Promise<ProviderUsage | null> {
-    try {
-        const token = options.oauthToken ?? (await readClaudeToken(options));
-        if (token === undefined) return null;
-        return (
-            (await fetchFromUsageEndpoint(token, options)) ??
-            (await probeRateLimitHeaders(token, options))
-        );
-    } catch {
-        return null;
-    }
+    const token = options.oauthToken ?? (await readClaudeToken(options));
+    if (token === undefined) return null;
+    return (
+        (await fetchFromUsageEndpoint(token, options)) ??
+        (await probeRateLimitHeaders(token, options))
+    );
 }
 
 async function fetchFromUsageEndpoint(
@@ -73,11 +71,14 @@ async function fetchFromUsageEndpoint(
         });
 
     const [usage, profile] = await Promise.all([
-        request("/api/oauth/usage").catch(() => null),
+        request("/api/oauth/usage"),
         // The plan name lives on the profile; losing it must not lose usage.
         request("/api/oauth/profile").catch(() => null),
     ]);
-    if (usage === null || !usage.ok) return null;
+    // An inference-only setup token cannot read account metadata, but it can
+    // still report the unified limits attached to an inference response.
+    if (usage.status === 403 || usage.status === 404) return null;
+    if (!usage.ok) throw providerUsageResponseError(usage, now());
     const profilePayload = await optionalResponseJson(profile);
 
     return parseClaudeProviderUsage(await usage.json(), {
@@ -85,6 +86,34 @@ async function fetchFromUsageEndpoint(
         providerId: options.providerId ?? "claude",
         profile: profilePayload,
     });
+}
+
+function providerUsageResponseError(
+    response: Response,
+    capturedAt: number,
+): ProviderUsageRequestError {
+    const retryAt = retryAtFromHeader(response.headers.get("retry-after"), capturedAt);
+    const retryText =
+        retryAt === undefined
+            ? ""
+            : ` Retry after ${Math.max(0, Math.ceil((retryAt - capturedAt) / 1_000))} seconds.`;
+    return new ProviderUsageRequestError(
+        `Claude usage returned HTTP ${response.status}.${retryText}`,
+        {
+            ...(retryAt === undefined ? {} : { retryAt }),
+            status: response.status,
+        },
+    );
+}
+
+function retryAtFromHeader(value: string | null, capturedAt: number): number | undefined {
+    if (value === null) return undefined;
+    const seconds = Number(value);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+        return capturedAt + Math.ceil(seconds * 1_000);
+    }
+    const date = Date.parse(value);
+    return Number.isFinite(date) && date >= capturedAt ? date : undefined;
 }
 
 /**
@@ -112,12 +141,16 @@ async function probeRateLimitHeaders(
         }),
         signal: AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS),
     });
-    // A refusal still carries the headers, and a rejected account is exactly
-    // what the caller needs to learn, so the status is not checked here.
-    return parseClaudeRateLimitHeaders(response.headers, {
-        capturedAt: now(),
+    // A refusal can still carry authoritative headers, and a rejected account
+    // is exactly what the caller needs to learn.
+    const capturedAt = now();
+    const usage = parseClaudeRateLimitHeaders(response.headers, {
+        capturedAt,
         providerId: options.providerId ?? "claude",
     });
+    if (usage !== null) return usage;
+    if (!response.ok) throw providerUsageResponseError(response, capturedAt);
+    return null;
 }
 
 function claudeHeaders(

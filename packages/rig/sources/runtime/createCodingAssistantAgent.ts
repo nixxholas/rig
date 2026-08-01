@@ -1,4 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
+import type { ProviderQuota } from "@slopus/rig-providers";
 
 import { createPermissionReviewSideAgent } from "../permissions/index.js";
 import { Executor, type Identity } from "@slopus/rig-execution";
@@ -69,6 +70,10 @@ export interface CreateCodingAssistantAgentOptions {
     instructions?: string;
     identity?: Identity;
     isSubagent?: boolean;
+    loadProviderQuota?: (
+        providerId: string,
+        options?: { fresh?: boolean },
+    ) => Promise<ProviderQuota | undefined>;
     local?: boolean;
     messages?: readonly Message[];
     contextMessages?: readonly Message[];
@@ -192,6 +197,9 @@ export function createCodingAssistantAgent(
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 env,
                 ...(options.identity === undefined ? {} : { identity: options.identity }),
+                ...(options.loadProviderQuota === undefined
+                    ? {}
+                    : { loadProviderQuota: options.loadProviderQuota }),
                 providers: options.providers ?? DEFAULT_RIG_CONFIG.providers,
                 ...(options.resolveCodexStreamMaxRetries === undefined
                     ? {}

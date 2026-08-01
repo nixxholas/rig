@@ -1,9 +1,10 @@
-import { query as createClaudeQuery, type Query } from "@anthropic-ai/claude-agent-sdk";
 import {
-    createClaudeQuotaLoader,
     createProviderQuotaCache,
     fetchCodexProviderQuota,
     type ProviderQuota,
+    type ProviderQuotaWindow,
+    type ProviderUsage,
+    unavailableProviderQuota,
 } from "@slopus/rig-providers";
 
 import type { ConfigProviders } from "../config/types.js";
@@ -13,13 +14,13 @@ export interface ProviderQuotaService {
 }
 
 export interface CreateProviderQuotaServiceOptions {
-    createClaudeQuery?: (options: Parameters<typeof createClaudeQuery>[0]) => Query;
-    cwd: string;
     env?: NodeJS.ProcessEnv;
-    loadClaudeQuota?: () => Promise<ProviderQuota>;
+    loadClaudeUsage?: (
+        providerId: string,
+        options?: { fresh?: boolean },
+    ) => Promise<ProviderUsage | null>;
     loadCodexQuota?: () => Promise<ProviderQuota>;
     now?: () => number;
-    pathToClaudeCodeExecutable?: string;
     providers?: ConfigProviders;
 }
 
@@ -40,50 +41,54 @@ export function createProviderQuotaService(
                 })),
         { now },
     );
-    const claudeByProviderId = new Map<string, ReturnType<typeof createProviderQuotaCache>>();
+
     return {
-        get(providerId, getOptions) {
+        async get(providerId, getOptions) {
             if (providerId === "codex") return codex.get(getOptions);
             const configuredProvider = options.providers?.[providerId];
-            if (providerId === "claude" || configuredProvider?.type === "claude") {
-                let cache = claudeByProviderId.get(providerId);
-                if (cache === undefined) {
-                    cache = createProviderQuotaCache(
-                        options.loadClaudeQuota ??
-                            createClaudeQuotaLoader({
-                                ...(configuredProvider?.type === "claude"
-                                    ? {
-                                          ...(configuredProvider.configDir === undefined
-                                              ? {}
-                                              : { configDir: configuredProvider.configDir }),
-                                          ...(configuredProvider.executable === undefined
-                                              ? {}
-                                              : { executable: configuredProvider.executable }),
-                                          ...(configuredProvider.oauthToken === undefined
-                                              ? {}
-                                              : { oauthToken: configuredProvider.oauthToken }),
-                                      }
-                                    : {}),
-                                ...(options.createClaudeQuery === undefined
-                                    ? {}
-                                    : { createClaudeQuery: options.createClaudeQuery }),
-                                ...(options.pathToClaudeCodeExecutable === undefined
-                                    ? {}
-                                    : {
-                                          pathToClaudeCodeExecutable:
-                                              options.pathToClaudeCodeExecutable,
-                                      }),
-                                cwd: options.cwd,
-                                env,
-                                now,
-                            }),
-                        { now },
-                    );
-                    claudeByProviderId.set(providerId, cache);
-                }
-                return cache.get(getOptions);
+            if (providerId !== "claude" && configuredProvider?.type !== "claude") {
+                return undefined;
             }
-            return Promise.resolve(undefined);
+            if (options.loadClaudeUsage === undefined) return undefined;
+            try {
+                return providerUsageToClaudeQuota(
+                    await options.loadClaudeUsage(providerId, getOptions),
+                    now(),
+                );
+            } catch {
+                return unavailableProviderQuota("claude", now());
+            }
         },
+    };
+}
+
+function providerUsageToClaudeQuota(
+    usage: ProviderUsage | null,
+    capturedAt: number,
+): ProviderQuota {
+    if (usage === null) return unavailableProviderQuota("claude", capturedAt);
+    return {
+        capturedAt: usage.capturedAt,
+        source: "claude",
+        windows: {
+            fiveHour: providerUsageWindowToQuota(usage.windows.fiveHour, usage.capturedAt),
+            weekly: providerUsageWindowToQuota(usage.windows.weekly, usage.capturedAt),
+        },
+    };
+}
+
+function providerUsageWindowToQuota(
+    window: ProviderUsage["windows"]["fiveHour"],
+    capturedAt: number,
+): ProviderQuotaWindow {
+    if (window === null || window.resetsAt === null) {
+        return { status: "unavailable" };
+    }
+    return {
+        capturedAt,
+        status: "available",
+        usedPercent: window.usedPercent,
+        resetsAt: window.resetsAt,
+        ...(window.durationMs === null ? {} : { durationMs: window.durationMs }),
     };
 }

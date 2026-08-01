@@ -13,6 +13,10 @@ export type {
     ProviderUsageWindow,
 } from "@/core/ProviderUsage.js";
 export {
+    ProviderUsageRequestError,
+    type ProviderUsageRequestErrorOptions,
+} from "@/core/ProviderUsageRequestError.js";
+export {
     createProviderQuotaCache,
     type ProviderQuotaCache,
     type ProviderQuotaCacheOptions,

@@ -29,6 +29,7 @@ import {
     createProviderUsageTracker,
     type ProviderUsageTracker,
 } from "../executor/createProviderUsageTracker.js";
+import { createProviderUsageService } from "../executor/createProviderUsageService.js";
 import { loadConfiguredProviderUsage } from "../executor/loadConfiguredProviderUsage.js";
 import { gracefulShutdown } from "../concurrency/index.js";
 import { disableUnavailableProviders } from "../executor/disableUnavailableProviders.js";
@@ -319,11 +320,7 @@ async function runOwnedLocalProtocolServer(
             codexStreamMaxRetries: loadedConfig.config.settings.codexStreamMaxRetries,
         };
 
-        const providerQuotaService = createProviderQuotaService({
-            cwd: process.cwd(),
-            providers: loadedConfig.config.providers,
-        });
-        providerUsageTracker = createProviderUsageTracker({
+        const providerUsageService = createProviderUsageService({
             loadUsage: (providerId) =>
                 loadConfiguredProviderUsage({
                     providerId,
@@ -337,6 +334,14 @@ async function runOwnedLocalProtocolServer(
                     { error: errorToMessage(error), providerId },
                 );
             },
+        });
+        const providerQuotaService = createProviderQuotaService({
+            loadClaudeUsage: (providerId, getOptions) =>
+                providerUsageService.get(providerId, getOptions),
+            providers: loadedConfig.config.providers,
+        });
+        providerUsageTracker = createProviderUsageTracker({
+            loadUsage: (providerId) => providerUsageService.get(providerId),
             providerIds: Object.keys(loadedConfig.config.providers),
             shutdown,
         });
@@ -417,6 +422,8 @@ async function runOwnedLocalProtocolServer(
             createRuntime: (options) =>
                 createCodingAssistantAgent({
                     ...options,
+                    loadProviderQuota: (providerId, getOptions) =>
+                        providerQuotaService.get(providerId, getOptions),
                     plugins,
                     providers: availableProviders,
                     resolveCodexStreamMaxRetries: () => runtimeSettings.codexStreamMaxRetries,

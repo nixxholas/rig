@@ -72,11 +72,17 @@ export function createProviderUsageTracker(
                     entry.usage = usage;
                     entry.error = null;
                 } else {
-                    entry.error = "The provider did not report usage.";
+                    entry.error =
+                        entry.usage === null ? "The provider did not report usage." : null;
                 }
             } catch (error) {
                 entry.checkedAt = now();
-                entry.error = error instanceof Error ? error.message : String(error);
+                entry.error =
+                    entry.usage === null
+                        ? error instanceof Error
+                            ? error.message
+                            : String(error)
+                        : null;
                 options.onError?.(providerId, error);
             }
             return entry;
