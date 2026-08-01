@@ -34,7 +34,7 @@ export const createWorkspaceTool = defineTool({
     name: "create_workspace",
     label: "Create workspace",
     description:
-        "Create a managed Git workspace owned by this session. Only this session can later archive it or start a workspace agent inside it.",
+        "Create a managed Git workspace owned by this session. A workspace isolates one piece of work from the others running alongside it: each parallel task gets its own fresh workspace so their changes never collide, while subtasks of the current work stay in the current workspace. It is a separate checkout with its own dependencies and context, so create one only when that isolation is needed. Only this session can later archive it or start a workspace agent inside it.",
     arguments: Type.Object(
         {
             base_ref: Type.Optional(
@@ -82,7 +82,7 @@ export const spawnWorkspaceAgentTool = defineTool({
     name: "spawn_workspace_agent",
     label: "Start workspace agent",
     description:
-        "Start a managed subagent inside a workspace created by this session. It is hidden from the ordinary session list, appears under this session as a subagent, and reports its result back here.",
+        "Start a managed subagent inside a workspace created by this session. It is hidden from the ordinary session list, appears under this session as a subagent, and reports its result back here. For a task that runs alongside other work, create a fresh workspace first instead of reusing one that holds other work.",
     arguments: Type.Object(
         {
             workspace_id: Type.String({ description: "Owned, ready workspace ID." }),
@@ -135,7 +135,7 @@ export const listWorkspacesTool = defineTool({
     name: "list_workspaces",
     label: "List workspaces",
     description:
-        "List the workspaces of this session's project, or of another project when a project ID is given.",
+        "List the workspaces of this session's project, or of another project when a project ID is given. Listing is for inspecting and following up on existing work, not for picking a workspace to reuse: a parallel task gets its own workspace from create_workspace.",
     arguments: Type.Object(
         {
             project_id: Type.Optional(
@@ -248,7 +248,10 @@ export const delegateToWorkspaceTool = defineTool({
         "Start a visible conversation in another workspace and give it a task. The new session appears in the user's session list, keeps this session as its parent, and can be reached afterwards with agent_info and agent_send using the returned agent ID. When the user writes to it themselves, this session is told what they said.",
     arguments: Type.Object(
         {
-            workspace_id: Type.String({ description: "Ready workspace to work in." }),
+            workspace_id: Type.String({
+                description:
+                    "Ready workspace to work in. For a task that runs alongside other work, create a fresh workspace first instead of reusing one that holds other work.",
+            }),
             project_id: Type.Optional(
                 Type.String({
                     description:

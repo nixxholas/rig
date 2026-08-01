@@ -5,6 +5,7 @@ import {
     createParentDelegationInstructions,
     createPermissionInstructions,
     createSubagentInstructions,
+    createWorkspaceInstructions,
 } from "./instructions.js";
 
 describe("createParentDelegationInstructions", () => {
@@ -14,6 +15,25 @@ describe("createParentDelegationInstructions", () => {
         expect(instructions).toContain("You are the parent agent");
         expect(instructions).toContain("explicitly allowed to spawn subagents");
         expect(instructions).toContain("Do simple work directly");
+    });
+});
+
+describe("createWorkspaceInstructions", () => {
+    it("ties workspaces to isolating parallel work, not to subtasks or reuse", () => {
+        const instructions = createWorkspaceInstructions();
+
+        expect(instructions).toContain("# Workspaces");
+        expect(instructions).toContain("already lives in its own workspace");
+        expect(instructions).toContain("one task, however many hands, is one workspace");
+        expect(instructions).toContain("isolate work, not to organize it");
+        expect(instructions).toContain("parallel tasks each get their own fresh workspace");
+        expect(instructions).toContain("Do not create workspaces for subtasks");
+        expect(instructions).toContain("A workspace is not free");
+        expect(instructions).toContain("installs its own dependencies");
+        expect(instructions).toContain(
+            "A workspace created by another session is not yours to move into",
+        );
+        expect(instructions).toContain("ask the user first");
     });
 });
 

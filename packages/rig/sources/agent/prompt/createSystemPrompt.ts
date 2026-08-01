@@ -4,6 +4,7 @@ import {
     createAvailableModelsInstructions,
     createParentDelegationInstructions,
     createPermissionInstructions,
+    createWorkspaceInstructions,
     RIG_AGENT_TOOL_INSTRUCTIONS,
 } from "./instructions.js";
 import type { AgentContext } from "../context/AgentContext.js";
@@ -81,6 +82,10 @@ export async function createSystemPrompt(
 
     if (options.context.subagents?.canSpawn === true && options.context.subagents.depth === 0) {
         parts.push(createParentDelegationInstructions());
+    }
+
+    if (options.context.workspaces !== undefined) {
+        parts.push(createWorkspaceInstructions());
     }
 
     if (options.tools?.some((tool) => tool.namespace?.name === "rig") === true) {

@@ -609,6 +609,55 @@ describe("createCodingAssistantAgent", () => {
         }
     });
 
+    it("explains workspace isolation only when workspace tools are present", async () => {
+        const workspaces = {
+            archive: async () => {
+                throw new Error("unused");
+            },
+            create: async () => {
+                throw new Error("unused");
+            },
+            crossWorkspace: false,
+            delegate: async () => {
+                throw new Error("unused");
+            },
+            listProjects: () => [],
+            listSessions: () => [],
+            listWorkspaces: () => [],
+            spawn: async () => {
+                throw new Error("unused");
+            },
+        };
+        const withWorkspaces = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            env: {},
+            workspaces,
+        });
+        const withoutWorkspaces = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            env: {},
+        });
+
+        const promptWith = await createSystemPrompt({
+            context: withWorkspaces.context,
+            messages: [],
+            model: withWorkspaces.agent.model,
+            provider: withWorkspaces.executor,
+            tools: withWorkspaces.agent.tools,
+        });
+        const promptWithout = await createSystemPrompt({
+            context: withoutWorkspaces.context,
+            messages: [],
+            model: withoutWorkspaces.agent.model,
+            provider: withoutWorkspaces.executor,
+            tools: withoutWorkspaces.agent.tools,
+        });
+
+        expect(promptWith).toContain("# Workspaces");
+        expect(promptWith).toContain("parallel tasks each get their own fresh workspace");
+        expect(promptWithout).not.toContain("# Workspaces");
+    });
+
     it("keeps V2 child guidance at maximum depth and excludes Luna", async () => {
         const managed = {
             description: "Test",

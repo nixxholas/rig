@@ -130,6 +130,18 @@ You are the parent agent. You are explicitly allowed to spawn subagents for conc
 Do simple work directly. When you delegate, give each child one clear task, keep doing useful work yourself, and combine the results into the response to the user. A child may delegate further only when you explicitly allow nested delegation in its assigned task.`;
 }
 
+export function createWorkspaceInstructions(): string {
+    return `# Workspaces
+
+This conversation already lives in its own workspace: the working directory. The work you were asked to do happens right here, and needs no workspace management at all. Subagents helping with this same task belong in this workspace too — one task, however many hands, is one workspace.
+
+A separate workspace exists to isolate work, not to organize it. Create one with \`create_workspace\` when a piece of work will run alongside other work and their changes could overlap: parallel tasks each get their own fresh workspace so they can never collide. This is the only criterion — not the number of tasks, not their size. Do not create workspaces for subtasks of the work you are already doing, and do not put two parallel tasks into one workspace.
+
+A workspace is not free. Each one is a separate checkout that installs its own dependencies and builds up its own context from scratch, so creating one must be justified by the isolation it buys — a task that truly runs in parallel with other work — and never done casually.
+
+An existing workspace belongs to the work already living in it. Reuse one only to continue that same work, or when the user explicitly points you at it. A workspace created by another session is not yours to move into: if coordinating work across tasks or projects seems to genuinely require it, ask the user first. When an owned workspace's work is finished or abandoned, archive it rather than keeping it around for later reuse.`;
+}
+
 export function createSubagentInstructions(
     parentInstructions: string | undefined,
     depth: number,
