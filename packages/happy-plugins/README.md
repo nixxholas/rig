@@ -93,8 +93,9 @@ await new Promise<void>((resolve) => {
 
 The entry is an ES module and may use top-level `await`. Relative TypeScript imports are supported.
 
-Restart the Happy daemon after adding or changing a plugin. Happy discovers installed folders,
-validates their manifests, compiles their TypeScript, and starts each valid plugin.
+Ask an agent to install the folder and Happy validates the manifest, compiles the TypeScript, and
+starts the plugin right away. Uninstalling stops it and keeps the folder it writes to. Happy also
+loads every installed plugin when the daemon starts.
 
 ## Runtime model
 

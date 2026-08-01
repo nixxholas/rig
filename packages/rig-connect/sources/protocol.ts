@@ -1167,6 +1167,18 @@ export interface PresenceSnapshot {
     since: number;
 }
 
+/** One plugin installed on this machine, as a client should show it. */
+export interface PluginSummary {
+    /** The folder the plugin writes to, which the user can open. */
+    dataDirectory: string;
+    description: string;
+    /** Where Rig installed the plugin's code. */
+    directory: string;
+    folder: string;
+    name: string;
+    running: boolean;
+}
+
 /** The catalog snapshot returned by `GET /catalog`. */
 export interface GlobalStreamHello {
     catalog: ModelCatalog;
@@ -1259,6 +1271,12 @@ export type GlobalEvent =
           data: { presence: PresenceSnapshot };
           id: string;
           type: "presence_changed";
+      }
+    | {
+          createdAt: number;
+          data: { plugins: readonly PluginSummary[] };
+          id: string;
+          type: "plugins_changed";
       }
     | SessionEvent;
 

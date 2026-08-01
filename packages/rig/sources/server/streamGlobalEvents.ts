@@ -177,7 +177,8 @@ const CATCHUP_PAGE_LIMIT = 1_000;
 const CATCHUP_PENDING_LIMIT = 1_000;
 
 function liveEventKey(event: GlobalLiveEvent): string {
-    if (event.type === "presence_changed") return event.type;
+    // Presence and plugins describe the whole daemon, so each coalesces on its type alone.
+    if (event.type === "presence_changed" || event.type === "plugins_changed") return event.type;
     if ("sessionId" in event) return `${event.type}:session:${event.sessionId}`;
     const scope =
         "workspaceId" in event ? `workspace:${event.workspaceId}` : `project:${event.projectId}`;

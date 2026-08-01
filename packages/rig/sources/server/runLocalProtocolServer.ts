@@ -48,6 +48,7 @@ import type { HappySyncService } from "../happy/index.js";
 import { getManagedWorkspacesDirectory } from "../project/getManagedWorkspacesDirectory.js";
 import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
+import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager } from "../plugins/index.js";
 
 export interface RunLocalProtocolServerOptions {
@@ -402,10 +403,19 @@ async function runOwnedLocalProtocolServer(
         const happyConfiguration = await happyModule?.importHappyCredentials({
             machineScope: socketPath,
         });
+        // Sessions are created before the plugin manager exists, so they reach it through a stable
+        // handle rather than a captured instance.
+        let pluginManager: PluginManager | undefined;
+        const plugins: PluginContext = {
+            install: (request) => requirePluginManager(pluginManager).install(request),
+            list: () => requirePluginManager(pluginManager).list(),
+            uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
+        };
         store = new PersistentSessionStore({
             createRuntime: (options) =>
                 createCodingAssistantAgent({
                     ...options,
+                    plugins,
                     providers: availableProviders,
                     resolveCodexStreamMaxRetries: () => runtimeSettings.codexStreamMaxRetries,
                 }),
@@ -448,26 +458,26 @@ async function runOwnedLocalProtocolServer(
             },
             taskDrain,
         });
-        const pluginManager = new PluginManager({
+        const startedPluginManager = (pluginManager = new PluginManager({
             daemonLog,
             ...(loadedConfig.config.docker === undefined
                 ? {}
                 : { defaultDocker: loadedConfig.config.docker }),
             store,
-        });
-        const pluginsStarted = pluginManager.start().catch((error: unknown) => {
+        }));
+        const pluginsStarted = startedPluginManager.start().catch((error: unknown) => {
             daemonLog.record(
                 "error",
                 "plugins_unavailable",
                 "Rig could not load the plugins folder.",
                 {
                     error: errorToMessage(error),
-                    pluginsDirectory: pluginManager.directory,
+                    pluginsDirectory: startedPluginManager.directory,
                 },
             );
         });
         shutdown.register("plugins", async () => {
-            await pluginManager.close();
+            await startedPluginManager.close();
             await pluginsStarted;
         });
         if (stopping) return;
@@ -640,6 +650,12 @@ async function runOwnedLocalProtocolServer(
             socketPath,
         });
     }
+}
+
+function requirePluginManager(manager: PluginManager | undefined): PluginManager {
+    if (manager === undefined)
+        throw new Error("Rig is still starting, so plugins are unavailable.");
+    return manager;
 }
 
 async function writeRegistry(path: string, payload: unknown): Promise<void> {

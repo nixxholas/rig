@@ -43,6 +43,7 @@ import { readAgentHistoryTool } from "../tools/read_agent_history.js";
 import { selectCollaborationToolsForModel } from "./selectCollaborationToolsForModel.js";
 import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
+import type { PluginContext } from "../agent/context/PluginContext.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
 import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
 import type { SchedulingContext } from "../scheduling/index.js";
@@ -82,6 +83,7 @@ export interface CreateCodingAssistantAgentOptions {
     scheduling?: SchedulingContext;
     subagents?: SubagentContext;
     systemPrompt?: string;
+    plugins?: PluginContext;
     tasks?: TaskContext;
     userInput?: UserInputContext;
     workflows?: WorkflowContext;
@@ -138,6 +140,9 @@ export function createCodingAssistantAgent(
     }
     if (options.workspaces !== undefined) {
         context.workspaces = options.workspaces;
+    }
+    if (options.plugins !== undefined) {
+        context.plugins = options.plugins;
     }
     if (options.scheduling !== undefined) {
         context.scheduling = options.scheduling;

@@ -18,6 +18,8 @@ export type {
     GlobalLiveEvent,
     GlobalLiveEventDelivery,
     GlobalStreamHello,
+    PluginsChangedEvent,
+    PluginSummary,
     PresenceChangedEvent,
     PresenceSnapshot,
     PresenceSummary,

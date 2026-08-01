@@ -5,6 +5,7 @@ export {
 } from "./createPluginApiServer.js";
 export { discoverPlugins } from "./discoverPlugins.js";
 export { getPluginDataDirectory, getPluginDataRoot } from "./getPluginDataDirectory.js";
+export { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 export { PluginBuildError } from "./PluginBuildError.js";
 export { PluginLog } from "./PluginLog.js";
 export { PluginManager, type PluginManagerOptions } from "./PluginManager.js";

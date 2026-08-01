@@ -94,6 +94,25 @@ loses to recent drafts instead of never being able to win. The clamped value is
 published as `updatedAt` and exposed as `draftUpdatedAt` on the session, so every
 client orders drafts by the same numbers. Omitting `updatedAt` means now.
 
+## Daemon events
+
+These describe the whole daemon rather than one session, project, or workspace.
+They arrive on the global stream only.
+
+| Event              | Emitted when                                                                      | `data` payload                             | Global |
+| ------------------ | --------------------------------------------------------------------------------- | ------------------------------------------ | ------ |
+| `presence_changed` | The user switches presence.                                                       | `presence`: current `PresenceSnapshot`     | **No** |
+| `plugins_changed`  | Plugins finish loading at startup, one is installed or uninstalled, or one stops. | `plugins`: every installed `PluginSummary` | **No** |
+
+Both are live-only and carry the complete current state, so a client that
+reconnects reads what is there now instead of replaying past changes.
+
+`plugins_changed` reports each installed plugin's `name`, `description`,
+`folder`, the `directory` Rig installed it into, the `dataDirectory` it writes
+to, and whether it is `running`. Installing a plugin starts it and uninstalling
+one stops it before its code is removed, so a client never has to poll or wait
+for a daemon restart to show the current set.
+
 ## `agent_event` subtypes
 
 All events in this section are wrapped as

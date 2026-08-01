@@ -31,3 +31,10 @@ allows writes only inside that folder.
 `PluginManager` is the daemon lifecycle boundary. Registration and compilation are separate
 functions so a bad plugin can be reported without preventing other plugins or the daemon
 from starting.
+
+Registration is immediate. `install` copies a folder in, compiles it, and starts the plugin before
+it returns; `uninstall` stops the plugin before removing its code and always keeps the folder the
+plugin writes to. Every change — including a plugin that exits on its own — publishes a live
+`plugins_changed` event carrying the whole current set, so clients never poll and never wait for a
+restart. A plugin is staged in a hidden folder and compiled there, so a plugin that fails to build
+is never installed and never replaces a working one.

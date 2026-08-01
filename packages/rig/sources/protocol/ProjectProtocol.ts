@@ -293,7 +293,32 @@ export interface SetPresenceRequestBody {
     until?: number;
 }
 
+/** One plugin installed on this machine, as a client should show it. */
+export interface PluginSummary {
+    /** The folder the plugin writes to, which the user can open. */
+    dataDirectory: string;
+    description: string;
+    /** Where Rig installed the plugin's code. */
+    directory: string;
+    folder: string;
+    name: string;
+    running: boolean;
+}
+
+/**
+ * The installed plugins changed, or one of them started or stopped. It is live-only and carries
+ * the whole current set: plugins are folders on disk, so a client that reconnects reads them again
+ * rather than replaying every past registration.
+ */
+export interface PluginsChangedEvent {
+    createdAt: number;
+    data: { plugins: readonly PluginSummary[] };
+    id: EventId;
+    type: "plugins_changed";
+}
+
 export type GlobalLiveEvent =
+    | PluginsChangedEvent
     | PresenceChangedEvent
     | ProjectGitEvent
     | ProjectWorkspaceGitEvent
@@ -321,6 +346,7 @@ export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDeliver
 
 export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
     return (
+        event.type === "plugins_changed" ||
         event.type === "presence_changed" ||
         event.type === "project_git_changed" ||
         event.type === "workspace_git_changed" ||

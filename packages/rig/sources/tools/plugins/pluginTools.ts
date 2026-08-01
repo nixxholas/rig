@@ -1,22 +1,11 @@
-import { join } from "node:path";
-
 import { Type } from "@sinclair/typebox";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
+import type { PluginContext } from "../../agent/context/PluginContext.js";
 import { resolveFileSystemPath } from "../../agent/context/resolveFileSystemPath.js";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
-import { discoverPlugins } from "../../plugins/discoverPlugins.js";
-import { getPluginDataDirectory } from "../../plugins/getPluginDataDirectory.js";
 import { getPluginsDirectory } from "../../plugins/getPluginsDirectory.js";
-import { installPluginFromPath } from "./installPluginFromPath.js";
-
-const installedPluginSchema = Type.Object({
-    description: Type.String(),
-    directory: Type.String(),
-    folder: Type.String(),
-    name: Type.String(),
-});
 
 /**
  * Plugins live in Rig's managed home rather than the workspace, so every plugin action reaches
@@ -28,7 +17,7 @@ export const pluginInstallTool = defineTool({
     name: "plugin_install",
     label: "Install plugin",
     description:
-        "Install a plugin from a folder on this machine. Rig copies the sources into its managed plugins folder and compiles them; a plugin that fails to build is not installed. Restart the daemon to start a newly installed plugin.",
+        "Install a plugin from a folder on this machine. Rig copies the sources into its managed plugins folder, compiles them, and starts the plugin right away; a plugin that fails to build is not installed.",
     arguments: Type.Object(
         {
             path: Type.String({
@@ -37,19 +26,23 @@ export const pluginInstallTool = defineTool({
         },
         { additionalProperties: false },
     ),
-    returnType: installedPluginSchema,
+    returnType: Type.Object({
+        description: Type.String(),
+        directory: Type.String(),
+        folder: Type.String(),
+        name: Type.String(),
+    }),
     shouldReviewInAutoMode: () => true,
     shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ path }, context) =>
-        `install the plugin at ${quoteVisibleExact(resolvePluginSource(path, context))} into ${quoteVisibleExact(getPluginsDirectory())}, compiling its TypeScript. ${OUTSIDE_WORKSPACE}`,
+        `install the plugin at ${quoteVisibleExact(resolvePluginSource(path, context))} into ${quoteVisibleExact(getPluginsDirectory())}, compiling its TypeScript and running it. ${OUTSIDE_WORKSPACE}`,
     execute: ({ path }, context) =>
-        installPluginFromPath({
+        requirePlugins(context).install({
             fs: context.fs,
-            pluginsDirectory: getPluginsDirectory(),
             sourceDirectory: resolvePluginSource(path, context),
         }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
-    toUI: (result) => `Installed the ${result.name} plugin. Restart Rig to start it.`,
+    toUI: (result) => `Installed and started the ${result.name} plugin.`,
     locks: ["plugins"],
 });
 
@@ -57,7 +50,7 @@ export const pluginUninstallTool = defineTool({
     name: "plugin_uninstall",
     label: "Uninstall plugin",
     description:
-        "Uninstall a plugin by its name. Rig removes the installed code and keeps everything the plugin wrote in its own folder.",
+        "Uninstall a plugin by its name. Rig stops it, removes the installed code, and keeps everything the plugin wrote in its own folder.",
     arguments: Type.Object(
         { name: Type.String({ description: "Installed plugin name or folder name." }) },
         { additionalProperties: false },
@@ -70,34 +63,8 @@ export const pluginUninstallTool = defineTool({
     shouldReviewInAutoMode: () => true,
     shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ name }) =>
-        `uninstall the plugin ${quoteVisibleExact(name)}, deleting its installed code under ${quoteVisibleExact(getPluginsDirectory())} while keeping the folder it writes to. ${OUTSIDE_WORKSPACE}`,
-    execute: async ({ name }, context) => {
-        const pluginsDirectory = getPluginsDirectory();
-        const discovery = await discoverPlugins(pluginsDirectory);
-        const wanted = name.trim().toLowerCase();
-        const installed = discovery.plugins.find(
-            (plugin) =>
-                plugin.manifest.name.toLowerCase() === wanted ||
-                plugin.folderName.toLowerCase() === wanted,
-        );
-        if (installed === undefined) {
-            const known = discovery.plugins.map((plugin) => plugin.manifest.name);
-            throw new Error(
-                known.length === 0
-                    ? `No plugin named ${name} is installed. No plugins are installed.`
-                    : `No plugin named ${name} is installed. Installed plugins: ${known.join(", ")}.`,
-            );
-        }
-        await context.fs.rm(join(pluginsDirectory, installed.folderName), {
-            force: true,
-            recursive: true,
-        });
-        return {
-            dataDirectory: getPluginDataDirectory(installed.folderName),
-            folder: installed.folderName,
-            name: installed.manifest.name,
-        };
-    },
+        `stop the plugin ${quoteVisibleExact(name)} and delete its installed code under ${quoteVisibleExact(getPluginsDirectory())}, keeping the folder it writes to. ${OUTSIDE_WORKSPACE}`,
+    execute: ({ name }, context) => requirePlugins(context).uninstall({ fs: context.fs, name }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Uninstalled the ${result.name} plugin and kept its data.`,
     locks: ["plugins"],
@@ -107,7 +74,7 @@ export const pluginListTool = defineTool({
     name: "plugin_list",
     label: "List plugins",
     description:
-        "List the plugins installed on this machine, along with the folder each one writes to and any that failed to register.",
+        "List the plugins installed on this machine, showing which are running, the folder each one writes to, and any that failed to register.",
     arguments: Type.Object({}, { additionalProperties: false }),
     returnType: Type.Object({
         failures: Type.Array(Type.Object({ error: Type.String(), folder: Type.String() })),
@@ -115,27 +82,21 @@ export const pluginListTool = defineTool({
             Type.Object({
                 dataDirectory: Type.String(),
                 description: Type.String(),
+                directory: Type.String(),
                 folder: Type.String(),
                 name: Type.String(),
+                running: Type.Boolean(),
             }),
         ),
     }),
     shouldReviewInAutoMode: () => true,
     describeAutoPermissionAction: () =>
         `list the plugins installed under ${quoteVisibleExact(getPluginsDirectory())}. ${OUTSIDE_WORKSPACE}`,
-    execute: async () => {
-        const discovery = await discoverPlugins(getPluginsDirectory());
+    execute: async (_args, context) => {
+        const { failures, plugins } = await requirePlugins(context).list();
         return {
-            failures: discovery.failures.map((failure) => ({
-                error: failure.error,
-                folder: failure.folderName,
-            })),
-            plugins: discovery.plugins.map((plugin) => ({
-                dataDirectory: getPluginDataDirectory(plugin.folderName),
-                description: plugin.manifest.description,
-                folder: plugin.folderName,
-                name: plugin.manifest.name,
-            })),
+            failures: failures.map((failure) => ({ ...failure })),
+            plugins: plugins.map((plugin) => ({ ...plugin })),
         };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
@@ -147,6 +108,13 @@ export const pluginListTool = defineTool({
 });
 
 export const pluginTools = [pluginInstallTool, pluginUninstallTool, pluginListTool];
+
+function requirePlugins(context: AgentContext): PluginContext {
+    if (context.plugins === undefined) {
+        throw new Error("Plugins are unavailable in this session.");
+    }
+    return context.plugins;
+}
 
 function resolvePluginSource(path: string, context: AgentContext): string {
     try {

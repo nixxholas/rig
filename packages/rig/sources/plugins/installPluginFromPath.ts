@@ -1,9 +1,9 @@
 import { basename, join } from "node:path";
 
-import type { FileSystemContext } from "../../agent/context/FileSystemContext.js";
-import { buildPlugin } from "../../plugins/buildPlugin.js";
-import { readPluginManifest } from "../../plugins/readPluginManifest.js";
-import { PLUGIN_MANIFEST_FILE_NAME } from "../../plugins/types.js";
+import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import { buildPlugin } from "./buildPlugin.js";
+import { readPluginManifest } from "./readPluginManifest.js";
+import { PLUGIN_MANIFEST_FILE_NAME } from "./types.js";
 
 /** Generated state never travels with a plugin; Rig rebuilds it for the installed copy. */
 const EXCLUDED_ENTRIES = new Set([".build", ".git", ".runtime", "node_modules"]);
