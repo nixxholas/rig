@@ -458,6 +458,14 @@ export class AgentSessionManager {
                 }
                 return this.#sendToAgent(sessionId, agentId, message);
             },
+            setReadOnly: async (agentId, readOnly) => {
+                if (!inspectedAgentIds.has(agentId)) {
+                    throw new Error(
+                        "Call agent_info with this agent ID before changing its permission mode.",
+                    );
+                }
+                await this.#setAgentReadOnly(sessionId, agentId, readOnly);
+            },
         };
     }
 
@@ -467,7 +475,9 @@ export class AgentSessionManager {
         message: string,
         messageId: string,
     ): void {
-        this.#sendToAgent(senderSessionId, targetAgentId, message, messageId);
+        const sender = this.#current(senderSessionId);
+        const target = this.#target(targetAgentId);
+        this.#deliverAgentMessage(sender, target, message, messageId);
     }
 
     async changeSubagentPermissionModes(
@@ -594,6 +604,20 @@ export class AgentSessionManager {
                           encryptedContent: encryptedMessage,
                       },
                   }),
+        });
+        this.recordChanged(child);
+        return this.#managedSubagent(child);
+    }
+
+    async setSubagentReadOnly(
+        parentSessionId: string,
+        target: string,
+        readOnly: boolean,
+    ): Promise<ManagedSubagent> {
+        const parent = this.#current(parentSessionId);
+        const child = this.#resolveTarget(parentSessionId, target);
+        await this.#changeChildPermissionMode(parent, child, readOnly, {
+            updateSubagents: false,
         });
         this.recordChanged(child);
         return this.#managedSubagent(child);
@@ -878,6 +902,7 @@ export class AgentSessionManager {
                 ...(request.effort === undefined ? {} : { effort: request.effort }),
                 ...(childModelId === undefined ? {} : { modelId: childModelId }),
                 ...(childProviderId === undefined ? {} : { providerId: childProviderId }),
+                ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
                 ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
             };
             child =
@@ -1023,6 +1048,26 @@ export class AgentSessionManager {
     ): { delivered: true } {
         const sender = this.#current(senderSessionId);
         const target = this.#target(targetAgentId);
+        this.#deliverAgentMessage(sender, target, message, messageId);
+        return { delivered: true };
+    }
+
+    async #setAgentReadOnly(
+        senderSessionId: string,
+        targetAgentId: string,
+        readOnly: boolean,
+    ): Promise<void> {
+        const sender = this.#current(senderSessionId);
+        const target = this.#target(targetAgentId);
+        await this.#changeChildPermissionMode(sender, target, readOnly);
+    }
+
+    #deliverAgentMessage(
+        sender: InMemorySession,
+        target: InMemorySession,
+        message: string,
+        messageId?: string,
+    ): void {
         const identity = sender.agentIdentity();
         const senderPath = resolveSharedAgentPath(
             target.agentCommunicationLocation(),
@@ -1057,7 +1102,34 @@ export class AgentSessionManager {
             provenance: "agent",
             role: "user",
         });
-        return { delivered: true };
+    }
+
+    async #changeChildPermissionMode(
+        parent: InMemorySession,
+        child: InMemorySession,
+        readOnly: boolean | undefined,
+        options: { updateSubagents?: boolean } = {},
+    ): Promise<void> {
+        if (readOnly === undefined) return;
+        const childMetadata = child.agentMetadata();
+        if (
+            childMetadata.parentSessionId !== parent.id &&
+            childMetadata.delegatedBySessionId !== parent.id
+        ) {
+            throw new Error(
+                "Only an agent that started this child can change its permission mode.",
+            );
+        }
+        const inheritedMode = parent.requestForSubagent().permissionMode;
+        if (inheritedMode === undefined) {
+            throw new Error("The parent session has no permission mode to inherit.");
+        }
+        const request = { permissionMode: readOnly ? ("read_only" as const) : inheritedMode };
+        if (options.updateSubagents === undefined) {
+            await child.changePermissionMode(request);
+        } else {
+            await child.changePermissionMode(request, options);
+        }
     }
 
     #target(agentId: string): InMemorySession {

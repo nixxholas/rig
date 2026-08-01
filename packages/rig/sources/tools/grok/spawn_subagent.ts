@@ -29,6 +29,12 @@ export const grokSpawnSubagentTool = defineTool({
                     'Subagent type. Use "explore" for read-only investigation or "general-purpose" for implementation.',
             }),
         ),
+        read_only: Type.Optional(
+            Type.Boolean({
+                description:
+                    "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+            }),
+        ),
         background: Type.Optional(
             Type.Boolean({
                 description:
@@ -44,7 +50,7 @@ export const grokSpawnSubagentTool = defineTool({
     }),
     shouldReviewInAutoMode: () => false,
     execute: async (
-        { background = true, description, effort, model, prompt },
+        { background = true, description, effort, model, prompt, read_only, subagent_type },
         context,
         execution,
     ) => {
@@ -55,6 +61,9 @@ export const grokSpawnSubagentTool = defineTool({
                 effort,
                 modelId: model,
                 prompt,
+                ...(read_only !== undefined || subagent_type === "explore"
+                    ? { readOnly: read_only ?? true }
+                    : {}),
                 taskName: toTaskName(description),
                 ...(execution.toolCallId === undefined
                     ? {}

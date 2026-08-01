@@ -9,8 +9,9 @@ import { AgentSessionManager } from "../AgentSessionManager.js";
 import type { InMemorySession } from "../InMemorySession.js";
 
 describe("AgentSessionManager", () => {
-    it("sends agent-authored steering by exact agent id with reply metadata", () => {
+    it("sends agent-authored steering and changes an owned delegate permission mode", async () => {
         const deliverAgentMessage = vi.fn();
+        const changePermissionMode = vi.fn(async () => ({ permissionMode: "read_only" }));
         const senderLocation = vi.fn<
             () => ReturnType<InMemorySession["agentCommunicationLocation"]>
         >(() => ({
@@ -23,6 +24,12 @@ describe("AgentSessionManager", () => {
             cwd: "/workspaces/target",
             sessionId: "target-session",
         }));
+        const targetMetadata = vi.fn<() => SessionAgentMetadata>(() => ({
+            delegatedBySessionId: "sender-session",
+            depth: 0,
+            rootSessionId: "target-session",
+            type: "primary" as const,
+        }));
         const sender = {
             agentCommunicationLocation: senderLocation,
             agentIdentity: () => ({
@@ -30,7 +37,13 @@ describe("AgentSessionManager", () => {
                 folder: "sender",
                 title: "Fix authentication",
             }),
+            agentMetadata: () => ({
+                depth: 0,
+                rootSessionId: "sender-session",
+                type: "primary" as const,
+            }),
             id: "sender-session",
+            requestForSubagent: () => ({ permissionMode: "auto" }),
         } as unknown as InMemorySession;
         const target = {
             agentCommunicationLocation: targetLocation,
@@ -39,8 +52,20 @@ describe("AgentSessionManager", () => {
                 folder: "target",
                 title: "Review authentication",
             }),
+            agentMetadata: targetMetadata,
+            changePermissionMode,
             deliverAgentMessage,
             id: "target-session",
+        } as unknown as InMemorySession;
+        const intermediate = {
+            agentMetadata: () => ({
+                depth: 1,
+                parentSessionId: "sender-session",
+                rootSessionId: "sender-session",
+                taskName: "intermediate",
+                type: "subagent" as const,
+            }),
+            id: "intermediate-session",
         } as unknown as InMemorySession;
         const findByAgentId = vi.fn((agentId: string) =>
             agentId === "target-agent-id" ? target : undefined,
@@ -49,8 +74,15 @@ describe("AgentSessionManager", () => {
             repository: {
                 createSubagent: vi.fn(),
                 findByAgentId,
-                get: (id) => (id === sender.id ? sender : id === target.id ? target : undefined),
-                listByRoot: () => [],
+                get: (id) =>
+                    id === sender.id
+                        ? sender
+                        : id === target.id
+                          ? target
+                          : id === intermediate.id
+                            ? intermediate
+                            : undefined,
+                listByRoot: () => [intermediate, target],
             },
         });
         const communication = manager.communicationContext(sender.id);
@@ -73,6 +105,33 @@ describe("AgentSessionManager", () => {
         expect(communication.send("target-agent-id", "Please check my patch.")).toEqual({
             delivered: true,
         });
+        await communication.setReadOnly?.("target-agent-id", true);
+        await communication.setReadOnly?.("target-agent-id", false);
+        expect(changePermissionMode).toHaveBeenNthCalledWith(1, {
+            permissionMode: "read_only",
+        });
+        expect(changePermissionMode).toHaveBeenNthCalledWith(2, {
+            permissionMode: "auto",
+        });
+        targetMetadata.mockReturnValue({
+            depth: 2,
+            parentSessionId: intermediate.id,
+            rootSessionId: sender.id,
+            taskName: "nested_target",
+            type: "subagent",
+        });
+        await expect(communication.setReadOnly?.("target-agent-id", false)).rejects.toThrow(
+            "Only an agent that started this child can change its permission mode.",
+        );
+        targetMetadata.mockReturnValue({
+            depth: 0,
+            rootSessionId: "target-session",
+            type: "primary",
+        });
+        await expect(communication.setReadOnly?.("target-agent-id", true)).rejects.toThrow(
+            "Only an agent that started this child can change its permission mode.",
+        );
+        expect(changePermissionMode).toHaveBeenCalledTimes(2);
         expect(findByAgentId).toHaveBeenCalledWith("target-agent-id");
         expect(deliverAgentMessage).toHaveBeenCalledWith({
             agentSource: {
@@ -565,6 +624,56 @@ describe("AgentSessionManager", () => {
         expect(createSubagent).toHaveBeenCalledOnce();
     });
 
+    it("can start a single subagent read only without changing the parent mode", async () => {
+        const child = {
+            agentMetadata: () => ({
+                depth: 1,
+                parentSessionId: "root-1",
+                rootSessionId: "root-1",
+                taskName: "inspect_only",
+                type: "subagent" as const,
+            }),
+            id: "child-1",
+            isSubagent: () => true,
+            subagentSummary: () => ({ status: "running" }),
+            submit: vi.fn(() => ({ runId: "child-run" })),
+        } as unknown as InMemorySession;
+        const parent = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            id: "root-1",
+            isSubagent: () => false,
+            recordSubagentChanged: vi.fn(),
+            requestForSubagent: () => ({
+                cwd: "/tmp/rig-manager-test",
+                modelId: "openai/gpt-5.6-sol",
+                permissionMode: "auto",
+                providerId: "codex",
+            }),
+        } as unknown as InMemorySession;
+        const createSubagent = vi.fn(() => child);
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent,
+                get: (sessionId) => (sessionId === parent.id ? parent : undefined),
+                listByRoot: () => [],
+            },
+        });
+
+        await manager.spawn(parent.id, {
+            background: true,
+            description: "Inspect only",
+            prompt: "Inspect without editing.",
+            readOnly: true,
+            taskName: "inspect_only",
+        });
+
+        expect(createSubagent).toHaveBeenCalledWith(
+            expect.objectContaining({ permissionMode: "read_only" }),
+            expect.objectContaining({ taskName: "inspect_only" }),
+        );
+        expect(parent.requestForSubagent().permissionMode).toBe("auto");
+    });
+
     it("rejects encrypted spawn delivery across provider or region scopes", async () => {
         const parentTransportScope = vi.fn<() => string | undefined>(() => '["codex",null]');
         const child = {
@@ -835,6 +944,115 @@ describe("AgentSessionManager", () => {
             { permissionMode: "read_only" },
             { updateSubagents: false },
         );
+    });
+
+    it("switches one retained subagent between read only and the sender mode", async () => {
+        const changePermissionMode = vi.fn(async () => ({ permissionMode: "read_only" }));
+        const child = {
+            agentMetadata: () => ({
+                depth: 1,
+                description: "Inspect code",
+                parentSessionId: "root-1",
+                rootSessionId: "root-1",
+                taskName: "inspect_code",
+                type: "subagent" as const,
+            }),
+            changePermissionMode,
+            id: "child-1",
+            isSubagent: () => true,
+            subagentSummary: () => ({
+                description: "Inspect code",
+                status: "completed" as const,
+            }),
+            submit: vi.fn(() => ({ runId: "child-run" })),
+            waitForRun: vi.fn(() => new Promise(() => {})),
+        } as unknown as InMemorySession;
+        const parent = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            id: "root-1",
+            isSubagent: () => false,
+            recordSubagentChanged: vi.fn(),
+            requestForSubagent: () => ({
+                cwd: "/tmp/rig-manager-test",
+                permissionMode: "auto",
+            }),
+        } as unknown as InMemorySession;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (sessionId) =>
+                    sessionId === parent.id ? parent : sessionId === child.id ? child : undefined,
+                listByRoot: () => [child],
+            },
+        });
+
+        await manager.setSubagentReadOnly(parent.id, "inspect_code", true);
+        manager.followUp(parent.id, "inspect_code", "Inspect first.");
+        await manager.setSubagentReadOnly(parent.id, "inspect_code", false);
+        manager.followUp(parent.id, "inspect_code", "Now make the fix.");
+
+        expect(changePermissionMode).toHaveBeenNthCalledWith(
+            1,
+            { permissionMode: "read_only" },
+            { updateSubagents: false },
+        );
+        expect(changePermissionMode).toHaveBeenNthCalledWith(
+            2,
+            { permissionMode: "auto" },
+            { updateSubagents: false },
+        );
+    });
+
+    it("does not let an ancestor restore a nested subagent above its direct parent", async () => {
+        const nestedChangePermissionMode = vi.fn(async () => ({ permissionMode: "auto" }));
+        const root = {
+            agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" as const }),
+            id: "root-1",
+            isSubagent: () => false,
+            requestForSubagent: () => ({ permissionMode: "auto" as const }),
+        } as unknown as InMemorySession;
+        const directChild = {
+            agentMetadata: () => ({
+                depth: 1,
+                parentSessionId: root.id,
+                rootSessionId: root.id,
+                taskName: "direct_child",
+                type: "subagent" as const,
+            }),
+            id: "child-1",
+            isSubagent: () => true,
+        } as unknown as InMemorySession;
+        const nestedChild = {
+            agentMetadata: () => ({
+                depth: 2,
+                parentSessionId: directChild.id,
+                rootSessionId: root.id,
+                taskName: "nested_child",
+                type: "subagent" as const,
+            }),
+            changePermissionMode: nestedChangePermissionMode,
+            id: "child-2",
+            isSubagent: () => true,
+        } as unknown as InMemorySession;
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (sessionId) =>
+                    sessionId === root.id
+                        ? root
+                        : sessionId === directChild.id
+                          ? directChild
+                          : sessionId === nestedChild.id
+                            ? nestedChild
+                            : undefined,
+                listByRoot: () => [directChild, nestedChild],
+            },
+        });
+
+        await expect(
+            manager.setSubagentReadOnly(root.id, "/root/direct_child/nested_child", false),
+        ).rejects.toThrow("Only an agent that started this child can change its permission mode.");
+        expect(nestedChangePermissionMode).not.toHaveBeenCalled();
     });
 
     it("shuts down a descendant whose permission reduction cannot be persisted", async () => {
@@ -1825,6 +2043,7 @@ describe("AgentSessionManager", () => {
         expect(createDelegatedSession).toHaveBeenCalledWith(
             expect.objectContaining({
                 cwd: "/workspaces/changelog",
+                permissionMode: "auto",
                 projectId: "project-1",
                 trackUnread: true,
                 workspaceId: "workspace-2",

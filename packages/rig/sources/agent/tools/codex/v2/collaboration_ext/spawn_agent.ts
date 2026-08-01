@@ -44,6 +44,12 @@ Spawn a background subagent with an explicit provider and model.`,
             reasoning_effort: Type.String({
                 description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
             }),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+                }),
+            ),
             service_tier: Type.Optional(
                 Type.Literal("priority", {
                     description:
@@ -59,8 +65,16 @@ Spawn a background subagent with an explicit provider and model.`,
     }),
     shouldReviewInAutoMode: () => false,
     execute: async (args, context, execution) => {
-        const { fork_turns, message, model, provider, reasoning_effort, service_tier, task_name } =
-            args;
+        const {
+            fork_turns,
+            message,
+            model,
+            provider,
+            read_only,
+            reasoning_effort,
+            service_tier,
+            task_name,
+        } = args;
         const subagents = requireSubagentContext(context);
         const availableModels = subagents.availableModels;
         if (
@@ -84,6 +98,7 @@ Spawn a background subagent with an explicit provider and model.`,
                 effort: reasoning_effort,
                 modelId: model,
                 providerId: provider,
+                ...(read_only === undefined ? {} : { readOnly: read_only }),
                 ...(service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
                 ...(execution.toolCallId === undefined
                     ? {}

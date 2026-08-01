@@ -1842,7 +1842,9 @@ export class InMemorySession {
         }
         const running = this.#reapableProcessCount();
         const descendantChange =
-            !this.isSubagent() && options.updateSubagents !== false
+            !this.isSubagent() &&
+            options.updateSubagents !== false &&
+            isPermissionReduction(previousPermissionMode, permissionMode)
                 ? (this.#agentManager?.changeSubagentPermissionModes(this.id, permissionMode) ??
                   Promise.resolve())
                 : Promise.resolve();
@@ -5918,6 +5920,8 @@ export class InMemorySession {
                 maxDepth: agentManager.maxDepth,
                 sendMessage: (target, message, encryptedMessage) =>
                     agentManager.sendMessage(this.id, target, message, encryptedMessage),
+                setReadOnly: (target, readOnly) =>
+                    agentManager.setSubagentReadOnly(this.id, target, readOnly),
                 spawn: (request, signal) => agentManager.spawn(this.id, request, signal),
                 wait: (timeoutMs, signal) => agentManager.wait(this.id, timeoutMs, signal),
             };

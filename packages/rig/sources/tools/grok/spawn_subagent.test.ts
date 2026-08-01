@@ -70,6 +70,7 @@ describe("grokSpawnSubagentTool", () => {
                 effort: "low",
                 model: "xai/grok-build",
                 prompt: "Inspect the implementation.",
+                subagent_type: "explore",
             },
             harness.context,
             { toolCallId: "tool-1" },
@@ -80,6 +81,7 @@ describe("grokSpawnSubagentTool", () => {
                 effort: "low",
                 modelId: "xai/grok-build",
                 parentToolCallId: "tool-1",
+                readOnly: true,
             }),
             undefined,
         );
@@ -141,7 +143,7 @@ describe("grokSpawnSubagentTool", () => {
         ).rejects.toBe(databaseError);
     });
 
-    it("follows up a retained subagent at the requested effort", () => {
+    it("follows up a retained subagent at the requested effort", async () => {
         const harness = createJustBashToolHarness();
         const followUp = vi.fn(() => ({
             description: "Inspect code",
@@ -161,7 +163,7 @@ describe("grokSpawnSubagentTool", () => {
             wait: async () => ({ agents: [], timedOut: false }),
         };
 
-        expect(
+        await expect(
             grokFollowupSubagentTool.execute(
                 {
                     effort: "high",
@@ -171,7 +173,7 @@ describe("grokSpawnSubagentTool", () => {
                 harness.context,
                 {},
             ),
-        ).toMatchObject({ subagent_id: "agent-1" });
+        ).resolves.toMatchObject({ subagent_id: "agent-1" });
         expect(followUp).toHaveBeenCalledWith("inspect_code", "Inspect the final diff.", "high");
     });
 });

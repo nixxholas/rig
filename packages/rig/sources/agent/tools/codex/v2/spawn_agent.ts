@@ -44,6 +44,12 @@ Spawn a background subagent for a concrete, bounded task. The new agent shares t
             reasoning_effort: Type.String({
                 description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
             }),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+                }),
+            ),
         },
         { additionalProperties: false },
     ),
@@ -53,7 +59,7 @@ Spawn a background subagent for a concrete, bounded task. The new agent shares t
     }),
     shouldReviewInAutoMode: () => false,
     execute: async (args, context, execution) => {
-        const { fork_turns, message, model, reasoning_effort, task_name } = args;
+        const { fork_turns, message, model, read_only, reasoning_effort, task_name } = args;
         const subagents = requireSubagentContext(context);
         const fork = parseCodexForkTurns(fork_turns);
         const parentMessages = execution.messages?.slice(0, -1);
@@ -68,6 +74,7 @@ Spawn a background subagent for a concrete, bounded task. The new agent shares t
                 ...(subagents.encryptedMessages === true ? { encryptedPrompt: message } : {}),
                 effort: reasoning_effort,
                 modelId: model,
+                ...(read_only === undefined ? {} : { readOnly: read_only }),
                 ...(execution.toolCallId === undefined
                     ? {}
                     : { parentToolCallId: execution.toolCallId }),

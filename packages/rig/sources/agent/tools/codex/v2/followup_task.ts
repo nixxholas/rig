@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 
+import { applySubagentReadOnlyOverride } from "../../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../../types.js";
 import { managedSubagentSchema } from "../impl/subagentSchemas.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
@@ -22,14 +23,21 @@ Send follow-up work to an existing subagent, including one that completed or was
                 description: "Message text to send to the target agent.",
                 encrypted: true,
             }),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "True switches the child to Read only; false restores the sender's current permission mode. Omit to keep its current mode.",
+                }),
+            ),
         },
         { additionalProperties: false },
     ),
     returnType: managedSubagentSchema,
     shouldReviewInAutoMode: () => false,
-    execute: (args, context) => {
-        const { message, target } = args;
+    execute: async (args, context) => {
+        const { message, read_only, target } = args;
         const subagents = requireSubagentContext(context);
+        await applySubagentReadOnlyOverride(subagents, target, read_only);
         return subagents.encryptedMessages === true
             ? subagents.followUp(target, "", undefined, message)
             : subagents.followUp(target, message);

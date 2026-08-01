@@ -4,7 +4,7 @@ import { DEFAULT_CODEX_STREAM_MAX_RETRIES } from "./codexStreamRetrySettings.js"
 export const DEFAULT_RIG_CONFIG: RigConfig = {
     defaults: {
         modelId: "openai/gpt-5.6-sol",
-        permissionMode: "workspace_write",
+        permissionMode: "auto",
     },
     features: {
         crossWorkspace: false,

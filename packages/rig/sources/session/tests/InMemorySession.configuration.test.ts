@@ -69,6 +69,23 @@ describe("InMemorySession queued configuration", () => {
         await session.beginShutdown();
     });
 
+    it("does not promote independently restricted descendants when the root mode increases", async () => {
+        const changeSubagentPermissionModes = vi.fn(async () => {});
+        const { session } = runningSession({
+            agentManager: {
+                changeSubagentPermissionModes,
+                communicationContext: vi.fn(),
+            } as unknown as AgentSessionManager,
+        });
+
+        await session.changePermissionMode({ permissionMode: "read_only" });
+        await session.changePermissionMode({ permissionMode: "auto" });
+
+        expect(changeSubagentPermissionModes).toHaveBeenCalledOnce();
+        expect(changeSubagentPermissionModes).toHaveBeenCalledWith(session.id, "read_only");
+        await session.beginShutdown();
+    });
+
     it("waits for local shutdown when descendant permission propagation fails", async () => {
         const processManager = new NativeProcessManager();
         const killStarted = deferred<void>();

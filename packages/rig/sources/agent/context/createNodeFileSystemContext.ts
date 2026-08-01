@@ -20,7 +20,7 @@ import { assertCanWritePath } from "./assertCanWritePath.js";
 import { createUserSkillRootPaths } from "./createUserSkillRootPaths.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 import { toFileSystemStat } from "./toFileSystemStat.js";
-import type { PermissionMode } from "../../permissions/index.js";
+import { DEFAULT_PERMISSION_MODE, type PermissionMode } from "../../permissions/index.js";
 import { getBuiltinSkillRoot } from "../skills/getBuiltinSkillRoot.js";
 
 export interface CreateNodeFileSystemContextOptions {
@@ -33,7 +33,7 @@ export function createNodeFileSystemContext(
     cwd: string,
     options: CreateNodeFileSystemContextOptions = {},
 ): FileSystemContext {
-    const permissionMode = options.permissionMode ?? (() => "workspace_write" as const);
+    const permissionMode = options.permissionMode ?? (() => DEFAULT_PERMISSION_MODE);
     const resolvePath = (path: string) => (isAbsolute(path) ? path : resolve(cwd, path));
     const home = options.home ?? homedir();
     const readPathOptions = {

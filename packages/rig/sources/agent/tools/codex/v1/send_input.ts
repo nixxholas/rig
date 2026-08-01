@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 
+import { applySubagentReadOnlyOverride } from "../../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../../types.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
 import { collaborationItemsSchema } from "./collaborationItemsSchema.js";
@@ -27,6 +28,12 @@ export const codexV1SendInputTool = defineTool({
             ),
             items: Type.Optional(collaborationItemsSchema),
             interrupt: Type.Optional(Type.Boolean()),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "True switches the child to Read only; false restores the sender's current permission mode. Omit to keep its current mode.",
+                }),
+            ),
         },
         { additionalProperties: false },
     ),
@@ -36,19 +43,23 @@ export const codexV1SendInputTool = defineTool({
         }),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: (args, context, execution) => {
+    execute: async (args, context, execution) => {
         const message = [args.message, collaborationItemsToText(args.items)]
             .filter((value): value is string => value !== undefined && value.length > 0)
             .join("\n");
         if (message.length === 0) throw new Error("send_input requires message or items.");
         const subagents = requireSubagentContext(context);
+        await applySubagentReadOnlyOverride(subagents, args.target, args.read_only);
         if (args.interrupt === true) {
             subagents.interrupt(args.target);
             subagents.followUp(args.target, message);
         } else {
             const sendMessage = subagents.sendMessage;
-            if (sendMessage === undefined) subagents.followUp(args.target, message);
-            else sendMessage(args.target, message);
+            if (sendMessage === undefined) {
+                subagents.followUp(args.target, message);
+            } else {
+                sendMessage(args.target, message);
+            }
         }
         return { submission_id: execution.toolCallId ?? args.target };
     },

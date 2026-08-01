@@ -53,6 +53,12 @@ export const claudeAgentTool = defineTool({
                     "Child provider ID. The model is inferred from recent successful use, the current model, or the first available model.",
             }),
         ),
+        read_only: Type.Optional(
+            Type.Boolean({
+                description:
+                    "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+            }),
+        ),
         run_in_background: Type.Optional(
             Type.Boolean({
                 description:
@@ -70,6 +76,7 @@ export const claudeAgentTool = defineTool({
             model,
             prompt,
             provider,
+            read_only,
             run_in_background = true,
         },
         context,
@@ -89,6 +96,7 @@ export const claudeAgentTool = defineTool({
                     : {}),
                 modelId: model,
                 prompt,
+                ...(read_only === undefined ? {} : { readOnly: read_only }),
                 ...(provider === undefined ? {} : { providerId: provider }),
                 ...(execution.toolCallId !== undefined
                     ? { parentToolCallId: execution.toolCallId }

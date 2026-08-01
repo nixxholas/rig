@@ -19,4 +19,5 @@ export interface AgentCommunicationContext {
     info(agentId: string): AgentCommunicationInfo;
     me(): AgentCommunicationIdentity;
     send(agentId: string, message: string): { delivered: true };
+    setReadOnly?(agentId: string, readOnly: boolean): Promise<void>;
 }

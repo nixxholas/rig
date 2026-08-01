@@ -38,6 +38,8 @@ export interface SpawnSubagentRequest {
     serviceTier?: ServiceTier;
     parentToolCallId?: string;
     prompt: string;
+    /** Restrict this child to read only instead of inheriting the parent mode. */
+    readOnly?: boolean;
     taskName?: string;
     waitForSlot?: boolean;
     /** Rig-owned location override used by managed workspace agents. */
@@ -76,6 +78,7 @@ export interface SubagentContext {
     maxActive?: number;
     maxDepth: number;
     sendMessage?(target: string, message: string, encryptedMessage?: string): ManagedSubagent;
+    setReadOnly?(target: string, readOnly: boolean): Promise<ManagedSubagent>;
     spawn(request: SpawnSubagentRequest, signal?: AbortSignal): Promise<SpawnSubagentResult>;
     wait(timeoutMs?: number, signal?: AbortSignal): Promise<WaitForSubagentResult>;
 }

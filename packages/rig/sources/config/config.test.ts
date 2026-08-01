@@ -690,7 +690,7 @@ codex_stream_max_retries = 8
                 showUsage: false,
             });
             expect(defaultLoaded.config.features.workflows).toBe(true);
-            expect(defaultLoaded.config.defaults.permissionMode).toBe("workspace_write");
+            expect(defaultLoaded.config.defaults.permissionMode).toBe("auto");
             expect(defaultLoaded.config.workspace.setupCommands).toEqual([]);
             expect(loaded.paths.global).toBe(globalPath);
             expect(loaded.paths.local).toBe(localPath);

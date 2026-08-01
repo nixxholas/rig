@@ -129,15 +129,15 @@ describe("Codex collaboration tools", () => {
             undefined,
         );
 
-        expect(
+        await expect(
             codexFollowupTaskTool.execute(
                 { message: "Check the tests too.", target: "inspect_code" },
                 harness.context,
                 {},
             ),
-        ).toEqual(agent);
+        ).resolves.toEqual(agent);
         expect(followUp).toHaveBeenCalledWith("inspect_code", "Check the tests too.");
-        expect(
+        await expect(
             claudeSendMessageTool.execute(
                 {
                     effort: "low",
@@ -148,7 +148,7 @@ describe("Codex collaboration tools", () => {
                 harness.context,
                 {},
             ),
-        ).toEqual({
+        ).resolves.toEqual({
             message: "Review final changes: follow-up work was sent to Inspect code.",
             success: true,
             target: "/root/inspect_code",
@@ -301,7 +301,7 @@ describe("Codex collaboration tools", () => {
         );
         expect(spawn.mock.calls[0]?.[0]).not.toHaveProperty("encryptedPrompt");
 
-        expect(
+        await expect(
             codexExtendedFollowupTaskTool.execute(
                 {
                     message: "Check the final diff.",
@@ -311,7 +311,7 @@ describe("Codex collaboration tools", () => {
                 harness.context,
                 {},
             ),
-        ).toEqual(managed);
+        ).resolves.toEqual(managed);
         expect(followUp).toHaveBeenCalledWith(
             "/root/review_claude",
             "Check the final diff.",
@@ -337,6 +337,7 @@ describe("Codex collaboration tools", () => {
         }));
         const followUp = vi.fn(() => agent);
         const sendMessage = vi.fn(() => agent);
+        const setReadOnly = vi.fn(async () => agent);
         harness.context.subagents = {
             canSpawn: true,
             depth: 0,
@@ -346,6 +347,7 @@ describe("Codex collaboration tools", () => {
             list: vi.fn(() => [agent]),
             maxDepth: 3,
             sendMessage,
+            setReadOnly,
             spawn,
             wait: vi.fn(async () => ({ agents: [agent], timedOut: false })),
         };
@@ -355,6 +357,7 @@ describe("Codex collaboration tools", () => {
                 fork_turns: "none",
                 message: "opaque-spawn-ciphertext",
                 model: "openai/gpt-5.6-sol",
+                read_only: true,
                 reasoning_effort: "medium",
                 task_name: "inspect_code",
             },
@@ -365,15 +368,21 @@ describe("Codex collaboration tools", () => {
             expect.objectContaining({
                 encryptedPrompt: "opaque-spawn-ciphertext",
                 prompt: "",
+                readOnly: true,
             }),
             undefined,
         );
 
-        codexFollowupTaskTool.execute(
-            { message: "opaque-followup-ciphertext", target: "inspect_code" },
+        await codexFollowupTaskTool.execute(
+            {
+                message: "opaque-followup-ciphertext",
+                read_only: true,
+                target: "inspect_code",
+            },
             harness.context,
             {},
         );
+        expect(setReadOnly).toHaveBeenCalledWith("inspect_code", true);
         expect(followUp).toHaveBeenCalledWith(
             "inspect_code",
             "",
@@ -381,12 +390,28 @@ describe("Codex collaboration tools", () => {
             "opaque-followup-ciphertext",
         );
 
-        codexSendMessageTool.execute(
-            { message: "opaque-message-ciphertext", target: "inspect_code" },
+        await codexSendMessageTool.execute(
+            {
+                message: "opaque-message-ciphertext",
+                read_only: false,
+                target: "inspect_code",
+            },
             harness.context,
             {},
         );
+        expect(setReadOnly).toHaveBeenLastCalledWith("inspect_code", false);
         expect(sendMessage).toHaveBeenCalledWith("inspect_code", "", "opaque-message-ciphertext");
+        expect(codexFollowupTaskTool.shouldReviewInAutoMode).toBeDefined();
+        expect(
+            await codexFollowupTaskTool.shouldReviewInAutoMode?.(
+                {
+                    message: "No escalation.",
+                    read_only: false,
+                    target: "inspect_code",
+                },
+                harness.context,
+            ),
+        ).toBe(false);
     });
 
     it("passes Bedrock v1 spawn messages to subagents as plaintext", async () => {

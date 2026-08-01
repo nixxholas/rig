@@ -53,7 +53,7 @@ describe("project config keeps useful preferences without elevating permissions"
         const startup = await gym.terminal.waitUntil(
             (snapshot) =>
                 snapshot.text.includes("Project permission ignored") &&
-                snapshot.text.includes("workspace write") &&
+                snapshot.text.includes("auto") &&
                 snapshot.text.includes("Ask Rig to do anything") &&
                 snapshot.scroll.atBottom,
             "a visible warning and the trusted permission default",
@@ -80,7 +80,7 @@ describe("project config keeps useful preferences without elevating permissions"
         expect(outcome.text).toContain("PROJECT_PREFERENCES_APPLIED");
         expect(outcome.text).not.toContain("PROJECT_PREFERENCES_MISSING");
         expect(outcome.text).not.toContain(INJECTION_SENTINEL);
-        expect(outcome.text).toContain("workspace write");
+        expect(outcome.text).toContain("auto");
         expect(outcome.text).not.toContain("full access");
         assertHealthy(outcome, baseline);
     }, 120_000);

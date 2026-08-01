@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 
+import { applySubagentReadOnlyOverride } from "../../../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../../../types.js";
 import { managedSubagentSchema } from "../../impl/subagentSchemas.js";
 import { requireSubagentContext } from "../../impl/requireSubagentContext.js";
@@ -29,14 +30,22 @@ Send plaintext follow-up work to an existing subagent and trigger another turn w
                         "Reasoning effort override for this turn. Omit to keep the agent's current effort.",
                 }),
             ),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "True switches the child to Read only; false restores the sender's current permission mode. Omit to keep its current mode.",
+                }),
+            ),
         },
         { additionalProperties: false },
     ),
     returnType: managedSubagentSchema,
     shouldReviewInAutoMode: () => false,
-    execute: (args, context) => {
-        const { message, reasoning_effort, target } = args;
-        return requireSubagentContext(context).followUp(target, message, reasoning_effort);
+    execute: async (args, context) => {
+        const { message, read_only, reasoning_effort, target } = args;
+        const subagents = requireSubagentContext(context);
+        await applySubagentReadOnlyOverride(subagents, target, read_only);
+        return subagents.followUp(target, message, reasoning_effort);
     },
     toLLM: () => [{ type: "text", text: "" }],
     toUI: (result) => `Sent follow-up work to ${result.description}.`,

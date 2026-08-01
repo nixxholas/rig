@@ -1,5 +1,6 @@
 import { Type } from "@sinclair/typebox";
 
+import { applySubagentReadOnlyOverride } from "../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../types.js";
 
 export const claudeSendMessageTool = defineTool({
@@ -22,6 +23,12 @@ export const claudeSendMessageTool = defineTool({
                     "New effort level for the subagent. Must be one of its model's allowed effort levels shown in the system prompt.",
             }),
         ),
+        read_only: Type.Optional(
+            Type.Boolean({
+                description:
+                    "True switches the child to Read only; false restores the sender's current permission mode. Omit to keep its current mode.",
+            }),
+        ),
     }),
     returnType: Type.Object({
         message: Type.String(),
@@ -29,10 +36,11 @@ export const claudeSendMessageTool = defineTool({
         target: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: ({ effort, message, summary, to }, context) => {
+    execute: async ({ effort, message, read_only, summary, to }, context) => {
         if (context.subagents === undefined) {
             throw new Error("Subagent management is unavailable in this session.");
         }
+        await applySubagentReadOnlyOverride(context.subagents, to, read_only);
         const target = context.subagents.followUp(to, message, effort);
         return {
             message:

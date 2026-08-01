@@ -9,6 +9,7 @@ describe("agent communication tools", () => {
     it("returns only the current agent identity and sends by exact agent id", async () => {
         const harness = createJustBashToolHarness();
         const send = vi.fn(() => ({ delivered: true as const }));
+        const setReadOnly = vi.fn(async () => {});
         harness.context.agentCommunication = {
             info: (agentId) => ({
                 agentId,
@@ -23,6 +24,7 @@ describe("agent communication tools", () => {
                 title: "Fix authentication",
             }),
             send,
+            setReadOnly,
         };
 
         await expect(harness.runTool(agentMeTool, {})).resolves.toEqual({
@@ -76,5 +78,15 @@ describe("agent communication tools", () => {
             }),
         ).resolves.toEqual({ delivered: true });
         expect(send).toHaveBeenCalledWith("target-agent-id", "Please review the change.");
+        await expect(
+            harness.runTool(agentSendTool, {
+                agent_id: "target-agent-id",
+                message: "You may edit now.",
+                read_only: false,
+            }),
+        ).resolves.toEqual({ delivered: true });
+        expect(setReadOnly).toHaveBeenCalledWith("target-agent-id", false);
+        expect(send).toHaveBeenLastCalledWith("target-agent-id", "You may edit now.");
+        expect(agentSendTool.shouldReviewInAutoMode?.({} as never, harness.context)).toBe(false);
     });
 });

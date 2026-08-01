@@ -1,6 +1,7 @@
 /* Grok Build tool contract, modified for Rig. Copyright 2023-2026 SpaceXAI; Apache-2.0. */
 import { Type } from "@sinclair/typebox";
 
+import { applySubagentReadOnlyOverride } from "../../agent/context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../agent/types.js";
 import { humanizeTaskName } from "../../agent/tools/codex/impl/humanizeTaskName.js";
 import { requireSubagentContext } from "../../agent/tools/codex/impl/requireSubagentContext.js";
@@ -19,6 +20,12 @@ export const grokFollowupSubagentTool = defineTool({
                     "New effort level for the subagent. Must be one of its model's allowed effort levels shown in the system prompt.",
             }),
         ),
+        read_only: Type.Optional(
+            Type.Boolean({
+                description:
+                    "True switches the child to Read only; false restores the sender's current permission mode. Omit to keep its current mode.",
+            }),
+        ),
     }),
     returnType: Type.Object({
         subagent_id: Type.String(),
@@ -26,8 +33,10 @@ export const grokFollowupSubagentTool = defineTool({
         status: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: ({ effort, prompt, target }, context) => {
-        const subagent = requireSubagentContext(context).followUp(target, prompt, effort);
+    execute: async ({ effort, prompt, read_only, target }, context) => {
+        const subagents = requireSubagentContext(context);
+        await applySubagentReadOnlyOverride(subagents, target, read_only);
+        const subagent = subagents.followUp(target, prompt, effort);
         return {
             status: subagent.status,
             subagent_id: subagent.sessionId,

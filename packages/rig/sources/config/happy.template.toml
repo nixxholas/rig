@@ -6,7 +6,7 @@
 # provider = "codex"
 # model = "openai/gpt-5.6-sol"
 # effort = "medium"
-# permission_mode = "workspace_write"
+# permission_mode = "auto"
 # service_tier = "default"
 # instructions = "Additional instructions for every Rig session."
 

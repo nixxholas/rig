@@ -33,6 +33,7 @@ export interface AgentWorkspaceSession {
 export interface WorkspaceAgentRequest {
     description: string;
     prompt: string;
+    readOnly?: boolean;
     workspaceId: string;
     background?: boolean;
     parentToolCallId?: string;

@@ -44,6 +44,12 @@ export const codexV1SpawnAgentTool = defineTool({
             reasoning_effort: Type.String({
                 description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
             }),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+                }),
+            ),
             service_tier: Type.Optional(
                 Type.Literal("priority", {
                     description:
@@ -76,6 +82,7 @@ export const codexV1SpawnAgentTool = defineTool({
                     : args.agent_type.trim(),
             effort: args.reasoning_effort,
             modelId: args.model,
+            ...(args.read_only === undefined ? {} : { readOnly: args.read_only }),
             ...(execution.toolCallId === undefined
                 ? {}
                 : { parentToolCallId: execution.toolCallId }),

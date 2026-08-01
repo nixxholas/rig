@@ -91,6 +91,12 @@ export const spawnWorkspaceAgentTool = defineTool({
             background: Type.Optional(
                 Type.Boolean({ description: "Run in the background. Defaults to true." }),
             ),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+                }),
+            ),
         },
         { additionalProperties: false },
     ),
@@ -102,12 +108,17 @@ export const spawnWorkspaceAgentTool = defineTool({
         taskName: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: ({ background = true, description, prompt, workspace_id }, context, execution) =>
+    execute: (
+        { background = true, description, prompt, read_only, workspace_id },
+        context,
+        execution,
+    ) =>
         requireWorkspaces(context).spawn(
             {
                 background,
                 description,
                 prompt,
+                ...(read_only === undefined ? {} : { readOnly: read_only }),
                 workspaceId: workspace_id,
                 ...(execution.toolCallId === undefined
                     ? {}
