@@ -4,7 +4,8 @@ import type { Duplex } from "node:stream";
 
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { proxyHttpRequest } from "./proxyHttpRequest.js";
-import { resolveHttpProxySession } from "./resolveHttpProxySession.js";
+import { resolveHttpProxyProjectScope } from "./resolveHttpProxyProjectScope.js";
+import type { ProjectScope } from "../protocol/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
 
 export function attachHttpConnectProxy(server: Server, token: string, store: SessionStore): void {
@@ -24,8 +25,8 @@ export function attachHttpConnectProxy(server: Server, token: string, store: Ses
         return closeServer(callback);
     }) as Server["close"];
     server.on("connect", (request, client, head) => {
-        const sessionId = sessionIdFromProxyPath(request.url);
-        if (sessionId === undefined) {
+        const scope = projectScopeFromProxyPath(request.url);
+        if (scope === undefined) {
             client.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n");
             return;
         }
@@ -36,9 +37,9 @@ export function attachHttpConnectProxy(server: Server, token: string, store: Ses
             return;
         }
 
-        const session = resolveHttpProxySession(sessionId, store);
-        if (!session.allowed) {
-            endWithStatus(client, session);
+        const resolution = resolveHttpProxyProjectScope(scope, store);
+        if (!resolution.allowed) {
+            endWithStatus(client, resolution);
             return;
         }
 
@@ -90,13 +91,18 @@ function connectProxyTarget(
     });
 }
 
-function sessionIdFromProxyPath(value: string | undefined): string | undefined {
+function projectScopeFromProxyPath(value: string | undefined): ProjectScope | undefined {
     if (value === undefined) return undefined;
-    const match = /^\/sessions\/([^/]+)\/proxy$/u.exec(value);
+    const match = /^\/projects\/([^/]+)(?:\/workspaces\/([^/]+))?\/proxy$/u.exec(value);
     if (match?.[1] === undefined) return undefined;
     try {
-        const sessionId = decodeURIComponent(match[1]);
-        return sessionId.length === 0 ? undefined : sessionId;
+        const projectId = decodeURIComponent(match[1]);
+        const workspaceId = match[2] === undefined ? undefined : decodeURIComponent(match[2]);
+        if (projectId.length === 0 || workspaceId?.length === 0) return undefined;
+        return {
+            projectId,
+            ...(workspaceId === undefined ? {} : { workspaceId }),
+        };
     } catch {
         return undefined;
     }

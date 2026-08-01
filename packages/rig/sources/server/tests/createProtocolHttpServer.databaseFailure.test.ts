@@ -1,12 +1,12 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import Database from "better-sqlite3";
 import { describe, expect, it, vi } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("createProtocolHttpServer database failures", () => {
@@ -19,7 +19,7 @@ describe("createProtocolHttpServer database failures", () => {
             throw error;
         });
 
-        const directory = await mkdtemp(join(tmpdir(), "rig-database-failure-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         const server = createProtocolHttpServer({ store, token: "secret" });
         await new Promise<void>((resolve, reject) => {

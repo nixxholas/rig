@@ -1,11 +1,12 @@
 import { request as requestHttp } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createHappyPluginClient, defineMcpTool, Type } from "happy-plugins";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createPluginApiServer } from "../createPluginApiServer.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
 
@@ -17,7 +18,7 @@ afterEach(async () => {
 
 describe("plugin API server", () => {
     it("requires its plugin token and serves SDK requests over its Unix socket", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
+        const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
         const store = new InMemorySessionStore({
@@ -59,7 +60,7 @@ describe("plugin API server", () => {
     });
 
     it("forwards SDK-registered MCP calls over the same authenticated socket", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
+        const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
         const store = new InMemorySessionStore({
@@ -152,7 +153,7 @@ describe("plugin API server", () => {
     });
 
     it("does not complete an in-flight MCP call after its real socket stream disconnects", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
+        const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
         const store = new InMemorySessionStore({
@@ -231,7 +232,7 @@ describe("plugin API server", () => {
     });
 
     it("does not unregister an MCP registration retired by closing its active stream", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
+        const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
         const store = new InMemorySessionStore({

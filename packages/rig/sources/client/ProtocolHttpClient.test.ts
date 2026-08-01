@@ -1,11 +1,11 @@
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 
 import { describe, expect, it, vi } from "vitest";
 
 import type { SessionEvent } from "../protocol/index.js";
+import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 
 describe("ProtocolHttpClient", () => {
@@ -23,7 +23,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("targets abort requests to the expected run", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         let requestedUrl: URL | undefined;
         const server = createServer((request, response) => {
@@ -57,7 +57,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("sends the expected workspace version with rename and archive mutations", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         const versions: Array<string | undefined> = [];
         const paths: Array<string | undefined> = [];
@@ -85,7 +85,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("surfaces a rejected session cursor without retrying forever", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         let streamRequests = 0;
         const server = createServer((_request, response) => {
@@ -113,7 +113,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("reconnects SSE streams from the last received event id", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         const first = sessionResetEvent("018bcfe5-6800-7001-8000-000000000001");
         const second = sessionResetEvent("018bcfe5-6800-7002-8000-000000000002");
@@ -162,7 +162,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("keeps the last observed event cursor when an SSE transport fails", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         const first = sessionResetEvent("018bcfe5-6800-7001-8000-000000000001");
         const second = sessionResetEvent("018bcfe5-6800-7002-8000-000000000002");
@@ -207,7 +207,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("serializes async event application and reconnects after the last successful apply", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         const prior = sessionResetEvent("018bcfe5-6800-7001-8000-000000000001");
         const first = sessionResetEvent("018bcfe5-6800-7002-8000-000000000002");
@@ -269,7 +269,7 @@ describe("ProtocolHttpClient", () => {
     });
 
     it("waits for the current event application before an abort completes the stream", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-client-test-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         const event = sessionResetEvent("018bcfe5-6800-7001-8000-000000000001");
         const server = createServer((_request, response) => {

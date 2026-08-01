@@ -48,6 +48,7 @@ import type {
     ListSessionsResponse,
     ListSubagentsResponse,
     ProtocolSession,
+    ProjectScope,
     ProjectResponse,
     ProjectWorkspaceResponse,
     RenameProjectRequest,
@@ -55,7 +56,7 @@ import type {
     ReorderRequest,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
-    ReadSessionFileResponse,
+    ReadProjectFileResponse,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
     RewindSessionResponse,
@@ -90,8 +91,8 @@ import type {
     UpdateGlobalSecurityPolicyRequest,
     UpdateGlobalSecurityPolicyResponse,
     UpdateSessionRequest,
-    WriteSessionFileRequest,
-    WriteSessionFileResponse,
+    WriteProjectFileRequest,
+    WriteProjectFileResponse,
 } from "../protocol/index.js";
 import type { SecretAttachmentScope } from "../secrets/index.js";
 import { EventStreamHttpError } from "./EventStreamHttpError.js";
@@ -101,7 +102,6 @@ import type {
     CreateRemoteTerminalResponse,
     ListRemoteTerminalsResponse,
     RemoteTerminalResponse,
-    RemoteTerminalScope,
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
@@ -394,14 +394,14 @@ export class ProtocolHttpClient {
     }
 
     createRemoteTerminal(
-        scope: RemoteTerminalScope,
+        scope: ProjectScope,
         request: CreateRemoteTerminalRequest = {},
     ): Promise<CreateRemoteTerminalResponse> {
         return this.#requestJson("POST", this.#remoteTerminalCollectionPath(scope), request);
     }
 
     async attachRemoteTerminal(
-        scope: RemoteTerminalScope,
+        scope: ProjectScope,
         terminalId: string,
         options: AttachRemoteTerminalOptions = {},
     ): Promise<RemoteTerminalAttachment> {
@@ -454,22 +454,19 @@ export class ProtocolHttpClient {
         }
     }
 
-    listRemoteTerminals(scope: RemoteTerminalScope): Promise<ListRemoteTerminalsResponse> {
+    listRemoteTerminals(scope: ProjectScope): Promise<ListRemoteTerminalsResponse> {
         return this.#requestJson("GET", this.#remoteTerminalCollectionPath(scope));
     }
 
     resizeRemoteTerminal(
-        scope: RemoteTerminalScope,
+        scope: ProjectScope,
         terminalId: string,
         request: ResizeRemoteTerminalRequest,
     ): Promise<RemoteTerminalResponse> {
         return this.#requestJson("PATCH", this.#remoteTerminalPath(scope, terminalId), request);
     }
 
-    stopRemoteTerminal(
-        scope: RemoteTerminalScope,
-        terminalId: string,
-    ): Promise<RemoteTerminalResponse> {
+    stopRemoteTerminal(scope: ProjectScope, terminalId: string): Promise<RemoteTerminalResponse> {
         return this.#requestJson("DELETE", this.#remoteTerminalPath(scope, terminalId));
     }
 
@@ -662,37 +659,37 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", `/sessions/${encodeURIComponent(sessionId)}/subagents`);
     }
 
-    searchFiles(sessionId: string, query: string, limit = 20): Promise<SearchFilesResponse> {
+    searchFiles(scope: ProjectScope, query: string, limit = 20): Promise<SearchFilesResponse> {
         const parameters = new URLSearchParams({
             limit: String(limit),
             query,
         });
         return this.#requestJson(
             "GET",
-            `/sessions/${encodeURIComponent(sessionId)}/files?${parameters.toString()}`,
+            `${this.#projectScopePath(scope)}/files?${parameters.toString()}`,
         );
     }
 
-    readFile(sessionId: string, path: string): Promise<ReadSessionFileResponse> {
+    readFile(scope: ProjectScope, path: string): Promise<ReadProjectFileResponse> {
         return this.#requestJson(
             "GET",
-            `/sessions/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`,
+            `${this.#projectScopePath(scope)}/file?path=${encodeURIComponent(path)}`,
         );
     }
 
     writeFile(
-        sessionId: string,
-        request: WriteSessionFileRequest,
-    ): Promise<WriteSessionFileResponse> {
-        return this.#requestJson("PUT", `/sessions/${encodeURIComponent(sessionId)}/file`, request);
+        scope: ProjectScope,
+        request: WriteProjectFileRequest,
+    ): Promise<WriteProjectFileResponse> {
+        return this.#requestJson("PUT", `${this.#projectScopePath(scope)}/file`, request);
     }
 
     async proxyHttpRequest(
-        sessionId: string,
+        scope: ProjectScope,
         options: ProxyHttpRequestOptions,
     ): Promise<ProxyHttpResponse> {
         const body = options.body === undefined ? undefined : Buffer.from(options.body);
-        const tunnel = await this.openHttpProxy(sessionId);
+        const tunnel = await this.openHttpProxy(scope);
         const agent = singleSocketAgent(tunnel);
         return new Promise((resolve, reject) => {
             const request = httpRequest(
@@ -722,8 +719,8 @@ export class ProtocolHttpClient {
         });
     }
 
-    async connectHttpProxy(sessionId: string, authority: string): Promise<Duplex> {
-        const tunnel = await this.openHttpProxy(sessionId);
+    async connectHttpProxy(scope: ProjectScope, authority: string): Promise<Duplex> {
+        const tunnel = await this.openHttpProxy(scope);
         const agent = singleSocketAgent(tunnel);
         return new Promise((resolve, reject) => {
             const request = httpRequest({
@@ -763,12 +760,12 @@ export class ProtocolHttpClient {
         });
     }
 
-    openHttpProxy(sessionId: string): Promise<Duplex> {
+    openHttpProxy(scope: ProjectScope): Promise<Duplex> {
         return new Promise((resolve, reject) => {
             const request = httpRequest({
                 headers: { authorization: `Bearer ${this.token}` },
                 method: "CONNECT",
-                path: `/sessions/${encodeURIComponent(sessionId)}/proxy`,
+                path: `${this.#projectScopePath(scope)}/proxy`,
                 socketPath: this.socketPath,
             });
             request.once("connect", (response, socket, head) => {
@@ -1209,14 +1206,18 @@ export class ProtocolHttpClient {
         });
     }
 
-    #remoteTerminalCollectionPath(scope: RemoteTerminalScope): string {
+    #projectScopePath(scope: ProjectScope): string {
         const project = `/projects/${encodeURIComponent(scope.projectId)}`;
         return scope.workspaceId === undefined
-            ? `${project}/terminals`
-            : `${project}/workspaces/${encodeURIComponent(scope.workspaceId)}/terminals`;
+            ? project
+            : `${project}/workspaces/${encodeURIComponent(scope.workspaceId)}`;
     }
 
-    #remoteTerminalPath(scope: RemoteTerminalScope, terminalId: string): string {
+    #remoteTerminalCollectionPath(scope: ProjectScope): string {
+        return `${this.#projectScopePath(scope)}/terminals`;
+    }
+
+    #remoteTerminalPath(scope: ProjectScope, terminalId: string): string {
         return `${this.#remoteTerminalCollectionPath(scope)}/${encodeURIComponent(terminalId)}`;
     }
 }

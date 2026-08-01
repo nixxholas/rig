@@ -224,11 +224,12 @@ TUI agent. File writes retain Happy's SHA-256 optimistic-concurrency contract.
 
 ## HTTP proxy
 
-The authenticated daemon connection exposes a session-scoped proxy tunnel for
-native host sessions:
+The authenticated daemon connection exposes a project- or workspace-scoped
+proxy tunnel:
 
 ```http
-CONNECT /sessions/{sessionId}/proxy
+CONNECT /projects/{projectId}/proxy
+CONNECT /projects/{projectId}/workspaces/{workspaceId}/proxy
 Authorization: Bearer <daemon token>
 ```
 
@@ -238,27 +239,26 @@ ordinary HTTP proxy protocol: absolute-form HTTP requests and nested
 without buffering. Rig removes proxy and hop-by-hop headers while preserving
 upstream `Authorization`.
 
-Putting the session ID in this URL lets an Electron main process bind one
-ephemeral loopback proxy per browser session, pass its ordinary
+Putting the folder scope in this URL lets an Electron main process bind one
+ephemeral loopback proxy per project or workspace, pass its ordinary
 `http://127.0.0.1:<port>` URL to `session.setProxy()`, and pipe each accepted
 browser connection through the authenticated Rig tunnel. Chromium does not
 preserve path, query, or arbitrary headers in its proxy server setting, so the
 loopback bridge owns that final URL-to-tunnel mapping.
 
-Docker sessions receive HTTP 403 before Rig opens any network connection instead
-of silently sending traffic through the daemon host; container-network proxying
-is not currently supported.
+The proxy is a host-side project service. It remains available before a chat
+exists and does not inherit a chat's execution environment or lifecycle.
 
-## Direct session files
+## Direct project and workspace files
 
-`GET /sessions/{sessionId}/file?path={path}` reads arbitrary binary file bytes
-through that session's `AgentContext` and returns:
+`GET /projects/{projectId}/file?path={path}` reads binary file bytes from a
+project. Add `/workspaces/{workspaceId}` before `/file` to target a workspace:
 
 ```json
 { "content": "<base64>", "hash": "<sha256>" }
 ```
 
-`PUT /sessions/{sessionId}/file` replaces or creates a file:
+`PUT` to the same URL replaces or creates a file:
 
 ```json
 {
@@ -270,10 +270,11 @@ through that session's `AgentContext` and returns:
 
 Use the hash returned by `GET` to replace the exact version that was read. Use
 `null` only when creating a file expected not to exist. A concurrent change
-returns HTTP 409. Reads and writes use the session's host or Docker filesystem
-and its current permission mode; read-only mode rejects writes, workspace mode
-rejects outside-workspace and protected Git writes, and full access permits
-arbitrary paths. File payloads are limited to 32 MB.
+returns HTTP 409. Paths are confined to the selected project or workspace;
+writes use Rig's workspace boundary and reject protected Git control files.
+File payloads are limited to 32 MB. File search follows the same scope at
+`GET .../files?query={query}&limit={limit}`. None of these operations requires
+or consults a Session.
 
 ## Submit a configured message
 

@@ -1,10 +1,10 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { createServer } from "node:http";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.js";
 import { createUnixSocketFetch } from "./createUnixSocketFetch.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -15,7 +15,7 @@ afterEach(async () => {
 
 describe("createUnixSocketFetch", () => {
     it("carries ordinary fetch requests and streaming responses over a Unix socket", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-unix-fetch-"));
+        const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");
         let received = "";
         const server = createServer((request, response) => {

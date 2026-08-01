@@ -1,12 +1,12 @@
 import { request as httpRequest } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { GlobalStreamHello } from "../../protocol/index.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 
@@ -141,7 +141,7 @@ async function startServer(): Promise<{
     }>;
     store: InMemorySessionStore;
 }> {
-    const root = await mkdtemp(join(tmpdir(), "rig-group-stream-"));
+    const root = await createTestSocketDirectory();
     const socketPath = join(root, "server.sock");
     const store = new InMemorySessionStore();
     const server: Server = createProtocolHttpServer({ store, token: "t" });

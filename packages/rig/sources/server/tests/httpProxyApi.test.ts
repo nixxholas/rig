@@ -1,13 +1,13 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { createServer as createTcpServer } from "node:net";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 const directories: string[] = [];
@@ -41,8 +41,9 @@ describe("daemon HTTP proxy", () => {
         const rig = await startRigProxy();
         try {
             const session = await rig.client.createSession({ cwd: "/tmp/rig-http-proxy" });
+            const scope = { projectId: session.session.projectId };
             const port = (upstream.address() as AddressInfo).port;
-            const response = await rig.client.proxyHttpRequest(session.session.id, {
+            const response = await rig.client.proxyHttpRequest(scope, {
                 body: Buffer.from("request body"),
                 headers: {
                     authorization: "Bearer upstream-secret",
@@ -79,11 +80,9 @@ describe("daemon HTTP proxy", () => {
         const rig = await startRigProxy();
         try {
             const session = await rig.client.createSession({ cwd: "/tmp/rig-connect-proxy" });
+            const scope = { projectId: session.session.projectId };
             const port = (upstream.address() as AddressInfo).port;
-            const tunnel = await rig.client.connectHttpProxy(
-                session.session.id,
-                `127.0.0.1:${String(port)}`,
-            );
+            const tunnel = await rig.client.connectHttpProxy(scope, `127.0.0.1:${String(port)}`);
             const echoed = new Promise<string>((resolve) => {
                 tunnel.once("data", (chunk) => resolve(Buffer.from(chunk).toString("utf8")));
             });
@@ -93,9 +92,15 @@ describe("daemon HTTP proxy", () => {
 
             const unauthorized = await rawTunnelRequest(
                 rig.socketPath,
-                `/sessions/${encodeURIComponent(session.session.id)}/proxy`,
+                `/projects/${encodeURIComponent(session.session.projectId)}/proxy`,
             );
             expect(unauthorized).toBe(401);
+            const oldSessionRoute = await rawTunnelRequest(
+                rig.socketPath,
+                `/sessions/${encodeURIComponent(session.session.id)}/proxy`,
+                { authorization: "Bearer secret" },
+            );
+            expect(oldSessionRoute).toBe(404);
         } finally {
             await rig.close();
             await close(upstream);
@@ -110,7 +115,7 @@ describe("daemon HTTP proxy", () => {
             const session = await rig.client.createSession({ cwd: "/tmp/rig-close-proxy" });
             const port = (upstream.address() as AddressInfo).port;
             const tunnel = await rig.client.connectHttpProxy(
-                session.session.id,
+                { projectId: session.session.projectId },
                 `127.0.0.1:${String(port)}`,
             );
             const closed = new Promise<void>((resolve) => tunnel.once("close", () => resolve()));
@@ -121,7 +126,7 @@ describe("daemon HTTP proxy", () => {
         }
     });
 
-    it("requires an existing native session and rejects Docker sessions", async () => {
+    it("requires an existing project scope without consulting session runtime state", async () => {
         const upstream = createHttpServer((_request, response) => response.end("unexpected"));
         await listenTcp(upstream);
         const rig = await startRigProxy();
@@ -134,19 +139,17 @@ describe("daemon HTTP proxy", () => {
             expect(missing).toBe(404);
 
             await expect(
-                rig.client.proxyHttpRequest("missing-session", { url: target }),
+                rig.client.proxyHttpRequest({ projectId: "missing-project" }, { url: target }),
             ).rejects.toMatchObject({ statusCode: 404 });
 
-            const docker = await rig.client.createSession({
+            const session = await rig.client.createSession({
                 cwd: "/tmp/rig-docker-proxy",
                 docker: { container: "not-started", workingDirectory: "/workspace" },
             });
-            await expect(
-                rig.client.proxyHttpRequest(docker.session.id, { url: target }),
-            ).rejects.toMatchObject({ statusCode: 403 });
-            await expect(
-                rig.client.connectHttpProxy(docker.session.id, `127.0.0.1:${String(port)}`),
-            ).rejects.toMatchObject({ statusCode: 403 });
+            const scope = { projectId: session.session.projectId };
+            const response = await rig.client.proxyHttpRequest(scope, { url: target });
+            expect(response.statusCode).toBe(200);
+            expect(await readText(response.body)).toBe("unexpected");
         } finally {
             await rig.close();
             await close(upstream);
@@ -159,7 +162,7 @@ async function startRigProxy(): Promise<{
     close(): Promise<void>;
     socketPath: string;
 }> {
-    const directory = await mkdtemp(join(tmpdir(), "rig-http-proxy-"));
+    const directory = await createTestSocketDirectory();
     directories.push(directory);
     const socketPath = join(directory, "server.sock");
     const server = createProtocolHttpServer({ token: "secret" });

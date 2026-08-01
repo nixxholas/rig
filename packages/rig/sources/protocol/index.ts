@@ -40,6 +40,7 @@ export type {
     ProjectNameSource,
     ProjectPresence,
     ProjectResponse,
+    ProjectScope,
     ProjectWorkspace,
     ProjectWorkspaceEvent,
     ProjectWorkspaceGitEvent,
@@ -55,6 +56,14 @@ export type {
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
 } from "./ProjectProtocol.js";
+export {
+    writeProjectFileRequestSchema,
+    type FileSearchResult,
+    type ReadProjectFileResponse,
+    type SearchFilesResponse,
+    type WriteProjectFileRequest,
+    type WriteProjectFileResponse,
+} from "./ProjectFileProtocol.js";
 export type { McpServerSummary } from "../mcp/index.js";
 export type { SessionTask, TaskStatus } from "../tasks/index.js";
 export type {
@@ -122,7 +131,6 @@ export type {
     DisconnectSessionTerminalResponse,
     ExternalToolCallRequestedEvent,
     ExternalToolCallResolvedEvent,
-    FileSearchResult,
     ForkSessionResponse,
     GetCurrentProviderQuotaResponse,
     GetDaemonConfigResponse,
@@ -150,7 +158,6 @@ export type {
     ProviderQuotaObservedEvent,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
-    ReadSessionFileResponse,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
     RewindSessionRequest,
@@ -164,7 +171,6 @@ export type {
     RunShellCommandResult,
     RunningShellCommandResponse,
     RunStartedEvent,
-    SearchFilesResponse,
     SecretSessionResponse,
     SecretSummary,
     SecretsChangedEvent,
@@ -247,8 +253,6 @@ export type {
     SetPresenceResponse,
     UserInputDetachedEvent,
     UserInputResolvedEvent,
-    WriteSessionFileRequest,
-    WriteSessionFileResponse,
     WorkflowChangedEvent,
 } from "./SessionProtocol.js";
 export { RIG_PROTOCOL_VERSION } from "./ProtocolVersion.js";

@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { GitStateTracker } from "../../git/GitStateTracker.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 
 const execFile = promisify(execFileCallback);
 const cleanups: (() => Promise<void>)[] = [];
@@ -167,7 +168,8 @@ async function startServer(): Promise<{
     tracker: GitStateTracker;
 }> {
     const root = await mkdtemp(join(tmpdir(), "rig-git-http-"));
-    const socketPath = join(root, "server.sock");
+    const socketDirectory = await createTestSocketDirectory();
+    const socketPath = join(socketDirectory, "server.sock");
     const store = new InMemorySessionStore();
     const tracker = new GitStateTracker({
         onLiveEvent: (event) => store.globalEventQueue.publishLive(event),
@@ -188,7 +190,10 @@ async function startServer(): Promise<{
     cleanups.push(async () => {
         tracker.dispose();
         await new Promise<void>((resolve) => server.close(() => resolve()));
-        await rm(root, { force: true, recursive: true });
+        await Promise.all([
+            rm(root, { force: true, recursive: true }),
+            rm(socketDirectory, { force: true, recursive: true }),
+        ]);
     });
 
     const get = async (path: string) =>

@@ -1,11 +1,12 @@
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { GLOBAL_AGENTS_MD_MAX_BYTES } from "../../config/globalAgentsMdMaxBytes.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("global instructions over the local protocol", () => {
@@ -91,7 +92,8 @@ async function startServer(): Promise<{
     instructionsPath: string;
 }> {
     const directory = await mkdtemp(join(tmpdir(), "rig-instructions-test-"));
-    const socketPath = join(directory, "server.sock");
+    const socketDirectory = await createTestSocketDirectory();
+    const socketPath = join(socketDirectory, "server.sock");
     const instructionsPath = join(directory, "AGENTS.md");
     const server = createProtocolHttpServer({
         globalInstructionsPath: instructionsPath,
@@ -110,7 +112,10 @@ async function startServer(): Promise<{
         instructionsPath,
         async close() {
             await new Promise<void>((resolve) => server.close(() => resolve()));
-            await rm(directory, { recursive: true, force: true });
+            await Promise.all([
+                rm(directory, { recursive: true, force: true }),
+                rm(socketDirectory, { recursive: true, force: true }),
+            ]);
         },
     };
 }

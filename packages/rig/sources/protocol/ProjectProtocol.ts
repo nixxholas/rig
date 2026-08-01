@@ -13,6 +13,12 @@ export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
 export type ProjectNameSource = "folder" | "git_remote" | "user";
 export type ProjectAvatarSource = "repository" | "hosting" | "user";
 
+/** A folder-backed operation targets either a project root or one workspace inside it. */
+export interface ProjectScope {
+    projectId: string;
+    workspaceId?: string;
+}
+
 /** Whether the directory backing a project or workspace still exists on disk. */
 export type ProjectPresence = "present" | "missing";
 

@@ -1,4 +1,4 @@
-import { lstat, mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -7,6 +7,7 @@ import Database from "better-sqlite3";
 
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { prepareLocalServerDirectory } from "../prepareLocalServerDirectory.js";
 import { runLocalProtocolServer } from "../runLocalProtocolServer.js";
 import { writeLocalServerToken } from "../writeLocalServerToken.js";
@@ -23,7 +24,9 @@ afterEach(async () => {
 describe("runLocalProtocolServer database failures", () => {
     it("rejects after cleanup when opening the session database fails", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-server-database-failure-"));
+        const socketDirectory = await createTestSocketDirectory();
         roots.add(root);
+        roots.add(socketDirectory);
         const serverDirectory = join(root, "server");
         const configDirectory = join(root, "config");
         const rigHome = join(root, "home", ".happy", "rig");
@@ -42,7 +45,7 @@ describe("runLocalProtocolServer database failures", () => {
         vi.stubEnv("RIG_HOME", rigHome);
         vi.stubEnv("RIG_SERVER_DIRECTORY", serverDirectory);
         const tokenPath = join(serverDirectory, "token");
-        const socketPath = join(serverDirectory, "server.sock");
+        const socketPath = join(socketDirectory, "server.sock");
         await writeLocalServerToken(tokenPath);
 
         await expect(
@@ -122,7 +125,9 @@ async function prepareServer(): Promise<{
     tokenPath: string;
 }> {
     const root = await mkdtemp(join(tmpdir(), "rig-server-database-failure-"));
+    const socketDirectory = await createTestSocketDirectory();
     roots.add(root);
+    roots.add(socketDirectory);
     const serverDirectory = join(root, "server");
     const configDirectory = join(root, "config");
     const rigHome = join(root, "home", ".happy", "rig");
@@ -139,7 +144,7 @@ async function prepareServer(): Promise<{
         configDirectory,
         rigHome,
         serverDirectory,
-        socketPath: join(serverDirectory, "server.sock"),
+        socketPath: join(socketDirectory, "server.sock"),
         tokenPath: join(serverDirectory, "token"),
     };
 }

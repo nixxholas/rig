@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { GLOBAL_SECURITY_MD_MAX_BYTES } from "../../config/globalSecurityMdMaxBytes.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 describe("global security policy over the local protocol", () => {
@@ -108,7 +109,8 @@ async function startServer(): Promise<{
     securityPath: string;
 }> {
     const directory = await mkdtemp(join(tmpdir(), "rig-security-policy-test-"));
-    const socketPath = join(directory, "server.sock");
+    const socketDirectory = await createTestSocketDirectory();
+    const socketPath = join(socketDirectory, "server.sock");
     const securityPath = join(directory, "SECURITY.md");
     const server = createProtocolHttpServer({
         globalSecurityPolicyPath: securityPath,
@@ -127,7 +129,10 @@ async function startServer(): Promise<{
         securityPath,
         async close() {
             await new Promise<void>((resolve) => server.close(() => resolve()));
-            await rm(directory, { recursive: true, force: true });
+            await Promise.all([
+                rm(directory, { recursive: true, force: true }),
+                rm(socketDirectory, { recursive: true, force: true }),
+            ]);
         },
     };
 }

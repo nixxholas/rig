@@ -33,7 +33,14 @@ export type {
     UpdateGlobalSecurityPolicyRequest,
     UpdateGlobalSecurityPolicyResponse,
 } from "./protocol/GlobalSecurityProtocol.js";
-export type { TrimGlobalEventsRequest } from "./protocol/ProjectProtocol.js";
+export type { ProjectScope, TrimGlobalEventsRequest } from "./protocol/ProjectProtocol.js";
+export type {
+    FileSearchResult,
+    ReadProjectFileResponse,
+    SearchFilesResponse,
+    WriteProjectFileRequest,
+    WriteProjectFileResponse,
+} from "./protocol/ProjectFileProtocol.js";
 export type { DurableSkillDefinition } from "./external-skills/types.js";
 export type {
     ExternalToolCall,

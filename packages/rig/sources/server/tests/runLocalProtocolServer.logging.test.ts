@@ -1,10 +1,11 @@
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { prepareLocalServerDirectory } from "../prepareLocalServerDirectory.js";
 import { runLocalProtocolServer } from "../runLocalProtocolServer.js";
 import { writeLocalServerToken } from "../writeLocalServerToken.js";
@@ -20,7 +21,9 @@ afterEach(async () => {
 describe("runLocalProtocolServer logging", () => {
     it("records starting, ready, stopping, and stopped lifecycle boundaries", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-server-logging-"));
+        const socketDirectory = await createTestSocketDirectory();
         roots.add(root);
+        roots.add(socketDirectory);
         const serverDirectory = join(root, "server");
         const configDirectory = join(root, "config");
         const rigHome = join(root, "home", ".happy", "rig");
@@ -38,7 +41,7 @@ describe("runLocalProtocolServer logging", () => {
         vi.stubEnv("RIG_HOME", rigHome);
         vi.stubEnv("RIG_SERVER_DIRECTORY", serverDirectory);
         const tokenPath = join(serverDirectory, "token");
-        const socketPath = join(serverDirectory, "server.sock");
+        const socketPath = join(socketDirectory, "server.sock");
         const token = await writeLocalServerToken(tokenPath);
         const running = runLocalProtocolServer({
             happyIntegration: "disabled",

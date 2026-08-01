@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
 const cleanups: (() => Promise<void>)[] = [];
@@ -195,7 +196,8 @@ async function startServer(): Promise<{
     socketPath: string;
 }> {
     const directory = await mkdtemp(join(tmpdir(), "rig-remote-terminal-"));
-    const socketPath = join(directory, "daemon.sock");
+    const socketDirectory = await createTestSocketDirectory();
+    const socketPath = join(socketDirectory, "daemon.sock");
     const server = createProtocolHttpServer({ token: "test-token" });
     await new Promise<void>((resolve, reject) => {
         server.once("error", reject);
@@ -206,7 +208,10 @@ async function startServer(): Promise<{
             new Promise<void>((resolve) => {
                 server.closeAllConnections();
                 server.close(() => {
-                    void rm(directory, { force: true, recursive: true }).then(() => resolve());
+                    void Promise.all([
+                        rm(directory, { force: true, recursive: true }),
+                        rm(socketDirectory, { force: true, recursive: true }),
+                    ]).then(() => resolve());
                 });
             }),
     );

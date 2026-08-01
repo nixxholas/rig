@@ -1,5 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -26,6 +26,7 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import type { FileSearchServiceContract } from "../../file-search/FileSearchService.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import type { GlobalEventQueue } from "../../global-event/GlobalEventQueue.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
 
@@ -1367,46 +1368,156 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
-    it("reads and hash-guards direct session file updates through the permission context", async () => {
-        const directory = await mkdtemp(join(tmpdir(), "rig-session-file-"));
-        const { client, close } = await startServer();
+    it("reads and hash-guards project files without inheriting a session permission mode", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-project-file-"));
+        const { client, close, socketPath } = await startServer();
         try {
             const created = await client.createSession({
                 cwd: directory,
-                permissionMode: "workspace_write",
+                permissionMode: "read_only",
             });
-            const first = await client.writeFile(created.session.id, {
+            const scope = { projectId: created.session.projectId };
+            const first = await client.writeFile(scope, {
                 content: Buffer.from("first").toString("base64"),
                 expectedHash: null,
                 path: "note.txt",
             });
-            await expect(client.readFile(created.session.id, "note.txt")).resolves.toEqual({
+            await expect(client.readFile(scope, "note.txt")).resolves.toEqual({
                 content: Buffer.from("first").toString("base64"),
                 hash: first.hash,
             });
             await writeFile(join(directory, "note.txt"), "changed elsewhere");
             await expect(
-                client.writeFile(created.session.id, {
+                client.writeFile(scope, {
                     content: Buffer.from("second").toString("base64"),
                     expectedHash: first.hash,
                     path: "note.txt",
                 }),
             ).rejects.toThrow("changed before");
 
-            await client.changePermissionMode(created.session.id, {
-                permissionMode: "read_only",
-            });
-            const current = await client.readFile(created.session.id, "note.txt");
+            const current = await client.readFile(scope, "note.txt");
             await expect(
-                client.writeFile(created.session.id, {
-                    content: Buffer.from("blocked").toString("base64"),
+                client.writeFile(scope, {
+                    content: Buffer.from("second").toString("base64"),
                     expectedHash: current.hash,
                     path: "note.txt",
                 }),
-            ).rejects.toThrow("read-only");
+            ).resolves.toMatchObject({ hash: expect.any(String) });
+            await expect(
+                requestRawJson(
+                    socketPath,
+                    `/sessions/${encodeURIComponent(created.session.id)}/file?path=note.txt`,
+                    { body: "", method: "GET" },
+                ),
+            ).resolves.toMatchObject({ statusCode: 404 });
         } finally {
             await close();
             await rm(directory, { force: true, recursive: true });
+        }
+    });
+
+    it("confines project files to their folder and enforces the file size limit", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-project-file-boundary-"));
+        const outsideDirectory = await mkdtemp(join(tmpdir(), "rig-project-file-outside-"));
+        const outsidePath = join(outsideDirectory, "private.txt");
+        await writeFile(outsidePath, "private");
+        await symlink(outsidePath, join(directory, "outside-link.txt"));
+        const oversizedPath = join(directory, "oversized.bin");
+        await writeFile(oversizedPath, "");
+        await truncate(oversizedPath, 32 * 1024 * 1024 + 1);
+        const { client, close } = await startServer();
+        try {
+            const created = await client.createSession({ cwd: directory });
+            const scope = { projectId: created.session.projectId };
+
+            await expect(client.readFile(scope, outsidePath)).rejects.toThrow(
+                "outside the selected folder",
+            );
+            await expect(client.readFile(scope, "outside-link.txt")).rejects.toThrow(
+                "outside the selected folder",
+            );
+            await expect(
+                client.writeFile(scope, {
+                    content: Buffer.from("replacement").toString("base64"),
+                    expectedHash: "0".repeat(64),
+                    path: "oversized.bin",
+                }),
+            ).rejects.toThrow("larger than the 32 MB limit");
+            await expect(
+                client.writeFile(scope, {
+                    content: Buffer.from("blocked").toString("base64"),
+                    expectedHash: null,
+                    path: ".git/config",
+                }),
+            ).rejects.toThrow("Git control files");
+        } finally {
+            await close();
+            await Promise.all([
+                rm(directory, { force: true, recursive: true }),
+                rm(outsideDirectory, { force: true, recursive: true }),
+            ]);
+        }
+    });
+
+    it("accesses a workspace before any session is created in it", async () => {
+        const projectDirectory = await mkdtemp(join(tmpdir(), "rig-workspace-files-project-"));
+        const workspacesDirectory = await mkdtemp(join(tmpdir(), "rig-workspace-files-root-"));
+        await execFile("git", ["-C", projectDirectory, "init"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.email", "rig@example.test"]);
+        await execFile("git", ["-C", projectDirectory, "config", "user.name", "Rig Test"]);
+        await writeFile(join(projectDirectory, "README.md"), "fixture\n");
+        await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
+        await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
+        const search = vi.fn(async () => [{ fileName: "note.txt", path: "note.txt" }]);
+        const store = new InMemorySessionStore({ workspacesDirectory });
+        const { client, close } = await startServer({
+            fileSearchService: { close: vi.fn(), search },
+            store,
+        });
+        try {
+            const rootSession = await client.createSession({ cwd: projectDirectory });
+            const created = await client.createProjectWorkspace(rootSession.session.projectId, {
+                baseRef: "HEAD",
+                name: "No chat yet",
+            });
+            let workspace = created.workspace;
+            await vi.waitFor(
+                async () => {
+                    const current = (
+                        await client.listProjectWorkspaces(rootSession.session.projectId)
+                    ).workspaces.find((candidate) => candidate.id === created.workspace.id);
+                    if (current === undefined) throw new Error("Expected the workspace.");
+                    workspace = current;
+                    expect(current.status).toBe("ready");
+                },
+                { interval: 20, timeout: 5_000 },
+            );
+            expect(store.list().some((session) => session.workspaceId === workspace.id)).toBe(
+                false,
+            );
+
+            const scope = {
+                projectId: rootSession.session.projectId,
+                workspaceId: workspace.id,
+            };
+            const written = await client.writeFile(scope, {
+                content: Buffer.from("workspace file").toString("base64"),
+                expectedHash: null,
+                path: "note.txt",
+            });
+            await expect(client.readFile(scope, "note.txt")).resolves.toEqual({
+                content: Buffer.from("workspace file").toString("base64"),
+                hash: written.hash,
+            });
+            await expect(client.searchFiles(scope, "note")).resolves.toEqual({
+                files: [{ fileName: "note.txt", path: "note.txt" }],
+            });
+            expect(search).toHaveBeenCalledWith(workspace.path, "note", 20);
+        } finally {
+            await close();
+            store.close();
+            await rm(projectDirectory, removeFixtureOptions);
+            await rm(workspacesDirectory, removeFixtureOptions);
         }
     });
 
@@ -2528,7 +2639,7 @@ describe("createProtocolHttpServer", () => {
         }
     });
 
-    it("searches files in the session workspace through the daemon", async () => {
+    it("searches files through the project scope instead of the session", async () => {
         const search = vi.fn(async () => [
             { fileName: "CodingAssistantApp.ts", path: "sources/app/CodingAssistantApp.ts" },
         ]);
@@ -2540,7 +2651,11 @@ describe("createProtocolHttpServer", () => {
         try {
             const created = await client.createSession({ cwd: "/tmp/rig-protocol-test" });
 
-            const response = await client.searchFiles(created.session.id, "coding app", 7);
+            const response = await client.searchFiles(
+                { projectId: created.session.projectId },
+                "coding app",
+                7,
+            );
 
             expect(search).toHaveBeenCalledWith("/tmp/rig-protocol-test", "coding app", 7);
             expect(response.files).toEqual([
@@ -2734,7 +2849,7 @@ async function startServer(
     socketPath: string;
     store: SessionStore;
 }> {
-    const directory = await mkdtemp(join(tmpdir(), "rig-server-test-"));
+    const directory = await createTestSocketDirectory();
     const socketPath = join(directory, "server.sock");
     const store = options.store ?? new InMemorySessionStore();
     const server = createProtocolHttpServer({

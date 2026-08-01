@@ -45,13 +45,14 @@ import type {
     ListSubagentsResponse,
     ModelCatalog,
     ProjectResponse,
+    ProjectScope,
     ProjectWorkspaceResponse,
     ReorderRequest,
     RewindSessionRequest,
     RewindSessionResponse,
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
-    ReadSessionFileResponse,
+    ReadProjectFileResponse,
     RunShellCommandRequest,
     RunShellCommandResponse,
     ResolveExternalToolCallRequest,
@@ -88,13 +89,14 @@ import type {
     UpdateGlobalSecurityPolicyResponse,
     SetSessionDraftRequest,
     UpdateSessionRequest,
-    WriteSessionFileRequest,
-    WriteSessionFileResponse,
+    WriteProjectFileRequest,
+    WriteProjectFileResponse,
 } from "../protocol/index.js";
 import {
     globalSecurityPolicySchema,
     RIG_PROTOCOL_VERSION,
     SESSION_DRAFT_MAX_LENGTH,
+    writeProjectFileRequestSchema,
 } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -164,11 +166,13 @@ import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
 import { sessionSummaryWithTerminalPresence } from "../session/sessionSummaryWithTerminalPresence.js";
 import { attachHttpConnectProxy } from "./attachHttpConnectProxy.js";
 import {
-    readSessionFile,
-    SessionFileConflictError,
-    SessionFileTooLargeError,
-    writeSessionFile,
-} from "./sessionFileApi.js";
+    ProjectFileConflictError,
+    ProjectFileOutsideScopeError,
+    ProjectFileTooLargeError,
+    readProjectFile,
+    writeProjectFile,
+} from "./projectFileApi.js";
+import { createNodeFileSystemContext } from "../agent/context/createNodeFileSystemContext.js";
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
@@ -435,6 +439,77 @@ async function handleRequest(
         sendJson<ListProviderUsageResponse>(response, 200, {
             providers: runtimeConfig.listProviderUsage?.() ?? [],
         });
+        return;
+    }
+
+    if (route.name === "project-file" || route.name === "project-files") {
+        const directory = resolveProjectScopeDirectory(store, route);
+        if (!directory.ok) {
+            sendJson(response, 404, { error: directory.error });
+            return;
+        }
+        if (route.name === "project-files") {
+            if (request.method !== "GET") {
+                sendJson(response, 405, { error: "Method not allowed" });
+                return;
+            }
+            const query = (url.searchParams.get("query") ?? "").slice(0, 512);
+            const files = await fileSearchService.search(
+                directory.path,
+                query,
+                parseFileSearchLimit(url.searchParams.get("limit")),
+            );
+            sendJson<SearchFilesResponse>(response, 200, { files });
+            return;
+        }
+        if (request.method !== "GET" && request.method !== "PUT") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const fileSystem = createNodeFileSystemContext(directory.path, {
+            permissionMode: () => "workspace_write",
+        });
+        try {
+            if (request.method === "GET") {
+                const path = url.searchParams.get("path");
+                if (path === null || path.length === 0) {
+                    sendJson(response, 400, { error: "A file path is required." });
+                    return;
+                }
+                sendJson<ReadProjectFileResponse>(
+                    response,
+                    200,
+                    await readProjectFile(fileSystem, path),
+                );
+                return;
+            }
+
+            const body = await readJson<unknown>(request, 44 * 1024 * 1024);
+            if (!Value.Check(writeProjectFileRequestSchema, body)) {
+                sendJson(response, 400, { error: "File update settings are invalid." });
+                return;
+            }
+            sendJson<WriteProjectFileResponse>(
+                response,
+                200,
+                await writeProjectFile(fileSystem, body as WriteProjectFileRequest),
+            );
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            const status =
+                error instanceof ProjectFileConflictError
+                    ? 409
+                    : error instanceof ProjectFileTooLargeError
+                      ? 413
+                      : error instanceof ProjectFileOutsideScopeError ||
+                          (error instanceof Error &&
+                              (error.message.includes("cannot modify files outside") ||
+                                  error.message.includes("cannot modify Git control files") ||
+                                  error.message.includes("cannot modify the project")))
+                        ? 403
+                        : 400;
+            sendJson(response, status, { error: errorToMessage(error) });
+        }
         return;
     }
 
@@ -1677,76 +1752,6 @@ async function handleRequest(
         return;
     }
 
-    if (route.name === "file" && (request.method === "GET" || request.method === "PUT")) {
-        try {
-            if (request.method === "GET") {
-                const path = url.searchParams.get("path");
-                if (path === null || path.length === 0) {
-                    sendJson(response, 400, { error: "A file path is required." });
-                    return;
-                }
-                sendJson<ReadSessionFileResponse>(
-                    response,
-                    200,
-                    await readSessionFile(session.externalControlContext(), path),
-                );
-                return;
-            }
-
-            if (session.isSubagent()) {
-                sendJson(response, 409, {
-                    error: "Subagent histories are read-only and cannot update files.",
-                });
-                return;
-            }
-            const body = await readJson<unknown>(request, 44 * 1024 * 1024);
-            if (
-                !hasOnlyObjectKeys(body, ["content", "expectedHash", "path"]) ||
-                typeof body.content !== "string" ||
-                (typeof body.expectedHash !== "string" && body.expectedHash !== null) ||
-                typeof body.path !== "string" ||
-                body.path.length === 0
-            ) {
-                sendJson(response, 400, { error: "File update settings are invalid." });
-                return;
-            }
-            sendJson<WriteSessionFileResponse>(
-                response,
-                200,
-                await writeSessionFile(
-                    session.externalControlContext(),
-                    body as unknown as WriteSessionFileRequest,
-                ),
-            );
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            const status =
-                error instanceof SessionFileConflictError
-                    ? 409
-                    : error instanceof SessionFileTooLargeError
-                      ? 413
-                      : error instanceof Error &&
-                          (error.message.includes("disabled in read-only mode") ||
-                              error.message.includes("cannot modify files outside") ||
-                              error.message.includes("cannot modify Git control files"))
-                        ? 403
-                        : 400;
-            sendJson(response, status, { error: errorToMessage(error) });
-        }
-        return;
-    }
-
-    if (request.method === "GET" && route.name === "files") {
-        const query = (url.searchParams.get("query") ?? "").slice(0, 512);
-        const files = await fileSearchService.search(
-            session.snapshot().cwd,
-            query,
-            parseFileSearchLimit(url.searchParams.get("limit")),
-        );
-        sendJson<SearchFilesResponse>(response, 200, { files });
-        return;
-    }
-
     if (request.method === "POST" && route.name === "fork") {
         if (session.isSubagent()) {
             sendJson(response, 409, { error: "Subagent histories cannot be forked." });
@@ -2346,6 +2351,19 @@ async function handleRequest(
     sendJson(response, 405, { error: "Method not allowed" });
 }
 
+function resolveProjectScopeDirectory(
+    store: SessionStore,
+    scope: ProjectScope,
+): { ok: true; path: string } | { error: string; ok: false } {
+    const project = store.getProject(scope.projectId);
+    if (project === undefined) return { error: "Project not found", ok: false };
+    if (scope.workspaceId === undefined) return { ok: true, path: project.path };
+    const workspace = store.getWorkspace(scope.projectId, scope.workspaceId);
+    return workspace === undefined
+        ? { error: "Workspace not found", ok: false }
+        : { ok: true, path: workspace.path };
+}
+
 function healthResponse(
     catalog: ModelCatalog,
     identity: DaemonIdentity,
@@ -2446,6 +2464,12 @@ function matchRoute(pathname: string):
           workspaceId: string;
       }
     | {
+          name: "project-file" | "project-files";
+          projectId: string;
+          sessionId?: undefined;
+          workspaceId?: string;
+      }
+    | {
           name: "project-terminals";
           projectId: string;
           sessionId?: undefined;
@@ -2471,8 +2495,6 @@ function matchRoute(pathname: string):
               | "effort"
               | "events"
               | "external-tool-calls"
-              | "file"
-              | "files"
               | "fork"
               | "goal"
               | "messages"
@@ -2559,6 +2581,12 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "avatar") {
             return { name: "project-avatar", projectId };
         }
+        if (globalParts.length === 3 && globalParts[2] === "file") {
+            return { name: "project-file", projectId };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "files") {
+            return { name: "project-files", projectId };
+        }
         if (globalParts.length === 3 && globalParts[2] === "refresh") {
             return { name: "project-refresh", projectId };
         }
@@ -2596,6 +2624,12 @@ function matchRoute(pathname: string):
             }
             if (globalParts.length === 5 && globalParts[4] === "archive") {
                 return { name: "project-workspace-archive", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "file") {
+                return { name: "project-file", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "files") {
+                return { name: "project-files", projectId, workspaceId };
             }
             if (globalParts.length === 5 && globalParts[4] === "reorder") {
                 return { name: "project-workspace-reorder", projectId, workspaceId };
@@ -2708,8 +2742,6 @@ function matchRoute(pathname: string):
     if (parts[2] === "external-tool-calls") {
         return { name: "external-tool-calls", sessionId };
     }
-    if (parts[2] === "file") return { name: "file", sessionId };
-    if (parts[2] === "files") return { name: "files", sessionId };
     if (parts[2] === "fork") return { name: "fork", sessionId };
     if (parts[2] === "goal") return { name: "goal", sessionId };
     if (parts[2] === "messages") return { name: "messages", sessionId };
@@ -2755,7 +2787,6 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "unarchive",
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
-        (method === "PUT" && routeName === "file") ||
         (["DELETE", "PUT"].includes(method ?? "") && routeName === "terminal-connection") ||
         (method === "DELETE" && routeName === "background-process") ||
         (["DELETE", "PATCH", "POST"].includes(method ?? "") && routeName === "goal") ||
@@ -2788,6 +2819,8 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
             "project",
             "project-archive",
             "project-avatar",
+            "project-file",
+            "project-files",
             "project-refresh",
             "project-reorder",
             "project-terminal",

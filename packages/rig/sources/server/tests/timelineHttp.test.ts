@@ -1,6 +1,5 @@
 import { request as httpRequest } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Server } from "node:http";
 
@@ -18,6 +17,7 @@ import { NativeProcessManager } from "../../processes/index.js";
 import type { ModelCatalog, TimelineAgent } from "../../protocol/index.js";
 import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
+import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -195,7 +195,7 @@ async function startServer(): Promise<{
     post: (path: string, body: unknown) => Promise<{ body: any; status: number }>;
     store: InMemorySessionStore;
 }> {
-    const root = await mkdtemp(join(tmpdir(), "rig-timeline-http-"));
+    const root = await createTestSocketDirectory();
     const socketPath = join(root, "server.sock");
     const provider = testProvider();
     const store = new InMemorySessionStore({

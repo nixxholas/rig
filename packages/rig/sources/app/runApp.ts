@@ -403,7 +403,15 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
                     .then(() => undefined),
             searchFiles: (query) =>
                 localServer.client
-                    .searchFiles(session.session.id, query)
+                    .searchFiles(
+                        {
+                            projectId: session.session.projectId,
+                            ...(session.session.workspaceId === undefined
+                                ? {}
+                                : { workspaceId: session.session.workspaceId }),
+                        },
+                        query,
+                    )
                     .then((response) => response.files),
             sessionBacked: true,
             codexStreamMaxRetries,
