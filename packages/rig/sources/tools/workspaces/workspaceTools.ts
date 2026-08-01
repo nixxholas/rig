@@ -37,7 +37,12 @@ export const createWorkspaceTool = defineTool({
         "Create a managed Git workspace owned by this session. Only this session can later archive it or start a workspace agent inside it.",
     arguments: Type.Object(
         {
-            base_ref: Type.String({ description: "Git ref to create the workspace from." }),
+            base_ref: Type.Optional(
+                Type.String({
+                    description:
+                        "Git ref to fork. Omit this to start from the project's main branch on the remote, which is almost always what you want.",
+                }),
+            ),
             name: Type.String({ description: "Human-readable workspace name." }),
         },
         { additionalProperties: false },
@@ -45,7 +50,10 @@ export const createWorkspaceTool = defineTool({
     returnType: workspaceResult,
     shouldReviewInAutoMode: () => false,
     execute: ({ base_ref, name }, context) =>
-        requireWorkspaces(context).create({ baseRef: base_ref, name }),
+        requireWorkspaces(context).create({
+            ...(base_ref === undefined ? {} : { baseRef: base_ref }),
+            name,
+        }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Created workspace ${result.name}.`,
     locks: [],

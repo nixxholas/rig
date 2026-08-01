@@ -135,7 +135,7 @@ export class AgentSessionManager {
 
     async createWorkspace(
         ownerSessionId: string,
-        input: { baseRef: string; name: string },
+        input: { baseRef?: string; name: string },
     ): Promise<ProjectWorkspace> {
         const owner = this.#repository.get(ownerSessionId);
         const create = this.#repository.createOwnedWorkspace;

@@ -90,6 +90,8 @@ export interface Project {
     avatar?: ProjectAvatar;
     avatarBuiltin?: "home";
     createdAt: number;
+    /** Branch new workspaces are cut from, decided once when the project was added. */
+    defaultBranch?: string;
     git?: GitRepositoryFacts;
     id: string;
     initializationAttempt: number;
@@ -137,7 +139,8 @@ export interface ProjectWorkspace {
 }
 
 export interface CreateProjectWorkspaceRequest {
-    baseRef: string;
+    /** Explicit base to fork; the project's trunk on `origin` is used when it is absent. */
+    baseRef?: string;
     /** Client-chosen cuid2 identity. Repeating it returns the same workspace. */
     id?: string;
     name: string;

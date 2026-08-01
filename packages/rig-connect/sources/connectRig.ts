@@ -228,7 +228,8 @@ export interface CreateSessionInput {
 }
 
 export interface CreateWorkspaceInput {
-    baseRef: string;
+    /** Explicit base to fork; the project's main branch on the remote is used when it is absent. */
+    baseRef?: string;
     name: string;
     projectId: string;
 }
@@ -2023,7 +2024,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const key = workspaceKey(input.projectId, id);
         const createdAt = now();
         const optimistic: ProjectWorkspace = {
-            baseRef: input.baseRef,
+            ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
             createdAt,
             id,
             kind: "git_worktree",
@@ -2050,7 +2051,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             matchesAuthoritative: (data) => responseEntity(data, "workspace")?.id === id,
             prepare: () => ({
                 body: {
-                    baseRef: input.baseRef,
+                    ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
                     id,
                     name: input.name,
                 },

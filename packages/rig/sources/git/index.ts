@@ -8,6 +8,7 @@ export {
 } from "./GitStateTracker.js";
 export { countUntrackedFileLines, type UntrackedFileCount } from "./countUntrackedFileLines.js";
 export { createGitWorktree } from "./createGitWorktree.js";
+export { detectGitDefaultBranch } from "./detectGitDefaultBranch.js";
 export { isGitWorktreeAt } from "./isGitWorktreeAt.js";
 export { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
 export {
@@ -30,6 +31,7 @@ export {
     type GitComparisonBase,
 } from "./resolveGitComparisonBase.js";
 export { resolveGitCommit } from "./resolveGitCommit.js";
+export { resolveWorkspaceBase, type WorkspaceBase } from "./resolveWorkspaceBase.js";
 export { resolveGitExecutable, resetResolvedGitExecutable } from "./resolveGitExecutable.js";
 export { resolveGitTrackedEntity } from "./resolveGitTrackedEntity.js";
 export { runGitCommand } from "./runGitCommand.js";

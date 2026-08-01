@@ -26,10 +26,12 @@ values. It holds no database code and no HTTP code.
    |                    readGitCommonDir                           |
    |                    readGitWorktreeIdentity                    |
    |                    resolveGitCommit                           |
+   |                    detectGitDefaultBranch the trunk to fork   |
    |                    selectGitRemoteUrl                         |
    |                    probeGitRepository   presence + facts      |
    |                                                               |
-   |   worktrees        createGitWorktree                          |
+   |   worktrees        resolveWorkspaceBase  where a branch starts|
+   |                    createGitWorktree                          |
    |                    removeGitWorktree                          |
    |                    isGitWorktreeAt                            |
    |                                                               |
@@ -89,6 +91,15 @@ into a display name and into a forge coordinate.
 A worktree is always created as a branch, so `createGitWorktree` creates the
 branch with it and then proves Git did what was asked: Git resolves the
 destination itself and will place a worktree somewhere Rig did not intend.
+
+Where that branch starts is `resolveWorkspaceBase`'s decision. Work begins from
+the trunk as the remote has it, so the remote is fetched and `origin/<trunk>` is
+read; the project's own checkout, however far it has drifted, is never the base
+unless the caller names one explicitly. `detectGitDefaultBranch` names the trunk
+once — when a project is added, or on the first workspace if that never happened
+— asking `origin/HEAD` first and falling back to `main`, `master`, and the branch
+the folder is on. The decision is then persisted with the project and reused.
+
 `removeGitWorktree` checks that the repository still reports the recorded control
 directory before it force-removes anything, and always prunes, because a missing
 directory is exactly the case where a stale administrative entry remains.

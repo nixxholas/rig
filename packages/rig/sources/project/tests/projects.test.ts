@@ -925,7 +925,7 @@ describe("projects", () => {
         expect(workspace?.baseCommit).toBe(expected.toLowerCase());
     });
 
-    it("fetches origin from the created workspace", async () => {
+    it("forks the remote trunk instead of the project's local branch", async () => {
         const gitCalls: { args: readonly string[]; cwd: string }[] = [];
         const fixture = await createFixture({
             projectGit: async (cwd, args) => {
@@ -942,18 +942,22 @@ describe("projects", () => {
         await git(upstream, ["push", "-u", "origin", "main"]);
         const repository = join(fixture.root, "clone");
         await git(fixture.root, ["clone", remote, repository]);
+        await git(repository, ["config", "user.email", "rig@example.test"]);
+        await git(repository, ["config", "user.name", "Rig Test"]);
 
         await writeFile(join(upstream, "REMOTE.md"), "new upstream commit\n");
         await git(upstream, ["add", "REMOTE.md"]);
         await git(upstream, ["commit", "-m", "Advance origin"]);
         await git(upstream, ["push", "origin", "main"]);
-        const expected = await git(upstream, ["rev-parse", "HEAD"]);
+        const expected = (await git(upstream, ["rev-parse", "HEAD"])).toLowerCase();
+
+        // The project folder is left on a commit that exists nowhere but here.
+        await writeFile(join(repository, "LOCAL.md"), "local only\n");
+        await git(repository, ["add", "LOCAL.md"]);
+        await git(repository, ["commit", "-m", "Local only"]);
         const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
 
-        const workspace = await fixture.store.createWorkspace(projectId, {
-            baseRef: "HEAD",
-            name: "Fresh Origin",
-        });
+        const workspace = await fixture.store.createWorkspace(projectId, { name: "Fresh Origin" });
         if (workspace === undefined) throw new Error("Expected a workspace.");
         const ready = await waitForWorkspace(
             fixture.store,
@@ -963,15 +967,67 @@ describe("projects", () => {
         );
 
         expect(ready.status).toBe("ready");
-        expect(await git(ready.path, ["rev-parse", "origin/main"])).toBe(expected);
-        expect(
-            gitCalls.some(
-                (call) =>
-                    call.cwd === ready.path &&
-                    call.args[0] === "fetch" &&
-                    call.args[1] === "origin",
-            ),
-        ).toBe(true);
+        expect(ready.baseRef).toBe("origin/main");
+        expect(ready.baseCommit).toBe(expected);
+        expect(await git(ready.path, ["rev-parse", "HEAD"])).toBe(expected);
+        await expect(access(join(ready.path, "REMOTE.md"))).resolves.toBeUndefined();
+        await expect(access(join(ready.path, "LOCAL.md"))).rejects.toThrow();
+        const fetches = gitCalls.filter(
+            (call) => call.args[0] === "fetch" && call.args[1] === "origin",
+        );
+        expect(fetches).not.toHaveLength(0);
+        // Fetching happens in the project, before the worktree exists, and never inside it.
+        expect(fetches.every((call) => call.cwd !== ready.path)).toBe(true);
+    });
+
+    it("records the trunk a project was added on and reuses it for every workspace", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "trunk-named");
+        await git(repository, ["branch", "-m", "main", "release"]);
+        await git(repository, ["update-ref", "refs/remotes/origin/release", "HEAD"]);
+        await git(repository, [
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/release",
+        ]);
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        await waitForProject(fixture.store, projectId, (p) => p.defaultBranch !== undefined);
+        expect(fixture.store.getProject(projectId)?.defaultBranch).toBe("release");
+
+        // A project folder that later moves to another branch keeps forking its trunk.
+        await git(repository, ["checkout", "-q", "-b", "sidetrack"]);
+        await writeFile(join(repository, "SIDE.md"), "side\n");
+        await git(repository, ["add", "SIDE.md"]);
+        await git(repository, ["commit", "-m", "Side"]);
+
+        const created = await fixture.store.createWorkspace(projectId, { name: "From Trunk" });
+        if (created === undefined) throw new Error("Expected a workspace.");
+        const workspace = await waitForWorkspace(
+            fixture.store,
+            projectId,
+            created.id,
+            (value) => value.status === "ready" || value.status === "failed",
+        );
+        expect(workspace.status).toBe("ready");
+        expect(workspace.baseRef).toBe("origin/release");
+    });
+
+    it("keeps a client-chosen workspace identity honest about the base it was built on", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "retry-base");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+        const id = createId();
+
+        const first = await fixture.store.createWorkspace(projectId, { id, name: "Retried" });
+        if (first === undefined) throw new Error("Expected a workspace.");
+        // The same request, repeated because the caller never learned it landed.
+        const repeated = await fixture.store.createWorkspace(projectId, { id, name: "Retried" });
+        expect(repeated?.id).toBe(first.id);
+        expect(fixture.store.listWorkspaces(projectId)).toHaveLength(1);
+
+        await expect(
+            fixture.store.createWorkspace(projectId, { baseRef: "HEAD~0", id, name: "Retried" }),
+        ).rejects.toThrow(/different base/);
     });
 
     it("inherits a workspace title once and publishes the updated workspace", async () => {

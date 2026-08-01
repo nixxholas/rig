@@ -40,6 +40,7 @@ export const projects = sqliteTable(
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
         archivedAtMs: integer("archived_at_ms"),
+        defaultBranch: text("default_branch"),
     },
     (table) => [
         index("projects_updated").on(desc(table.updatedAtMs)),

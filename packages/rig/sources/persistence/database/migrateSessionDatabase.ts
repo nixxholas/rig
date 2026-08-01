@@ -5,8 +5,15 @@ import { init } from "./migrations/01-init.js";
 import { delegatedSessions } from "./migrations/02-delegated-sessions.js";
 import { timelineIndex } from "./migrations/03-timeline-index.js";
 import { scheduling } from "./migrations/04-scheduling.js";
+import { projectDefaultBranch } from "./migrations/05-project-default-branch.js";
 
-const migrations = [init, delegatedSessions, timelineIndex, scheduling] as const;
+const migrations = [
+    init,
+    delegatedSessions,
+    timelineIndex,
+    scheduling,
+    projectDefaultBranch,
+] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 
 export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;

@@ -31,6 +31,16 @@ describe("workspace tools", () => {
         });
     });
 
+    it("leaves the base to the project when the model names none", async () => {
+        const harness = createJustBashToolHarness();
+        const create = vi.fn(async () => workspace());
+        harness.context.workspaces = workspaceContext({ create });
+
+        await createWorkspaceTool.execute({ name: "Investigate parser" }, harness.context, {});
+
+        expect(create).toHaveBeenCalledWith({ name: "Investigate parser" });
+    });
+
     it("starts a hidden subagent in the selected owned workspace", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({

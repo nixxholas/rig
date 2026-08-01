@@ -58,7 +58,7 @@ export interface WorkspaceContext {
     /** Whether this session may inspect, and start work in, other projects and workspaces. */
     crossWorkspace: boolean;
     archive(workspaceId: string): Promise<AgentWorkspace>;
-    create(input: { baseRef: string; name: string }): Promise<AgentWorkspace>;
+    create(input: { baseRef?: string; name: string }): Promise<AgentWorkspace>;
     delegate(request: DelegatedSessionRequest): Promise<DelegatedSession>;
     listProjects(): readonly AgentProject[];
     listSessions(target: {

@@ -55,12 +55,14 @@ import { workspaceMarkInitializationFailed } from "../persistence/project/worksp
 import { workspaceMarkReady } from "../persistence/project/workspaceMarkReady.js";
 import { workspaceRename } from "../persistence/project/workspaceRename.js";
 import { workspaceReorder } from "../persistence/project/workspaceReorder.js";
+import { projectSetDefaultBranch } from "../persistence/project/projectSetDefaultBranch.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import { normalizeProjectCwd } from "../utils/normalizeProjectCwd.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
 import { createGitWorktree } from "../git/createGitWorktree.js";
+import { detectGitDefaultBranch } from "../git/detectGitDefaultBranch.js";
 import { isGitWorktreeAt } from "../git/isGitWorktreeAt.js";
 import { parseHostingRepository } from "../git/parseHostingRepository.js";
 import { type GitRepositoryProbe, probeGitRepository } from "../git/probeGitRepository.js";
@@ -68,7 +70,7 @@ import { readGitCommonDir } from "../git/readGitCommonDir.js";
 import { readGitTopLevel } from "../git/readGitTopLevel.js";
 import { remoteProjectName } from "../git/remoteProjectName.js";
 import { removeGitWorktree } from "../git/removeGitWorktree.js";
-import { resolveGitCommit } from "../git/resolveGitCommit.js";
+import { resolveWorkspaceBase } from "../git/resolveWorkspaceBase.js";
 import { runGitCommand } from "../git/runGitCommand.js";
 import { runSandboxedGitCommand } from "../git/runSandboxedGitCommand.js";
 import { selectGitRemoteUrl } from "../git/selectGitRemoteUrl.js";
@@ -562,27 +564,32 @@ export class ProjectRepository {
         const name = validateProjectName(request.name);
         const requestedId =
             request.id === undefined ? undefined : clientChosenId(request.id, "workspace");
-        const baseRef = request.baseRef.trim();
-        if (
-            baseRef.length === 0 ||
-            baseRef.length > 200 ||
-            baseRef.startsWith("-") ||
-            /[\p{Cc}\p{Cf}]/u.test(baseRef)
-        ) {
-            throw new Error("The workspace base reference is invalid.");
-        }
-        const retry = this.#retriedWorkspace(projectId, requestedId, baseRef);
+        const requestedRef = requestedBaseRef(request.baseRef);
+        // A repeat that names its base can be answered from what is already stored. One that leaves
+        // the base to the project cannot: the base has to be resolved before there is anything to
+        // compare, so it falls through to the reservation, which rejects a genuine mismatch.
+        const retry =
+            requestedRef === undefined
+                ? undefined
+                : this.#retriedWorkspace(projectId, requestedId, requestedRef);
         if (retry !== undefined) return retry;
 
         const gitTopLevel = await readGitTopLevel(this.#git, project.path);
         if (gitTopLevel !== project.path) {
             throw new Error("Managed workspaces require a Git repository project.");
         }
+        // A project added before its trunk was recorded, or one whose detection failed, learns the
+        // branch now rather than forking whatever the project folder is checked out on.
+        const defaultBranch =
+            requestedRef === undefined ? await this.#projectDefaultBranch(project) : undefined;
         const gitCommonDir = await readGitCommonDir(this.#git, project.path);
-        const commit = await resolveGitCommit(this.#git, project.path, baseRef);
-        if (commit === undefined) {
-            throw new Error("The workspace base reference did not resolve to a commit.");
-        }
+        const base = await resolveWorkspaceBase({
+            ...(defaultBranch === undefined ? {} : { defaultBranch }),
+            git: this.#git,
+            projectPath: project.path,
+            ...(requestedRef === undefined ? {} : { requestedRef }),
+        });
+        const { commit } = base;
         const workspaceRoot = join(this.#workspacesDirectory, project.storageKey);
         const unavailableStorageKeys = await workspaceStorageKeysInUse({
             git: this.#git,
@@ -593,7 +600,7 @@ export class ProjectRepository {
         const reservation = this.#mutate((tx) => {
             const result = workspaceReserve(tx, {
                 baseCommit: commit,
-                baseRef,
+                baseRef: base.ref,
                 ...(creatorSessionId === undefined ? {} : { creatorSessionId }),
                 gitCommonDir,
                 id: requestedId ?? createId(),
@@ -837,6 +844,23 @@ export class ProjectRepository {
         return this.getWorkspace(projectId, workspaceId);
     }
 
+    /**
+     * Reads the branch a project's workspaces are cut from, detecting and recording it on first
+     * use so an older project or a failed detection still forks from the trunk.
+     */
+    async #projectDefaultBranch(project: Project): Promise<string | undefined> {
+        if (project.defaultBranch !== undefined) return project.defaultBranch;
+        const detected = await detectGitDefaultBranch(this.#git, project.path);
+        if (detected === undefined || this.#closed) return detected;
+        this.#mutate((tx) => {
+            const changed = projectSetDefaultBranch(tx, project.id, detected, this.#now());
+            if (changed > 0) this.#publishedProject(project.id);
+        });
+        // Another path may have recorded a different branch first. The stored decision is the one
+        // the project publishes, so it is also the one the workspace has to be cut from.
+        return this.getProject(project.id)?.defaultBranch ?? detected;
+    }
+
     async #initialize(projectId: string): Promise<void> {
         if (this.#closed) return;
         const project = this.getProject(projectId);
@@ -862,6 +886,13 @@ export class ProjectRepository {
             } catch {
                 // A regular non-Git directory is a valid project.
             }
+            if (this.#closed) return;
+
+            // The trunk is decided while the project is being added, so every later workspace has a
+            // branch to fork without re-deciding it under a user's request. Git resolves upward
+            // from a folder, so this waits until the folder is known to be a repository root and a
+            // plain directory inside somebody else's repository cannot inherit their branch.
+            if (repositoryTopLevel) await this.#projectDefaultBranch(project);
             if (this.#closed) return;
 
             const detectedName = remote === undefined ? undefined : remoteProjectName(remote);
@@ -1130,14 +1161,13 @@ export class ProjectRepository {
                 await this.#removeWorkspaceDirectory(project, workspace);
             }
             if (this.#closed) return;
-            if (workspace.baseRef === undefined) {
-                throw new Error("The workspace base reference is unavailable.");
+            // The workspace is anchored to the commit it was reserved on, so an interrupted
+            // creation resumes onto exactly the base the workspace was promised, however far the
+            // branch it came from has moved since.
+            if (workspace.baseCommit === undefined) {
+                throw new Error("The workspace base commit is unavailable.");
             }
-            const commit = await resolveGitCommit(this.#git, project.path, workspace.baseRef);
-            if (commit === undefined) {
-                throw new Error("The workspace base reference no longer resolves to a commit.");
-            }
-            await this.#materializeWorkspaceLocked(workspace, project.path, commit);
+            await this.#materializeWorkspaceLocked(workspace, project.path, workspace.baseCommit);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
             if (!this.#closed) {
@@ -1456,6 +1486,22 @@ interface WorkspaceGitFactValues extends GitFactValues {
 interface ProjectGitFactValues extends WorkspaceGitFactValues {
     worktreeSupport: string;
     worktreeSupportReason: string | null;
+}
+
+/**
+ * Validates an explicitly requested base reference.
+ *
+ * Most workspaces name no base at all and fork the project's trunk; a caller that does name one is
+ * held to a reference Git can be handed safely.
+ */
+function requestedBaseRef(value: string | undefined): string | undefined {
+    if (value === undefined) return undefined;
+    const baseRef = value.trim();
+    if (baseRef.length === 0) return undefined;
+    if (baseRef.length > 200 || baseRef.startsWith("-") || /[\p{Cc}\p{Cf}]/u.test(baseRef)) {
+        throw new Error("The workspace base reference is invalid.");
+    }
+    return baseRef;
 }
 
 function gitFactValues(facts: GitRepositoryFacts): GitFactValues {

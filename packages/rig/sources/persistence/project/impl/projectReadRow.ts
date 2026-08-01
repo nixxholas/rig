@@ -12,6 +12,7 @@ export function projectReadRow(row: ProjectRow, asset: ProjectAvatarAssetRow): P
     const project: Project = {
         ...(row.archivedAtMs === null ? {} : { archivedAt: row.archivedAtMs }),
         createdAt: row.createdAtMs,
+        ...(row.defaultBranch === null ? {} : { defaultBranch: row.defaultBranch }),
         ...(git === undefined ? {} : { git }),
         id: row.id,
         initializationAttempt: row.initializationAttempt,

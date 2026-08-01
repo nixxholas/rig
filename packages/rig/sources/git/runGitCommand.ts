@@ -13,12 +13,23 @@ const GIT_OUTPUT_LIMIT = 1024 * 1024;
  * removing a managed worktree, where Git has to be able to write. Unattended background reads use
  * `runSandboxedGitCommand` instead. Both the timeout and the output ceiling are deliberate so a
  * repository that hangs or floods cannot stall the daemon.
+ *
+ * A command that talks to a remote runs without a deadline. How long a fetch takes belongs to the
+ * repository and the network, not to a number chosen here, and any limit small enough to protect
+ * the daemon is small enough to fail an ordinary clone of a large repository — silently, since the
+ * caller tolerates a failed fetch. Terminal prompting is disabled for every command instead, so the
+ * one thing that would genuinely wait forever, a repository asking for credentials, fails at once.
  */
 export async function runGitCommand(cwd: string, args: readonly string[]): Promise<string> {
     const result = await execFile("git", ["-C", cwd, ...args], {
         encoding: "utf8",
+        env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
         maxBuffer: GIT_OUTPUT_LIMIT,
-        timeout: GIT_TIMEOUT_MS,
+        timeout: usesNetwork(args) ? 0 : GIT_TIMEOUT_MS,
     });
     return result.stdout.trim();
+}
+
+function usesNetwork(args: readonly string[]): boolean {
+    return args[0] === "fetch";
 }

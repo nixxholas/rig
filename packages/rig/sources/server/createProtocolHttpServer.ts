@@ -720,7 +720,7 @@ async function handleRequest(
             if (
                 !hasNoUnknownObjectKeys(body, ["baseRef", "id", "name"]) ||
                 typeof body.name !== "string" ||
-                typeof body.baseRef !== "string" ||
+                (body.baseRef !== undefined && typeof body.baseRef !== "string") ||
                 (body.id !== undefined && typeof body.id !== "string")
             ) {
                 sendJson(response, 400, { error: "Workspace settings are invalid." });
@@ -728,7 +728,7 @@ async function handleRequest(
             }
             try {
                 const workspace = await store.createWorkspace(route.projectId, {
-                    baseRef: body.baseRef,
+                    ...(body.baseRef === undefined ? {} : { baseRef: body.baseRef }),
                     ...(body.id === undefined ? {} : { id: body.id }),
                     name: body.name,
                 });

@@ -13,9 +13,8 @@ import type { GitCommandRunner } from "./types.js";
  * did not intend — inside an existing one, or from a repository that is not the source — so both
  * halves of the resulting identity are verified before the worktree is treated as usable.
  *
- * The initial fetch runs only when the repository has an `origin`, because a local-only repository
- * would otherwise fail creation on a step that exists purely to make the new branch start out
- * up to date.
+ * The commit arrives already chosen and already current: `resolveWorkspaceBase` fetches the remote
+ * before reading it, so there is nothing left to bring up to date here.
  */
 export async function createGitWorktree(options: {
     /** Branch created with the worktree; it must not already exist. */
@@ -46,14 +45,5 @@ export async function createGitWorktree(options: {
     }
     if (identity.commonDir !== options.expectedCommonDir) {
         throw new Error("Git created the worktree from an unexpected repository.");
-    }
-    let hasOrigin = true;
-    try {
-        await options.git(options.workspacePath, ["remote", "get-url", "origin"]);
-    } catch {
-        hasOrigin = false;
-    }
-    if (hasOrigin) {
-        await options.git(options.workspacePath, ["fetch", "origin"]);
     }
 }
