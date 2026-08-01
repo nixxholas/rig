@@ -11,7 +11,7 @@ describe("subagent selection descriptions", () => {
             "- anthropic/sonnet-5 (Sonnet 5): off, low, medium (default), high, xhigh, max, ultra",
         );
         expect(SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION).toContain(
-            "- openai/gpt-5.6-sol (GPT-5.6 Sol): off, low (default), medium, high, xhigh, max, ultra",
+            "- openai/gpt-5.6-sol (GPT-5.6 Sol): off, low, medium (default), high, xhigh, max, ultra",
         );
         expect(SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION).toContain(
             "- openai/gpt-5.6-luna (GPT-5.6 Luna): off, low, medium (default), high, xhigh, max",
