@@ -2526,8 +2526,15 @@ export class InMemorySession {
         return this.#shutdownCleanup;
     }
 
-    archiveForWorkspace(workspaceId: string): Promise<void> {
-        if (this.#workspaceArchived) return this.#shutdownCleanup ?? Promise.resolve();
+    /**
+     * Records the archival and hands back the teardown it still owes. Aborting a run, closing a
+     * runtime, and killing processes are not database work, so the caller runs them once the
+     * archival has committed rather than while it holds the write lock.
+     */
+    archiveForWorkspace(workspaceId: string): () => Promise<void> {
+        if (this.#workspaceArchived) {
+            return () => this.#shutdownCleanup ?? Promise.resolve();
+        }
         const activeRun = this.#activeRun;
         const runIds = new Set([
             ...(activeRun === undefined ? [] : [activeRun.runId]),
@@ -2550,7 +2557,6 @@ export class InMemorySession {
         this.#suspendedRunIds.clear();
         this.#suspendOnAbort = false;
         this.#pauseActiveGoal();
-        activeRun?.controller.abort();
         this.#status = "archived";
         this.#archived = true;
         this.#append("session_workspace_archived", {
@@ -2558,7 +2564,10 @@ export class InMemorySession {
             workspaceId,
         });
         this.#workspaceArchived = true;
-        return this.beginShutdown();
+        return () => {
+            activeRun?.controller.abort();
+            return this.beginShutdown();
+        };
     }
 
     isClosing(): boolean {

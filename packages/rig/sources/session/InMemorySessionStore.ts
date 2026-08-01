@@ -629,7 +629,7 @@ export class InMemorySessionStore implements SessionStore {
                     {
                         cleanup: [...this.#sessions.values()]
                             .filter((session) => session.snapshot().workspaceId === workspace.id)
-                            .map((session) => session.archiveForWorkspace(workspace.id)),
+                            .map((session) => session.archiveForWorkspace(workspace.id)()),
                         workspaceId: workspace.id,
                     },
                 ];
@@ -669,7 +669,7 @@ export class InMemorySessionStore implements SessionStore {
         }
         const cleanup = [...this.#sessions.values()]
             .filter((session) => session.snapshot().workspaceId === workspaceId)
-            .map((session) => session.archiveForWorkspace(workspaceId));
+            .map((session) => session.archiveForWorkspace(workspaceId)());
         cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
         void this.#completeWorkspaceArchive(projectId, workspaceId, cleanup).catch(
             (error: unknown) => {

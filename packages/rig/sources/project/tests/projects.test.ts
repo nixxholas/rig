@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
+import Database from "better-sqlite3";
 import sharp from "sharp";
 import { eq, sql } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
@@ -13,6 +14,7 @@ import { migrateSessionDatabase } from "../../persistence/database/migrateSessio
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { projects, projectWorkspaces } from "../../persistence/database/schema.js";
 import { PersistentGlobalEventQueue } from "../../global-event/PersistentGlobalEventQueue.js";
+import type { InMemorySession } from "../../session/InMemorySession.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import type { GitCommandRunner } from "../../git/types.js";
 import { ProjectRepository } from "../ProjectRepository.js";
@@ -237,6 +239,50 @@ describe("projects", () => {
         await expect(access(ready.path)).rejects.toThrow();
         await mkdir(ready.path, { recursive: true });
         expect(() => fixture.store.create({ cwd: ready.path })).toThrow("archived");
+    });
+
+    it("archives a workspace while an observer writes on its own connection", async () => {
+        // Happy sync attaches to a session the moment the store hands it out, and writes through a
+        // second connection to the same file. A workspace archival that holds the write lock while
+        // it looks up its sessions can never let that write through, and SQLite is synchronous, so
+        // the daemon deadlocks against itself until the busy timeout reports "database is locked".
+        let observe = false;
+        const observed: string[] = [];
+        const fixture = await createFixture({
+            onSessionAccess: (session) => {
+                if (!observe) return;
+                observed.push(session.id);
+                writeOnSeparateConnection(fixture.databasePath);
+            },
+        });
+        const repository = await createRepository(fixture.root, "observed-source");
+        const source = fixture.store.create({ cwd: repository });
+        const workspace = await fixture.store.createWorkspace(source.snapshot().projectId, {
+            baseRef: "HEAD",
+            name: "Observed Work",
+        });
+        if (workspace === undefined) throw new Error("Expected a workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            workspace.projectId,
+            workspace.id,
+            (value) => value.status === "ready" || value.status === "failed",
+        );
+        expect(ready.status).toBe("ready");
+        const workspaceSession = fixture.store.create({ cwd: ready.path, workspaceId: ready.id });
+
+        observe = true;
+        const archived = await fixture.store.archiveWorkspace(ready.projectId, ready.id);
+
+        expect(archived?.status).toBe("archiving");
+        expect(observed).toContain(workspaceSession.id);
+        expect(workspaceSession.snapshot()).toMatchObject({ archived: true, status: "archived" });
+        await waitForWorkspace(
+            fixture.store,
+            ready.projectId,
+            ready.id,
+            (value) => value.status === "archived",
+        );
     });
 
     it("runs configured workspace setup commands in order before becoming ready", async () => {
@@ -1046,9 +1092,24 @@ describe("projects", () => {
     });
 });
 
+/**
+ * Takes the write lock the way any observer with its own connection does. The short timeout keeps
+ * a deadlock quick to report; a healthy archival never contends for the lock at all.
+ */
+function writeOnSeparateConnection(databasePath: string): void {
+    const client = new Database(databasePath, { timeout: 250 });
+    try {
+        client.exec("BEGIN IMMEDIATE");
+        client.exec("COMMIT");
+    } finally {
+        client.close();
+    }
+}
+
 async function createFixture(
     options: {
         durableGlobalEventQueue?: boolean;
+        onSessionAccess?: (session: InMemorySession) => void;
         onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
         projectGit?: GitCommandRunner;
         workspacesDirectory?: string;
@@ -1073,6 +1134,9 @@ async function createFixture(
                 ? {}
                 : { durableGlobalEventQueue: options.durableGlobalEventQueue }),
             homeDirectory: home,
+            ...(options.onSessionAccess === undefined
+                ? {}
+                : { onSessionAccess: options.onSessionAccess }),
             ...(options.onWorkspaceCleanupError === undefined
                 ? {}
                 : { onWorkspaceCleanupError: options.onWorkspaceCleanupError }),

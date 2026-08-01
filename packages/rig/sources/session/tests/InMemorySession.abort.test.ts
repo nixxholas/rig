@@ -49,7 +49,7 @@ describe("InMemorySession abort", () => {
             },
         });
 
-        await session.archiveForWorkspace("workspace-1");
+        await session.archiveForWorkspace("workspace-1")();
 
         expect(session.state()).toMatchObject({
             archived: true,
@@ -107,7 +107,7 @@ describe("InMemorySession abort", () => {
 
         session.submit({ text: "Keep running until archival." });
         await started.promise;
-        const archive = session.archiveForWorkspace("workspace-1");
+        const archive = session.archiveForWorkspace("workspace-1")();
         release.resolve();
         await Promise.all([archive, settled.promise]);
         await new Promise<void>((resolve) => setImmediate(resolve));

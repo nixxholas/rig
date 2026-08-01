@@ -112,7 +112,7 @@ import { querySessionEvents } from "../persistence/session/querySessionEvents.js
 import { querySessionHasEarlierTranscriptMessage } from "../persistence/session/querySessionHasEarlierTranscriptMessage.js";
 import { querySessionHasLaterTranscriptMessage } from "../persistence/session/querySessionHasLaterTranscriptMessage.js";
 import { querySessionIdByAgentId } from "../persistence/session/querySessionIdByAgentId.js";
-import { querySessionIdsForWorkspace } from "../persistence/session/querySessionIdsForWorkspace.js";
+import { queryUnarchivedSessionIdsForWorkspace } from "../persistence/session/queryUnarchivedSessionIdsForWorkspace.js";
 import { querySessionOrderItems } from "../persistence/session/querySessionOrderItems.js";
 import { querySessionRestore } from "../persistence/session/querySessionRestore.js";
 import { querySessionSummaries } from "../persistence/session/querySessionSummaries.js";
@@ -794,34 +794,28 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         expectedVersion?: number,
     ): Promise<Project | undefined> {
         let project: Project | undefined;
-        let workspaces: {
-            cleanup: Promise<void>[];
-            workspaceId: string;
-        }[] = [];
+        let archiving: string[] = [];
         this.#transaction(() => {
             project = this.#projects.archiveProject(projectId, expectedVersion);
             if (project === undefined) return;
             const rootSessionIds = queryRootSessionIdsForProject(this.#tx(), projectId);
             for (const sessionId of rootSessionIds) this.get(sessionId)?.setArchived(true);
-            workspaces = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
+            archiving = this.#projects.listWorkspaces(projectId).flatMap((workspace) => {
                 if (workspace.status === "archived" || workspace.status === "archiving") {
                     return [];
                 }
-                const archiving = this.#projects.beginWorkspaceArchive(projectId, workspace.id);
-                if (archiving === undefined || archiving.status === "archived") return [];
-                return [
-                    {
-                        cleanup: querySessionIdsForWorkspace(this.#tx(), workspace.id)
-                            .map((sessionId) =>
-                                this.get(sessionId)?.archiveForWorkspace(workspace.id),
-                            )
-                            .filter((task): task is Promise<void> => task !== undefined),
-                        workspaceId: workspace.id,
-                    },
-                ];
+                const begun = this.#projects.beginWorkspaceArchive(projectId, workspace.id);
+                if (begun === undefined || begun.status === "archived") return [];
+                return [workspace.id];
             });
         });
         if (project === undefined) return undefined;
+        // Every workspace is logically archived above; its sessions follow one transaction at a
+        // time so no session teardown runs while the project archival holds the write lock.
+        const workspaces = archiving.map((workspaceId) => ({
+            cleanup: this.#archiveWorkspaceSessions(workspaceId),
+            workspaceId,
+        }));
         // All logical state is committed before physical cleanup yields.
         await this.remoteTerminals.closeProject(projectId);
         for (const workspace of workspaces) {
@@ -847,22 +841,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         workspaceId: string,
         expectedVersion?: number,
     ): Promise<ProjectWorkspace | undefined> {
-        let workspace: ProjectWorkspace | undefined;
-        let cleanup: Promise<void>[] = [];
-        this.#transaction(() => {
-            workspace = this.#projects.beginWorkspaceArchive(
-                projectId,
-                workspaceId,
-                expectedVersion,
-            );
-            if (workspace === undefined || workspace.status === "archived") return;
-            cleanup = querySessionIdsForWorkspace(this.#tx(), workspaceId)
-                .map((sessionId) => this.get(sessionId)?.archiveForWorkspace(workspaceId))
-                .filter((task): task is Promise<void> => task !== undefined);
-        });
+        // The workspace becomes "archiving" in its own transaction, before any session is touched.
+        // That decision is what makes the rest resumable: a daemon that dies partway through finds
+        // the workspace still archiving on the next start and runs the remaining sessions.
+        const workspace = this.#transaction(() =>
+            this.#projects.beginWorkspaceArchive(projectId, workspaceId, expectedVersion),
+        );
         if (workspace === undefined || workspace.status === "archived") {
             return Promise.resolve(workspace);
         }
+        const cleanup = this.#archiveWorkspaceSessions(workspaceId);
         cleanup.push(this.remoteTerminals.closeWorkspace(projectId, workspaceId));
         const finish = () => this.#completeWorkspaceArchive(projectId, workspaceId, cleanup);
         const background = this.#taskDrain?.run(finish) ?? finish();
@@ -875,6 +863,27 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         // Logical archival is already durable. Physical cleanup must never hold
         // the request open or make the workspace visible again.
         return Promise.resolve(workspace);
+    }
+
+    /**
+     * Archives the workspace's sessions one at a time, each in its own transaction, and starts each
+     * session's teardown only once that transaction has committed. Nothing but database work runs
+     * under the write lock, so an observer that reaches the database from a session callback cannot
+     * deadlock against an archival that is still open.
+     */
+    #archiveWorkspaceSessions(workspaceId: string): Promise<void>[] {
+        const cleanup: Promise<void>[] = [];
+        // Sessions cannot join a workspace that is already archiving, so this list only shrinks.
+        const pending = this.#transaction(() =>
+            queryUnarchivedSessionIdsForWorkspace(this.#tx(), workspaceId),
+        );
+        for (const sessionId of pending) {
+            const teardown = this.#transaction(() =>
+                this.get(sessionId)?.archiveForWorkspace(workspaceId),
+            );
+            if (teardown !== undefined) cleanup.push(teardown());
+        }
+        return cleanup;
     }
 
     async #completeWorkspaceArchive(
@@ -1223,12 +1232,17 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #notifySessionAccess(session: InMemorySession): void {
-        try {
-            this.#onSessionAccess?.(session);
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            // External synchronization must never interrupt local session access.
-        }
+        // Observers own their own database connections, and SQLite is synchronous. One that writes
+        // while this store still holds the write lock would wait for a transaction that cannot
+        // commit until the observer returns, so every notification waits for the commit.
+        this.#afterTransactionCommit(() => {
+            try {
+                this.#onSessionAccess?.(session);
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                // External synchronization must never interrupt local session access.
+            }
+        });
     }
 
     #notifySessionEvent(event: SessionEvent): void {
