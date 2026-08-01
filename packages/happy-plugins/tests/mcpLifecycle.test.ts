@@ -51,6 +51,117 @@ describe("Happy MCP server lifecycle", () => {
         ]);
     });
 
+    it("closes its event stream without retaining finite request connections", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".m-"));
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "s");
+        const activeConnections = new Set<object>();
+        let connectionCount = 0;
+        const requests: string[] = [];
+        const server = createServer((request, response) => {
+            const path = request.url ?? "/";
+            requests.push(`${request.method ?? "GET"} ${path}`);
+            if (request.method === "POST" && path === "/mcp/servers") {
+                sendJson(response, 201, { registrationId: "registration-1" });
+                return;
+            }
+            if (request.method === "GET" && path === "/mcp/servers/registration-1/events") {
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                return;
+            }
+            if (request.method === "GET" && path === "/projects") {
+                sendJson(response, 200, { projects: [] });
+                return;
+            }
+            sendJson(response, 404, { error: "Unexpected test request." });
+        });
+        server.on("connection", (socket) => {
+            connectionCount += 1;
+            activeConnections.add(socket);
+            socket.once("close", () => activeConnections.delete(socket));
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+        const client = createHappyPluginClient({ socketPath, token: "plugin-token" });
+
+        const contribution = await client.mcp.startServer(testServer("Connection ownership"));
+        await expect(client.projects.list()).resolves.toEqual([]);
+        await contribution.close();
+
+        expect(requests).toEqual([
+            "POST /mcp/servers",
+            "GET /mcp/servers/registration-1/events",
+            "GET /projects",
+        ]);
+        expect(connectionCount).toBe(3);
+        await expect.poll(() => activeConnections.size).toBe(0);
+    });
+
+    it("opens a recovered event stream on a new connection", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".m-"));
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "s");
+        const activeConnections = new Set<object>();
+        let connectionCount = 0;
+        let firstStream: ServerResponse | undefined;
+        let registration = 0;
+        const requests: string[] = [];
+        const server = createServer((request, response) => {
+            const path = request.url ?? "/";
+            requests.push(`${request.method ?? "GET"} ${path}`);
+            if (request.method === "POST" && path === "/mcp/servers") {
+                registration += 1;
+                sendJson(response, 201, {
+                    registrationId: `registration-${String(registration)}`,
+                });
+                return;
+            }
+            if (
+                request.method === "GET" &&
+                (path === "/mcp/servers/registration-1/events" ||
+                    path === "/mcp/servers/registration-2/events")
+            ) {
+                if (registration === 1) firstStream = response;
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                return;
+            }
+            sendJson(response, 404, { error: "Unexpected test request." });
+        });
+        server.on("connection", (socket) => {
+            connectionCount += 1;
+            activeConnections.add(socket);
+            socket.once("close", () => activeConnections.delete(socket));
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+
+        const contribution = await createHappyPluginClient({
+            socketPath,
+            token: "plugin-token",
+        }).mcp.startServer(testServer("Recovered connection ownership"));
+        firstStream!.end();
+        await expect.poll(() => contribution.registrationId).toBe("registration-2");
+        await expect.poll(() => contribution.status).toBe("connected");
+        await contribution.close();
+
+        expect(requests).toEqual([
+            "POST /mcp/servers",
+            "GET /mcp/servers/registration-1/events",
+            "POST /mcp/servers",
+            "GET /mcp/servers/registration-2/events",
+        ]);
+        expect(connectionCount).toBe(4);
+        await expect.poll(() => activeConnections.size).toBe(0);
+    });
+
     it("unregisters a recovery registration closed after POST but before stream attachment", async () => {
         const directory = await mkdtemp(join(process.cwd(), ".m-"));
         cleanup.push(() => rm(directory, { force: true, recursive: true }));

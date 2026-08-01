@@ -171,6 +171,8 @@ function requestJson<TSchema_ extends TSchema>(options: {
         const body = options.body === undefined ? undefined : JSON.stringify(options.body);
         const request = requestHttp(
             {
+                // A plugin client has no Agent lifecycle to destroy, so never pool its sockets.
+                agent: false,
                 headers: {
                     accept: "application/json",
                     authorization: `Bearer ${options.token}`,

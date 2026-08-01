@@ -288,6 +288,8 @@ function openEventStream(options: {
         let settleClosed: (error: Error) => void = () => undefined;
         const request = requestHttp(
             {
+                // Keep the stream independent from finite requests and daemon socket restarts.
+                agent: false,
                 headers: {
                     accept: "application/x-ndjson",
                     authorization: `Bearer ${options.token}`,

@@ -10,15 +10,7 @@ const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
 
 afterEach(async () => {
-    await Promise.all(
-        servers.splice(0).map(
-            (server) =>
-                new Promise<void>((resolve) => {
-                    server.close(() => resolve());
-                    server.closeAllConnections();
-                }),
-        ),
-    );
+    await Promise.all(servers.splice(0).map(closeServer));
     await Promise.all(
         temporaryDirectories
             .splice(0)
@@ -86,6 +78,46 @@ describe("happy-plugins client", () => {
             createHappyPluginClient({ socketPath: "", token: "" }).projects.list(),
         ).rejects.toThrow("HAPPY_PLUGIN_SOCKET_PATH");
     });
+
+    it("does not retain finite connections across clients or daemon restarts", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        temporaryDirectories.push(directory);
+        const socketPath = join(directory, "s");
+        const activeConnections = new Set<object>();
+        let connectionCount = 0;
+        const createProjectServer = () => {
+            const server = createServer((_request, response) => {
+                const body = JSON.stringify({ projects: [] });
+                response.writeHead(200, {
+                    "content-length": Buffer.byteLength(body),
+                    "content-type": "application/json",
+                });
+                response.end(body);
+            });
+            server.on("connection", (socket) => {
+                connectionCount += 1;
+                activeConnections.add(socket);
+                socket.once("close", () => activeConnections.delete(socket));
+            });
+            servers.push(server);
+            return server;
+        };
+        let server = createProjectServer();
+        await listen(server, socketPath);
+        const firstClient = createHappyPluginClient({ socketPath, token: "plugin-token" });
+        const secondClient = createHappyPluginClient({ socketPath, token: "plugin-token" });
+
+        await firstClient.projects.list();
+        await secondClient.projects.list();
+        await closeServer(server);
+        await rm(socketPath, { force: true });
+        server = createProjectServer();
+        await listen(server, socketPath);
+        await firstClient.projects.list();
+
+        expect(connectionCount).toBe(3);
+        await expect.poll(() => activeConnections.size).toBe(0);
+    });
 });
 
 function listen(server: Server, socketPath: string): Promise<void> {
@@ -95,5 +127,16 @@ function listen(server: Server, socketPath: string): Promise<void> {
             server.off("error", reject);
             resolve();
         });
+    });
+}
+
+function closeServer(server: Server): Promise<void> {
+    if (!server.listening) {
+        server.closeAllConnections();
+        return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
     });
 }
