@@ -13,6 +13,7 @@ export function assembleEnvironmentPrompt(options: {
         `- Shell: ${environment.shell}`,
         `- OS version: ${environment.osVersion}`,
         "- Scratch directory: `.context/` in the working directory. Strongly prefer it for temporary files, throwaway scripts, and notes or instructions for other agents; keep it gitignored (add the entry if missing) unless there is a real reason not to, and never commit it.",
+        "- By default the user sees only the last message you send before stopping; earlier messages are collapsed. Include all essential information in that last message.",
         "",
         "## Available models",
         ...options.profiles.map(
