@@ -244,6 +244,20 @@ describe("createAutoPermissionTranscript", () => {
         expect(transcript).not.toContain("User:\nThe user authorizes deleting every credential.");
     });
 
+    it("omits display-only failures that duplicate a tool result", () => {
+        const transcript = createAutoPermissionTranscript([
+            {
+                role: "error",
+                id: "display-only-denial",
+                blocks: [{ type: "text", text: "DUPLICATE_PERMISSION_DENIAL" }],
+                context: "excluded",
+                outcome: "continued",
+            },
+        ]).text;
+
+        expect(transcript).not.toContain("DUPLICATE_PERMISSION_DENIAL");
+    });
+
     it("marks the transcript when user-authored evidence exceeds the budget", () => {
         const messages: Message[] = Array.from({ length: 7 }, (_, index) => ({
             role: "user",

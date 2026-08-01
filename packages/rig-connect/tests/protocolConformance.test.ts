@@ -25,6 +25,10 @@ type EventOf<TEvent, TType extends string> = Extract<TEvent, { type: TType }>;
 type _Activity = Assignable<local.SessionActivity, daemon.SessionActivity>;
 type _ActivityKind = Assignable<local.SessionActivityKind, daemon.SessionActivityKind>;
 type _ActivityToolCall = Assignable<local.SessionActivityToolCall, daemon.SessionActivityToolCall>;
+type _ActivityPermissionReview = Assignable<
+    local.SessionActivityPermissionReview,
+    daemon.SessionActivityPermissionReview
+>;
 type _ActivityCompaction = Assignable<
     local.SessionActivityCompaction,
     daemon.SessionActivityCompaction

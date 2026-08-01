@@ -172,9 +172,9 @@ const { activity, git, modelId, tokens, title } = connection.session();
 ```
 
 `activity.kind` is one of `idle`, `queued`, `thinking`, `generating_message`,
-`generating_tool_call`, `executing_tool_call`, `awaiting_input`, `compacting`, `retrying`,
-`stopped`, or `error`, and `activity.label` is ready to display. A status line renders from this
-without walking the list.
+`generating_tool_call`, `reviewing_tool_call`, `executing_tool_call`, `awaiting_input`,
+`compacting`, `retrying`, `stopped`, or `error`, and `activity.label` is ready to display. A status
+line renders from this without walking the list.
 
 While the session is executing tools, `activity.toolCalls` is the list of calls it is still waiting
 on, each with its tool name, start time, and latest progress status. `describeSessionActivity`
@@ -189,6 +189,11 @@ const { label, toolCategory, awaitingTools } = describeSessionActivity(
 // Agent, spawn_workspace_agent             -> "Waiting for subagents"
 // a mixture                                -> "Running 2 tools"
 ```
+
+While Auto is deciding whether a tool may run, `activity.reviewingToolCalls` identifies those
+calls and `describeSessionActivity(...).reviewingTools` exposes the same application-ready list.
+Each tool-call element carries `permissionReview.status: "reviewing"` during that work, then
+updates in place to `"completed"` with the decision, risk, reason, and user-authorization level.
 
 `classifyToolName` is the same classification on its own, for a UI that wants an icon per category.
 A tool this library has not seen classifies as `unknown` and is named literally rather than

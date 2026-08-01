@@ -16,6 +16,7 @@ export type SessionActivityKind =
     | "thinking"
     | "generating_message"
     | "generating_tool_call"
+    | "reviewing_tool_call"
     | "executing_tool_call"
     | "waiting"
     | "awaiting_input"
@@ -27,6 +28,13 @@ export type SessionActivityKind =
 export interface SessionActivityToolCall {
     startedAt: number;
     status?: string;
+    toolCallId: string;
+    toolName: string;
+}
+
+export interface SessionActivityPermissionReview {
+    action: string;
+    startedAt: number;
     toolCallId: string;
     toolName: string;
 }
@@ -57,6 +65,7 @@ export interface SessionActivity {
     compaction?: SessionActivityCompaction;
     pendingInputRequestIds?: readonly string[];
     retry?: SessionActivityRetry;
+    reviewingToolCalls?: readonly SessionActivityPermissionReview[];
     wait?: SessionActivityWait;
     toolCalls?: readonly SessionActivityToolCall[];
 }
@@ -251,8 +260,9 @@ export interface ErrorMessage {
     role: "error";
     id: string;
     blocks: readonly ContentBlock[];
-    outcome: "retried" | "failed";
+    outcome: "retried" | "continued" | "failed";
     attempt?: number;
+    context?: "excluded";
     internal?: never;
 }
 
@@ -1014,6 +1024,12 @@ export type AgentLoopEvent =
           elapsedMs: number;
           status: "cancelled" | "completed" | "failed";
           errorMessage?: string;
+      }
+    | {
+          type: "permission_review_started";
+          action: string;
+          toolCallId: string;
+          toolName: string;
       }
     | {
           type: "permission_review";

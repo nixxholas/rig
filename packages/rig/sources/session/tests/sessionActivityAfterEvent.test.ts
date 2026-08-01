@@ -69,6 +69,55 @@ describe("sessionActivityAfterEvent", () => {
         ]);
     });
 
+    it("reports tools while Auto reviews them and clears the review before execution", () => {
+        const reviewing = [
+            event("run_started", { runId: "run-1" }),
+            agentEvent({
+                action: "running a host command",
+                toolCallId: "call-1",
+                toolName: "Bash",
+                type: "permission_review_started",
+            }),
+        ];
+
+        const started = apply(reviewing);
+        expect(started.kind).toBe("reviewing_tool_call");
+        expect(started.label).toBe("Reviewing Bash");
+        expect(started.reviewingToolCalls).toEqual([
+            {
+                action: "running a host command",
+                startedAt: expect.any(Number),
+                toolCallId: "call-1",
+                toolName: "Bash",
+            },
+        ]);
+        const completed = apply([
+            ...reviewing,
+            agentEvent({
+                action: "running a host command",
+                decision: "deny",
+                reason: "The action was not authorized.",
+                risk: "high",
+                toolCallId: "call-1",
+                type: "permission_review",
+                userAuthorization: "low",
+            }),
+        ]);
+        expect(completed.kind).toBe("thinking");
+        expect(completed.reviewingToolCalls).toBeUndefined();
+
+        const recovered = apply([
+            ...reviewing,
+            agentEvent({
+                iteration: 2,
+                messageId: "message-2",
+                type: "inference_iteration_start",
+            }),
+        ]);
+        expect(recovered.kind).toBe("thinking");
+        expect(recovered.reviewingToolCalls).toBeUndefined();
+    });
+
     it("prefers a tool's own reported status over the tool name", () => {
         const activity = apply([
             event("run_started", { runId: "run-1" }),

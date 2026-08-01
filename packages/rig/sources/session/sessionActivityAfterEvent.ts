@@ -1,6 +1,7 @@
 import type {
     SessionActivity,
     SessionActivityCompaction,
+    SessionActivityPermissionReview,
     SessionActivityToolCall,
     SessionEvent,
 } from "../protocol/index.js";
@@ -68,7 +69,12 @@ function activityAfterAgentEvent(
 ): SessionActivity {
     switch (event.type) {
         case "inference_iteration_start":
-            return { ...withoutRetry(previous), kind: "thinking", label: "Thinking", since: at };
+            return {
+                ...withoutPermissionReviews(withoutRetry(previous)),
+                kind: "thinking",
+                label: "Thinking",
+                since: at,
+            };
         case "thinking_start":
         case "thinking_delta":
             return streaming(previous, at, "thinking", "Thinking");
@@ -92,6 +98,15 @@ function activityAfterAgentEvent(
                 toolCallId: event.toolCall.id,
                 toolName: event.toolCall.name,
             });
+        case "permission_review_started":
+            return withPermissionReview(previous, at, {
+                action: event.action,
+                startedAt: at,
+                toolCallId: event.toolCallId,
+                toolName: event.toolName,
+            });
+        case "permission_review":
+            return withoutPermissionReview(previous, at, event.toolCallId);
         case "tool_execution_status":
             return withToolCallStatus(previous, at, event.toolCallId, event.status);
         case "tool_execution_end":
@@ -138,8 +153,34 @@ function holdsPrecedenceOverStreaming(activity: SessionActivity): boolean {
         activity.compaction !== undefined ||
         activity.wait !== undefined ||
         (activity.pendingInputRequestIds?.length ?? 0) > 0 ||
+        (activity.reviewingToolCalls?.length ?? 0) > 0 ||
         (activity.toolCalls?.length ?? 0) > 0
     );
+}
+
+function withPermissionReview(
+    previous: SessionActivity,
+    at: number,
+    review: SessionActivityPermissionReview,
+): SessionActivity {
+    const reviewingToolCalls = [
+        ...(previous.reviewingToolCalls ?? []).filter(
+            (candidate) => candidate.toolCallId !== review.toolCallId,
+        ),
+        review,
+    ];
+    return resolve({ ...previous, reviewingToolCalls }, at);
+}
+
+function withoutPermissionReview(
+    previous: SessionActivity,
+    at: number,
+    toolCallId: string,
+): SessionActivity {
+    const existing = previous.reviewingToolCalls ?? [];
+    if (!existing.some((candidate) => candidate.toolCallId === toolCallId)) return previous;
+    const reviewingToolCalls = existing.filter((candidate) => candidate.toolCallId !== toolCallId);
+    return resolve({ ...previous, reviewingToolCalls }, at);
 }
 
 function withToolCall(
@@ -226,6 +267,12 @@ function withoutRetry(activity: SessionActivity): SessionActivity {
     return rest;
 }
 
+function withoutPermissionReviews(activity: SessionActivity): SessionActivity {
+    if (activity.reviewingToolCalls === undefined) return activity;
+    const { reviewingToolCalls: _reviewing, ...rest } = activity;
+    return rest;
+}
+
 /**
  * Rebuilds the reported kind and label after the tracked work changed.
  *
@@ -257,6 +304,19 @@ function describe(activity: SessionActivity): { kind: SessionActivity["kind"]; l
             label: `Waiting until ${new Date(activity.wait.dueAt).toLocaleString()}`,
         };
     }
+    const reviewingToolCalls = activity.reviewingToolCalls ?? [];
+    if (reviewingToolCalls.length === 1) {
+        return {
+            kind: "reviewing_tool_call",
+            label: `Reviewing ${reviewingToolCalls[0]!.toolName}`,
+        };
+    }
+    if (reviewingToolCalls.length > 1) {
+        return {
+            kind: "reviewing_tool_call",
+            label: `Reviewing ${String(reviewingToolCalls.length)} tools`,
+        };
+    }
     const toolCalls = activity.toolCalls ?? [];
     if (toolCalls.length === 1) {
         const only = toolCalls[0]!;
@@ -278,6 +338,7 @@ function describe(activity: SessionActivity): { kind: SessionActivity["kind"]; l
 function normalize(activity: SessionActivity): SessionActivity {
     const normalized = { ...activity };
     if (normalized.toolCalls?.length === 0) delete normalized.toolCalls;
+    if (normalized.reviewingToolCalls?.length === 0) delete normalized.reviewingToolCalls;
     if (normalized.pendingInputRequestIds?.length === 0) delete normalized.pendingInputRequestIds;
     return normalized;
 }

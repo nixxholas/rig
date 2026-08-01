@@ -543,7 +543,11 @@ export class Agent {
             this.#steeringController = new AbortController();
             if (this.#resetVersion === resetVersion) {
                 this.#messages = [...result.messages];
-                if (contextWasExplicit || contextCompactedDuringRun) {
+                if (
+                    contextWasExplicit ||
+                    contextCompactedDuringRun ||
+                    !hasSameMessageIdentity(result.messages, result.contextMessages)
+                ) {
                     this.#contextMessages = [...result.contextMessages];
                 } else {
                     this.#contextMessages = undefined;
@@ -777,4 +781,14 @@ export class Agent {
         await this.#onEvent?.(event);
         await options.onEvent?.(event);
     }
+}
+
+function hasSameMessageIdentity(
+    messages: readonly Message[],
+    contextMessages: readonly Message[],
+): boolean {
+    return (
+        messages.length === contextMessages.length &&
+        messages.every((message, index) => message === contextMessages[index])
+    );
 }

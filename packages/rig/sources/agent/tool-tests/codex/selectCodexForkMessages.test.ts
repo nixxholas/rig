@@ -42,6 +42,13 @@ describe("selectCodexForkMessages", () => {
                 provenance: "agent",
                 blocks: [{ type: "text", text: "internal delegation" }],
             },
+            {
+                role: "error",
+                id: "display-only-denial",
+                blocks: [{ type: "text", text: "Automatic permission review refused the action." }],
+                context: "excluded",
+                outcome: "continued",
+            },
         ];
 
         const forked = selectCodexForkMessages(messages, undefined);

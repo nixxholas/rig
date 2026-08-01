@@ -6,6 +6,58 @@ import { InMemorySession } from "../InMemorySession.js";
 import { InMemorySessionStore } from "../InMemorySessionStore.js";
 
 describe("InMemorySession", () => {
+    it("keeps visible-only restored errors out of persisted model context", () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "openai/visible-only-error",
+            name: "Visible-only error model",
+            thinkingLevels: ["off"],
+        });
+        const modelCatalog: ModelCatalog = {
+            defaultModelId: model.id,
+            defaultProviderId: "codex",
+            models: [model],
+            providers: [{ providerId: "codex", models: [model] }],
+        };
+        const denial = {
+            blocks: [{ text: "Automatic permission review refused deployment.", type: "text" }],
+            context: "excluded",
+            id: "visible-denial",
+            outcome: "continued",
+            role: "error",
+        } as const;
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            modelCatalog,
+            request: { cwd: "/tmp/rig-visible-only-error" },
+            restore: {
+                agent: {
+                    depth: 0,
+                    rootSessionId: "visible-only-session",
+                    type: "primary",
+                },
+                agentId: "visible-only-agent",
+                cwd: "/tmp/rig-visible-only-error",
+                id: "visible-only-session",
+                messages: [{ isPartial: false, message: denial, position: 0, runId: "run-1" }],
+                modelId: model.id,
+                models: [model],
+                nextTaskId: 1,
+                orderKey: "a0",
+                permissionMode: "auto",
+                providerId: "codex",
+                queuedRuns: [],
+                status: "idle",
+                tasks: [],
+                titleStatus: "idle",
+                tools: [],
+            },
+        });
+
+        expect(session.state().messages[0]?.message).toEqual(denial);
+        expect(session.state().contextMessages).toEqual([]);
+    });
+
     it("rejects an unsupported queued effort before changing session state", () => {
         const model = defineModel({
             defaultThinkingLevel: "off",

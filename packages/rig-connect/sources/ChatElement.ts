@@ -121,11 +121,19 @@ export interface ToolCallElement extends BaseChatElement {
      * replaced by a differently shaped one.
      */
     presentation?: ToolPresentation;
-    /** The complete automatic review associated with this action, when one was required. */
-    permissionReview?: PermissionReviewState;
+    /** Automatic review progress or the complete verdict for this action. */
+    permissionReview?: ToolPermissionReviewState;
     /** Set when adjacent calls were issued together, so a UI can draw one unit. */
     toolCallGroupId?: string;
 }
+
+export type ToolPermissionReviewState =
+    | {
+          action: string;
+          status: "reviewing";
+          toolCallId: string;
+      }
+    | (PermissionReviewState & { status: "completed" });
 
 export interface CompactionElement extends BaseChatElement {
     kind: "compaction";
@@ -155,8 +163,8 @@ export interface CompactionElement extends BaseChatElement {
  */
 export interface FailureElement extends BaseChatElement {
     kind: "failure";
-    /** Whether the run tried again after this, or gave up here. */
-    outcome: "retried" | "failed";
+    /** Whether Rig retried inference, continued after a local failure, or gave up here. */
+    outcome: "retried" | "continued" | "failed";
     /** Which attempt this was. Absent for a failure that ended the group. */
     attempt?: number;
     reason: string;

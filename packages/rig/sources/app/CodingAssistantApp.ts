@@ -3609,6 +3609,9 @@ export class CodingAssistantApp implements Component, Focusable {
                       ? "Compacting conversation"
                       : "Idle";
             }
+        } else if (event.type === "permission_review_started") {
+            this.#reviewingPermissionToolCallIds.add(event.toolCallId);
+            this.#refreshToolActivityStatus();
         } else if (event.type === "permission_review") {
             if (event.transcript !== undefined && !this.#skipInitialUsageReplay) {
                 this.#usage = addUsage(this.#usage, event.transcript.usage);
@@ -3618,9 +3621,9 @@ export class CodingAssistantApp implements Component, Focusable {
                     usage: event.transcript.usage,
                 });
             }
+            this.#reviewingPermissionToolCallIds.delete(event.toolCallId);
+            this.#refreshToolActivityStatus();
             if (event.decision === "deny") {
-                this.#reviewingPermissionToolCallIds.delete(event.toolCallId);
-                this.#refreshToolActivityStatus();
                 const toolEntry = this.#entries.find((entry) => entry.id === event.toolCallId);
                 if (toolEntry !== undefined) {
                     toolEntry.permissionReview = `Refused: ${event.reason} Risk: ${humanizePermissionReviewLevel(event.risk)}. User authorization: ${humanizePermissionReviewLevel(event.userAuthorization)}.`;
@@ -3736,7 +3739,9 @@ export class CodingAssistantApp implements Component, Focusable {
                         ? message.attempt === undefined
                             ? "Inference failed and was retried"
                             : `Inference attempt ${String(message.attempt)} failed and was retried`
-                        : "Run failed",
+                        : message.outcome === "continued"
+                          ? "Action failed"
+                          : "Run failed",
             });
             this.#requestRender();
             return;

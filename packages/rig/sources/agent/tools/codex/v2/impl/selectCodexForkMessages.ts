@@ -1,4 +1,5 @@
 import type { AgentMessage, Message } from "../../../../types.js";
+import { isExcludedFromModelContext } from "../../../../isExcludedFromModelContext.js";
 import { selectCodexFinalAnswerBlocks } from "./selectCodexFinalAnswerBlocks.js";
 import { selectCodexFinalAnswerItems } from "./selectCodexFinalAnswerItems.js";
 
@@ -26,7 +27,7 @@ export function selectCodexForkMessages(
                 : [message];
         }
         if (message.role === "compaction") return [message];
-        if (message.role === "error") return [message];
+        if (message.role === "error") return isExcludedFromModelContext(message) ? [] : [message];
         const responseItems = selectCodexFinalAnswerItems(message.responseItems);
         const blocks = selectCodexFinalAnswerBlocks(responseItems);
         if (blocks.length === 0) return [];

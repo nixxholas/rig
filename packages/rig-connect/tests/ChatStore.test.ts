@@ -880,6 +880,7 @@ describe("ChatStore", () => {
         ).toMatchObject({
             permissionReview: {
                 decision: "allow",
+                status: "completed",
                 toolCallId: "reviewed-call",
                 userAuthorization: "high",
             },
@@ -942,7 +943,307 @@ describe("ChatStore", () => {
         ).toMatchObject({
             permissionReview: {
                 decision: "allow",
+                status: "completed",
                 toolCallId: "paged-reviewed-call",
+            },
+        });
+    });
+
+    it("updates one tool row from automatic review progress to its complete verdict", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const toolMessage: Message = {
+            blocks: [
+                {
+                    arguments: { command: "deploy" },
+                    id: "review-progress-call",
+                    name: "exec_command",
+                    type: "tool_call",
+                },
+            ],
+            id: "review-progress-message",
+            role: "agent",
+        };
+        store.apply(
+            event("agent_message", {
+                message: toolMessage,
+                runId: "run-review-progress",
+            }),
+        );
+
+        store.apply(
+            agentEvent({
+                action: "Deploy the service",
+                toolCallId: "review-progress-call",
+                toolName: "exec_command",
+                type: "permission_review_started",
+            }),
+        );
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" &&
+                        element.toolCallId === "review-progress-call",
+                ),
+        ).toMatchObject({
+            permissionReview: {
+                action: "Deploy the service",
+                status: "reviewing",
+                toolCallId: "review-progress-call",
+            },
+        });
+
+        store.apply(
+            agentEvent({
+                action: "Deploy the service",
+                decision: "deny",
+                reason: "The user did not authorize deployment.",
+                risk: "high",
+                toolCallId: "review-progress-call",
+                type: "permission_review",
+                userAuthorization: "low",
+            }),
+        );
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" &&
+                        element.toolCallId === "review-progress-call",
+                ),
+        ).toMatchObject({
+            permissionReview: {
+                decision: "deny",
+                reason: "The user did not authorize deployment.",
+                risk: "high",
+                status: "completed",
+                toolCallId: "review-progress-call",
+                userAuthorization: "low",
+            },
+        });
+        store.apply(
+            event("session_activity_changed", {
+                activity: {
+                    kind: "reviewing_tool_call",
+                    label: "Reviewing exec_command",
+                    reviewingToolCalls: [
+                        {
+                            action: "Deploy the service",
+                            startedAt: 10,
+                            toolCallId: "review-progress-call",
+                            toolName: "exec_command",
+                        },
+                    ],
+                    runId: "run-review-progress",
+                    since: 10,
+                },
+            }),
+        );
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" &&
+                        element.toolCallId === "review-progress-call",
+                ),
+        ).toMatchObject({
+            permissionReview: {
+                decision: "deny",
+                status: "completed",
+                toolCallId: "review-progress-call",
+            },
+        });
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [
+                        { text: "Automatic permission review refused deployment.", type: "text" },
+                    ],
+                    context: "excluded",
+                    id: "review-progress-error",
+                    outcome: "continued",
+                    role: "error",
+                },
+                runId: "run-review-progress",
+            }),
+        );
+        expect(store.elements().at(-1)).toMatchObject({
+            kind: "failure",
+            outcome: "continued",
+            reason: "Automatic permission review refused deployment.",
+        });
+    });
+
+    it("clears an unfinished review when the tool is interrupted", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [
+                        {
+                            arguments: { command: "deploy" },
+                            id: "interrupted-review-call",
+                            name: "exec_command",
+                            type: "tool_call",
+                        },
+                    ],
+                    id: "interrupted-review-message",
+                    role: "agent",
+                },
+                runId: "run-interrupted-review",
+            }),
+        );
+        store.apply(
+            agentEvent({
+                action: "Deploy the service",
+                toolCallId: "interrupted-review-call",
+                toolName: "exec_command",
+                type: "permission_review_started",
+            }),
+        );
+
+        store.apply(
+            agentEvent({
+                result: {
+                    display: "Interrupted by user.",
+                    failure: { kind: "interrupted" },
+                    isError: true,
+                    toolCallId: "interrupted-review-call",
+                    toolName: "exec_command",
+                },
+                type: "tool_execution_end",
+            }),
+        );
+
+        const interrupted = store
+            .elements()
+            .find(
+                (element) =>
+                    element.kind === "tool_call" &&
+                    element.toolCallId === "interrupted-review-call",
+            );
+        expect(interrupted).toMatchObject({ status: "interrupted" });
+        expect(interrupted).not.toHaveProperty("permissionReview");
+    });
+
+    it("clears an unfinished review when activity moves on without a verdict", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [
+                        {
+                            arguments: { command: "deploy" },
+                            id: "abandoned-review-call",
+                            name: "exec_command",
+                            type: "tool_call",
+                        },
+                    ],
+                    id: "abandoned-review-message",
+                    role: "agent",
+                },
+                runId: "run-abandoned-review",
+            }),
+        );
+        store.apply(
+            agentEvent({
+                action: "Deploy the service",
+                toolCallId: "abandoned-review-call",
+                toolName: "exec_command",
+                type: "permission_review_started",
+            }),
+        );
+
+        store.apply(
+            event("session_activity_changed", {
+                activity: {
+                    kind: "thinking",
+                    label: "Thinking",
+                    runId: "run-abandoned-review",
+                    since: 11,
+                },
+            }),
+        );
+
+        const abandoned = store
+            .elements()
+            .find(
+                (element) =>
+                    element.kind === "tool_call" && element.toolCallId === "abandoned-review-call",
+            );
+        expect(abandoned).not.toHaveProperty("permissionReview");
+    });
+
+    it("restores an in-progress automatic review from current session activity", () => {
+        const opening = hello();
+        const toolMessage: Message = {
+            blocks: [
+                {
+                    arguments: { command: "deploy" },
+                    id: "reconnected-review-call",
+                    name: "exec_command",
+                    type: "tool_call",
+                },
+            ],
+            id: "reconnected-review-message",
+            role: "agent",
+        };
+        const activity = {
+            kind: "reviewing_tool_call" as const,
+            label: "Reviewing exec_command",
+            reviewingToolCalls: [
+                {
+                    action: "Deploy the service",
+                    startedAt: 10,
+                    toolCallId: "reconnected-review-call",
+                    toolName: "exec_command",
+                },
+            ],
+            runId: "run-reconnected-review",
+            since: 10,
+        };
+        const store = new ChatStore("session-1");
+        store.applyHello({
+            ...opening,
+            activity,
+            session: {
+                ...opening.session!,
+                activity,
+                snapshot: { messages: [toolMessage] },
+            },
+            transcript: {
+                complete: true,
+                messages: [toolMessage],
+                turns: [
+                    {
+                        messageIds: [toolMessage.id],
+                        runId: "run-reconnected-review",
+                        startedAt: 1,
+                    },
+                ],
+            },
+        });
+
+        expect(store.session().activity).toEqual(activity);
+        expect(
+            store
+                .elements()
+                .find(
+                    (element) =>
+                        element.kind === "tool_call" &&
+                        element.toolCallId === "reconnected-review-call",
+                ),
+        ).toMatchObject({
+            permissionReview: {
+                action: "Deploy the service",
+                status: "reviewing",
+                toolCallId: "reconnected-review-call",
             },
         });
     });

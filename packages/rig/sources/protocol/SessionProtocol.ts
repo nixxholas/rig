@@ -61,6 +61,7 @@ export type SessionActivityKind =
     | "thinking"
     | "generating_message"
     | "generating_tool_call"
+    | "reviewing_tool_call"
     | "executing_tool_call"
     | "waiting"
     | "awaiting_input"
@@ -73,6 +74,13 @@ export interface SessionActivityToolCall {
     startedAt: number;
     /** Latest short label the tool reported about its own progress. */
     status?: string;
+    toolCallId: string;
+    toolName: string;
+}
+
+export interface SessionActivityPermissionReview {
+    action: string;
+    startedAt: number;
     toolCallId: string;
     toolName: string;
 }
@@ -106,6 +114,8 @@ export interface SessionActivity {
     /** Requests the session is blocked on, including permission approvals. */
     pendingInputRequestIds?: readonly string[];
     retry?: SessionActivityRetry;
+    /** Tool calls whose requested action is currently being reviewed in Auto. */
+    reviewingToolCalls?: readonly SessionActivityPermissionReview[];
     wait?: SessionActivityWait;
     /** Tool calls that have started and not yet reported a result. */
     toolCalls?: readonly SessionActivityToolCall[];

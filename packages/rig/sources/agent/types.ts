@@ -160,22 +160,21 @@ export interface CompactionMessage {
     internal?: never;
 }
 
-/**
- * A run failure preserved in both visible history and model context.
- *
- * Retried attempts and terminal failures are the same durable message kind. The
- * outcome tells readers whether Rig continued after this failure or stopped. This
- * is deliberately not ephemeral retry telemetry: persistence fans it out to every
- * backend and UI, and replay puts the failed attempt back into model context.
- */
+/** A failure preserved in visible history. */
 export interface ErrorMessage {
     role: "error";
     id: string;
     blocks: readonly ContentBlock[];
-    outcome: "retried" | "failed";
+    /** Whether Rig retried inference, continued after a local failure, or stopped. */
+    outcome: "retried" | "continued" | "failed";
     /** Present when the provider identified which retry attempt failed. */
     attempt?: number;
-    /** Inference failures are always visible transcript history. */
+    /**
+     * Display-only failures duplicate information already represented in model context, such as
+     * an automatic permission denial that is also the tool result.
+     */
+    context?: "excluded";
+    /** Failures are always visible transcript history. */
     internal?: never;
 }
 

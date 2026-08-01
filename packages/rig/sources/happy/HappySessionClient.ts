@@ -829,6 +829,7 @@ function isWorkingActivity(kind: ReturnType<InMemorySession["activity"]>["kind"]
         kind === "thinking" ||
         kind === "generating_message" ||
         kind === "generating_tool_call" ||
+        kind === "reviewing_tool_call" ||
         kind === "executing_tool_call" ||
         kind === "waiting" ||
         kind === "compacting" ||

@@ -48,6 +48,21 @@ describe("describeSessionActivity", () => {
         expect(description.toolCategory).toBe("shell");
     });
 
+    it("reports the tools whose automatic permissions are being reviewed", () => {
+        const reviewing = { ...toolCall("Bash"), action: "running a host command" };
+        const description = describeSessionActivity({
+            kind: "reviewing_tool_call",
+            label: "Reviewing Bash",
+            reviewingToolCalls: [reviewing],
+            since: 10,
+        });
+
+        expect(description.awaitingTools).toEqual([]);
+        expect(description.reviewingTools).toEqual([reviewing]);
+        expect(description.label).toBe("Reviewing Bash");
+        expect(description.toolCategory).toBe("shell");
+    });
+
     it("names the shared kind of work rather than counting the calls", () => {
         const description = describeSessionActivity(
             running([toolCall("Agent", "a"), toolCall("spawn_subagent", "b")]),
@@ -104,6 +119,7 @@ describe("describeSessionActivity", () => {
             awaitingTools: [],
             kind: "idle",
             label: "Idle",
+            reviewingTools: [],
         });
         expect(
             describeSessionActivity({ kind: "generating_message", label: "x", since: 0 }).label,

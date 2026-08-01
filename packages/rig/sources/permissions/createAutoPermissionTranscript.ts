@@ -1,4 +1,5 @@
 import type { ContentBlock, Message } from "../agent/types.js";
+import { isExcludedFromModelContext } from "../agent/isExcludedFromModelContext.js";
 import { isInternalMessage } from "../agent/isInternalMessage.js";
 
 interface TranscriptEntry {
@@ -96,6 +97,7 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
             continue;
         }
         if (message.role === "error") {
+            if (isExcludedFromModelContext(message)) continue;
             const text = renderContent(message.blocks, "[Image attached to inference error]");
             if (text.length > 0) {
                 entries.push({

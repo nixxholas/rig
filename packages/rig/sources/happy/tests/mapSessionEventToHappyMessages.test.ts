@@ -306,6 +306,37 @@ describe("HappyMessageMapper", () => {
         });
     });
 
+    it("serializes continued chat errors through Happy's established service event", () => {
+        const mapper = new HappyMessageMapper();
+        mapper.map(sessionEvent("run_started", { runId: "run-1" }, 90));
+        const output = mapper.map(
+            sessionEvent(
+                "agent_message",
+                {
+                    message: {
+                        blocks: [
+                            {
+                                text: "Automatic permission review refused deployment.",
+                                type: "text",
+                            },
+                        ],
+                        context: "excluded",
+                        id: "permission-denial-1",
+                        outcome: "continued",
+                        role: "error",
+                    },
+                    runId: "run-1",
+                },
+                100,
+            ),
+        );
+
+        expect(output.at(-1)?.content.ev).toEqual({
+            t: "service",
+            text: "Automatic permission review refused deployment.",
+        });
+    });
+
     it("does not duplicate a terminal failure when its durable message arrives late", () => {
         const mapper = new HappyMessageMapper();
         const output = [

@@ -173,16 +173,27 @@ export class HappyMessageMapper {
             if (event.data.message.outcome === "failed") {
                 this.#runsWithTerminalFailureMessage.add(event.data.runId);
             }
+            const reason = event.data.message.blocks
+                .flatMap((block) => (block.type === "text" ? [block.text] : []))
+                .join("\n");
+            const headers = this.#takePendingGroupHeaders(event.data.runId, group.id);
+            if (event.data.message.outcome === "continued") {
+                return [
+                    ...headers,
+                    agentMessage(event, event.data.message.id, group.id, {
+                        t: "service",
+                        text: reason,
+                    }),
+                ];
+            }
             return [
-                ...this.#takePendingGroupHeaders(event.data.runId, group.id),
+                ...headers,
                 failureMessage(
                     event,
                     event.data.message.id,
                     group.id,
                     event.data.message.outcome,
-                    event.data.message.blocks
-                        .flatMap((block) => (block.type === "text" ? [block.text] : []))
-                        .join("\n"),
+                    reason,
                     event.data.message.attempt,
                 ),
             ];

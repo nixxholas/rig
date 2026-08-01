@@ -12,6 +12,7 @@ import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js
 import { assistantMessageToAgentMessage } from "../agent/assistantMessageToAgentMessage.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import { isInternalMessage } from "../agent/isInternalMessage.js";
+import { isExcludedFromModelContext } from "../agent/isExcludedFromModelContext.js";
 import { findFirstUserRequestText, findLastAgentResponseText } from "../agent/index.js";
 import type {
     AgentContext,
@@ -3661,9 +3662,13 @@ export class InMemorySession {
         const runtimeSnapshot = this.#runtime?.agent.snapshot();
         const contextMessages =
             runtimeSnapshot === undefined
-                ? (this.#contextMessages ?? this.#committedMessages())
+                ? (this.#contextMessages ?? this.#committedMessages()).filter(
+                      (message) => !isExcludedFromModelContext(message),
+                  )
                 : [
-                      ...(runtimeSnapshot.contextMessages ?? runtimeSnapshot.messages),
+                      ...(runtimeSnapshot.contextMessages ?? runtimeSnapshot.messages).filter(
+                          (message) => !isExcludedFromModelContext(message),
+                      ),
                       ...runtimeSnapshot.queue.map((queued) => queued.message),
                   ];
         const usageSummary = structuredClone(this.usage());
@@ -4794,17 +4799,27 @@ export class InMemorySession {
         const { wait: _previousWait, ...base } = this.#activity;
         const next: SessionActivity =
             waiting === undefined
-                ? (base.toolCalls?.length ?? 0) > 0
+                ? (base.reviewingToolCalls?.length ?? 0) > 0
                     ? {
                           ...base,
-                          kind: "executing_tool_call",
+                          kind: "reviewing_tool_call",
                           label:
-                              base.toolCalls?.length === 1
-                                  ? `Running ${base.toolCalls[0]?.toolName ?? "tool"}`
-                                  : `Running ${String(base.toolCalls?.length ?? 0)} tools`,
+                              base.reviewingToolCalls?.length === 1
+                                  ? `Reviewing ${base.reviewingToolCalls[0]?.toolName ?? "tool"}`
+                                  : `Reviewing ${String(base.reviewingToolCalls?.length ?? 0)} tools`,
                           since: this.#now(),
                       }
-                    : { ...base, kind: "thinking", label: "Thinking", since: this.#now() }
+                    : (base.toolCalls?.length ?? 0) > 0
+                      ? {
+                            ...base,
+                            kind: "executing_tool_call",
+                            label:
+                                base.toolCalls?.length === 1
+                                    ? `Running ${base.toolCalls[0]?.toolName ?? "tool"}`
+                                    : `Running ${String(base.toolCalls?.length ?? 0)} tools`,
+                            since: this.#now(),
+                        }
+                      : { ...base, kind: "thinking", label: "Thinking", since: this.#now() }
                 : {
                       ...base,
                       kind: "waiting",
@@ -6171,11 +6186,11 @@ export class InMemorySession {
         if (this.#contextMessages !== undefined) return;
 
         const runtimeSnapshot = this.#runtime?.agent.snapshot();
-        this.#contextMessages = [
-            ...(runtimeSnapshot?.contextMessages ??
-                runtimeSnapshot?.messages ??
-                this.#committedMessages()),
-        ];
+        this.#contextMessages = (
+            runtimeSnapshot?.contextMessages ??
+            runtimeSnapshot?.messages ??
+            this.#committedMessages()
+        ).filter((message) => !isExcludedFromModelContext(message));
     }
 
     #completionForRun(runId: string): SessionRunCompletion | undefined {

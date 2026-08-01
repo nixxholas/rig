@@ -605,9 +605,21 @@ describe("Auto permissions", () => {
             tools: [tool],
         });
 
-        await agent.send("Check whether deployment is possible.");
+        const reviewLifecycle: string[] = [];
+        await agent.send("Check whether deployment is possible.", {
+            onEvent: (event) => {
+                if (event.type === "permission_review_started") {
+                    reviewLifecycle.push(`started:${event.toolCallId}:${event.action}`);
+                } else if (event.type === "permission_review") {
+                    reviewLifecycle.push(`completed:${event.toolCallId}:${event.decision}`);
+                }
+            },
+        });
 
         expect(observedModes).toEqual([]);
+        expect(reviewLifecycle[0]).toMatch(/^started:[^:]+:checking deployment target/);
+        const reviewedCallId = reviewLifecycle[0]?.split(":")[1];
+        expect(reviewLifecycle[1]).toBe(`completed:${reviewedCallId}:deny`);
         // Auto decides on the user's behalf, so a refusal must never become a question.
         expect(request).not.toHaveBeenCalled();
         const resultMessage = agent.messages.findLast(
@@ -629,7 +641,54 @@ describe("Auto permissions", () => {
                 }),
             ]),
         );
+        const visibleDenial = agent.messages.find(
+            (message) => message.role === "error" && message.outcome === "continued",
+        );
+        expect(visibleDenial).toMatchObject({
+            context: "excluded",
+            outcome: "continued",
+            role: "error",
+        });
+        expect(agent.snapshot().contextMessages).not.toContainEqual(visibleDenial);
         await agent.close();
+    });
+
+    it("does not emit a denial notice when an abort replaces the denied result", async () => {
+        const harness = createJustBashToolHarness();
+        harness.context.permissions = createPermissionContext("auto");
+        const tool = permissionProbeTool([]);
+        const provider = autoReviewProvider("deny");
+        const controller = new AbortController();
+        const agent = new Agent({
+            context: harness.context,
+            createPermissionReviewAgent: () => reviewAgentFor(provider),
+            modelId: provider.models[0]?.id ?? "",
+            printToConsole: false,
+            provider,
+            tools: [tool],
+        });
+
+        const result = await agent.send("Check whether deployment is possible.", {
+            signal: controller.signal,
+            onEvent: (event) => {
+                if (event.type === "tool_execution_start") controller.abort();
+            },
+        });
+
+        expect(result.stopReason).toBe("aborted");
+        expect(
+            agent.messages.filter(
+                (message) => message.role === "error" && message.outcome === "continued",
+            ),
+        ).toEqual([]);
+        expect(
+            agent.messages
+                .flatMap((message) => (message.role === "agent" ? message.blocks : []))
+                .findLast((block) => block.type === "tool_result"),
+        ).toMatchObject({
+            failure: { kind: "interrupted" },
+            isError: true,
+        });
     });
 
     it("stores only the selected values as trusted evidence from a real input tool", async () => {

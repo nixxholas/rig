@@ -7,6 +7,7 @@ import { createErrorToolResultBlock } from "./createErrorToolResultBlock.js";
 import { formatInvalidToolArguments } from "./formatInvalidToolArguments.js";
 import { createErrorMessage } from "./createErrorMessage.js";
 import { createToolResultBlock } from "./createToolResultBlock.js";
+import { isExcludedFromModelContext } from "./isExcludedFromModelContext.js";
 import type { AgentContext } from "./context/AgentContext.js";
 import type { BashSessionActivity } from "./context/BashContext.js";
 import { isContextWindowExceededError } from "./isContextWindowExceededError.js";
@@ -181,6 +182,12 @@ export type AgentLoopEvent =
           toolCallId: string;
       }
     | {
+          type: "permission_review_started";
+          action: string;
+          toolCallId: string;
+          toolName: string;
+      }
+    | {
           type: "permission_review";
           action: string;
           decision: "allow" | "deny";
@@ -248,7 +255,10 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
     const now = options.now ?? Date.now;
     const startDate = options.startDate ?? toLocalDate(now());
     const transcript: Message[] = [...options.messages];
-    const contextTranscript: Message[] = [...(options.contextMessages ?? options.messages)];
+    const contextTranscript: Message[] = [
+        ...(options.contextMessages ??
+            options.messages.filter((message) => !isExcludedFromModelContext(message))),
+    ];
     const providerMessages = toProviderMessages(contextTranscript, {
         model,
         now,
@@ -649,6 +659,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             return interrupted;
         }
 
+        const toolMessages = transcript.filter((message) => !isExcludedFromModelContext(message));
         const preparedPermissionEntries = await raceWithAbort(
             (async () => {
                 const entries: [string, PreparedToolPermission][] = [];
@@ -656,7 +667,18 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                     entries.push([
                         toolCall.id,
                         await prepareToolPermission(toolCall, toolsByName, toolContext, {
-                            messages: transcript,
+                            messages: toolMessages,
+                            onPermissionReviewStarted: (review) =>
+                                options.signal?.aborted
+                                    ? Promise.resolve()
+                                    : ignoreOptionalFailure(() =>
+                                          options.onEvent?.({
+                                              type: "permission_review_started",
+                                              toolCallId: toolCall.id,
+                                              toolName: toolCall.name,
+                                              ...review,
+                                          }),
+                                      ),
                             onPermissionReview: (review) =>
                                 options.signal?.aborted
                                     ? Promise.resolve()
@@ -768,7 +790,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                                         toolContext,
                                         {
                                             batchId: agentMessage.id,
-                                            messages: transcript,
+                                            messages: toolMessages,
                                             model,
                                             now,
                                             toolCallIndex: toolCalls.indexOf(toolCall),
@@ -909,6 +931,20 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
             contextTranscript.push(toolResultMessage);
             await options.onContextChanged?.(contextTranscript);
             await options.onMessage?.(toolResultMessage);
+            for (const resultBlock of toolResultBlocks) {
+                const prepared = preparedPermissions.get(resultBlock.toolCallId);
+                if (prepared?.kind !== "review" || prepared.review.decision !== "deny") continue;
+                if (resultBlock.failure?.kind === "interrupted") continue;
+                const denial = createErrorMessage(
+                    idFactory(),
+                    resultBlock.display,
+                    "continued",
+                    undefined,
+                    "excluded",
+                );
+                transcript.push(denial);
+                await options.onMessage?.(denial);
+            }
         }
         if (options.signal?.aborted) {
             await appendSteering(options, transcript, contextTranscript, providerMessages, now);
@@ -1189,6 +1225,7 @@ export function toProviderMessages(
     const providerMessages: ProviderMessage[] = [];
 
     for (const message of messages) {
+        if (isExcludedFromModelContext(message)) continue;
         if (message.role === "system") {
             // A notice belongs in the conversation at the position it was raised. Each provider
             // resolves it into its own native shape, so it never becomes prompt content here.
@@ -1233,7 +1270,9 @@ function toProviderErrorMessage(message: ErrorMessage, now: () => number): Provi
     const heading =
         message.outcome === "retried"
             ? `Rig inference${attempt} failed and was retried.`
-            : "Rig's previous work stopped with an error.";
+            : message.outcome === "continued"
+              ? "Rig encountered an error and continued."
+              : "Rig's previous work stopped with an error.";
     return {
         content: [{ text: heading, type: "text" }, ...message.blocks.map(toProviderUserContent)],
         role: "user",
@@ -1413,6 +1452,7 @@ async function prepareToolPermission(
             transcript?: PermissionReviewTranscript;
             userAuthorization: AutoPermissionUserAuthorization;
         }) => void | Promise<void>;
+        onPermissionReviewStarted?: (review: { action: string }) => void | Promise<void>;
         permissionReviewAgent?: () => PermissionReviewAgent;
         signal?: AbortSignal;
     },
@@ -1429,22 +1469,6 @@ async function prepareToolPermission(
         if (!(await tool.shouldReviewInAutoMode(toolCall.arguments as never, context))) {
             return { kind: "skip" };
         }
-        const reviewAgent = options.permissionReviewAgent;
-        if (reviewAgent === undefined) {
-            // Auto without a reviewer must fall back to the user, never to silent execution.
-            const action =
-                tool.describeAutoPermissionAction?.(toolCall.arguments as never, context) ??
-                `running ${tool.name}`;
-            const review = {
-                decision: "deny",
-                denialKind: "unavailable",
-                reason: "No automatic permission reviewer is available for this session.",
-                risk: "medium",
-                userAuthorization: "low",
-            } as const;
-            await options.onPermissionReview?.({ action, ...review });
-            return { action, kind: "review", review };
-        }
         if (tool.describeAutoPermissionAction === undefined) {
             return {
                 kind: "error",
@@ -1455,6 +1479,20 @@ async function prepareToolPermission(
             };
         }
         const action = tool.describeAutoPermissionAction(toolCall.arguments as never, context);
+        await options.onPermissionReviewStarted?.({ action });
+        const reviewAgent = options.permissionReviewAgent;
+        if (reviewAgent === undefined) {
+            // Auto without a reviewer must fall back to the user, never to silent execution.
+            const review = {
+                decision: "deny",
+                denialKind: "unavailable",
+                reason: "No automatic permission reviewer is available for this session.",
+                risk: "medium",
+                userAuthorization: "low",
+            } as const;
+            await options.onPermissionReview?.({ action, ...review });
+            return { action, kind: "review", review };
+        }
         const review = await reviewAutoPermission({
             action,
             args: toolCall.arguments,

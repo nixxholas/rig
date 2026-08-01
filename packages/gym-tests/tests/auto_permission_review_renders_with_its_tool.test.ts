@@ -11,15 +11,19 @@ afterEach(async () => {
 
 describe("successful Auto permission reviews", () => {
     it("shows temporary Full access on the command without exposing reviewer rationale", async () => {
+        const reviewStarted = deferred<void>();
+        const releaseReview = deferred<void>();
         const gym = await createGym({
             mode: "docker",
             cols: 132,
-            inference(request, callIndex) {
+            async inference(request, callIndex) {
                 if (
                     request.context.systemPrompt?.includes(
                         "judging one planned coding-agent action",
                     )
                 ) {
+                    reviewStarted.resolve();
+                    await releaseReview.promise;
                     return {
                         content: [
                             {
@@ -61,28 +65,53 @@ describe("successful Auto permission reviews", () => {
         });
         running.add(gym);
 
-        submit(gym, "Create the harmless marker in my home directory.");
-        const completed = await gym.terminal.waitUntil(
-            (snapshot) =>
-                snapshot.text.includes("INLINE_AUTO_APPROVAL_COMPLETE") &&
-                snapshot.text.includes("Ask Rig to do anything"),
-            "completed automatically approved tool",
-            30_000,
-        );
+        try {
+            submit(gym, "Create the harmless marker in my home directory.");
+            await reviewStarted.promise;
+            const reviewing = await gym.terminal.waitUntil(
+                (snapshot) =>
+                    snapshot.text.includes("Reviewing exec_command") &&
+                    snapshot.text.includes("INLINE_APPROVAL_MARKER"),
+                "tool shown during automatic permission review",
+                30_000,
+            );
+            expect(reviewing.rows.some((row) => row.includes("Reviewing exec_command"))).toBe(true);
 
-        const toolRow = completed.rows.findIndex((row) => row.includes("INLINE_APPROVAL_MARKER"));
-        expect(toolRow).toBeGreaterThanOrEqual(0);
-        expect(completed.text).toContain("Approved automatically: temporary Full access.");
-        expect(completed.text).not.toContain("Risk: Low");
-        expect(completed.text).not.toContain("User authorization: High");
-        expect(completed.text).not.toContain(
-            "The user explicitly authorized this harmless home-directory check.",
-        );
-        expect(completed.rows.some((row) => row.includes("Auto permission"))).toBe(false);
+            releaseReview.resolve();
+            const completed = await gym.terminal.waitUntil(
+                (snapshot) =>
+                    snapshot.text.includes("INLINE_AUTO_APPROVAL_COMPLETE") &&
+                    snapshot.text.includes("Ask Rig to do anything"),
+                "completed automatically approved tool",
+                30_000,
+            );
+
+            const toolRow = completed.rows.findIndex((row) =>
+                row.includes("INLINE_APPROVAL_MARKER"),
+            );
+            expect(toolRow).toBeGreaterThanOrEqual(0);
+            expect(completed.text).toContain("Approved automatically: temporary Full access.");
+            expect(completed.text).not.toContain("Risk: Low");
+            expect(completed.text).not.toContain("User authorization: High");
+            expect(completed.text).not.toContain(
+                "The user explicitly authorized this harmless home-directory check.",
+            );
+            expect(completed.rows.some((row) => row.includes("Auto permission"))).toBe(false);
+        } finally {
+            releaseReview.resolve();
+        }
     }, 120_000);
 });
 
 function submit(gym: Gym, text: string): void {
     gym.terminal.type(text);
     gym.terminal.press("enter");
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
+    let resolve: (value?: T) => void = () => undefined;
+    const promise = new Promise<T>((innerResolve) => {
+        resolve = innerResolve as (value?: T) => void;
+    });
+    return { promise, resolve };
 }

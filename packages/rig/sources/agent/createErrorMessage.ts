@@ -5,9 +5,11 @@ export function createErrorMessage(
     reason: string,
     outcome: ErrorMessage["outcome"],
     attempt?: number,
+    context?: ErrorMessage["context"],
 ): ErrorMessage {
     return {
         blocks: [{ text: reason, type: "text" }],
+        ...(context === undefined ? {} : { context }),
         id,
         outcome,
         role: "error",

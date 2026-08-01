@@ -1,4 +1,9 @@
-import type { SessionActivity, SessionActivityKind, SessionActivityToolCall } from "./protocol.js";
+import type {
+    SessionActivity,
+    SessionActivityKind,
+    SessionActivityPermissionReview,
+    SessionActivityToolCall,
+} from "./protocol.js";
 
 /**
  * The kind of work a running tool represents, in terms a person recognises.
@@ -41,9 +46,11 @@ export interface SessionActivityDescription {
      * whenever the session is not executing tools.
      */
     readonly awaitingTools: readonly SessionActivityToolCall[];
+    /** Tool calls whose requested action is currently being reviewed in Auto. */
+    readonly reviewingTools: readonly SessionActivityPermissionReview[];
     /**
-     * The shared category of `awaitingTools`, or `unknown` when they disagree.
-     * Absent when no tool is running.
+     * The shared category of the tools being reviewed or awaited, or `unknown`
+     * when they disagree. Absent when neither phase is active.
      */
     readonly toolCategory?: ToolCategory;
 }
@@ -177,6 +184,7 @@ export function classifyToolName(toolName: string): ToolCategory {
  */
 export function describeSessionActivity(activity: SessionActivity): SessionActivityDescription {
     const awaitingTools = activity.toolCalls ?? [];
+    const reviewingTools = activity.reviewingToolCalls ?? [];
 
     if (activity.retry !== undefined) {
         return described(activity, awaitingTools, `Retrying: ${activity.retry.reason}`);
@@ -189,6 +197,17 @@ export function describeSessionActivity(activity: SessionActivity): SessionActiv
     }
     if (activity.wait !== undefined) {
         return described(activity, awaitingTools, activity.label);
+    }
+    if (reviewingTools.length > 0) {
+        const category = sharedCategory(reviewingTools);
+        return described(
+            activity,
+            awaitingTools,
+            reviewingTools.length === 1
+                ? `Reviewing ${reviewingTools[0]!.toolName}`
+                : `Reviewing ${String(reviewingTools.length)} tools`,
+            category,
+        );
     }
     if (awaitingTools.length > 0) {
         const category = sharedCategory(awaitingTools);
@@ -217,7 +236,9 @@ export function describeSessionActivity(activity: SessionActivity): SessionActiv
     }
 }
 
-function sharedCategory(toolCalls: readonly SessionActivityToolCall[]): ToolCategory {
+function sharedCategory(
+    toolCalls: readonly (SessionActivityPermissionReview | SessionActivityToolCall)[],
+): ToolCategory {
     const first = classifyToolName(toolCalls[0]!.toolName);
     return toolCalls.every((call) => classifyToolName(call.toolName) === first) ? first : "unknown";
 }
@@ -240,6 +261,7 @@ function described(
         awaitingTools,
         kind: activity.kind,
         label,
+        reviewingTools: activity.reviewingToolCalls ?? [],
         ...(category === undefined ? {} : { toolCategory: category }),
     };
 }

@@ -47,6 +47,7 @@ import type {
     SystemNoticeElement,
     ThinkingElement,
     ToolCallElement,
+    ToolPermissionReviewState,
     GroupEndElement,
     GroupEndReason,
     UserMessageElement,
@@ -1327,7 +1328,9 @@ export class ChatStore {
         for (const review of session.permissionReviews ?? []) {
             const elementId = `tool:${review.toolCallId}`;
             if (this.#byId.get(elementId)?.kind === "tool_call") {
-                this.#update(elementId, { permissionReview: review });
+                this.#update(elementId, {
+                    permissionReview: { ...review, status: "completed" },
+                });
             }
         }
         for (const pending of session.pendingSteeringMessages ?? []) {
@@ -1681,6 +1684,31 @@ export class ChatStore {
         deltas.push({ type: "session_changed", session: this.#session });
         this.#retrying = activity.retry !== undefined;
         if (!this.#retrying && wasRetrying) deltas.push({ type: "retry_finished" });
+        const reviewingToolCallIds = new Set(
+            (activity.reviewingToolCalls ?? []).map((review) => review.toolCallId),
+        );
+        for (const [toolCallId, elementId] of this.#toolCallElementIds) {
+            if (reviewingToolCallIds.has(toolCallId)) continue;
+            const element = this.#byId.get(elementId);
+            if (element?.kind === "tool_call" && element.permissionReview?.status === "reviewing") {
+                this.#clearPermissionReview(elementId);
+            }
+        }
+        for (const review of activity.reviewingToolCalls ?? []) {
+            const elementId = this.#toolCallElementIds.get(review.toolCallId);
+            if (elementId === undefined) continue;
+            const element = this.#byId.get(elementId);
+            if (element?.kind === "tool_call" && element.permissionReview?.status === "completed") {
+                continue;
+            }
+            this.#update(elementId, {
+                permissionReview: {
+                    action: review.action,
+                    status: "reviewing",
+                    toolCallId: review.toolCallId,
+                },
+            });
+        }
         for (const call of activity.toolCalls ?? []) {
             const elementId = this.#toolCallElementIds.get(call.toolCallId);
             if (elementId === undefined) continue;
@@ -2489,7 +2517,14 @@ export class ChatStore {
                     .result;
                 const elementId = this.#toolCallElementIds.get(result.toolCallId);
                 if (elementId === undefined) return;
+                const element = this.#byId.get(elementId);
                 this.#toolCallElementIds.delete(result.toolCallId);
+                if (
+                    element?.kind === "tool_call" &&
+                    element.permissionReview?.status === "reviewing"
+                ) {
+                    this.#clearPermissionReview(elementId);
+                }
                 this.#update(elementId, {
                     argumentsComplete: true,
                     status: toolStatus(result),
@@ -2577,6 +2612,32 @@ export class ChatStore {
                 this.#session = { ...this.#session, backgroundProcesses: processes };
                 return;
             }
+            case "permission_review_started": {
+                const review = event as {
+                    action: string;
+                    toolCallId: string;
+                    toolName: string;
+                    type: "permission_review_started";
+                };
+                const elementId = this.#toolCallElementIds.get(review.toolCallId);
+                if (elementId !== undefined) {
+                    const element = this.#byId.get(elementId);
+                    if (
+                        element?.kind === "tool_call" &&
+                        element.permissionReview?.status === "completed"
+                    ) {
+                        return;
+                    }
+                    this.#update(elementId, {
+                        permissionReview: {
+                            action: review.action,
+                            status: "reviewing",
+                            toolCallId: review.toolCallId,
+                        },
+                    });
+                }
+                return;
+            }
             case "permission_review": {
                 const review = event as PermissionReviewState & {
                     transcript?: { modelId: string; providerId: string; usage: Usage };
@@ -2593,7 +2654,9 @@ export class ChatStore {
                 this.#permissionReviewsByToolCallId.set(next.toolCallId, next);
                 const elementId = this.#toolCallElementIds.get(next.toolCallId);
                 if (elementId !== undefined) {
-                    this.#update(elementId, { permissionReview: next });
+                    this.#update(elementId, {
+                        permissionReview: { ...next, status: "completed" },
+                    });
                 }
                 if (review.transcript !== undefined) {
                     this.#recordUsageGroup({
@@ -2632,7 +2695,9 @@ export class ChatStore {
                 this.#permissionReviewsByToolCallId.set(next.toolCallId, next);
                 const elementId = this.#toolCallElementIds.get(next.toolCallId);
                 if (elementId !== undefined) {
-                    this.#update(elementId, { permissionReview: next });
+                    this.#update(elementId, {
+                        permissionReview: { ...next, status: "completed" },
+                    });
                 }
                 this.#session = {
                     ...this.#session,
@@ -2782,9 +2847,12 @@ export class ChatStore {
             ...(this.#permissionReviewsByToolCallId.get(block.id) === undefined
                 ? {}
                 : {
-                      permissionReview: this.#permissionReviewsByToolCallId.get(
-                          block.id,
-                      ) as PermissionReviewState,
+                      permissionReview: {
+                          ...(this.#permissionReviewsByToolCallId.get(
+                              block.id,
+                          ) as PermissionReviewState),
+                          status: "completed",
+                      } satisfies ToolPermissionReviewState,
                   }),
             ...presentationOf(projectToolPresentation(block.presentation, undefined)),
         };
@@ -2943,6 +3011,13 @@ export class ChatStore {
         if (updated.kind === "tool_call" && updated.groupId !== existing.groupId) {
             this.#groupingDirty = true;
         }
+    }
+
+    #clearPermissionReview(id: string): void {
+        const existing = this.#byId.get(id);
+        if (existing?.kind !== "tool_call" || existing.permissionReview === undefined) return;
+        const { permissionReview: _permissionReview, ...updated } = existing;
+        this.#replace(id, updated);
     }
 
     #remove(id: string): void {

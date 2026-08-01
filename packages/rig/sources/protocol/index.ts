@@ -180,6 +180,7 @@ export type {
     SessionContextChangedEvent,
     SessionActivityCompaction,
     SessionActivityKind,
+    SessionActivityPermissionReview,
     SessionActivityRetry,
     SessionActivityWait,
     SessionActivityToolCall,

@@ -76,6 +76,7 @@ export type {
     ThinkingElement,
     ToolCallElement,
     ToolCallStatus,
+    ToolPermissionReviewState,
     UserMessageElement,
 } from "./ChatElement.js";
 export type {
@@ -127,6 +128,7 @@ export type {
     SessionSummary,
     SessionActivity,
     SessionActivityKind,
+    SessionActivityPermissionReview,
     SessionActivityWait,
     SessionAgentMetadata,
     SessionExecutionEnvironment,

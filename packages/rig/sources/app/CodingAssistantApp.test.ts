@@ -6725,6 +6725,22 @@ describe("CodingAssistantApp", () => {
             data: {
                 event: {
                     action: "Close ticket 42",
+                    toolCallId: "mcp-pending",
+                    toolName: "mcp__issues__close_ticket",
+                    type: "permission_review_started",
+                },
+                runId: "run-1",
+            },
+            id: "mcp-permission-started",
+            sessionId: "session-1",
+            type: "agent_event",
+        });
+        expect(stripAnsi(app.render(120).join("\n"))).toContain("Reviewing permissions");
+        app.applySessionEvent({
+            createdAt: 3,
+            data: {
+                event: {
+                    action: "Close ticket 42",
                     decision: "deny",
                     reason: "This changes external issue state.",
                     risk: "medium",
