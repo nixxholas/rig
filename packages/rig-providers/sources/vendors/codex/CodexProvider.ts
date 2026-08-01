@@ -20,6 +20,11 @@ import {
     CODEX_CHATGPT_ENDPOINT,
     type CodexTransport,
 } from "@/vendors/codex/impl/codexConstants.js";
+import {
+    generateCodexImage,
+    type GenerateCodexImageRequest,
+    type GenerateCodexImageResult,
+} from "@/vendors/codex/generateCodexImage.js";
 
 export interface CodexProviderOptions {
     credential: CodexProviderCredential;
@@ -88,6 +93,19 @@ export class CodexProvider extends ResponsesProvider {
 
     get streamMaxRetries(): number {
         return this.#resolveStreamMaxRetries();
+    }
+
+    async generateImage(request: GenerateCodexImageRequest): Promise<GenerateCodexImageResult> {
+        if (this.credential.name === "bedrock-bearer-token") {
+            throw new Error("Codex image generation is unavailable through Bedrock.");
+        }
+        const userAgent = this.userAgent ?? (await resolveCodexUserAgent());
+        return generateCodexImage({
+            credential: this.credential,
+            endpoint: this.endpoint,
+            request,
+            userAgent,
+        });
     }
 
     override async session(id: string, options: SessionOptions): Promise<CodexSession> {

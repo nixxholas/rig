@@ -22,4 +22,8 @@ export type {
     ExecutorSelection,
 } from "@/ExecutorModelProfile.js";
 export type { ExecutorProvider } from "@/ExecutorProvider.js";
+export {
+    ExecutorImageGenerationUnavailableError,
+    type ExecutorImageGeneration,
+} from "@/ExecutorImageGeneration.js";
 export * from "@/types.js";

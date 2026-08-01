@@ -48,6 +48,10 @@ import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspa
 import type { SchedulingContext } from "../scheduling/index.js";
 import type { ProviderUsageContext } from "../agent/context/ProviderUsageContext.js";
 import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
+import {
+    createImageGenerationTool,
+    type ImageGenerationProvider,
+} from "../tools/imageGeneration/createImageGenerationTool.js";
 
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
@@ -263,6 +267,7 @@ export function createCodingAssistantAgent(
     const toolsWithoutGoals = [
         ...baseTools,
         ...selectCommonToolsForModel({ isSubagent: options.isSubagent === true }),
+        ...(nativeProvider instanceof Executor ? imageGenerationTools(nativeProvider) : []),
         ...(options.workspaces === undefined
             ? []
             : options.workspaces.crossWorkspace
@@ -324,4 +329,13 @@ export function createCodingAssistantAgent(
         processManager,
         executor: provider,
     };
+}
+
+function imageGenerationTools(executor: Executor) {
+    const providers: ImageGenerationProvider[] = executor.providers.flatMap((provider) =>
+        provider.imageGeneration === undefined
+            ? []
+            : [{ id: provider.id, imageGeneration: provider.imageGeneration }],
+    );
+    return providers.length === 0 ? [] : [createImageGenerationTool(providers)];
 }

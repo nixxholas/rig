@@ -1,12 +1,17 @@
 import {
     CodexApiKeyCredential,
+    CodexImageGenerationError,
     CodexProvider,
     CodexSessionCredential,
     createProviderQuotaCache,
     fetchCodexProviderQuota,
     unavailableProviderQuota,
 } from "@slopus/rig-providers";
-import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
+import {
+    builtinModelProfiles,
+    ExecutorImageGenerationUnavailableError,
+    type ExecutorProvider,
+} from "@slopus/rig-execution";
 
 import type { ConfigCodexProvider } from "../config/types.js";
 
@@ -31,41 +36,71 @@ export function codexExecution(options: {
                   ...(baseUrl === undefined ? {} : { baseUrl }),
               }),
     );
+    const loadCredential = async () =>
+        (options.apiKey === undefined
+            ? null
+            : await CodexApiKeyCredential.tryLoad({ apiKey: options.apiKey })) ??
+        (await CodexSessionCredential.tryLoad({
+            env: options.env,
+            ...(options.config.authFile === undefined ? {} : { authFile: options.config.authFile }),
+        }));
+    const createNative = (credential: NonNullable<Awaited<ReturnType<typeof loadCredential>>>) =>
+        new CodexProvider({
+            credential,
+            parallelToolCalls: true,
+            ...(options.resolveStreamMaxRetries === undefined
+                ? {}
+                : { resolveStreamMaxRetries: options.resolveStreamMaxRetries }),
+            ...(baseUrl === undefined ? {} : { endpoint: baseUrl }),
+            ...(transport === "auto" || transport === "sse" || transport === "websocket"
+                ? { transport }
+                : transport === "websocket-cached"
+                  ? { transport: "websocket" as const }
+                  : {}),
+        });
+    const native = async () => {
+        const credential = await loadCredential();
+        if (credential === null) {
+            throw new Error(
+                "Codex authentication is unavailable. Sign in with Codex or configure an API key.",
+            );
+        }
+        return createNative(credential);
+    };
     return {
         id: options.id,
+        imageGeneration: {
+            generate: async (request) => {
+                let credential: Awaited<ReturnType<typeof loadCredential>>;
+                try {
+                    credential = await loadCredential();
+                } catch (error) {
+                    throw new ExecutorImageGenerationUnavailableError(
+                        "A configured Codex image provider's authentication could not be loaded.",
+                        { cause: error },
+                    );
+                }
+                if (credential === null) {
+                    throw new ExecutorImageGenerationUnavailableError(
+                        "A configured Codex image provider has no available authentication.",
+                    );
+                }
+                try {
+                    return await createNative(credential).generateImage(request);
+                } catch (error) {
+                    if (error instanceof CodexImageGenerationError && error.fallbackEligible) {
+                        throw new ExecutorImageGenerationUnavailableError(error.message, {
+                            cause: error,
+                        });
+                    }
+                    throw error;
+                }
+            },
+        },
         profiles: builtinModelProfiles(options.id, "codex"),
         serviceTiers: ["fast"],
         quota: (quotaOptions) => quota.get(quotaOptions),
         sessionId: options.sessionId ?? options.id,
-        native: async () => {
-            const credential =
-                (options.apiKey === undefined
-                    ? null
-                    : await CodexApiKeyCredential.tryLoad({ apiKey: options.apiKey })) ??
-                (await CodexSessionCredential.tryLoad({
-                    env: options.env,
-                    ...(options.config.authFile === undefined
-                        ? {}
-                        : { authFile: options.config.authFile }),
-                }));
-            if (credential === null) {
-                throw new Error(
-                    "Codex authentication is unavailable. Sign in with Codex or configure an API key.",
-                );
-            }
-            return new CodexProvider({
-                credential,
-                parallelToolCalls: true,
-                ...(options.resolveStreamMaxRetries === undefined
-                    ? {}
-                    : { resolveStreamMaxRetries: options.resolveStreamMaxRetries }),
-                ...(baseUrl === undefined ? {} : { endpoint: baseUrl }),
-                ...(transport === "auto" || transport === "sse" || transport === "websocket"
-                    ? { transport }
-                    : transport === "websocket-cached"
-                      ? { transport: "websocket" as const }
-                      : {}),
-            });
-        },
+        native,
     };
 }

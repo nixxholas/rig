@@ -33,7 +33,7 @@ describe("createCodingAssistantAgent", () => {
         expect(runtime.agent.snapshot().instructions).toContain(cwd);
         expect(runtime.agent.snapshot().effort).toBe("medium");
         expect(runtime.agent.tools.map((tool) => tool.name)).toEqual(
-            expect.arrayContaining(["agent_me", "agent_info", "agent_send"]),
+            expect.arrayContaining(["agent_me", "agent_info", "agent_send", "imagegen"]),
         );
     });
 
@@ -106,6 +106,7 @@ describe("createCodingAssistantAgent", () => {
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
+            "imagegen",
             "agent_me",
             "agent_info",
             "agent_send",
@@ -121,6 +122,19 @@ describe("createCodingAssistantAgent", () => {
 
         expect(runtime.executor.id).toBe("claude");
         expect(runtime.agent.model).toEqual(modelAnthropicOpus5);
+    });
+
+    it("omits image generation when no Codex cloud provider is configured", () => {
+        const runtime = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            env: {},
+            modelId: modelAnthropicFable5.id,
+            providers: {
+                claude: { enabled: true, type: "claude" },
+            },
+        });
+
+        expect(runtime.agent.tools.map((tool) => tool.name)).not.toContain("imagegen");
     });
 
     it("creates a Grok Build agent with the native Grok tool surface", () => {
@@ -146,6 +160,7 @@ describe("createCodingAssistantAgent", () => {
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
+            "imagegen",
             "agent_me",
             "agent_info",
             "agent_send",
@@ -644,6 +659,7 @@ describe("createCodingAssistantAgent", () => {
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
+            "imagegen",
             "agent_me",
             "agent_info",
             "agent_send",

@@ -1,0 +1,175 @@
+import { describe, expect, it, vi } from "vitest";
+import { ExecutorImageGenerationUnavailableError } from "@slopus/rig-execution";
+
+import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
+import { validPng32Base64 } from "../testing/validImageFixtures.js";
+import { createImageGenerationTool } from "./createImageGenerationTool.js";
+
+describe("createImageGenerationTool", () => {
+    it("prefers the current Codex provider and falls back to the first working account", async () => {
+        const first = vi
+            .fn()
+            .mockResolvedValue({ base64: validPng32Base64, mediaType: "image/png" });
+        const current = vi
+            .fn()
+            .mockRejectedValue(new ExecutorImageGenerationUnavailableError("quota exhausted"));
+        const tool = createImageGenerationTool([
+            { id: "first", imageGeneration: { generate: first } },
+            { id: "current", imageGeneration: { generate: current } },
+        ]);
+        const harness = createJustBashToolHarness();
+
+        const result = await tool.execute({ prompt: "A lighthouse in a storm" }, harness.context, {
+            provider: { id: "current" } as never,
+            toolCallId: "call-1",
+        });
+
+        expect(current).toHaveBeenCalledBefore(first);
+        expect(result).toMatchObject({
+            path: "/workspace/generated_images/call-1.png",
+        });
+        expect(
+            Buffer.from(await harness.context.fs.readFileBuffer(result.path)).toString("base64"),
+        ).toBe(validPng32Base64);
+        expect(current.mock.calls[0]?.[0].turnId).toBe("call-1");
+        expect(first.mock.calls[0]?.[0].turnId).toBe("call-1");
+    });
+
+    it("round robins the first candidate when the current provider cannot generate images", async () => {
+        const calls: string[] = [];
+        const tool = createImageGenerationTool(
+            ["one", "two"].map((id) => ({
+                id,
+                imageGeneration: {
+                    generate: async () => {
+                        calls.push(id);
+                        return { base64: validPng32Base64, mediaType: "image/png" as const };
+                    },
+                },
+            })),
+        );
+        const harness = createJustBashToolHarness();
+
+        await tool.execute({ prompt: "First" }, harness.context, { toolCallId: "first" });
+        await tool.execute({ prompt: "Second" }, harness.context, { toolCallId: "second" });
+
+        expect(calls).toEqual(["one", "two"]);
+    });
+
+    it("does not generate again when persistence fails after provider success", async () => {
+        const first = vi
+            .fn()
+            .mockResolvedValue({ base64: validPng32Base64, mediaType: "image/png" });
+        const second = vi.fn();
+        const tool = createImageGenerationTool([
+            { id: "first", imageGeneration: { generate: first } },
+            { id: "second", imageGeneration: { generate: second } },
+        ]);
+        const harness = createJustBashToolHarness({
+            files: { "/workspace/generated_images/call-1.png": "existing" },
+        });
+
+        await expect(
+            tool.execute({ prompt: "A lighthouse in a storm" }, harness.context, {
+                toolCallId: "call-1",
+            }),
+        ).rejects.toThrow(/has not been read yet/);
+
+        expect(first).toHaveBeenCalledOnce();
+        expect(second).not.toHaveBeenCalled();
+    });
+
+    it("does not fall back after an indeterminate provider failure", async () => {
+        const first = vi.fn().mockRejectedValue(new Error("connection reset"));
+        const second = vi.fn();
+        const tool = createImageGenerationTool([
+            { id: "first", imageGeneration: { generate: first } },
+            { id: "second", imageGeneration: { generate: second } },
+        ]);
+
+        await expect(
+            tool.execute(
+                { prompt: "A lighthouse in a storm" },
+                createJustBashToolHarness().context,
+                { toolCallId: "call-1" },
+            ),
+        ).rejects.toThrow("connection reset");
+
+        expect(second).not.toHaveBeenCalled();
+    });
+
+    it("rejects aggregate local image input before reading or generating", async () => {
+        const generate = vi.fn();
+        const tool = createImageGenerationTool([{ id: "first", imageGeneration: { generate } }]);
+        const harness = createJustBashToolHarness({
+            files: {
+                "/workspace/one.png": Buffer.from(validPng32Base64, "base64"),
+                "/workspace/two.png": Buffer.from(validPng32Base64, "base64"),
+            },
+        });
+        const stat = vi.spyOn(harness.context.fs, "stat");
+        stat.mockResolvedValue({
+            isDirectory: false,
+            isFile: true,
+            isSymbolicLink: false,
+            mtimeMs: 0,
+            size: 17 * 1024 * 1024,
+        });
+
+        await expect(
+            tool.execute(
+                {
+                    prompt: "Combine these",
+                    referenced_image_paths: ["one.png", "two.png"],
+                },
+                harness.context,
+                {},
+            ),
+        ).rejects.toThrow("32 MiB aggregate");
+        expect(generate).not.toHaveBeenCalled();
+    });
+
+    it("fully discloses recent images and multi-provider fallback in Auto review", () => {
+        const tool = createImageGenerationTool([
+            { id: "first", imageGeneration: { generate: vi.fn() } },
+            { id: "second", imageGeneration: { generate: vi.fn() } },
+        ]);
+
+        const disclosure = tool.describeAutoPermissionAction?.(
+            { num_last_images_to_include: 2, prompt: "Edit these" },
+            createJustBashToolHarness().context,
+        );
+
+        expect(disclosure).toContain("2 recent conversation image(s)");
+        expect(disclosure).toContain("another of 2 configured Codex cloud provider(s)");
+        expect(disclosure).toContain("custom endpoints");
+    });
+
+    it.each([
+        ["invalid base64", "!!!!", "invalid base64"],
+        ["non-PNG data", Buffer.from("not a png").toString("base64"), "not a PNG"],
+        [
+            "malformed PNG",
+            Buffer.concat([
+                Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+                Buffer.from("broken"),
+            ]).toString("base64"),
+            "malformed PNG",
+        ],
+    ])("rejects %s returned by a provider", async (_name, base64, message) => {
+        const tool = createImageGenerationTool([
+            {
+                id: "first",
+                imageGeneration: {
+                    generate: vi.fn().mockResolvedValue({ base64, mediaType: "image/png" }),
+                },
+            },
+        ]);
+
+        await expect(
+            tool.execute({ prompt: "A lighthouse" }, createJustBashToolHarness().context, {
+                toolCallId: "call-bad",
+            }),
+        ).rejects.toThrow(message);
+    });
+});

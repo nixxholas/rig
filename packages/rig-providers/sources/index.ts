@@ -110,6 +110,12 @@ export { GrokSession, type GrokSessionOptions } from "@/vendors/grok/GrokSession
 export type { GrokToolVendor } from "@/vendors/grok/GrokToolVendor.js";
 export { CodexProvider, type CodexProviderOptions } from "@/vendors/codex/CodexProvider.js";
 export {
+    CodexImageGenerationError,
+    generateCodexImage,
+    type GenerateCodexImageRequest,
+    type GenerateCodexImageResult,
+} from "@/vendors/codex/generateCodexImage.js";
+export {
     fetchCodexProviderQuota,
     type FetchCodexProviderQuotaOptions,
 } from "@/vendors/codex/fetchCodexProviderQuota.js";

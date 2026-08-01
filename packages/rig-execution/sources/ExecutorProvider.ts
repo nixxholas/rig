@@ -2,6 +2,7 @@ import type { BaseProvider, ProviderQuota } from "@slopus/rig-providers";
 
 import type { ExecutorModelProfile } from "@/ExecutorModelProfile.js";
 import type { ProfilePromptContext, ServiceTier } from "@/types.js";
+import type { ExecutorImageGeneration } from "@/ExecutorImageGeneration.js";
 
 export interface ExecutorProvider {
     destroy?(): Promise<void> | void;
@@ -9,6 +10,7 @@ export interface ExecutorProvider {
         context: ProfilePromptContext,
     ) => ProfilePromptContext | Promise<ProfilePromptContext>;
     id: string;
+    imageGeneration?: ExecutorImageGeneration;
     native: BaseProvider | ((profile: ExecutorModelProfile) => Promise<BaseProvider>);
     nativeKey?: (profile: ExecutorModelProfile) => string;
     profiles: readonly ExecutorModelProfile[];
