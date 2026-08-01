@@ -98,6 +98,14 @@ type _ResultPresentation = Assignable<
     daemonAgent.ToolResultPresentation
 >;
 type _FileDiff = Assignable<local.FileDiff, daemonAgent.FileDiff>;
+// Usage is polled rather than streamed, so this is the only shape a view reads
+// through a request of its own.
+type _ProviderUsage = Assignable<local.ProviderUsage, daemon.ProviderUsage>;
+type _ProviderUsageEntry = Assignable<local.ProviderUsageEntry, daemon.ProviderUsageEntry>;
+type _ProviderUsageList = Assignable<
+    local.ListProviderUsageResponse,
+    daemon.ListProviderUsageResponse
+>;
 type _ExplorationOperation = Assignable<
     local.ExplorationOperation,
     daemonAgent.ExplorationOperation

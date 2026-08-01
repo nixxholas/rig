@@ -1254,3 +1254,45 @@ export interface SwitchModelMutationRequest extends MutationRequest {
 export interface RenameGroupMutationRequest extends MutationRequest {
     name: string;
 }
+
+/** One rate-limit or spend window a provider reports. */
+export interface ProviderUsageWindow {
+    usedPercent: number;
+    resetsAt: number | null;
+    startsAt: number | null;
+    durationMs: number | null;
+}
+
+/** Money an account can still spend once its rate-limit window is used up. */
+export interface ProviderUsageCredits {
+    available: boolean;
+    remainingCents: number | null;
+    unlimited: boolean;
+    usedPercent: number | null;
+}
+
+/** One reading of an account's usage, normalized across vendors. */
+export interface ProviderUsage {
+    providerId: string;
+    vendor: "claude" | "codex" | "grok";
+    capturedAt: number;
+    planName: string | null;
+    exhausted: boolean;
+    windows: {
+        fiveHour: ProviderUsageWindow | null;
+        weekly: ProviderUsageWindow | null;
+        monthly: ProviderUsageWindow | null;
+    };
+    credits: ProviderUsageCredits | null;
+}
+
+export interface ProviderUsageEntry {
+    providerId: string;
+    usage: ProviderUsage | null;
+    checkedAt: number | null;
+    error: string | null;
+}
+
+export interface ListProviderUsageResponse {
+    providers: readonly ProviderUsageEntry[];
+}

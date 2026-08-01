@@ -12,6 +12,8 @@ export type {
     RigGroupsSubscriptionOptions,
     RigInboxConnection,
     RigInboxSubscriptionOptions,
+    RigProviderUsageConnection,
+    RigProviderUsageSubscriptionOptions,
     RigSessionConnection,
     RigSessionSubscriptionOptions,
     RigTimelineConnection,
@@ -24,6 +26,11 @@ export type {
     UserInputAnswers,
 } from "./connectRig.js";
 export { InboxStore } from "./InboxStore.js";
+export { ProviderUsageStore } from "./ProviderUsageStore.js";
+export type {
+    ProviderUsageDelta,
+    ProviderUsageState,
+} from "./ProviderUsageElement.js";
 export type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
 export { ChatStore } from "./ChatStore.js";
 export { GroupStore } from "./GroupStore.js";
@@ -103,6 +110,10 @@ export type {
     ProviderModelCatalog,
     PermissionReviewState,
     ProviderQuota,
+    ProviderUsage,
+    ProviderUsageCredits,
+    ProviderUsageEntry,
+    ProviderUsageWindow,
     RemoteTerminalGroupState,
     RemoteTerminalSummary,
     Project,

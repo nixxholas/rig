@@ -11,6 +11,12 @@ import { GroupStore } from "./GroupStore.js";
 import type { InboxDelta, InboxItem, InboxState } from "./InboxElement.js";
 import { InboxStore } from "./InboxStore.js";
 import { mergeForwardTranscriptWindow } from "./mergeTranscriptWindow.js";
+import type {
+    ProviderUsageDelta,
+    ProviderUsageEntry,
+    ProviderUsageState,
+} from "./ProviderUsageElement.js";
+import { ProviderUsageStore } from "./ProviderUsageStore.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -39,6 +45,7 @@ import type {
     SessionUnreadState,
     GlobalStreamHello,
     GetTimelineResponse,
+    ListProviderUsageResponse,
     SessionStateResponse,
     TimelineScope,
 } from "./protocol.js";
@@ -48,6 +55,8 @@ const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
 const MAXIMUM_PENDING_PER_ENTITY = 256;
 const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
+/** Well inside the fifteen minutes the daemon refreshes provider usage on. */
+const DEFAULT_PROVIDER_USAGE_REFRESH_MS = 60_000;
 const GIT_WATCH_RENEWAL_MS = 4 * 60 * 1_000;
 const GIT_WATCH_RETRY_MS = 5_000;
 
@@ -110,6 +119,18 @@ export interface RigInboxSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+export interface RigProviderUsageSubscriptionOptions {
+    onChange: (providers: readonly ProviderUsageEntry[], state: ProviderUsageState) => void;
+    onDelta?: (delta: ProviderUsageDelta) => void;
+    onError?: (error: unknown) => void;
+    /**
+     * How often to read the daemon again. Defaults to a minute, which is well
+     * inside the fifteen minutes the daemon itself refreshes on, so a view sees
+     * a new reading shortly after the daemon takes one.
+     */
+    refreshIntervalMs?: number;
+}
+
 export interface RigTimelineSubscriptionOptions {
     /** Leave archived chats out, as the daemon does by default. */
     includeArchived?: boolean;
@@ -138,6 +159,14 @@ export interface RigGroupsConnection {
 export interface RigInboxConnection {
     items: () => readonly InboxItem[];
     state: () => InboxState;
+    close: () => void;
+}
+
+export interface RigProviderUsageConnection {
+    providers: () => readonly ProviderUsageEntry[];
+    state: () => ProviderUsageState;
+    /** Reads the daemon now and restarts the interval from this moment. */
+    refresh: () => Promise<void>;
     close: () => void;
 }
 
@@ -227,6 +256,16 @@ export interface RigConnection {
     connectSession: (options: RigSessionSubscriptionOptions) => RigSessionConnection;
     connectGroups: (options: RigGroupsSubscriptionOptions) => RigGroupsConnection;
     connectInbox: (options: RigInboxSubscriptionOptions) => RigInboxConnection;
+    /**
+     * Follows how much of each provider account's plan has been used.
+     *
+     * Usage is polled rather than streamed, so this subscription reads the
+     * daemon itself and repeats on an interval for as long as a view is
+     * mounted. It reports a loading state until the first answer arrives.
+     */
+    connectProviderUsage: (
+        options: RigProviderUsageSubscriptionOptions,
+    ) => RigProviderUsageConnection;
     connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
@@ -305,6 +344,19 @@ interface InboxSubscriber extends RigInboxSubscriptionOptions {
 interface InboxEntry {
     store: InboxStore;
     subscribers: Set<InboxSubscriber>;
+}
+
+interface ProviderUsageSubscriber extends RigProviderUsageSubscriptionOptions {
+    closed: boolean;
+}
+
+interface ProviderUsageEntryState {
+    controller: AbortController;
+    inFlight: boolean;
+    refreshIntervalMs: number;
+    store: ProviderUsageStore;
+    subscribers: Set<ProviderUsageSubscriber>;
+    timer: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface TimelineSubscriber extends RigTimelineSubscriptionOptions {
@@ -423,6 +475,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
+    let providerUsageEntry: ProviderUsageEntryState | undefined;
     const timelineEntries = new Map<string, TimelineEntry>();
     let liveStreamStarted = false;
     let liveStreamOpen = false;
@@ -1754,6 +1807,98 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
+    const publishProviderUsage = (deltas: readonly ProviderUsageDelta[]): void => {
+        if (closed || providerUsageEntry === undefined || deltas.length === 0) return;
+        const entry = providerUsageEntry;
+        for (const subscriber of [...entry.subscribers]) {
+            if (subscriber.closed) continue;
+            subscriber.onChange(entry.store.providers(), entry.store.state());
+            if (subscriber.onDelta === undefined) continue;
+            for (const delta of deltas) subscriber.onDelta(delta);
+        }
+    };
+
+    const readProviderUsage = async (): Promise<void> => {
+        const entry = providerUsageEntry;
+        // One read at a time: a manual refresh landing on top of the interval
+        // must not produce two answers racing into the same store.
+        if (entry === undefined || entry.inFlight || closed) return;
+        entry.inFlight = true;
+        try {
+            const { data } = await requestJson("/provider-usage", { signal: entry.controller.signal });
+            if (providerUsageEntry !== entry) return;
+            const providers = (data as ListProviderUsageResponse | null)?.providers ?? [];
+            publishProviderUsage(entry.store.applyProviders(providers, now()));
+        } catch (error) {
+            if (providerUsageEntry !== entry || entry.controller.signal.aborted) return;
+            publishProviderUsage(entry.store.applyError(humanProviderUsageError(error)));
+            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        } finally {
+            entry.inFlight = false;
+        }
+    };
+
+    const scheduleProviderUsage = (entry: ProviderUsageEntryState): void => {
+        if (entry.timer !== undefined) clearTimeout(entry.timer);
+        entry.timer = setTimeout(() => {
+            if (providerUsageEntry !== entry) return;
+            void readProviderUsage().finally(() => {
+                // Chained from the end of a read rather than run on a fixed
+                // interval, so a slow daemon cannot queue reads behind itself.
+                if (providerUsageEntry === entry) scheduleProviderUsage(entry);
+            });
+        }, entry.refreshIntervalMs);
+        entry.timer.unref?.();
+    };
+
+    const connectProviderUsage = (
+        subscription: RigProviderUsageSubscriptionOptions,
+    ): RigProviderUsageConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const first = providerUsageEntry === undefined;
+        providerUsageEntry ??= {
+            controller: new AbortController(),
+            inFlight: false,
+            refreshIntervalMs:
+                subscription.refreshIntervalMs ?? DEFAULT_PROVIDER_USAGE_REFRESH_MS,
+            store: new ProviderUsageStore(),
+            subscribers: new Set(),
+            timer: undefined,
+        };
+        const entry = providerUsageEntry;
+        const subscriber: ProviderUsageSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        // The state is handed over before anything is read, so a view renders
+        // its loading state from the same value it will later render usage from.
+        subscriber.onChange(entry.store.providers(), entry.store.state());
+        if (first) {
+            void readProviderUsage().finally(() => {
+                if (providerUsageEntry === entry) scheduleProviderUsage(entry);
+            });
+        }
+        return {
+            providers: () => entry.store.providers(),
+            state: () => entry.store.state(),
+            refresh: async () => {
+                if (providerUsageEntry !== entry) return;
+                await readProviderUsage();
+                if (providerUsageEntry === entry) scheduleProviderUsage(entry);
+            },
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                // The last view leaving stops the polling and forgets the
+                // readings, so a mounted view never shows a stale first frame.
+                if (entry.subscribers.size === 0) {
+                    if (entry.timer !== undefined) clearTimeout(entry.timer);
+                    entry.controller.abort();
+                    if (providerUsageEntry === entry) providerUsageEntry = undefined;
+                }
+            },
+        };
+    };
+
     const connectTimeline = (
         subscription: RigTimelineSubscriptionOptions,
     ): RigTimelineConnection => {
@@ -2761,6 +2906,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         compactSession,
         connectGroups,
         connectInbox,
+        connectProviderUsage,
         connectSession,
         connectTerminalPresence,
         connectTimeline,
@@ -2928,6 +3074,11 @@ function humanMutationError(data: unknown, status: number): string {
 function describeMutationRejection(error: unknown): string {
     if (error instanceof Error && error.message.length > 0) return error.message;
     return "Rig could not apply that change.";
+}
+
+function humanProviderUsageError(error: unknown): string {
+    if (error instanceof Error && error.message.length > 0) return error.message;
+    return "Rig could not read how much of each provider has been used.";
 }
 
 function responseEntity(
