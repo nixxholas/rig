@@ -498,9 +498,7 @@ export class ClaudeSession extends BaseSession {
             }
             if (options.compaction && nativeCompactionCompleted) {
                 const compactResultUsage =
-                    result === undefined
-                        ? undefined
-                        : toModelUsage(result.modelUsage, options.model);
+                    result === undefined ? undefined : toAggregateModelUsage(result.modelUsage);
                 if (!sawInferenceUsage && compactResultUsage !== undefined) {
                     usage = compactResultUsage;
                     sawInferenceUsage = true;
@@ -665,16 +663,15 @@ function mergeUsage(
     };
 }
 
-function toModelUsage(
+function toAggregateModelUsage(
     modelUsage: SDKResultMessage["modelUsage"],
-    model: string,
 ): SessionCacheUsage | undefined {
-    const usage = modelUsage[model];
-    if (usage === undefined) return undefined;
-    const input = usage.inputTokens;
-    const output = usage.outputTokens;
-    const cacheRead = usage.cacheReadInputTokens;
-    const cacheWrite = usage.cacheCreationInputTokens;
+    const entries = Object.values(modelUsage);
+    if (entries.length === 0) return undefined;
+    const input = entries.reduce((total, usage) => total + usage.inputTokens, 0);
+    const output = entries.reduce((total, usage) => total + usage.outputTokens, 0);
+    const cacheRead = entries.reduce((total, usage) => total + usage.cacheReadInputTokens, 0);
+    const cacheWrite = entries.reduce((total, usage) => total + usage.cacheCreationInputTokens, 0);
     return {
         input,
         output,

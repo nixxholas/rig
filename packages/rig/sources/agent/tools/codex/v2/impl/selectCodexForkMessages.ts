@@ -30,6 +30,9 @@ export function selectCodexForkMessages(
         const responseItems = selectCodexFinalAnswerItems(message.responseItems);
         const blocks = selectCodexFinalAnswerBlocks(responseItems);
         if (blocks.length === 0) return [];
-        return [{ ...message, blocks, responseItems } satisfies AgentMessage];
+        const forked = { ...message, blocks, responseItems } satisfies AgentMessage;
+        // The checkpoint covers the original prefix, not this projected fork context.
+        delete forked.contextTokens;
+        return [forked];
     });
 }

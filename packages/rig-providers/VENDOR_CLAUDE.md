@@ -176,9 +176,10 @@ initial messages plus Claude's native summary. A failed native status, missing s
 tool call, or cancellation leaves the original context active.
 
 For this local slash command, the SDK's terminal `result.usage` is zero even though the
-compaction made a real inference request. The same result's `modelUsage` entry for the active
-model carries the exact input, output, cache-read, and cache-creation counts from that request;
-the provider maps that entry into the completed compaction usage.
+compaction made a real inference request. The same result's `modelUsage` map carries the exact
+input, output, cache-read, and cache-creation counts from that request. Its keys may use the
+resolved model name instead of the requested alias, so the provider aggregates every entry into
+the completed compaction usage.
 
 The provider fixture covers custom retention instructions and post-compaction continuation.
 `tests/claude.live.test.ts` separately covers real native compaction without custom

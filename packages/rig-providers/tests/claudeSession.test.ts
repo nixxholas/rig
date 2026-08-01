@@ -1054,6 +1054,42 @@ describe("ClaudeSession", () => {
         });
     });
 
+    it("uses exact compaction usage reported under Claude's canonical model key", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const session = new ClaudeSession("fable-compaction", {
+            instructions: "Rig system instructions.",
+            credential,
+            model: "claude-fable-5[1m]",
+            query: ((parameters) =>
+                fakeNativeCompactQuery(parameters, "SUMMARY", [], {
+                    usageModel: "claude-fable-5",
+                })) as ClaudeSdkQuery,
+            tools: [],
+        });
+
+        const compacted = await session.compact({
+            context: {
+                messages: [
+                    { role: "user", content: "Review this." },
+                    { role: "assistant", content: "Reviewed." },
+                ],
+            },
+        });
+
+        expect(compacted).toMatchObject({
+            status: "completed",
+            summary: "SUMMARY",
+            usage: {
+                input: 7,
+                output: 11,
+                cacheRead: 101,
+                cacheWrite: 13,
+                totalTokens: 132,
+            },
+        });
+    });
+
     it("replaces restored conversation history after compaction", async () => {
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
         if (credential === null) throw new Error("Expected test credential.");
@@ -1162,6 +1198,7 @@ function fakeNativeCompactQuery(
     parameters: Parameters<ClaudeSdkQuery>[0],
     summary: string,
     prompts: string[],
+    options: { usageModel?: string } = {},
 ): ReturnType<ClaudeSdkQuery> {
     async function* messages() {
         if (typeof parameters.prompt === "string") {
@@ -1204,7 +1241,7 @@ function fakeNativeCompactQuery(
             uuid: "compact-status",
             session_id: "session-id",
         };
-        const model = parameters.options?.model ?? "claude-sonnet-5[1m]";
+        const model = options.usageModel ?? parameters.options?.model ?? "claude-sonnet-5[1m]";
         yield {
             type: "result",
             subtype: "success",

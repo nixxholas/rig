@@ -14,6 +14,7 @@ describe("selectCodexForkMessages", () => {
                     { type: "thinking", thinking: "private reasoning" },
                     { type: "text", text: "Checking. final answer" },
                 ],
+                contextTokens: 331_600,
                 responseItems: [
                     '{"type":"reasoning","encrypted_content":"secret"}',
                     '{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Checking. "}]}',
