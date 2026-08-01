@@ -129,6 +129,30 @@ describe("createImageGenerationTool", () => {
         expect(generate).not.toHaveBeenCalled();
     });
 
+    it("bounds the actual local image read after the size preflight", async () => {
+        const generate = vi
+            .fn()
+            .mockResolvedValue({ base64: validPng32Base64, mediaType: "image/png" });
+        const tool = createImageGenerationTool([{ id: "first", imageGeneration: { generate } }]);
+        const harness = createJustBashToolHarness({
+            files: { "/workspace/reference.png": Buffer.from(validPng32Base64, "base64") },
+        });
+        const readFileBuffer = vi.spyOn(harness.context.fs, "readFileBuffer");
+
+        await tool.execute(
+            {
+                prompt: "Add a red hat",
+                referenced_image_paths: ["reference.png"],
+            },
+            harness.context,
+            { toolCallId: "bounded-read" },
+        );
+
+        expect(readFileBuffer).toHaveBeenCalledWith("/workspace/reference.png", {
+            maxBytes: 32 * 1024 * 1024,
+        });
+    });
+
     it("fully discloses recent images and multi-provider fallback in Auto review", () => {
         const tool = createImageGenerationTool([
             { id: "first", imageGeneration: { generate: vi.fn() } },

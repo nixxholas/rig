@@ -197,8 +197,11 @@ async function prepareReferencedImages(
     }
 
     const images: string[] = [];
+    let remainingBytes = MAX_PROMPT_IMAGE_INPUT_BYTES;
     for (const reference of references) {
-        const image = await prepareImageForPrompt(await fs.readFileBuffer(reference), "original");
+        const bytes = await fs.readFileBuffer(reference, { maxBytes: remainingBytes });
+        remainingBytes -= bytes.byteLength;
+        const image = await prepareImageForPrompt(bytes, "original");
         images.push(`data:${image.mediaType};base64,${image.bytes.toString("base64")}`);
     }
     return images;

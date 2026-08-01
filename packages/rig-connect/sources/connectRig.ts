@@ -50,6 +50,7 @@ import type {
     TimelineScope,
 } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
+import { endpointUrl } from "./endpointUrl.js";
 
 const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
@@ -2994,12 +2995,6 @@ function mutationIdOf(event: SessionEvent | GlobalEvent): string | undefined {
     if (event.data === null || typeof event.data !== "object") return undefined;
     const mutationId = (event.data as { mutationId?: unknown }).mutationId;
     return typeof mutationId === "string" ? mutationId : undefined;
-}
-
-function endpointUrl(endpoint: string, path: string): string {
-    const base = new URL(endpoint);
-    if (!base.pathname.endsWith("/")) base.pathname += "/";
-    return new URL(path.replace(/^\/+/, ""), base).toString();
 }
 
 function ifMatchHeader(value: string | number | undefined): Record<string, string> {

@@ -115,6 +115,37 @@ describe("presence", () => {
         }
     });
 
+    it("keeps a temporary presence armed beyond Node's maximum timer delay", async () => {
+        vi.useFakeTimers();
+        let now = 1_000;
+        const until = now + 3_000_000_000;
+        const store = new PresenceStore({
+            now: () => now,
+            persist: async () => undefined,
+            presences: resolvePresences(),
+        });
+        try {
+            await store.setPresence({ presenceId: "away", until });
+            const changed = vi.fn();
+            store.onChange(changed);
+
+            now = until - 1;
+            await vi.advanceTimersByTimeAsync(2_147_000_000);
+
+            expect(changed).not.toHaveBeenCalled();
+            expect(store.state().presence.id).toBe("away");
+
+            now = until;
+            await vi.advanceTimersByTimeAsync(until - 1_000 - 2_147_000_000);
+
+            expect(changed).toHaveBeenCalledOnce();
+            expect(changed.mock.calls[0]?.[0].presence.id).toBe("online");
+        } finally {
+            store.close();
+            vi.useRealTimers();
+        }
+    });
+
     it("publishes an observed expiry even when persistence fails", async () => {
         const store = new PresenceStore({
             now: () => 2_001,

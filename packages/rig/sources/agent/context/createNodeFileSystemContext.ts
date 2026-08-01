@@ -2,6 +2,7 @@ import {
     chmod,
     lstat,
     mkdir,
+    open,
     readFile,
     readdir,
     realpath,
@@ -91,10 +92,12 @@ export function createNodeFileSystemContext(
             await assertCanReadPath(cwd, target, permissionMode(), readPathOptions);
             return readFile(target, "utf8");
         },
-        async readFileBuffer(path) {
+        async readFileBuffer(path, readOptions) {
             const target = resolvePath(path);
             await assertCanReadPath(cwd, target, permissionMode(), readPathOptions);
-            return readFile(target);
+            return readOptions?.maxBytes === undefined
+                ? readFile(target)
+                : readFileBufferWithLimit(target, readOptions.maxBytes);
         },
         async readdir(path) {
             const target = resolvePath(path);
@@ -126,4 +129,25 @@ export function createNodeFileSystemContext(
             await writeFile(target, content);
         },
     };
+}
+
+async function readFileBufferWithLimit(path: string, maxBytes: number): Promise<Buffer> {
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
+        throw new Error("The file read limit must be a non-negative safe integer.");
+    }
+    const file = await open(path, "r");
+    const chunks: Buffer[] = [];
+    let length = 0;
+    try {
+        while (length <= maxBytes) {
+            const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - length));
+            const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+            if (bytesRead === 0) return Buffer.concat(chunks, length);
+            chunks.push(chunk.subarray(0, bytesRead));
+            length += bytesRead;
+        }
+        throw new Error(`Could not read '${path}' because it exceeds ${String(maxBytes)} bytes.`);
+    } finally {
+        await file.close();
+    }
 }

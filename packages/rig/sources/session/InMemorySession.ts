@@ -2243,12 +2243,21 @@ export class InMemorySession {
             this.#detachUserInput(requestId, "away", state);
             return;
         }
+        this.#armUserInputPresenceTimer(requestId, this.#now() + answerWaitMs, state);
+    }
+
+    #armUserInputPresenceTimer(requestId: string, dueAt: number, state: PresenceState): void {
         const timer = setTimeout(
             () => {
+                if (this.#userInputPresenceTimers.get(requestId) !== timer) return;
                 this.#userInputPresenceTimers.delete(requestId);
+                if (dueAt > this.#now()) {
+                    this.#armUserInputPresenceTimer(requestId, dueAt, state);
+                    return;
+                }
                 this.#detachUserInput(requestId, "timeout", this.#presence?.state() ?? state);
             },
-            Math.min(MAX_TIMER_DELAY_MS, answerWaitMs),
+            Math.min(MAX_TIMER_DELAY_MS, Math.max(0, dueAt - this.#now())),
         );
         timer.unref?.();
         this.#userInputPresenceTimers.set(requestId, timer);

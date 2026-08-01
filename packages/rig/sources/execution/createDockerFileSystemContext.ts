@@ -78,19 +78,23 @@ export function createDockerFileSystemContext(
         async readFile(path) {
             return Buffer.from(await this.readFileBuffer(path)).toString("utf8");
         },
-        async readFileBuffer(path) {
+        async readFileBuffer(path, options) {
             const target = assertDockerReadPath(cwd, path);
+            const maxBytes = Math.min(
+                options?.maxBytes ?? MAX_FILE_READ_BYTES,
+                MAX_FILE_READ_BYTES,
+            );
             const details = await this.stat(path);
-            if (details.size > MAX_FILE_READ_BYTES) throw fileReadLimitError(target);
+            if (details.size > maxBytes) throw fileReadLimitError(target, maxBytes);
             const result = await runDockerExec(
                 await environment.container(),
                 ["cat", "--", target],
                 {
-                    maxOutputBytes: MAX_FILE_READ_BYTES + 1,
+                    maxOutputBytes: maxBytes + 1,
                 },
             );
             if (result.exitCode !== 0) throw dockerCommandError("read", target, result.stderr);
-            if (result.stdout.length > MAX_FILE_READ_BYTES) throw fileReadLimitError(target);
+            if (result.stdout.length > maxBytes) throw fileReadLimitError(target, maxBytes);
             return result.stdout;
         },
         async readdir(path) {
@@ -162,8 +166,10 @@ export function createDockerFileSystemContext(
     };
 }
 
-function fileReadLimitError(path: string): Error {
-    return new Error(`Could not read '${path}' in the Docker container because it exceeds 32 MB.`);
+function fileReadLimitError(path: string, maxBytes: number): Error {
+    return new Error(
+        `Could not read '${path}' in the Docker container because it exceeds ${String(maxBytes)} bytes.`,
+    );
 }
 
 async function successfulExec(

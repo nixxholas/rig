@@ -29,6 +29,19 @@ describe("createNodeFileSystemContext", () => {
         await expect(context.writeFile("inside.txt", "inside\n")).resolves.toBeUndefined();
     });
 
+    it("bounds a binary read at the file descriptor", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-fs-bounded-read-"));
+        temporaryDirectories.push(root);
+        const workspace = join(root, "workspace");
+        await mkdir(workspace);
+        await writeFile(join(workspace, "image.bin"), Buffer.alloc(65_537, 1));
+        const context = createNodeFileSystemContext(workspace);
+
+        await expect(context.readFileBuffer("image.bin", { maxBytes: 65_536 })).rejects.toThrow(
+            "exceeds 65536 bytes",
+        );
+    });
+
     it("uses Codex-style host reads without allowing outside writes on Linux", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-fs-user-skills-"));
         temporaryDirectories.push(root);

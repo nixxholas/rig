@@ -61,7 +61,8 @@ describe("connectProviderUsage", () => {
     it("keeps provider usage beneath a path-prefixed endpoint", async () => {
         const requested: string[] = [];
         const rig = connectRig({
-            endpoint: "https://connector.test/capability/rig-connect",
+            endpoint:
+                "https://connector.test/capability/rig-connect?tenant=acme&signature=one%20two",
             token: "t",
             fetch: ((input: RequestInfo | URL) => {
                 requested.push(String(input));
@@ -77,7 +78,7 @@ describe("connectProviderUsage", () => {
         await settle();
 
         expect(requested).toEqual([
-            "https://connector.test/capability/rig-connect/provider-usage",
+            "https://connector.test/capability/rig-connect/provider-usage?tenant=acme&signature=one%20two",
         ]);
         expect(usage.providers()).toEqual([entry("codex", 42)]);
         usage.close();

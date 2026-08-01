@@ -1,4 +1,5 @@
 import type { GlobalEvent } from "./protocol.js";
+import { endpointUrl } from "./endpointUrl.js";
 import { readSseFrames } from "./sseFrames.js";
 
 /** The daemon refused the request; retrying it unchanged cannot help. */
@@ -117,8 +118,9 @@ async function readStreamOnce(
     options: LiveStreamOptions,
     onCursor: (cursor: string) => void,
 ): Promise<boolean> {
-    const url = new URL("events/live", endpointBase(options.endpoint));
-    if (after !== undefined) url.searchParams.set("after", after);
+    const path =
+        after === undefined ? "events/live" : `events/live?after=${encodeURIComponent(after)}`;
+    const url = endpointUrl(options.endpoint, path);
 
     const response = await fetchImpl(url, {
         headers: { accept: "text/event-stream", authorization: `Bearer ${options.token}` },
@@ -147,10 +149,6 @@ async function readStreamOnce(
         onCursor(update.cursor);
     }
     return delivered;
-}
-
-function endpointBase(endpoint: string): string {
-    return endpoint.endsWith("/") ? endpoint : `${endpoint}/`;
 }
 
 function defaultWait(ms: number, signal: AbortSignal): Promise<void> {

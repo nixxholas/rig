@@ -7,6 +7,11 @@ export interface FileSystemStat {
     mtimeMs: number;
 }
 
+export interface FileSystemReadOptions {
+    /** Refuse the read after this many bytes without buffering the rest of the file. */
+    maxBytes?: number;
+}
+
 export interface FileSystemContext {
     cwd: string;
     home?: string;
@@ -17,7 +22,7 @@ export interface FileSystemContext {
     move(source: string, destination: string): Promise<void>;
     realpath(path: string): Promise<string>;
     readFile(path: string): Promise<string>;
-    readFileBuffer(path: string): Promise<Uint8Array>;
+    readFileBuffer(path: string, options?: FileSystemReadOptions): Promise<Uint8Array>;
     readdir(path: string): Promise<readonly string[]>;
     rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
     setModificationTime(path: string, mtimeMs: number): Promise<void>;

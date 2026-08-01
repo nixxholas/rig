@@ -38,8 +38,14 @@ export function createJustBashFileSystemContext(bash: Bash, cwd: string): FileSy
         async readFile(path) {
             return bash.fs.readFile(path);
         },
-        async readFileBuffer(path) {
-            return bash.fs.readFileBuffer(path);
+        async readFileBuffer(path, options) {
+            const bytes = await bash.fs.readFileBuffer(path);
+            if (options?.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
+                throw new Error(
+                    `Could not read '${path}' because it exceeds ${String(options.maxBytes)} bytes.`,
+                );
+            }
+            return bytes;
         },
         async readdir(path) {
             return bash.fs.readdir(path);

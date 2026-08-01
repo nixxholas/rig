@@ -171,9 +171,13 @@ export class PresenceStore {
         const timer = setTimeout(
             () => {
                 this.#expiry = undefined;
+                if (until > this.#now()) {
+                    this.#scheduleExpiry();
+                    return;
+                }
                 this.#publish();
             },
-            Math.max(0, until - this.#now()),
+            Math.min(2_147_000_000, Math.max(0, until - this.#now())),
         );
         timer.unref?.();
         this.#expiry = timer;

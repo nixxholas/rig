@@ -75,7 +75,11 @@ export type {
     BashSessionSnapshot,
     BashSessionStatus,
 } from "./context/BashContext.js";
-export type { FileSystemContext, FileSystemStat } from "./context/FileSystemContext.js";
+export type {
+    FileSystemContext,
+    FileSystemReadOptions,
+    FileSystemStat,
+} from "./context/FileSystemContext.js";
 export type { GoalContext } from "./context/GoalContext.js";
 export type {
     ChatHistoryAgentSummary,
