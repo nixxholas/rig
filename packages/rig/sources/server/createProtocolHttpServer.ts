@@ -1697,7 +1697,7 @@ async function handleRequest(
 
     if (request.method === "GET" && route.name === "current-provider-quota") {
         const currentProviderId = session.snapshot().providerId;
-        const quota = await session.providerQuota();
+        const quota = await getProviderQuota?.(currentProviderId);
         sendJson<GetCurrentProviderQuotaResponse>(response, 200, {
             currentProviderId,
             ...(quota === undefined ? {} : { quota }),
@@ -1772,7 +1772,6 @@ async function handleRequest(
                 ...usage.groups.flatMap((group) =>
                     group.providerId === null ? [] : [group.providerId],
                 ),
-                ...usage.observedQuota.map((contribution) => contribution.providerId),
                 currentProviderId,
             ]),
         ];
@@ -1780,17 +1779,15 @@ async function handleRequest(
         const quotas = (
             await Promise.all(
                 providerIds.map(async (providerId) => {
-                    const loadedQuota =
-                        providerId === currentProviderId
-                            ? await session.providerQuota()
-                            : await getProviderQuota?.(providerId);
-                    const observedQuota = observedQuotas.get(providerId);
+                    const loaded = await getProviderQuota?.(providerId);
+                    // What this session saw the provider say during its own run
+                    // can be newer than the daemon's last reading.
+                    const observed = observedQuotas.get(providerId);
                     const quota =
-                        observedQuota !== undefined &&
-                        (loadedQuota === undefined ||
-                            observedQuota.capturedAt >= loadedQuota.capturedAt)
-                            ? observedQuota
-                            : loadedQuota;
+                        observed !== undefined &&
+                        (loaded === undefined || observed.capturedAt >= loaded.capturedAt)
+                            ? observed
+                            : loaded;
                     return quota === undefined ? undefined : { providerId, quota };
                 }),
             )
@@ -1798,7 +1795,6 @@ async function handleRequest(
         sendJson<GetSessionUsageResponse>(response, 200, {
             currentProviderId,
             groups: usage.groups,
-            observedQuota: usage.observedQuota,
             quotas,
             sessionTokenCount: usage.sessionTokenCount,
             ...(usage.currentContext === undefined ? {} : { context: usage.currentContext }),
@@ -3405,7 +3401,8 @@ function sessionStreamHello(
                   usage: {
                       currentProviderId: full.providerId,
                       groups: usage.groups,
-                      observedQuota: usage.observedQuota,
+                      // The daemon-wide readings arrive with the usage request;
+                      // what this session itself observed is known right away.
                       quotas: [...session.events.latestProviderQuotas().entries()].map(
                           ([providerId, quota]) => ({ providerId, quota }),
                       ),

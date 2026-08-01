@@ -1,9 +1,15 @@
+import type { ProviderUsage } from "@slopus/rig-providers";
+
 import { createGymProvider } from "./createGymProvider.js";
 import { readGymContextWindow } from "./readGymContextWindow.js";
 import type { Provider } from "@slopus/rig-execution";
 import { Executor } from "@slopus/rig-execution";
 
-export function routeProviderThroughGym(provider: Provider, env: NodeJS.ProcessEnv): Provider {
+export function routeProviderThroughGym(
+    provider: Provider,
+    env: NodeJS.ProcessEnv,
+    onAccountUsage?: (usage: ProviderUsage) => void,
+): Provider {
     const overrides = new Set(
         (env.RIG_GYM_PROVIDER_OVERRIDES ?? "")
             .split(",")
@@ -24,6 +30,7 @@ export function routeProviderThroughGym(provider: Provider, env: NodeJS.ProcessE
             ? {}
             : { extendProfilePromptContext: provider.extendProfilePromptContext }),
         models: provider.models,
+        ...(onAccountUsage === undefined ? {} : { onAccountUsage }),
         ...(provider instanceof Executor
             ? {
                   prepareContext: async (model, context) => ({
@@ -49,12 +56,6 @@ export function routeProviderThroughGym(provider: Provider, env: NodeJS.ProcessE
                   close: async () => {
                       await Promise.all([gymProvider.close?.(), provider.close?.()]);
                   },
-              }),
-        ...(provider.quota === undefined
-            ? {}
-            : {
-                  quota: (options?: Parameters<NonNullable<Provider["quota"]>>[0]) =>
-                      provider.quota!(options),
               }),
         ...(provider.runClaudeAuxiliaryQuery === undefined
             ? {}

@@ -1,3 +1,4 @@
+import type { ProviderUsage } from "@slopus/rig-providers";
 import { createInferenceStream } from "@slopus/rig-execution";
 import type { GymInferenceRequest, GymInferenceResponse } from "./gym-types.js";
 import {
@@ -27,6 +28,8 @@ export interface CreateGymProviderOptions {
     extendProfilePromptContext?: Provider["extendProfilePromptContext"];
     fetch?: typeof globalThis.fetch;
     models?: readonly Model[];
+    /** Receives account usage a scripted response reports, as a real vendor would. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     prepareContext?: (model: Model, context: Context) => Context | Promise<Context>;
     providerId?: string;
     providerType?: Provider["type"];
@@ -159,6 +162,9 @@ export function createGymProvider(options: CreateGymProviderOptions) {
                 }
 
                 const reply = (await response.json()) as GymInferenceResponse;
+                if (reply.accountUsage !== undefined) {
+                    options.onAccountUsage?.({ ...reply.accountUsage, providerId });
+                }
                 if (reply.delayMs !== undefined) {
                     await delay(reply.delayMs, streamOptions);
                 }

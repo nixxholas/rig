@@ -327,19 +327,10 @@ export interface SessionProviderQuota {
     quota: ProviderQuota;
 }
 
-export interface SessionQuotaContribution {
-    providerId: string;
-    windows: {
-        fiveHour?: { observedUsedPercent: number };
-        weekly?: { observedUsedPercent: number };
-    };
-}
-
 export interface SessionUsageSnapshot {
     currentProviderId: string;
     groups: readonly SessionUsageGroup[];
     context?: SessionContextUsage;
-    observedQuota: readonly SessionQuotaContribution[];
     quotas: readonly SessionProviderQuota[];
     sessionTokenCount: SessionTokenCount;
 }
@@ -928,20 +919,7 @@ export type InterpretedSessionEvent =
       >
     | BaseSessionEvent<"agent_message", { message: Message; runId: string }>
     | BaseSessionEvent<"agent_event", { event: AgentLoopEvent; runId: string }>
-    | BaseSessionEvent<
-          "provider_quota_observed",
-          {
-              observationId: string;
-              phase: "before" | "after";
-              providerId: string;
-              quota: ProviderQuota;
-              runId: string;
-          }
-      >
-    | BaseSessionEvent<
-          "session_quota_contribution_changed",
-          { observedQuota: readonly SessionQuotaContribution[] }
-      >
+    | BaseSessionEvent<"provider_quota_observed", { providerId: string; quota: ProviderQuota }>
     | BaseSessionEvent<
           "run_finished",
           { errorMessage?: string; modelLocked: boolean; runId: string; stopReason: string }

@@ -84,19 +84,11 @@ export type {
     ClaudeAuxiliaryQueryResponse,
 } from "@/vendors/claude/ClaudeAuxiliaryQuery.js";
 export {
-    createClaudeQuotaLoader,
-    type CreateClaudeQuotaLoaderOptions,
-} from "@/vendors/claude/createClaudeQuotaLoader.js";
-export {
-    fetchClaudeProviderQuota,
-    type ClaudeQuotaQuery,
-    type FetchClaudeProviderQuotaOptions,
-} from "@/vendors/claude/fetchClaudeProviderQuota.js";
-export {
     fetchClaudeProviderUsage,
     parseClaudeProviderUsage,
     type FetchClaudeProviderUsageOptions,
 } from "@/vendors/claude/fetchClaudeProviderUsage.js";
+export { claudeUsageFromRateLimitInfo } from "@/vendors/claude/claudeUsageFromRateLimitInfo.js";
 export { parseClaudeRateLimitHeaders } from "@/vendors/claude/parseClaudeRateLimitHeaders.js";
 export { resolveClaudeCodeExecutablePath } from "@/vendors/claude/resolveClaudeCodeExecutablePath.js";
 export {

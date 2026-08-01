@@ -56,7 +56,6 @@ function provider(models: readonly Model[]): Provider {
         models,
         serviceTiers: undefined,
         extendProfilePromptContext: undefined,
-        quota: undefined,
         stream: () => {
             throw new Error("Not used");
         },

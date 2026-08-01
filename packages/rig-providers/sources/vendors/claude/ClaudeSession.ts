@@ -8,6 +8,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import { BaseSession } from "@/core/BaseSession.js";
+import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type {
@@ -22,6 +23,7 @@ import type { SessionModelConfiguration } from "@/core/SessionModelConfiguration
 import type { SessionTool } from "@/core/SessionTool.js";
 import { resolveClaudeModelId } from "@/vendors/claude/impl/resolveClaudeModelId.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
+import { claudeUsageFromRateLimitInfo } from "@/vendors/claude/claudeUsageFromRateLimitInfo.js";
 import { ClaudePromptQueue } from "@/vendors/claude/impl/ClaudePromptQueue.js";
 import {
     classifyClaudeError,
@@ -46,6 +48,8 @@ export interface ClaudeSessionOptions {
     env?: NodeJS.ProcessEnv;
     model?: string;
     modelConfigurations?: Readonly<Record<string, SessionModelConfiguration>>;
+    /** Receives the account usage the limiter reports during inference. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     pathToClaudeCodeExecutable?: string;
     query?: ClaudeSdkQuery;
     tools?: readonly SessionTool[];
@@ -74,6 +78,7 @@ export class ClaudeSession extends BaseSession {
     private activeReplay: ClaudeSessionReplay | undefined;
     private activeToolBridge: ClaudeToolBridge | undefined;
     private lastQueryToolCalls: SessionToolCall[] = [];
+    private readonly onAccountUsage: ((usage: ProviderUsage) => void) | undefined;
 
     constructor(id: string, options: ClaudeSessionOptions) {
         super(id);
@@ -85,8 +90,27 @@ export class ClaudeSession extends BaseSession {
         this.userAgent = options.userAgent;
         this.tools = options.tools;
         this.modelConfigurations = options.modelConfigurations;
+        this.onAccountUsage = options.onAccountUsage;
         this.query = options.query ?? defaultClaudeSdkQuery;
         this.context = { instructions: options.instructions, messages: [] };
+    }
+
+    /**
+     * Hands on what the limiter said about the account. Reporting usage is
+     * bookkeeping beside the run, so a listener that throws cannot break it.
+     */
+    private reportAccountUsage(info: SDKRateLimitInfo): void {
+        if (this.onAccountUsage === undefined) return;
+        const usage = claudeUsageFromRateLimitInfo(info, {
+            capturedAt: Date.now(),
+            providerId: "claude",
+        });
+        if (usage === null) return;
+        try {
+            this.onAccountUsage(usage);
+        } catch {
+            // A usage listener never decides whether inference continues.
+        }
     }
 
     run(request: SessionRunRequest): SessionStream {
@@ -388,6 +412,7 @@ export class ClaudeSession extends BaseSession {
                 }
                 if (message.type === "rate_limit_event") {
                     rateLimitInfo = message.rate_limit_info;
+                    this.reportAccountUsage(rateLimitInfo);
                     continue;
                 }
                 if (message.type === "assistant" && message.error !== undefined) {

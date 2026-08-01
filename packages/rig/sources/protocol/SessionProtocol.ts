@@ -739,7 +739,6 @@ export interface GetSessionUsageResponse {
     currentProviderId: string;
     groups: readonly SessionUsageGroup[];
     context?: SessionContextUsage;
-    observedQuota: readonly SessionQuotaContribution[];
     quotas: readonly SessionProviderQuota[];
     sessionTokenCount: SessionTokenCount;
 }
@@ -767,18 +766,6 @@ export interface ProviderUsageEntry {
 export interface SessionProviderQuota {
     providerId: string;
     quota: ProviderQuota;
-}
-
-export interface SessionQuotaContribution {
-    providerId: string;
-    windows: {
-        fiveHour?: SessionQuotaWindowContribution;
-        weekly?: SessionQuotaWindowContribution;
-    };
-}
-
-export interface SessionQuotaWindowContribution {
-    observedUsedPercent: number;
 }
 
 export interface StopWorkflowResponse {
@@ -965,7 +952,6 @@ export type SessionEvent =
     | AgentMessageEvent
     | RunFinishedEvent
     | ProviderQuotaObservedEvent
-    | SessionQuotaContributionChangedEvent
     | RunErrorEvent
     | AbortRequestedEvent
     | SessionResetEvent
@@ -1074,20 +1060,17 @@ export type RunFinishedEvent = BaseSessionEvent<
     }
 >;
 
+/**
+ * What a provider said about the account while it was already answering this
+ * session. It costs no extra request, so it is the freshest thing a client can
+ * be told about a quota without asking the vendor.
+ */
 export type ProviderQuotaObservedEvent = BaseSessionEvent<
     "provider_quota_observed",
     {
-        observationId: string;
-        phase: "before" | "after";
         providerId: string;
         quota: ProviderQuota;
-        runId: string;
     }
->;
-
-export type SessionQuotaContributionChangedEvent = BaseSessionEvent<
-    "session_quota_contribution_changed",
-    { observedQuota: readonly SessionQuotaContribution[] }
 >;
 
 export type RunErrorEvent = BaseSessionEvent<

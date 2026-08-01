@@ -12,7 +12,12 @@ interface ProviderUsageCacheEntry {
 }
 
 export interface ProviderUsageService {
-    get(providerId: string, options?: { fresh?: boolean }): Promise<ProviderUsage | null>;
+    get(providerId: string): Promise<ProviderUsage | null>;
+    /**
+     * Folds in a reading a provider volunteered during ordinary inference, and
+     * answers with the account's complete picture afterwards.
+     */
+    record(usage: ProviderUsage): ProviderUsage;
 }
 
 export interface CreateProviderUsageServiceOptions {
@@ -25,10 +30,13 @@ export interface CreateProviderUsageServiceOptions {
 /**
  * Owns the one upstream usage reading for each configured provider.
  *
- * The daemon's scheduled poll and session quota reads both pass through this
- * cache, so concurrent reads cannot issue duplicate requests. Session quota
- * observations may bypass the ordinary refresh interval, but never a provider
- * retry boundary. A failed refresh keeps serving the last successful reading.
+ * The daemon's scheduled poll and every quota display read pass through this
+ * cache, so concurrent reads cannot issue duplicate requests and nothing asks
+ * the vendor more often than the refresh interval or a provider retry boundary
+ * allows. A failed refresh keeps serving the last successful reading.
+ *
+ * Readings a provider volunteers during ordinary inference are folded in
+ * without asking the vendor anything, and without disturbing the schedule.
  */
 export function createProviderUsageService(
     options: CreateProviderUsageServiceOptions,
@@ -55,14 +63,11 @@ export function createProviderUsageService(
     }
 
     return {
-        get(providerId, getOptions) {
+        get(providerId) {
             const entry = entryFor(providerId);
             if (entry.pending !== undefined) return entry.pending;
             const currentTime = now();
-            if (
-                currentTime < entry.retryAt ||
-                (getOptions?.fresh !== true && currentTime < entry.nextLoadAt)
-            ) {
+            if (currentTime < entry.retryAt || currentTime < entry.nextLoadAt) {
                 if (entry.hasValue) return Promise.resolve(entry.value);
                 return Promise.reject(entry.lastError);
             }
@@ -70,12 +75,21 @@ export function createProviderUsageService(
             const request = options
                 .loadUsage(providerId)
                 .then((usage) => {
+                    // An observation that arrived while this request was in
+                    // flight describes the account more recently than the
+                    // answer now coming back.
+                    const value =
+                        usage !== null &&
+                        entry.value !== null &&
+                        entry.value.capturedAt > usage.capturedAt
+                            ? mergeObservedUsage(usage, entry.value)
+                            : usage;
                     entry.hasValue = true;
                     entry.lastError = undefined;
                     entry.nextLoadAt = now() + minimumRefreshIntervalMs;
                     entry.retryAt = 0;
-                    entry.value = usage;
-                    return usage;
+                    entry.value = value;
+                    return value;
                 })
                 .catch((error: unknown) => {
                     entry.lastError = error;
@@ -95,6 +109,36 @@ export function createProviderUsageService(
                 });
             entry.pending = request;
             return request;
+        },
+        record(usage) {
+            const entry = entryFor(usage.providerId);
+            const merged = mergeObservedUsage(entry.hasValue ? entry.value : null, usage);
+            entry.hasValue = true;
+            entry.lastError = undefined;
+            entry.value = merged;
+            return merged;
+        },
+    };
+}
+
+/**
+ * An observation made during inference reports only the window that currently
+ * constrains the account, so everything it leaves unsaid keeps the value the
+ * last full reading gave it.
+ */
+function mergeObservedUsage(
+    previous: ProviderUsage | null,
+    observed: ProviderUsage,
+): ProviderUsage {
+    if (previous === null) return observed;
+    return {
+        ...observed,
+        planName: observed.planName ?? previous.planName,
+        credits: observed.credits ?? previous.credits,
+        windows: {
+            fiveHour: observed.windows.fiveHour ?? previous.windows.fiveHour,
+            weekly: observed.windows.weekly ?? previous.windows.weekly,
+            monthly: observed.windows.monthly ?? previous.windows.monthly,
         },
     };
 }

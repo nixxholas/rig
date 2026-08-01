@@ -8,7 +8,7 @@ import { createProviderUsageTracker } from "../createProviderUsageTracker.js";
 import { createProviderUsageService } from "../createProviderUsageService.js";
 
 describe("createProviderUsageService", () => {
-    it("shares one in-flight read between account usage and session quota", async () => {
+    it("shares one in-flight read between account usage and quota display", async () => {
         const reading = usage("claude", 10, 1_000);
         const loadUsage = vi.fn(async () => reading);
         const service = createProviderUsageService({ loadUsage });
@@ -21,7 +21,7 @@ describe("createProviderUsageService", () => {
             loadClaudeUsage: (providerId) => service.get(providerId),
         });
 
-        await Promise.all([tracker.refresh("claude"), quota.get("claude", { fresh: true })]);
+        await Promise.all([tracker.refresh("claude"), quota.get("claude")]);
 
         expect(loadUsage).toHaveBeenCalledOnce();
         expect(tracker.get("claude")?.usage).toBe(reading);
@@ -32,15 +32,17 @@ describe("createProviderUsageService", () => {
         expect(loadUsage).toHaveBeenCalledOnce();
     });
 
-    it("allows fresh session observations while ordinary reads remain cached", async () => {
+    it("serves the cached reading until the refresh interval elapses", async () => {
+        let now = 1_000;
         const first = usage("claude", 10, 1_000);
         const second = usage("claude", 20, 2_000);
         const loadUsage = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(second);
-        const service = createProviderUsageService({ loadUsage });
+        const service = createProviderUsageService({ loadUsage, now: () => now });
 
         await expect(service.get("claude")).resolves.toBe(first);
         await expect(service.get("claude")).resolves.toBe(first);
-        await expect(service.get("claude", { fresh: true })).resolves.toBe(second);
+        now += PROVIDER_USAGE_POLL_INTERVAL_MS;
+        await expect(service.get("claude")).resolves.toBe(second);
 
         expect(loadUsage).toHaveBeenCalledTimes(2);
     });
@@ -48,14 +50,14 @@ describe("createProviderUsageService", () => {
     it("shares a reading and respects the provider retry time after throttling", async () => {
         let now = 1_000;
         const first = usage("claude", 10, now);
-        const refreshed = usage("claude", 20, now + 75 * 60 * 1_000);
-        const retryAt = now + 75 * 60 * 1_000;
+        const refreshed = usage("claude", 20, now + 5 * 60 * 60 * 1_000);
+        const retryAt = now + 5 * 60 * 60 * 1_000;
         const loadUsage = vi
             .fn<(providerId: string) => Promise<ProviderUsage | null>>()
             .mockResolvedValueOnce(first)
             .mockRejectedValueOnce(
                 new ProviderUsageRequestError(
-                    "Claude usage returned HTTP 429. Retry after 3600 seconds.",
+                    "Claude usage returned HTTP 429. Retry after 18000 seconds.",
                     { retryAt, status: 429 },
                 ),
             )
@@ -82,7 +84,7 @@ describe("createProviderUsageService", () => {
         );
 
         now += PROVIDER_USAGE_POLL_INTERVAL_MS;
-        await expect(service.get("claude", { fresh: true })).resolves.toBe(first);
+        await expect(service.get("claude")).resolves.toBe(first);
         expect(loadUsage).toHaveBeenCalledTimes(2);
 
         now = retryAt;
@@ -90,10 +92,41 @@ describe("createProviderUsageService", () => {
         expect(loadUsage).toHaveBeenCalledTimes(3);
     });
 
+    it("folds an inference observation into the account's known windows", async () => {
+        let now = 1_000;
+        const polled = usage("claude", 10, 1_000);
+        const loadUsage = vi.fn(async () => polled);
+        const service = createProviderUsageService({ loadUsage, now: () => now });
+
+        await expect(service.get("claude")).resolves.toBe(polled);
+        const merged = service.record({
+            ...usage("claude", 55, 2_000),
+            planName: null,
+            windows: {
+                fiveHour: {
+                    durationMs: 5 * 60 * 60 * 1_000,
+                    resetsAt: null,
+                    startsAt: null,
+                    usedPercent: 55,
+                },
+                weekly: null,
+                monthly: null,
+            },
+        });
+
+        expect(merged.windows.fiveHour?.usedPercent).toBe(55);
+        // The poll is the only thing that knew these, so the observation keeps them.
+        expect(merged.windows.weekly?.usedPercent).toBe(10);
+        expect(merged.planName).toBe("Max");
+        // Observing costs the vendor nothing, so nothing is asked again.
+        await expect(service.get("claude")).resolves.toBe(merged);
+        expect(loadUsage).toHaveBeenCalledOnce();
+    });
+
     it("rethrows the first failure until its retry time", async () => {
         let now = 1_000;
         const error = new ProviderUsageRequestError("Claude usage returned HTTP 429.", {
-            retryAt: 3_601_000,
+            retryAt: 1_000 + 5 * 60 * 60 * 1_000,
             status: 429,
         });
         const loadUsage = vi.fn(() => Promise.reject(error));

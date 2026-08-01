@@ -1,6 +1,7 @@
 import { Type } from "@sinclair/typebox";
 import { describe, expect, it, vi } from "vitest";
 
+import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import { ClaudeAuthTokenCredential } from "@/vendors/claude/ClaudeAuthTokenCredential.js";
 import { ClaudeSession, type ClaudeSdkQuery } from "@/vendors/claude/ClaudeSession.js";
 import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivacyEnvironment.js";
@@ -91,6 +92,64 @@ describe("ClaudeSession", () => {
             message: "You've hit your weekly limit · resets Jul 25 at 5am",
             providerError: { type: "rate_limit", resetAt: 2_000_000 },
         });
+    });
+
+    it("reports the account usage the limiter volunteers during a run", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const observed: ProviderUsage[] = [];
+        const session = new ClaudeSession("usage-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            onAccountUsage: (usage) => observed.push(usage),
+            query: (() => {
+                async function* messages() {
+                    yield {
+                        type: "rate_limit_event",
+                        rate_limit_info: {
+                            status: "allowed",
+                            rateLimitType: "five_hour",
+                            utilization: 0.42,
+                            resetsAt: 2_000,
+                        },
+                        uuid: "usage-event-id",
+                        session_id: "usage-session",
+                    };
+                    yield {
+                        type: "result",
+                        subtype: "success",
+                        duration_ms: 1,
+                        duration_api_ms: 1,
+                        is_error: false,
+                        num_turns: 1,
+                        result: "Hello.",
+                        stop_reason: null,
+                        total_cost_usd: 0,
+                        usage: {
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
+                        },
+                        modelUsage: {},
+                        permission_denials: [],
+                        uuid: "result-id",
+                        session_id: "usage-session",
+                    };
+                }
+                const generator = messages();
+                return Object.assign(generator, { close: () => {} });
+            }) as unknown as ClaudeSdkQuery,
+            tools: [],
+        });
+
+        await collectSessionEvents(
+            session.run({ context: { messages: [{ role: "user", content: "Hello." }] } }),
+        );
+
+        expect(observed).toHaveLength(1);
+        expect(observed[0]?.windows.fiveHour?.usedPercent).toBe(42);
     });
 
     it("humanizes an SDK error result whose error list is empty", async () => {

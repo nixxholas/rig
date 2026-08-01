@@ -110,10 +110,7 @@ export class HappySyncService {
     #attachSession(session: InMemorySession, includeArchived: boolean): void {
         if (this.#closed) return;
         const snapshot = session.snapshot();
-        if (
-            snapshot.agent.type !== "primary" ||
-            (snapshot.archived && !includeArchived)
-        ) {
+        if (snapshot.agent.type !== "primary" || (snapshot.archived && !includeArchived)) {
             return;
         }
         let client = this.#clients.get(session.id);
@@ -171,12 +168,10 @@ export class HappySyncService {
         for (const timer of this.#backfillTimers.values()) clearTimeout(timer);
         this.#backfillTimers.clear();
         this.#attachRetryAfter.clear();
-        const results = await Promise.allSettled(
-            [
-                ...[...this.#clients.values()].map((client) => client.close()),
-                ...this.#detachedClientClosures.values(),
-            ],
-        );
+        const results = await Promise.allSettled([
+            ...[...this.#clients.values()].map((client) => client.close()),
+            ...this.#detachedClientClosures.values(),
+        ]);
         this.#clients.clear();
         this.#detachedClientClosures.clear();
         this.#messageMappers.clear();

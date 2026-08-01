@@ -128,12 +128,10 @@ describe("resuming a session with streamed response history", () => {
 
         const persistedJson = await gym.readFile("streamed-session-persistence.json");
         const persisted = JSON.parse(persistedJson) as {
-            durableQuotaObservations: number;
             persistedEventRows: number;
             transientInferenceEvents: number;
         };
         expect(persisted.transientInferenceEvents).toBe(0);
-        expect(persisted.durableQuotaObservations).toBe(2);
         expect(persisted.persistedEventRows).toBeGreaterThan(0);
         expect(persisted.persistedEventRows).toBeLessThanOrEqual(MAX_PERSISTED_EVENT_ROWS);
 
@@ -184,9 +182,7 @@ const rows = database
     .prepare("SELECT type, data_json FROM session_events WHERE session_id = ? ORDER BY seq")
     .all(sessionId);
 let transientInferenceEvents = 0;
-let durableQuotaObservations = 0;
 for (const row of rows) {
-    if (row.type === "provider_quota_observed") durableQuotaObservations += 1;
     if (row.type !== "agent_event") continue;
     const event = JSON.parse(row.data_json).event;
     if (transientTypes.has(event?.type)) transientInferenceEvents += 1;
@@ -194,6 +190,6 @@ for (const row of rows) {
 database.close();
 writeFileSync(
     "/workspace/streamed-session-persistence.json",
-    JSON.stringify({ durableQuotaObservations, persistedEventRows: rows.length, transientInferenceEvents }),
+    JSON.stringify({ persistedEventRows: rows.length, transientInferenceEvents }),
 );
 `;

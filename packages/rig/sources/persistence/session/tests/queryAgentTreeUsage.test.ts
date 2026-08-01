@@ -404,7 +404,6 @@ function usageEnvelope(totalTokens: number, permissionReviewTokens = 0): string 
                           },
                       ]),
             ],
-            observedQuota: [],
             sessionTokenCount: { lastContextTokens: 0, totalTokens },
         },
     });

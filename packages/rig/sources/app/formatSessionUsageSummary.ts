@@ -1,8 +1,4 @@
-import type {
-    GetSessionUsageResponse,
-    SessionQuotaWindowContribution,
-    SessionUsageGroup,
-} from "../protocol/index.js";
+import type { GetSessionUsageResponse, SessionUsageGroup } from "../protocol/index.js";
 import type { ProviderQuotaWindow } from "@slopus/rig-providers";
 import type { CodingAssistantModelChoice } from "./CodingAssistantAgentBackend.js";
 import { formatCompactTokens } from "./formatCompactTokens.js";
@@ -18,11 +14,9 @@ export function formatSessionUsageSummary(
     const providerIds = distinct([
         ...summary.groups.map((group) => group.providerId),
         ...summary.quotas.map((entry) => entry.providerId),
-        ...summary.observedQuota.map((entry) => entry.providerId),
         summary.currentProviderId,
     ]);
 
-    let hasObservedRemaining = false;
     for (const [providerIndex, providerId] of providerIds.entries()) {
         if (providerIndex > 0) lines.push("");
         lines.push(humanizeProviderId(providerId));
@@ -46,23 +40,13 @@ export function formatSessionUsageSummary(
             lines.push(`    ${formatContext(summary, modelChoices)}`);
         }
         const quota = summary.quotas.find((entry) => entry.providerId === providerId)?.quota;
-        const contribution = summary.observedQuota.find((entry) => entry.providerId === providerId);
         lines.push(
             "  Account quota",
             `    ${formatQuotaWindow("5-hour", quota?.windows.fiveHour, now)}`,
             `    ${formatQuotaWindow("Weekly", quota?.windows.weekly, now)}`,
         );
-        const observed = formatObservedQuota(contribution);
-        if (observed !== undefined) {
-            lines.push(`    ${observed}`);
-            hasObservedRemaining = true;
-        }
     }
 
-    if (hasObservedRemaining) {
-        lines.push("");
-        lines.push("Observed remaining may include other account activity.");
-    }
     lines.push(`Session tokens: ${formatTokens(summary.sessionTokenCount.totalTokens)}`);
     return lines.join("\n");
 }
@@ -132,32 +116,6 @@ function formatQuotaWindow(
     if (window?.status !== "available") return `${label}: unavailable`;
     const left = Math.max(0, Math.min(100, 100 - window.usedPercent));
     return `${label}: ${formatPercent(left)} left · resets in ${formatResetDuration(window.resetsAt - now)}`;
-}
-
-function formatObservedQuota(
-    contribution:
-        | {
-              windows: {
-                  fiveHour?: SessionQuotaWindowContribution;
-                  weekly?: SessionQuotaWindowContribution;
-              };
-          }
-        | undefined,
-): string | undefined {
-    const windows = [
-        formatObservedWindow("5h", contribution?.windows.fiveHour),
-        formatObservedWindow("week", contribution?.windows.weekly),
-    ].filter((value): value is string => value !== undefined);
-    if (windows.length === 0) return undefined;
-    return `Observed remaining: ${windows.join(" · ")} (approx.)`;
-}
-
-function formatObservedWindow(
-    label: "5h" | "week",
-    contribution: SessionQuotaWindowContribution | undefined,
-): string | undefined {
-    if (contribution === undefined || contribution.observedUsedPercent <= 0) return undefined;
-    return `${label} ${formatPercent(-contribution.observedUsedPercent)}`;
 }
 
 function formatContext(

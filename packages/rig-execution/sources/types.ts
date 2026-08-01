@@ -9,7 +9,6 @@ import type { TSchema } from "@sinclair/typebox";
 import type {
     ClaudeAuxiliaryQueryRequest,
     ClaudeAuxiliaryQueryResponse,
-    ProviderQuota,
     SessionAssistantMessage,
     SessionToolResultMessage,
 } from "@slopus/rig-providers";
@@ -361,7 +360,6 @@ export interface Provider {
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
-    quota: ((options?: { fresh?: boolean }) => Promise<ProviderQuota>) | undefined;
     runClaudeAuxiliaryQuery?(
         model: Model,
         request: ClaudeAuxiliaryQueryRequest,
@@ -410,7 +408,6 @@ export function defineProvider(provider: {
         signal?: AbortSignal;
     }): Promise<CompactionResult>;
     close?(): Promise<void> | void;
-    quota?: (options?: { fresh?: boolean }) => Promise<ProviderQuota>;
     runClaudeAuxiliaryQuery?(
         model: Model,
         request: ClaudeAuxiliaryQueryRequest,
@@ -423,7 +420,6 @@ export function defineProvider(provider: {
 }): Provider {
     return {
         extendProfilePromptContext: undefined,
-        quota: undefined,
         serviceTiers: undefined,
         type: undefined,
         ...provider,

@@ -9,7 +9,6 @@ export function affectsSessionUsage(event: SessionEvent): boolean {
     }
     return (
         event.type === "agent_message" ||
-        event.type === "provider_quota_observed" ||
         event.type === "session_configuration_changed" ||
         event.type === "session_created" ||
         event.type === "session_reset" ||

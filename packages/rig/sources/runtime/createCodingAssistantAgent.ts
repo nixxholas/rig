@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/rig-providers";
 
 import { createPermissionReviewSideAgent } from "../permissions/index.js";
 import { Executor, type Identity } from "@slopus/rig-execution";
@@ -72,12 +72,10 @@ export interface CreateCodingAssistantAgentOptions {
     instructions?: string;
     identity?: Identity;
     isSubagent?: boolean;
-    loadProviderQuota?: (
-        providerId: string,
-        options?: { fresh?: boolean },
-    ) => Promise<ProviderQuota | undefined>;
     local?: boolean;
     messages?: readonly Message[];
+    /** Receives account usage a provider reports while it is already answering. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     contextMessages?: readonly Message[];
     modelId?: string;
     providerId?: string;
@@ -199,9 +197,9 @@ export function createCodingAssistantAgent(
                 ...(options.apiKey === undefined ? {} : { apiKey: options.apiKey }),
                 env,
                 ...(options.identity === undefined ? {} : { identity: options.identity }),
-                ...(options.loadProviderQuota === undefined
+                ...(options.onAccountUsage === undefined
                     ? {}
-                    : { loadProviderQuota: options.loadProviderQuota }),
+                    : { onAccountUsage: options.onAccountUsage }),
                 providers: options.providers ?? DEFAULT_RIG_CONFIG.providers,
                 ...(options.resolveCodexStreamMaxRetries === undefined
                     ? {}
@@ -239,7 +237,7 @@ export function createCodingAssistantAgent(
                     sessionId: `${options.sessionId ?? options.agentId ?? "standalone"}:auto-reviewer`,
                 });
     if (nativeProvider instanceof Executor) nativeProvider.selectProvider(providerId);
-    const provider = routeProviderThroughGym(nativeProvider, env);
+    const provider = routeProviderThroughGym(nativeProvider, env, options.onAccountUsage);
     const model = provider.models.find((candidate) => candidate.id === modelId);
     if (model === undefined) {
         throw new Error(`Unknown model '${modelId}' for provider '${provider.id}'`);

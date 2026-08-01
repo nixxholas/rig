@@ -1,6 +1,5 @@
 import type { SessionEvent } from "../../protocol/index.js";
 import { addUsage } from "./addUsage.js";
-import { aggregateQuotaContributions } from "./aggregateQuotaContributions.js";
 import {
     type AttributedSessionUsageGroup,
     type SessionContextUsage,
@@ -24,7 +23,7 @@ export function aggregateSessionUsage(
 ): SessionUsageSummary {
     const sessionTokenCount = aggregateSessionTokenCount(events);
     if (metadata.type === "subagent") {
-        return { groups: [], observedQuota: [], sessionTokenCount };
+        return { groups: [], sessionTokenCount };
     }
 
     let groups: SessionUsageGroup[] = [];
@@ -215,7 +214,6 @@ export function aggregateSessionUsage(
     return {
         ...(currentContext === undefined ? {} : { currentContext }),
         groups,
-        observedQuota: aggregateQuotaContributions(events),
         sessionTokenCount,
     };
 }

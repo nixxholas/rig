@@ -3,9 +3,6 @@ import {
     CodexImageGenerationError,
     CodexProvider,
     CodexSessionCredential,
-    createProviderQuotaCache,
-    fetchCodexProviderQuota,
-    unavailableProviderQuota,
 } from "@slopus/rig-providers";
 import {
     builtinModelProfiles,
@@ -25,17 +22,6 @@ export function codexExecution(options: {
 }): ExecutorProvider {
     const baseUrl = options.config.baseUrl ?? options.env.RIG_CODEX_BASE_URL;
     const transport = options.config.transport ?? options.env.RIG_CODEX_TRANSPORT;
-    const quota = createProviderQuotaCache(() =>
-        options.apiKey !== undefined
-            ? Promise.resolve(unavailableProviderQuota("codex", Date.now()))
-            : fetchCodexProviderQuota({
-                  env: options.env,
-                  ...(options.config.authFile === undefined
-                      ? {}
-                      : { authPath: options.config.authFile }),
-                  ...(baseUrl === undefined ? {} : { baseUrl }),
-              }),
-    );
     const loadCredential = async () =>
         (options.apiKey === undefined
             ? null
@@ -99,7 +85,6 @@ export function codexExecution(options: {
         },
         profiles: builtinModelProfiles(options.id, "codex"),
         serviceTiers: ["fast"],
-        quota: (quotaOptions) => quota.get(quotaOptions),
         sessionId: options.sessionId ?? options.id,
         native,
     };

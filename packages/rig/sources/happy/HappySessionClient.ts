@@ -778,9 +778,7 @@ export class HappySessionClient {
             this.kick();
             await this.#syncPromise;
             this.#sendSessionEnd();
-            const remoteSessionId = this.#repository.getSession(
-                this.#session.id,
-            )?.remoteSessionId;
+            const remoteSessionId = this.#repository.getSession(this.#session.id)?.remoteSessionId;
             if (remoteSessionId !== undefined) {
                 await this.#request(
                     `${this.#configuration.serverUrl}/v1/sessions/${encodeURIComponent(remoteSessionId)}/archive`,

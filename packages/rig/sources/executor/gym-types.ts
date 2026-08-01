@@ -1,3 +1,4 @@
+import type { ProviderUsage } from "@slopus/rig-providers";
 import type {
     AssistantContent,
     Context,
@@ -16,6 +17,8 @@ export interface GymInferenceRequest {
 }
 
 export interface GymInferenceResponse {
+    /** Account usage the scripted provider reports while it answers, as Claude does. */
+    accountUsage?: ProviderUsage;
     compactionContext?: Context;
     compactionSummary?: string;
     completionDelayMs?: number;

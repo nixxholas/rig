@@ -2008,7 +2008,6 @@ describe("ChatStore", () => {
             usage: {
                 currentProviderId: "claude",
                 groups: [],
-                observedQuota: [],
                 quotas: [],
                 sessionTokenCount: { lastContextTokens: 0, totalTokens: 0 },
             },
@@ -2721,7 +2720,6 @@ describe("ChatStore", () => {
                             usage: usage(100, 20, 0.5),
                         },
                     ],
-                    observedQuota: [],
                     quotas: [],
                     sessionTokenCount: { lastContextTokens: 120, totalTokens: 120 },
                 },
@@ -2741,7 +2739,6 @@ describe("ChatStore", () => {
                 usage: {
                     currentProviderId: "claude",
                     groups: [],
-                    observedQuota: [],
                     quotas: [],
                     sessionTokenCount: { lastContextTokens: 0, totalTokens: 0 },
                 },
@@ -2761,10 +2758,9 @@ describe("ChatStore", () => {
                     runId: "run-1",
                 }),
             );
+
             store.apply(
                 event("provider_quota_observed", {
-                    observationId: "quota-1",
-                    phase: "before",
                     providerId: "claude",
                     quota: {
                         capturedAt: 9,
@@ -2778,13 +2774,10 @@ describe("ChatStore", () => {
                             },
                         },
                     },
-                    runId: "run-1",
                 }),
             );
             store.apply(
                 event("provider_quota_observed", {
-                    observationId: "quota-1",
-                    phase: "after",
                     providerId: "claude",
                     quota: {
                         capturedAt: 10,
@@ -2798,30 +2791,18 @@ describe("ChatStore", () => {
                             },
                         },
                     },
-                    runId: "run-1",
-                }),
-            );
-            store.apply(
-                event("session_quota_contribution_changed", {
-                    observedQuota: [
-                        {
-                            providerId: "claude",
-                            windows: { fiveHour: { observedUsedPercent: 5 } },
-                        },
-                    ],
                 }),
             );
 
             expect(store.session().usage).toMatchObject({
                 context: { approximate: false, totalTokens: 211 },
                 currentProviderId: "claude",
-                observedQuota: [
+                quotas: [
                     {
                         providerId: "claude",
-                        windows: { fiveHour: { observedUsedPercent: 5 } },
+                        quota: { capturedAt: 10, windows: { fiveHour: { usedPercent: 25 } } },
                     },
                 ],
-                quotas: [{ providerId: "claude", quota: { capturedAt: 10 } }],
                 totalCost: 0.75,
                 totalTokens: 230,
             });
@@ -2896,7 +2877,6 @@ describe("ChatStore", () => {
                     },
                     currentProviderId: "claude",
                     groups: [],
-                    observedQuota: [],
                     quotas: [],
                     sessionTokenCount: { lastContextTokens: 100, totalTokens: 100 },
                 },

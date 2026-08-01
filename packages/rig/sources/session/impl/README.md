@@ -21,7 +21,6 @@ isLiveOnlySessionEvent -> isTransientInferenceSessionEvent
 InMemorySessionStore ----\
 PersistentSessionStore ---> sessionOrderKeyForCreation  sidebar position at create
 
-latestObservedProviderQuotas  most recent quota per provider from an event list
 ```
 
 Each file holds one function, and its tests live in `impl/tests`.

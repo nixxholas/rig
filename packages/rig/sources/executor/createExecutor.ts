@@ -1,6 +1,6 @@
 import { release } from "node:os";
 
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/rig-providers";
 import { Executor, type ExecutorProvider, type Identity } from "@slopus/rig-execution";
 
 import type { AgentContext } from "../agent/context/AgentContext.js";
@@ -17,10 +17,8 @@ export interface CreateExecutorOptions {
     apiKey?: string;
     env: NodeJS.ProcessEnv;
     identity?: Identity;
-    loadProviderQuota?: (
-        providerId: string,
-        options?: { fresh?: boolean },
-    ) => Promise<ProviderQuota | undefined>;
+    /** Receives account usage a provider reports while it is already answering. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     providers: ConfigProviders;
     resolveCodexStreamMaxRetries?: () => number;
     sessionId?: string;
@@ -94,12 +92,9 @@ function configuredExecutor(
                 config,
                 env: options.env,
                 id,
-                ...(options.loadProviderQuota === undefined
+                ...(options.onAccountUsage === undefined
                     ? {}
-                    : {
-                          loadQuota: (quotaOptions?: { fresh?: boolean }) =>
-                              options.loadProviderQuota!(id, quotaOptions),
-                      }),
+                    : { onAccountUsage: options.onAccountUsage }),
                 ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
             })
           : config.type === "grok"

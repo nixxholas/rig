@@ -1046,23 +1046,6 @@ export class ChatStore {
                 this.#recordProviderQuota(data.providerId, data.quota);
                 break;
             }
-            case "session_quota_contribution_changed": {
-                const usage = this.#session.usage;
-                if (usage !== undefined) {
-                    this.#session = {
-                        ...this.#session,
-                        usage: {
-                            ...usage,
-                            observedQuota: (
-                                event.data as {
-                                    observedQuota: SessionUsageSnapshot["observedQuota"];
-                                }
-                            ).observedQuota,
-                        },
-                    };
-                }
-                break;
-            }
             case "agent_event":
                 this.#applyAgentEvent(
                     (event.data as { event: AgentLoopEvent }).event,
@@ -1156,7 +1139,6 @@ export class ChatStore {
                                     currentProviderId:
                                         data.snapshot.providerId ?? usage.currentProviderId,
                                     groups: [],
-                                    observedQuota: [],
                                     quotas: usage.quotas,
                                     sessionTokenCount: {
                                         lastContextTokens: 0,
@@ -2126,7 +2108,6 @@ export class ChatStore {
             applicationUsage({
                 currentProviderId: this.#session.providerId,
                 groups: [],
-                observedQuota: [],
                 quotas: [],
                 sessionTokenCount: this.#session.tokens ?? {
                     lastContextTokens: 0,
@@ -2153,6 +2134,11 @@ export class ChatStore {
         };
     }
 
+    /**
+     * Keeps the newest quota a provider has reported for this session, so the
+     * usage display moves as the account is spent rather than only when it is
+     * polled.
+     */
     #recordProviderQuota(
         providerId: string,
         quota: SessionUsageSnapshot["quotas"][number]["quota"],

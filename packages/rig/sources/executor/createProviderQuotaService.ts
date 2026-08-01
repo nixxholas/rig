@@ -2,23 +2,20 @@ import {
     createProviderQuotaCache,
     fetchCodexProviderQuota,
     type ProviderQuota,
-    type ProviderQuotaWindow,
     type ProviderUsage,
     unavailableProviderQuota,
 } from "@slopus/rig-providers";
 
 import type { ConfigProviders } from "../config/types.js";
+import { providerUsageToClaudeQuota } from "./providerUsageToClaudeQuota.js";
 
 export interface ProviderQuotaService {
-    get(providerId: string, options?: { fresh?: boolean }): Promise<ProviderQuota | undefined>;
+    get(providerId: string): Promise<ProviderQuota | undefined>;
 }
 
 export interface CreateProviderQuotaServiceOptions {
     env?: NodeJS.ProcessEnv;
-    loadClaudeUsage?: (
-        providerId: string,
-        options?: { fresh?: boolean },
-    ) => Promise<ProviderUsage | null>;
+    loadClaudeUsage?: (providerId: string) => Promise<ProviderUsage | null>;
     loadCodexQuota?: () => Promise<ProviderQuota>;
     now?: () => number;
     providers?: ConfigProviders;
@@ -43,52 +40,18 @@ export function createProviderQuotaService(
     );
 
     return {
-        async get(providerId, getOptions) {
-            if (providerId === "codex") return codex.get(getOptions);
+        async get(providerId) {
+            if (providerId === "codex") return codex.get();
             const configuredProvider = options.providers?.[providerId];
             if (providerId !== "claude" && configuredProvider?.type !== "claude") {
                 return undefined;
             }
             if (options.loadClaudeUsage === undefined) return undefined;
             try {
-                return providerUsageToClaudeQuota(
-                    await options.loadClaudeUsage(providerId, getOptions),
-                    now(),
-                );
+                return providerUsageToClaudeQuota(await options.loadClaudeUsage(providerId), now());
             } catch {
                 return unavailableProviderQuota("claude", now());
             }
         },
-    };
-}
-
-function providerUsageToClaudeQuota(
-    usage: ProviderUsage | null,
-    capturedAt: number,
-): ProviderQuota {
-    if (usage === null) return unavailableProviderQuota("claude", capturedAt);
-    return {
-        capturedAt: usage.capturedAt,
-        source: "claude",
-        windows: {
-            fiveHour: providerUsageWindowToQuota(usage.windows.fiveHour, usage.capturedAt),
-            weekly: providerUsageWindowToQuota(usage.windows.weekly, usage.capturedAt),
-        },
-    };
-}
-
-function providerUsageWindowToQuota(
-    window: ProviderUsage["windows"]["fiveHour"],
-    capturedAt: number,
-): ProviderQuotaWindow {
-    if (window === null || window.resetsAt === null) {
-        return { status: "unavailable" };
-    }
-    return {
-        capturedAt,
-        status: "available",
-        usedPercent: window.usedPercent,
-        resetsAt: window.resetsAt,
-        ...(window.durationMs === null ? {} : { durationMs: window.durationMs }),
     };
 }

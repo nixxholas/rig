@@ -249,8 +249,8 @@ describe("HappySyncService session archival", () => {
 
         try {
             service.attach(session);
-            await waitFor(() =>
-                sockets[0]?.emitted.some(([event]) => event === "session-alive") === true,
+            await waitFor(
+                () => sockets[0]?.emitted.some(([event]) => event === "session-alive") === true,
             );
 
             session.setArchived(true);
@@ -258,20 +258,19 @@ describe("HappySyncService session archival", () => {
             if (archivedEvent === undefined) throw new Error("The archive event was not recorded.");
             service.observe(archivedEvent, session);
 
-            await waitFor(() =>
-                sockets[0]?.emitted.some(([event]) => event === "session-end") === true,
+            await waitFor(
+                () => sockets[0]?.emitted.some(([event]) => event === "session-end") === true,
             );
             await waitFor(() => archiveRequestCount(request) === 1);
-            expect(sockets[0]?.emitted.find(([event]) => event === "session-end")?.[1]).toMatchObject(
-                {
-                    sid: "happy-session-archive",
-                },
-            );
+            expect(
+                sockets[0]?.emitted.find(([event]) => event === "session-end")?.[1],
+            ).toMatchObject({
+                sid: "happy-session-archive",
+            });
             const archivedMetadata = decryptMetadata(
                 secret,
-                sockets[0]?.emitted
-                    .filter(([event]) => event === "update-metadata")
-                    .at(-1)?.[1].metadata,
+                sockets[0]?.emitted.filter(([event]) => event === "update-metadata").at(-1)?.[1]
+                    .metadata,
             );
             expect(archivedMetadata).toMatchObject({
                 archiveReason: "Session archived in Rig",
@@ -304,9 +303,8 @@ describe("HappySyncService session archival", () => {
             );
             const restoredMetadata = decryptMetadata(
                 secret,
-                sockets[1]?.emitted
-                    .filter(([event]) => event === "update-metadata")
-                    .at(-1)?.[1].metadata,
+                sockets[1]?.emitted.filter(([event]) => event === "update-metadata").at(-1)?.[1]
+                    .metadata,
             );
             expect(restoredMetadata).not.toHaveProperty("archiveReason");
             expect(restoredMetadata).not.toHaveProperty("archivedBy");
@@ -322,11 +320,11 @@ describe("HappySyncService session archival", () => {
             restartedService.observe(restartedArchiveEvent, session);
 
             await waitFor(() => archiveRequestCount(request) === 2);
-            expect(sockets[2]?.emitted.find(([event]) => event === "session-end")?.[1]).toMatchObject(
-                {
-                    sid: "happy-session-archive",
-                },
-            );
+            expect(
+                sockets[2]?.emitted.find(([event]) => event === "session-end")?.[1],
+            ).toMatchObject({
+                sid: "happy-session-archive",
+            });
         } finally {
             await restartedService?.close();
             await service.close();
@@ -397,15 +395,11 @@ function decode(secret: Uint8Array, value: string): unknown {
 function archiveRequestCount(request: ReturnType<typeof vi.fn<typeof fetch>>): number {
     return request.mock.calls.filter(
         ([input]) =>
-            new URL(String(input)).pathname ===
-            "/v1/sessions/happy-session-archive/archive",
+            new URL(String(input)).pathname === "/v1/sessions/happy-session-archive/archive",
     ).length;
 }
 
-function decryptMetadata(
-    secret: Uint8Array,
-    value: unknown,
-): Record<string, unknown> | undefined {
+function decryptMetadata(secret: Uint8Array, value: unknown): Record<string, unknown> | undefined {
     if (typeof value !== "string") return undefined;
     const decoded = decode(secret, value);
     return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)

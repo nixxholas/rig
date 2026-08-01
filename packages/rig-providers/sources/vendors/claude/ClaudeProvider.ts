@@ -1,4 +1,5 @@
 import type { ProviderModality } from "@/core/ProviderModality.js";
+import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import { BaseProvider } from "@/core/BaseProvider.js";
 import type { SessionOptions } from "@/core/SessionOptions.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
@@ -14,6 +15,8 @@ export interface ClaudeProviderOptions {
     credential: ClaudeCredential;
     env?: NodeJS.ProcessEnv;
     model?: string;
+    /** Receives the account usage the limiter reports during inference. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     pathToClaudeCodeExecutable?: string;
     query?: ClaudeSdkQuery;
     /** Identifies the caller instead of Claude Code, which is the default. */
@@ -28,6 +31,7 @@ export class ClaudeProvider extends BaseProvider {
     readonly credential: ClaudeCredential;
     readonly env: NodeJS.ProcessEnv | undefined;
     readonly model: string | undefined;
+    readonly onAccountUsage: ((usage: ProviderUsage) => void) | undefined;
     readonly pathToClaudeCodeExecutable: string | undefined;
     readonly query: ClaudeSdkQuery | undefined;
     readonly userAgent: string | undefined;
@@ -37,6 +41,7 @@ export class ClaudeProvider extends BaseProvider {
         this.credential = options.credential;
         this.env = options.env;
         this.model = options.model === undefined ? undefined : resolveClaudeModelId(options.model);
+        this.onAccountUsage = options.onAccountUsage;
         this.pathToClaudeCodeExecutable = options.pathToClaudeCodeExecutable;
         this.query = options.query;
         this.userAgent = options.userAgent;
@@ -48,6 +53,7 @@ export class ClaudeProvider extends BaseProvider {
             credential: this.credential,
             ...(this.env === undefined ? {} : { env: this.env }),
             ...(this.model === undefined ? {} : { model: this.model }),
+            ...(this.onAccountUsage === undefined ? {} : { onAccountUsage: this.onAccountUsage }),
             ...(this.pathToClaudeCodeExecutable === undefined
                 ? {}
                 : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),

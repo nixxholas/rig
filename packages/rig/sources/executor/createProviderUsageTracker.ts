@@ -2,8 +2,14 @@ import type { ProviderUsage } from "@slopus/rig-providers";
 
 import { asyncQueue, forever, type GracefulShutdown } from "../concurrency/index.js";
 
-/** How often each provider is asked for its usage. */
-export const PROVIDER_USAGE_POLL_INTERVAL_MS = 15 * 60 * 1_000;
+/**
+ * How often each provider is asked for its usage.
+ *
+ * Vendors rate-limit their own usage endpoints, and Claude reports the account
+ * again during ordinary inference, so a patient schedule costs almost nothing
+ * and keeps a busy account from being refused for asking too often.
+ */
+export const PROVIDER_USAGE_POLL_INTERVAL_MS = 60 * 60 * 1_000;
 
 export interface ProviderUsageEntry {
     providerId: string;
@@ -19,8 +25,12 @@ export interface ProviderUsageTracker {
     /** Every tracked provider, including those that have never answered. */
     all(): readonly ProviderUsageEntry[];
     get(providerId: string): ProviderUsageEntry | undefined;
+    /** Stores a reading a provider volunteered, without asking it anything. */
+    observe(usage: ProviderUsage): void;
     /** Asks one provider now, outside the schedule, and stores the result. */
     refresh(providerId: string): Promise<ProviderUsageEntry | undefined>;
+    /** Brings every provider's reading up to date and returns them all. */
+    refreshAll(): Promise<readonly ProviderUsageEntry[]>;
     /** Starts one polling loop per provider. */
     start(): void;
 }
@@ -96,8 +106,21 @@ export function createProviderUsageTracker(
         get(providerId) {
             return entries.get(providerId);
         },
+        observe(usage) {
+            const entry = entries.get(usage.providerId);
+            if (entry === undefined) return;
+            entry.checkedAt = now();
+            entry.error = null;
+            entry.usage = usage;
+        },
         refresh(providerId) {
             return poll(providerId);
+        },
+        async refreshAll() {
+            // A provider that cannot answer keeps its previous reading, so one
+            // slow or broken vendor never withholds the others.
+            await Promise.all([...entries.keys()].map((providerId) => poll(providerId)));
+            return [...entries.values()];
         },
         start() {
             if (started) return;

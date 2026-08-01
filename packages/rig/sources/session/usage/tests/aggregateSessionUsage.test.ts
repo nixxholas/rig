@@ -256,7 +256,6 @@ describe("aggregateSessionUsage", () => {
 
         expect(result).toEqual({
             groups: [],
-            observedQuota: [],
             sessionTokenCount: { lastContextTokens: 100, totalTokens: 100 },
         });
     });

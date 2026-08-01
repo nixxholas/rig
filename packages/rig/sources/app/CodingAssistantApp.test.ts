@@ -5932,7 +5932,6 @@ describe("CodingAssistantApp", () => {
                             },
                         },
                     ],
-                    observedQuota: [],
                     sessionTokenCount: { lastContextTokens: 1_370, totalTokens: 1_370 },
                     quotas: [
                         {
@@ -6027,7 +6026,6 @@ describe("CodingAssistantApp", () => {
         pendingUsage.resolve({
             currentProviderId: "codex",
             groups: [],
-            observedQuota: [],
             quotas: [],
             sessionTokenCount: { lastContextTokens: 0, totalTokens: 0 },
         });

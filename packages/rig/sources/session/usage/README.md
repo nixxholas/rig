@@ -1,20 +1,17 @@
 # session/usage
 
 Turns a session's events into the totals Rig shows: tokens and cost per model,
-how much of the context window a conversation is using, and how much of a
-provider's quota the session accounts for.
+and how much of the context window a conversation is using.
 
 ```
    session events
          |
          v
    aggregateSessionUsage  ------> SessionUsageSummary
-         |     |     |                 groups[]           per model and provider
-         |     |     |                 context            context window pressure
-         |     |     |                 observedQuota      quota contributions
-         |     |     |                 sessionTokenCount  counted tokens
-         |     |     |
-         |     |     +--> aggregateQuotaContributions   quota windows per provider
+         |     |                       groups[]           per model and provider
+         |     |                       context            context window pressure
+         |     |                       sessionTokenCount  counted tokens
+         |     |
          |     +--------> addUsage                      adds two Usage records
          +--------------> zeroUsage                     an empty Usage record
 

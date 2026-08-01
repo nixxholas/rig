@@ -13,7 +13,7 @@ const codex = defineModel({
 });
 
 describe("formatSessionUsageSummary", () => {
-    it("renders detailed compact tokens, both quota windows, observed movement, and context", () => {
+    it("renders detailed compact tokens, both quota windows, and context", () => {
         expect(
             formatSessionUsageSummary(summary(), [{ model: codex, providerId: "codex" }], 1_000),
         ).toBe(
@@ -25,9 +25,6 @@ describe("formatSessionUsageSummary", () => {
                 "  Account quota",
                 "    5-hour: 68% left · resets in 2h 14m",
                 "    Weekly: 79% left · resets in 6d 2h",
-                "    Observed remaining: 5h -3.5% · week -1% (approx.)",
-                "",
-                "Observed remaining may include other account activity.",
                 "Session tokens: 1.4k",
             ].join("\n"),
         );
@@ -49,16 +46,14 @@ describe("formatSessionUsageSummary", () => {
                 },
             },
         ];
-        value.observedQuota = [];
 
         const text = formatSessionUsageSummary(value, [{ model: codex, providerId: "codex" }]);
         expect(text).toContain("5-hour: unavailable");
         expect(text).toContain("Weekly: unavailable");
-        expect(text).not.toContain("Observed remaining:");
         expect(text).toContain("Context: ~1.3k / 200k");
     });
 
-    it("shows authoritative Claude cost and keeps provider observations separate", () => {
+    it("shows authoritative Claude cost and keeps provider sections separate", () => {
         const value = summary();
         value.currentProviderId = "claude";
         value.groups = [
@@ -74,22 +69,10 @@ describe("formatSessionUsageSummary", () => {
                 },
             },
         ];
-        value.observedQuota = [
-            ...value.observedQuota,
-            {
-                providerId: "claude",
-                windows: {
-                    fiveHour: { observedUsedPercent: 0 },
-                    weekly: { observedUsedPercent: 2 },
-                },
-            },
-        ];
 
         const text = formatSessionUsageSummary(value, [{ model: codex, providerId: "codex" }]);
         expect(text).toContain("Claude Code\n  Sonnet 4 6\n    100 input · 20 output");
         expect(text).toContain("· $0.12");
-        expect(text).toContain("Observed remaining: week -2% (approx.)");
-        expect(text).toContain("Observed remaining may include other account activity.");
     });
 
     it("formats sub-one-percent quota values without a leading zero", () => {
@@ -100,10 +83,6 @@ describe("formatSessionUsageSummary", () => {
             status: "available",
             usedPercent: 99.8,
         };
-        value.observedQuota[0]!.windows = {
-            fiveHour: { observedUsedPercent: 0.2 },
-            weekly: { observedUsedPercent: 0.9 },
-        };
 
         const text = formatSessionUsageSummary(
             value,
@@ -111,7 +90,6 @@ describe("formatSessionUsageSummary", () => {
             1_000,
         );
         expect(text).toContain("5-hour: .2% left");
-        expect(text).toContain("Observed remaining: 5h -.2% · week -.9% (approx.)");
     });
 
     it("uses compact million-scale token labels", () => {
@@ -135,7 +113,6 @@ describe("formatSessionUsageSummary", () => {
     it("renders current context before the selected model has a usage group", () => {
         const value = summary();
         value.groups = [];
-        value.observedQuota = [];
         value.quotas = [];
         value.context = { ...value.context!, approximate: true, totalTokens: 600 };
 
@@ -153,7 +130,6 @@ describe("formatSessionUsageSummary", () => {
         delete value.context;
         value.currentProviderId = providerId;
         value.groups = [];
-        value.observedQuota = [];
         value.quotas = [];
 
         expect(formatSessionUsageSummary(value, []).split("\n")[0]).toBe(productName);
@@ -177,15 +153,6 @@ function summary(): GetSessionUsageResponse {
                 providerId: "codex",
                 requestedModelId: codex.id,
                 usage: { ...usage(1_200, 100, 40, 30, 1_370), reasoning: 20 },
-            },
-        ],
-        observedQuota: [
-            {
-                providerId: "codex",
-                windows: {
-                    fiveHour: { observedUsedPercent: 3.5 },
-                    weekly: { observedUsedPercent: 1 },
-                },
             },
         ],
         sessionTokenCount: { lastContextTokens: 1_370, totalTokens: 1_370 },

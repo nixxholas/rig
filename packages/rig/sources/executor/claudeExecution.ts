@@ -4,8 +4,7 @@ import {
     ClaudeCodeCredential,
     ClaudeOAuthCredential,
     ClaudeProvider,
-    type ProviderQuota,
-    unavailableProviderQuota,
+    type ProviderUsage,
 } from "@slopus/rig-providers";
 import { builtinModelProfiles, type ExecutorProvider } from "@slopus/rig-execution";
 
@@ -16,7 +15,8 @@ export function claudeExecution(options: {
     config: ConfigClaudeProvider;
     env: NodeJS.ProcessEnv;
     id: string;
-    loadQuota?: (options?: { fresh?: boolean }) => Promise<ProviderQuota | undefined>;
+    /** Receives the account usage Claude reports while it is already answering. */
+    onAccountUsage?: (usage: ProviderUsage) => void;
     sessionId?: string;
 }): ExecutorProvider {
     const executable = options.config.executable ?? options.env.RIG_CLAUDE_CODE_EXECUTABLE;
@@ -32,13 +32,6 @@ export function claudeExecution(options: {
             ...(environment.SHELL === undefined ? {} : { shell: environment.SHELL }),
         }),
         profiles: builtinModelProfiles(options.id, "claude"),
-        ...(options.loadQuota === undefined
-            ? {}
-            : {
-                  quota: async (quotaOptions?: { fresh?: boolean }) =>
-                      (await options.loadQuota?.(quotaOptions)) ??
-                      unavailableProviderQuota("claude", Date.now()),
-              }),
         sessionId: options.sessionId ?? options.id,
         native: async () => {
             const credential =
@@ -67,6 +60,14 @@ export function claudeExecution(options: {
             return new ClaudeProvider({
                 credential,
                 env: environment,
+                ...(options.onAccountUsage === undefined
+                    ? {}
+                    : {
+                          // The vendor reading knows nothing of Rig's provider
+                          // names, so the configured account is named here.
+                          onAccountUsage: (usage) =>
+                              options.onAccountUsage?.({ ...usage, providerId: options.id }),
+                      }),
                 ...(pathToClaudeCodeExecutable === undefined ? {} : { pathToClaudeCodeExecutable }),
             });
         },

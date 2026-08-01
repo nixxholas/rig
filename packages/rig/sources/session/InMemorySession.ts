@@ -3,7 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
 import { Executor } from "@slopus/rig-execution";
-import { areProviderModelsCompatible } from "@slopus/rig-providers";
+import { areProviderModelsCompatible, type ProviderUsage } from "@slopus/rig-providers";
 
 import { errorToMessage } from "../errorToMessage.js";
 import { toLocalDate } from "../executor/toLocalDate.js";
@@ -95,7 +95,6 @@ import { IDLE_SESSION_ACTIVITY, sessionActivityAfterEvent } from "./sessionActiv
 import { aggregateSessionTokenCount } from "./usage/aggregateSessionTokenCount.js";
 import { sessionTokenCountAfterEvent } from "./usage/sessionTokenCountAfterEvent.js";
 import type { Model, Provider, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
-import type { ProviderQuota } from "@slopus/rig-providers";
 import { createEncryptedAgentTransportScope } from "../executor/createEncryptedAgentTransportScope.js";
 import type {
     DurableUserInputCall,
@@ -150,6 +149,7 @@ import { resolveSteeringContinuationMessageIds } from "./impl/resolveSteeringCon
 import { SessionEventLog } from "./SessionEventLog.js";
 import { isTransientInferenceSessionEvent } from "./impl/isTransientInferenceSessionEvent.js";
 import { affectsSessionUsage } from "./impl/affectsSessionUsage.js";
+import { providerUsageToClaudeQuota } from "../executor/providerUsageToClaudeQuota.js";
 import type { AgentSessionManager } from "./AgentSessionManager.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { summarizeDockerExecution } from "../execution/index.js";
@@ -158,7 +158,6 @@ import {
     addUsage,
     aggregateSessionUsage,
     type SessionUsageGroup,
-    SessionQuotaContributionTracker,
     type SessionUsageSummary,
     zeroUsage,
 } from "./usage/index.js";
@@ -584,7 +583,6 @@ export class InMemorySession {
     #totalTokens = 0;
     #sessionTokenCount: SessionTokenCount = { lastContextTokens: 0, totalTokens: 0 };
     #usage: Usage = zeroUsage();
-    #quotaContributionTracker = new SessionQuotaContributionTracker();
     #usageSummaryCache: SessionUsageSummary | undefined;
     #usageSummaryRevision = 0;
     #cachedUsageSummaryRevision = -1;
@@ -817,9 +815,6 @@ export class InMemorySession {
         for (const event of this.events.all()) {
             this.#recordRunFacts(event);
             this.#recordPermissionReview(event);
-            if (options.restore?.usageSummary === undefined) {
-                this.#quotaContributionTracker.apply(event);
-            }
         }
         if (options.restore?.usage === undefined) {
             this.#usage = this.#sumCommittedUsage();
@@ -854,10 +849,6 @@ export class InMemorySession {
                 this.#cachedUsageSummaryRevision = this.#usageSummaryRevision;
                 this.#cachedUsageEventRevision = this.events.usageRevision();
             }
-            this.#quotaContributionTracker.seed(
-                options.restore.usageSummary.observedQuota,
-                this.events.latestProviderQuotas(),
-            );
         }
 
         this.#ensureKnownModel(this.#modelId, this.#providerId);
@@ -1350,7 +1341,6 @@ export class InMemorySession {
             });
             const summary = {
                 ...reset,
-                observedQuota: this.#quotaContributionTracker.snapshot(),
                 sessionTokenCount: { ...this.#sessionTokenCount },
             };
             this.#persistedUsageBase = summary;
@@ -1413,16 +1403,11 @@ export class InMemorySession {
         const summary: SessionUsageSummary = {
             ...(currentContext === undefined ? {} : { currentContext }),
             groups,
-            observedQuota: this.#quotaContributionTracker.snapshot(),
             sessionTokenCount: { ...this.#sessionTokenCount },
         };
         this.#persistedUsageBase = summary;
         this.#usageEventsAfterBase = [];
         return summary;
-    }
-
-    providerQuota(options?: { fresh?: boolean }): Promise<ProviderQuota | undefined> {
-        return this.#ensureRuntime().executor.quota?.(options) ?? Promise.resolve(undefined);
     }
 
     encryptedAgentTransportScope(): string | undefined {
@@ -5142,6 +5127,18 @@ export class InMemorySession {
             : this.#persistence.transaction(append);
     }
 
+    /**
+     * Records what a provider said about the account while it was answering
+     * this session. It cost no extra request, so it is the freshest quota a
+     * client can be shown.
+     */
+    #recordObservedProviderUsage(usage: ProviderUsage): void {
+        this.#append("provider_quota_observed", {
+            providerId: usage.providerId,
+            quota: providerUsageToClaudeQuota(usage, this.#now()),
+        });
+    }
+
     #appendDurableEvent(event: SessionEvent): void {
         if (!this.isSubagent() && this.#request.trackUnread === true) {
             this.#unread = sessionUnreadStateAfterEvent(this.#unread, event);
@@ -5161,7 +5158,6 @@ export class InMemorySession {
             if (this.#persistedUsageBase !== undefined) this.#usageEventsAfterBase.push(event);
             this.#ownedUsageEventRevision = this.events.usageRevision();
         }
-        this.#quotaContributionTracker.apply(event);
         if (!isTransientInferenceSessionEvent(event)) this.#saveSession();
         this.#recordRunFacts(event);
         this.#recordPermissionReview(event);
@@ -5761,31 +5757,6 @@ export class InMemorySession {
         this.#appendAgentMessage(runId, message);
     }
 
-    async #observeProviderQuota(
-        provider: Provider,
-        runId: string,
-        observationId: string,
-        phase: "before" | "after",
-    ): Promise<void> {
-        if (this.isSubagent() || provider.quota === undefined) return;
-        try {
-            const quota = await provider.quota({ fresh: true });
-            this.#append("provider_quota_observed", {
-                observationId,
-                phase,
-                providerId: provider.id,
-                quota,
-                runId,
-            });
-            this.#append("session_quota_contribution_changed", {
-                observedQuota: this.#quotaContributionTracker.snapshot(),
-            });
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            // Quota observation must never fail or replay an otherwise completed agent run.
-        }
-    }
-
     #finishElapsedInterval(): void {
         if (this.#activeSince === undefined) return;
         this.#elapsedMs += Math.max(0, this.#now() - this.#activeSince);
@@ -5901,6 +5872,7 @@ export class InMemorySession {
         if (this.#contextMessages !== undefined) {
             options.contextMessages = this.#contextMessages;
         }
+        options.onAccountUsage = (usage) => this.#recordObservedProviderUsage(usage);
         if (this.#effort !== undefined) options.effort = this.#effort;
         if (this.#serviceTier !== undefined) options.serviceTier = this.#serviceTier;
         if (this.#instructions !== undefined) options.instructions = this.#instructions;
@@ -6416,7 +6388,6 @@ export class InMemorySession {
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
 
         let runtime: CodingAssistantRuntime | undefined;
-        const quotaObservationId = createId();
         try {
             // The configuration applies before anything can await, so a run leaves the queue and
             // takes effect in one step. Nothing else can observe a started run still describing
@@ -6449,12 +6420,6 @@ export class InMemorySession {
             });
             runtime = this.#ensureRuntime();
             await this.#ensureMcpTools(runtime, controller.signal, queued.interactive !== false);
-            await this.#observeProviderQuota(
-                runtime.executor,
-                queued.runId,
-                quotaObservationId,
-                "before",
-            );
             runtime.agent.enqueueMessage(queued.userMessage);
             if (this.#contextMessages !== undefined) {
                 this.#contextMessages = [...this.#contextMessages, queued.userMessage];
@@ -6510,12 +6475,6 @@ export class InMemorySession {
                     this.#pendingSteeringContinuations.delete(queued.runId);
                 }
 
-                await this.#observeProviderQuota(
-                    runtime.executor,
-                    queued.runId,
-                    quotaObservationId,
-                    "after",
-                );
                 const completionStatus = this.#appendRunFinished(queued.runId, result);
                 if (completionStatus === "completed" && result.stopReason !== "error") {
                     this.#continueGoalIfIdle();
@@ -6540,14 +6499,6 @@ export class InMemorySession {
             this.#pauseActiveGoal();
             if (this.#activeRun?.runId === queued.runId) {
                 this.#activeRun = undefined;
-            }
-            if (runtime !== undefined) {
-                await this.#observeProviderQuota(
-                    runtime.executor,
-                    queued.runId,
-                    quotaObservationId,
-                    "after",
-                );
             }
             await debugLog
                 ?.record("run-error", { error, runId: queued.runId, sessionId: this.id })

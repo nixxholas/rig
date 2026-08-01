@@ -31,7 +31,7 @@ export const getProviderUsageTool = defineTool({
     name: "get_provider_usage",
     label: "get_provider_usage",
     description:
-        "Report how much of each configured provider account's plan has been used, when each limit resets, and whether an account is out of budget. Rig refreshes these readings on its own; they may be up to fifteen minutes old.",
+        "Report how much of each configured provider account's plan has been used, when each limit resets, and whether an account is out of budget. This returns the most recent reading Rig holds, refreshing it when the provider allows.",
     arguments: Type.Object({}, { additionalProperties: false }),
     returnType: Type.Object(
         { providers: Type.Array(providerEntry) },
@@ -39,9 +39,9 @@ export const getProviderUsageTool = defineTool({
     ),
     execution: "immediate",
     steerable: false,
-    execute(_args, context) {
-        const entries = context.providerUsage?.list() ?? [];
-        return Promise.resolve({ providers: entries.map(toToolEntry) });
+    async execute(_args, context) {
+        const entries = (await context.providerUsage?.current()) ?? [];
+        return { providers: entries.map(toToolEntry) };
     },
     toLLM: (result) => [
         {

@@ -137,10 +137,6 @@ export class Executor {
         return this.selectedProvider.extendProfilePromptContext;
     }
 
-    get quota(): ExecutorProvider["quota"] {
-        return this.selectedProvider.quota;
-    }
-
     get hasActiveSession(): boolean {
         return this.active !== undefined;
     }

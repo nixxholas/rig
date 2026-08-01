@@ -60,7 +60,6 @@ describe("selectToolsForModel", () => {
                 models: [modelAnthropicSonnet46],
                 serviceTiers: undefined,
                 extendProfilePromptContext: undefined,
-                quota: undefined,
                 stream: () => {
                     throw new Error("Not used");
                 },

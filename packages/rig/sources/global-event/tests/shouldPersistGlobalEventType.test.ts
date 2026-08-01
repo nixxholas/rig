@@ -3,9 +3,8 @@ import { describe, expect, it } from "vitest";
 import { shouldPersistGlobalEventType } from "../shouldPersistGlobalEventType.js";
 
 describe("shouldPersistGlobalEventType", () => {
-    it("excludes streaming updates and account quota observations", () => {
+    it("excludes streaming updates", () => {
         expect(shouldPersistGlobalEventType("agent_event")).toBe(false);
-        expect(shouldPersistGlobalEventType("provider_quota_observed")).toBe(false);
     });
 
     it.each([

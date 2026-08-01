@@ -336,8 +336,7 @@ async function runOwnedLocalProtocolServer(
             },
         });
         const providerQuotaService = createProviderQuotaService({
-            loadClaudeUsage: (providerId, getOptions) =>
-                providerUsageService.get(providerId, getOptions),
+            loadClaudeUsage: (providerId) => providerUsageService.get(providerId),
             providers: loadedConfig.config.providers,
         });
         providerUsageTracker = createProviderUsageTracker({
@@ -426,9 +425,18 @@ async function runOwnedLocalProtocolServer(
             createRuntime: (options) =>
                 createCodingAssistantAgent({
                     ...options,
-                    loadProviderQuota: (providerId, getOptions) =>
-                        providerQuotaService.get(providerId, getOptions),
+                    // What a provider says about the account while it answers is
+                    // both the daemon's freshest reading and the session's, so
+                    // the session is told the complete merged picture.
+                    onAccountUsage: (usage) => {
+                        const merged = providerUsageService.record(usage);
+                        providerUsageTracker?.observe(merged);
+                        options.onAccountUsage?.(merged);
+                    },
                     plugins,
+                    providerUsage: {
+                        current: async () => (await providerUsageTracker?.refreshAll()) ?? [],
+                    },
                     providers: availableProviders,
                     resolveCodexStreamMaxRetries: () => runtimeSettings.codexStreamMaxRetries,
                 }),

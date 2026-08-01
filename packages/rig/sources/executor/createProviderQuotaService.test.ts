@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createProviderQuotaService } from "./createProviderQuotaService.js";
 
 describe("createProviderQuotaService", () => {
-    it("caches Codex quota until an explicit refresh", async () => {
+    it("caches Codex quota while it stays fresh", async () => {
         let now = 1_000;
         const loadCodexQuota = vi.fn(async () => quota("codex", now, 30, 10));
         const service = createProviderQuotaService({
@@ -20,9 +20,8 @@ describe("createProviderQuotaService", () => {
         });
         now += 1;
         await service.get("codex");
-        await service.get("codex", { fresh: true });
 
-        expect(loadCodexQuota).toHaveBeenCalledTimes(2);
+        expect(loadCodexQuota).toHaveBeenCalledTimes(1);
         await expect(service.get("gym")).resolves.toBeUndefined();
     });
 
@@ -62,7 +61,7 @@ describe("createProviderQuotaService", () => {
             },
         });
 
-        await expect(service.get("kirill_claude", { fresh: true })).resolves.toEqual({
+        await expect(service.get("kirill_claude")).resolves.toEqual({
             capturedAt: 1_000,
             source: "claude",
             windows: {
@@ -82,7 +81,7 @@ describe("createProviderQuotaService", () => {
                 },
             },
         });
-        expect(loadClaudeUsage).toHaveBeenCalledWith("kirill_claude", { fresh: true });
+        expect(loadClaudeUsage).toHaveBeenCalledWith("kirill_claude");
     });
 });
 

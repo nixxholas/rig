@@ -1,11 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { Agent, createNodeAgentContext } from "../../agent/index.js";
 import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
 import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
 import { NativeProcessManager } from "../../processes/index.js";
 import { createEventIdFactory, type ModelCatalog } from "../../protocol/index.js";
-import type { ProviderQuota } from "@slopus/rig-providers";
+import type { ProviderUsage } from "@slopus/rig-providers";
 import {
     defineModel,
     defineProvider,
@@ -15,21 +15,16 @@ import {
 import { InMemorySession } from "../InMemorySession.js";
 
 describe("InMemorySession quota observations", () => {
-    it("persists fresh before/after checkpoints around a primary provider run", async () => {
+    it("records what a provider reported about the account while it answered", async () => {
         const model = defineModel({
             defaultThinkingLevel: "off",
-            id: "openai/quota-test",
+            id: "anthropic/quota-test",
             name: "Quota test",
             thinkingLevels: ["off"],
         });
-        const quota = vi
-            .fn<(options?: { fresh?: boolean }) => Promise<ProviderQuota>>()
-            .mockResolvedValueOnce(snapshot(20, 10))
-            .mockResolvedValueOnce(snapshot(23, 11));
         const provider = defineProvider({
-            id: "codex",
+            id: "claude",
             models: [model],
-            quota,
             stream: () => responseStream(model.id),
         });
         const catalog: ModelCatalog = {
@@ -40,7 +35,12 @@ describe("InMemorySession quota observations", () => {
         };
         const session = new InMemorySession({
             createEventId: createEventIdFactory(),
-            createRuntime: (options) => createRuntime(options, provider),
+            createRuntime: (options) => {
+                // The provider answers the run and reports the account in the
+                // same breath, which is exactly what the Claude limiter does.
+                options.onAccountUsage?.(observedUsage(42));
+                return createRuntime(options, provider);
+            },
             modelCatalog: catalog,
             request: {
                 cwd: "/tmp/rig-quota-observation",
@@ -51,64 +51,42 @@ describe("InMemorySession quota observations", () => {
 
         const submitted = session.submit({ text: "Observe this run." });
         await expect(session.waitForRun(submitted.runId)).resolves.toEqual({ status: "completed" });
-        await vi.waitFor(() => expect(quota).toHaveBeenCalledTimes(2));
 
         const observations = session.events
-            .since(undefined)
-            ?.filter((event) => event.type === "provider_quota_observed");
-        expect(observations).toHaveLength(2);
-        expect(observations?.map((event) => event.data.phase)).toEqual(["before", "after"]);
-        expect(observations?.[0]?.data.observationId).toBe(observations?.[1]?.data.observationId);
-        expect(quota).toHaveBeenNthCalledWith(1, { fresh: true });
-        expect(quota).toHaveBeenNthCalledWith(2, { fresh: true });
-        const authoritative = session.events
             .all()
-            .filter((event) => event.type === "session_quota_contribution_changed");
-        expect(authoritative.at(-1)?.data.observedQuota).toEqual([
-            {
-                providerId: "codex",
-                windows: {
-                    fiveHour: { observedUsedPercent: 3 },
-                    weekly: { observedUsedPercent: 1 },
-                },
-            },
-        ]);
-        const usage = session.usage();
-        expect(usage.observedQuota).toEqual([
-            {
-                providerId: "codex",
-                windows: {
-                    fiveHour: { observedUsedPercent: 3 },
-                    weekly: { observedUsedPercent: 1 },
-                },
-            },
-        ]);
-        // Repeated hello frames and usage-panel reads share the already reduced
-        // snapshot until a usage-bearing event invalidates it.
-        expect(session.usage()).toBe(usage);
+            .filter((event) => event.type === "provider_quota_observed");
+        expect(observations).toHaveLength(1);
+        expect(observations[0]?.data.providerId).toBe("claude");
+        expect(observations[0]?.data.quota.windows.fiveHour).toMatchObject({
+            status: "available",
+            usedPercent: 42,
+        });
+        // A window the reading left unmeasured is not drawn as an empty bar.
+        expect(observations[0]?.data.quota.windows.weekly).toEqual({ status: "unavailable" });
+        expect(session.events.latestProviderQuotas().get("claude")?.windows.fiveHour).toMatchObject(
+            { usedPercent: 42 },
+        );
     });
 });
 
-function snapshot(fiveHourUsed: number, weeklyUsed: number): ProviderQuota {
+function observedUsage(usedPercent: number): ProviderUsage {
     return {
-        capturedAt: 1,
-        source: "codex",
+        providerId: "claude",
+        vendor: "claude",
+        capturedAt: 1_000,
+        planName: "Max",
+        exhausted: false,
         windows: {
             fiveHour: {
-                capturedAt: 1,
-                durationMs: 18_000_000,
-                resetsAt: 100,
-                status: "available",
-                usedPercent: fiveHourUsed,
+                durationMs: 5 * 60 * 60 * 1_000,
+                resetsAt: 2_000,
+                startsAt: null,
+                usedPercent,
             },
-            weekly: {
-                capturedAt: 1,
-                durationMs: 604_800_000,
-                resetsAt: 200,
-                status: "available",
-                usedPercent: weeklyUsed,
-            },
+            weekly: null,
+            monthly: null,
         },
+        credits: null,
     };
 }
 
@@ -138,7 +116,7 @@ function responseStream(model: string): InferenceStream {
         api: "test",
         content: [{ text: "Observed.", type: "text" }],
         model,
-        provider: "codex",
+        provider: "claude",
         role: "assistant",
         stopReason: "stop",
         timestamp: 1,
