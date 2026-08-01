@@ -57,7 +57,7 @@ export async function buildExtension(
                             types: "./index.d.ts",
                         },
                     },
-                    name: "@slopus/plugins",
+                    name: "happy-plugins",
                     type: "module",
                 },
                 null,
@@ -85,7 +85,7 @@ export async function buildExtension(
                     noUncheckedIndexedAccess: true,
                     outDir: buildDirectory,
                     paths: {
-                        "@slopus/plugins": [join(sdkInstallDirectory, "index.d.ts")],
+                        "happy-plugins": [join(sdkInstallDirectory, "index.d.ts")],
                     },
                     resolveJsonModule: true,
                     rewriteRelativeImportExtensions: true,
@@ -128,7 +128,7 @@ async function resolveShippedSdkModuleDirectory(): Promise<string> {
         await access(join(shipped, "index.js"));
         return shipped;
     } catch {
-        return dirname(require.resolve("@slopus/plugins"));
+        return dirname(require.resolve("happy-plugins"));
     }
 }
 

@@ -26,7 +26,7 @@ afterEach(async () => {
     );
 });
 
-describe("@slopus/plugins client", () => {
+describe("happy-plugins client", () => {
     it("authenticates over the provided Unix socket and validates the response schema", async () => {
         const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-sdk-"));
         temporaryDirectories.push(directory);

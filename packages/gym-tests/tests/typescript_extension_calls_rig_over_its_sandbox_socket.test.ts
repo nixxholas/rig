@@ -18,7 +18,7 @@ describe("TypeScript extensions", () => {
                 "happy/extensions/project-counter/icon.png": PNG_SIGNATURE,
                 "happy/extensions/project-counter/index.ts": [
                     'import { writeFile } from "node:fs/promises";',
-                    'import { rig } from "@slopus/plugins";',
+                    'import { rig } from "happy-plugins";',
                     "",
                     "const projects = await rig.projects.list();",
                     'await writeFile("started.txt", `ready:${projects.length}\\n`);',

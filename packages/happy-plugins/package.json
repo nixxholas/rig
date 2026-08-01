@@ -1,12 +1,12 @@
 {
-    "name": "@slopus/plugins",
+    "name": "happy-plugins",
     "version": "0.0.1",
     "description": "The typed API available to TypeScript extensions running inside Rig.",
     "license": "MIT",
     "repository": {
         "type": "git",
         "url": "git+https://github.com/slopus/rig.git",
-        "directory": "packages/plugins"
+        "directory": "packages/happy-plugins"
     },
     "files": [
         "dist",

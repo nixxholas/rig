@@ -1,11 +1,11 @@
-# @slopus/plugins
+# happy-plugins
 
-`@slopus/plugins` is the public TypeScript SDK for writing local Rig extensions.
+`happy-plugins` is the public TypeScript SDK for writing local Rig extensions.
 
 An extension imports one ready-to-use client:
 
 ```ts
-import { rig } from "@slopus/plugins";
+import { rig } from "happy-plugins";
 
 const projects = await rig.projects.list();
 console.log(`Rig has ${projects.length} projects.`);
@@ -24,11 +24,11 @@ to agents. MCP and embedded UI extension points are planned but are not part of 
 Install the published package while authoring for editor completion and local type checking:
 
 ```sh
-pnpm add --save-dev @slopus/plugins typescript@^7.0.2 @types/node
+pnpm add --save-dev happy-plugins typescript@^7.0.2 @types/node
 ```
 
 This installation is an authoring dependency. At runtime, Rig compiles the extension with
-TypeScript 7 and substitutes the copy of `@slopus/plugins` shipped with that Rig installation. The
+TypeScript 7 and substitutes the copy of `happy-plugins` shipped with that Rig installation. The
 daemon's build is the final compatibility check. An extension cannot accidentally run against a
 different SDK from the one its daemon implements.
 
@@ -79,7 +79,7 @@ icon is invalid.
 ### `index.ts`
 
 ```ts
-import { rig } from "@slopus/plugins";
+import { rig } from "happy-plugins";
 
 const sessions = await rig.sessions.list();
 
@@ -121,7 +121,7 @@ be edited or distributed.
 ## API
 
 ```ts
-import { rig } from "@slopus/plugins";
+import { rig } from "happy-plugins";
 ```
 
 All methods return promises. Inputs and daemon responses are validated with TypeBox at runtime.
@@ -313,7 +313,7 @@ schemas when validating persisted state, configuration, or test fixtures:
 
 ```ts
 import { Value } from "@sinclair/typebox/value";
-import { createWorkspaceInputSchema } from "@slopus/plugins";
+import { createWorkspaceInputSchema } from "happy-plugins";
 
 const input: unknown = JSON.parse(serializedInput);
 const workspaceInput = Value.Decode(createWorkspaceInputSchema, input);
@@ -338,7 +338,7 @@ response against its TypeBox schema.
 When Rig rejects a valid request, the SDK throws `RigPluginApiError`:
 
 ```ts
-import { RigPluginApiError, rig } from "@slopus/plugins";
+import { RigPluginApiError, rig } from "happy-plugins";
 
 try {
     await rig.workspaces.archive({
@@ -360,7 +360,7 @@ Normal extensions should import the singleton `rig`. Tests and custom harnesses 
 client explicitly:
 
 ```ts
-import { createRigPluginClient } from "@slopus/plugins";
+import { createRigPluginClient } from "happy-plugins";
 
 const client = createRigPluginClient({
     socketPath: "/path/to/test.sock",
@@ -375,7 +375,7 @@ The explicit client uses the same API and runtime validation as `rig`.
 Distribute the extension folder, excluding generated `.rig/` contents and local `node_modules/`.
 Before sharing it:
 
-1. Install the current `@slopus/plugins` package for local type checking.
+1. Install the current `happy-plugins` package for local type checking.
 2. Keep the manifest paths relative and inside the extension folder.
 3. Include the TypeScript sources and required PNG icon.
 4. Start it with the oldest Rig version you intend to support; the daemon build is the compatibility

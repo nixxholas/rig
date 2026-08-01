@@ -101,23 +101,23 @@ describe("extensions", () => {
         const directory = join(root, "builder");
         await createExtensionFixture(directory, {
             source: [
-                'import { rig } from "@slopus/plugins";',
+                'import { rig } from "happy-plugins";',
                 "const projects = await rig.projects.list();",
                 'console.log(projects.map((project) => project.name).join(","));',
                 "",
             ].join("\n"),
         });
         const extension = await readExtensionManifest(directory);
-        const sdkModuleDirectory = dirname(require.resolve("@slopus/plugins"));
+        const sdkModuleDirectory = dirname(require.resolve("happy-plugins"));
         const built = await buildExtension(extension, { sdkModuleDirectory });
         await expect(readFile(built.builtEntryPath, "utf8")).resolves.toContain(
-            'from "@slopus/plugins"',
+            'from "happy-plugins"',
         );
 
         await writeFile(
             extension.entryPath,
             [
-                'import { rig } from "@slopus/plugins";',
+                'import { rig } from "happy-plugins";',
                 'await rig.workspaces.create({ name: 42, projectId: "project" });',
                 "",
             ].join("\n"),

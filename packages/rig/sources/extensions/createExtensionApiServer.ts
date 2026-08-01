@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
-import type { AgentMessageDelivery, RigProject, RigSession, RigWorkspace } from "@slopus/plugins";
+import type { AgentMessageDelivery, RigProject, RigSession, RigWorkspace } from "happy-plugins";
 import {
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
@@ -10,7 +10,7 @@ import {
     listWorkspacesInputSchema,
     renameWorkspaceBodySchema,
     sendAgentMessageBodySchema,
-} from "@slopus/plugins";
+} from "happy-plugins";
 
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";

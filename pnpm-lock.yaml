@@ -116,7 +116,7 @@ importers:
         specifier: ^8.21.1
         version: 8.21.1
 
-  packages/plugins:
+  packages/happy-plugins:
     dependencies:
       '@sinclair/typebox':
         specifier: ^0.34.49
@@ -195,9 +195,6 @@ importers:
       '@slopus/ghostty-web':
         specifier: workspace:*
         version: link:../ghostty-web
-      '@slopus/plugins':
-        specifier: workspace:*
-        version: link:../plugins
       '@slopus/rig-execution':
         specifier: workspace:*
         version: link:../rig-execution
@@ -240,6 +237,9 @@ importers:
       esbuild:
         specifier: ^0.28.1
         version: 0.28.1
+      happy-plugins:
+        specifier: workspace:*
+        version: link:../happy-plugins
       ignore:
         specifier: ^7.0.6
         version: 7.0.6

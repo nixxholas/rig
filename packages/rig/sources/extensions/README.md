@@ -12,7 +12,7 @@ the existing command sandbox, and serving the private API socket it uses.
   +-- index.ts
   +-- .rig/
        +-- build/                    TypeScript output
-       +-- node_modules/@slopus/plugins/ SDK shipped by this Rig
+       +-- node_modules/happy-plugins/ SDK shipped by this Rig
        +-- runtime/plugin.sock       per-extension API
        +-- extension.log             bounded current-run output
 ```

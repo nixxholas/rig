@@ -2,7 +2,7 @@ import { request as requestHttp } from "node:http";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import { createRigPluginClient } from "@slopus/plugins";
+import { createRigPluginClient } from "happy-plugins";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";

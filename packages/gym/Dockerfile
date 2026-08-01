@@ -15,7 +15,7 @@ COPY packages/gym/package.json packages/gym/package.json
 COPY packages/gym-tests/package.json packages/gym-tests/package.json
 COPY packages/ghostty-web/package.json packages/ghostty-web/package.json
 COPY packages/rig-codemode-codex/package.json packages/rig-codemode-codex/package.json
-COPY packages/plugins/package.json packages/plugins/package.json
+COPY packages/happy-plugins/package.json packages/happy-plugins/package.json
 COPY packages/rig-providers/package.json packages/rig-providers/package.json
 COPY packages/rig-execution/package.json packages/rig-execution/package.json
 COPY packages/rig/package.json packages/rig/package.json
@@ -25,13 +25,13 @@ RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
 
 COPY packages/ghostty-web packages/ghostty-web
 COPY packages/rig-codemode-codex packages/rig-codemode-codex
-COPY packages/plugins packages/plugins
+COPY packages/happy-plugins packages/happy-plugins
 COPY packages/rig-providers packages/rig-providers
 COPY packages/rig-execution packages/rig-execution
 COPY packages/rig packages/rig
 RUN pnpm --filter @slopus/ghostty-web build
 RUN pnpm --filter @slopus/rig-codemode-codex build
-RUN pnpm --filter @slopus/plugins build
+RUN pnpm --filter happy-plugins build
 RUN pnpm --filter @slopus/rig-providers build
 RUN pnpm --filter @slopus/rig-execution build
 RUN pnpm --filter @slopus/rig build
