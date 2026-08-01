@@ -152,6 +152,25 @@ const { activity, git, modelId, tokens, title } = connection.session();
 `stopped`, or `error`, and `activity.label` is ready to display. A status line renders from this
 without walking the list.
 
+While the session is executing tools, `activity.toolCalls` is the list of calls it is still waiting
+on, each with its tool name, start time, and latest progress status. `describeSessionActivity`
+turns that into the sentence a status line shows, phrased by what the running tools have in common
+rather than by their provider-specific names.
+
+```ts
+const { label, toolCategory, awaitingTools } = describeSessionActivity(
+    connection.session().activity,
+);
+// Bash, exec_command, run_terminal_command -> "Waiting for bash"
+// Agent, spawn_workspace_agent             -> "Waiting for subagents"
+// a mixture                                -> "Running 2 tools"
+```
+
+`classifyToolName` is the same classification on its own, for a UI that wants an icon per category.
+A tool this library has not seen classifies as `unknown` and is named literally rather than
+described as something it is not. A retry, a compaction, a question, or a scheduled wait outranks
+the tools running underneath it in `label`, while `awaitingTools` still lists those calls.
+
 The session state also carries the live facts a complete conversation surface renders: project,
 worktree, environment and agent identity; model locking, effort and service tier; permission mode;
 composer draft and recap; title generation and structured interruption state; pending steering and

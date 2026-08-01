@@ -37,6 +37,8 @@ export { GroupStore } from "./GroupStore.js";
 export { TimelineStore } from "./TimelineStore.js";
 export type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 export { groupToolCalls } from "./groupToolCalls.js";
+export { classifyToolName, describeSessionActivity } from "./describeSessionActivity.js";
+export type { SessionActivityDescription, ToolCategory } from "./describeSessionActivity.js";
 export { projectToolPresentation } from "./ToolPresentation.js";
 export type {
     CommandPresentation,
