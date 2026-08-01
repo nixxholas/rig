@@ -59,6 +59,8 @@ export interface GroupSession {
     /** Present while this chat is waiting for the person to catch up. */
     readonly unread?: SessionUnreadState;
     readonly updatedAt: number;
+    /** Present while the agent is inside a scheduled `wait` or `wait_until`. */
+    readonly wait?: { readonly startedAt: number; readonly dueAt: number };
     readonly workspaceId?: string;
 }
 

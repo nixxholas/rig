@@ -130,6 +130,58 @@ describe("persistent scheduling", () => {
         }
     });
 
+    it("carries the live wait on the catalog session summary until it ends", async () => {
+        const requests: GymInferenceRequest[] = [];
+        let now = 1_700_000_000_000;
+        installGymInference((request) => {
+            requests.push(request);
+            return requests.length === 1
+                ? {
+                      content: [
+                          {
+                              arguments: { hours: 12 },
+                              id: "catalog-wait-provider-call",
+                              name: "wait",
+                              type: "toolCall",
+                          },
+                      ],
+                  }
+                : { content: [{ text: "CATALOG_WAIT_DONE", type: "text" }] };
+        });
+        const store = new PersistentSessionStore({
+            databasePath: ":memory:",
+            modelCatalog: gymCatalog(),
+            now: () => now,
+        });
+        try {
+            const session = store.create(gymSessionRequest("/tmp/rig-catalog-wait"));
+            const submitted = session.submit({ text: "Wait for twelve hours." });
+            await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
+
+            // Activity is live-only, so the catalog summary is what tells a
+            // client connecting mid-wait that the session is waiting. It must
+            // state the same span the live activity reports.
+            const waiting = store.listActive().find((summary) => summary.id === session.id);
+            const wait = waiting?.wait;
+            if (wait === undefined) throw new Error("Expected the summary to carry the wait.");
+            expect(wait).toEqual(session.activity().wait);
+            expect(wait.dueAt - wait.startedAt).toBe(12 * 60 * 60 * 1000);
+
+            now += 3_000;
+            session.steer({ expectedRunId: submitted.runId, text: "Stop waiting now." });
+            await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
+                status: "completed",
+            });
+
+            const settled = store.listActive().find((summary) => summary.id === session.id);
+            expect(settled).toBeDefined();
+            expect(settled?.wait).toBeUndefined();
+        } finally {
+            await store.prepareForShutdown("shutdown");
+            store.close();
+        }
+    });
+
     it("continues a restored wait before running the message that interrupts it", async () => {
         const databasePath = await createDatabasePath();
         const requests: GymInferenceRequest[] = [];

@@ -16,6 +16,7 @@ import type {
     Project,
     ProjectWorkspace,
     RemoteTerminalGroupState,
+    SessionActivity,
     SessionStatus,
     SessionEvent,
     SessionSummary,
@@ -631,7 +632,7 @@ export class GroupStore {
         // change through events that carry only the change rather than a whole
         // session. Applying them here is what keeps a list live without asking
         // the daemon to restate the session every time something moves.
-        const patch = sessionPatch(event);
+        const patch = sessionPatch(event, this.#sessions.get(sessionId));
         if (patch !== undefined) {
             const known = this.#sessions.get(sessionId);
             if (known === undefined) return false;
@@ -889,6 +890,9 @@ export class GroupStore {
                 ? {}
                 : { sessionTokenCount: session.sessionTokenCount }),
             ...(session.title === undefined ? {} : { title: session.title }),
+            ...(session.wait === undefined
+                ? {}
+                : { wait: { dueAt: session.wait.dueAt, startedAt: session.wait.startedAt } }),
         };
         this.#groupSessions.set(session.id, { source: session, value });
         return value;
@@ -1085,7 +1089,7 @@ function sessionSummaryAfterEvent(
     if (unread !== undefined && unread !== session.unread) {
         return { ...session, lastEventId: event.id, unread };
     }
-    const patch = sessionPatch(event);
+    const patch = sessionPatch(event, session);
     if (patch === undefined) return undefined;
     const updated = { ...session, ...patch.set, lastEventId: event.id };
     for (const key of patch.clear ?? []) delete updated[key];
@@ -1108,8 +1112,31 @@ function withAuthoritativeUnread(
     return read;
 }
 
-function sessionPatch(event: GlobalEvent): SessionPatch | undefined {
+function sessionPatch(
+    event: GlobalEvent,
+    session: SessionSummary | undefined,
+): SessionPatch | undefined {
     switch (event.type) {
+        case "session_activity_changed": {
+            // Activity changes on every step of a working agent, but the only
+            // part of it a catalog renders is the scheduled wait. Anything that
+            // leaves the wait as it stands must say nothing, or every thinking
+            // and tool transition would rebuild the tree.
+            const wait = (event.data as { activity: SessionActivity }).activity.wait;
+            if (wait === undefined) {
+                return session?.wait === undefined ? undefined : { clear: ["wait"] };
+            }
+            const known = session?.wait;
+            if (
+                known !== undefined &&
+                known.dueAt === wait.dueAt &&
+                known.startedAt === wait.startedAt &&
+                known.toolCallId === wait.toolCallId
+            ) {
+                return undefined;
+            }
+            return { set: { wait } };
+        }
         case "session_title_changed": {
             const { recap, status, title } = event.data as {
                 recap?: string;

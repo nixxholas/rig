@@ -1181,3 +1181,116 @@ describe("GroupStore and where the user is", () => {
         expect(store.state()).toBe(before);
     });
 });
+
+describe("GroupStore and scheduled waits", () => {
+    const waitingActivity = {
+        kind: "waiting",
+        label: "Waiting until later",
+        since: 100,
+        wait: { dueAt: 900, startedAt: 100, toolCallId: "call-wait" },
+    };
+
+    it("shows the wait when the live stream says the agent started one", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+
+        const deltas = store.apply(
+            event("session_activity_changed", { activity: waitingActivity }, { sessionId: "s1" }),
+        );
+
+        expect(deltas.map((delta) => delta.type)).toContain("projects_changed");
+        expect(store.projects()[0]?.sessions[0]?.wait).toEqual({ dueAt: 900, startedAt: 100 });
+    });
+
+    it("clears the wait when the agent moves on to other work", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+        store.apply(
+            event("session_activity_changed", { activity: waitingActivity }, { sessionId: "s1" }),
+        );
+
+        const deltas = store.apply(
+            event(
+                "session_activity_changed",
+                { activity: { kind: "thinking", label: "Thinking", since: 950 } },
+                { sessionId: "s1" },
+            ),
+        );
+
+        expect(deltas.map((delta) => delta.type)).toContain("projects_changed");
+        expect(store.projects()[0]?.sessions[0]?.wait).toBeUndefined();
+    });
+
+    it("seeds the wait from the opening frame for a client connecting mid-wait", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                sessions: [
+                    {
+                        ...session("s1", "p1"),
+                        wait: { dueAt: 900, startedAt: 100, toolCallId: "call-wait" },
+                    },
+                ],
+            }),
+        );
+
+        expect(store.projects()[0]?.sessions[0]?.wait).toEqual({ dueAt: 900, startedAt: 100 });
+    });
+
+    it("ignores activity changes that leave the wait as it stands", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+        const before = store.projects();
+
+        // A working agent changes activity on every step; only the wait is
+        // catalog state, so everything else must not rebuild the tree.
+        const deltas = store.apply(
+            event(
+                "session_activity_changed",
+                { activity: { kind: "thinking", label: "Thinking", since: 10 } },
+                { sessionId: "s1" },
+            ),
+        );
+
+        expect(deltas).toEqual([]);
+        expect(store.projects()).toBe(before);
+
+        store.apply(
+            event("session_activity_changed", { activity: waitingActivity }, { sessionId: "s1" }),
+        );
+        const whileWaiting = store.projects();
+        const repeat = store.apply(
+            event(
+                "session_activity_changed",
+                { activity: { ...waitingActivity, label: "Still waiting", since: 200 } },
+                { sessionId: "s1" },
+            ),
+        );
+        expect(repeat).toEqual([]);
+        expect(store.projects()).toBe(whileWaiting);
+    });
+
+    it("survives a fresh hello taken while the wait is still running", () => {
+        const store = new GroupStore();
+        store.applyHello(hello({ sessions: [session("s1", "p1")] }));
+        store.apply(
+            event("session_activity_changed", { activity: waitingActivity }, { sessionId: "s1" }),
+        );
+
+        // A reconnect snapshot taken mid-wait carries the wait itself, so the
+        // catalog keeps showing it rather than blanking until the next event.
+        store.applyHello(
+            hello({
+                cursor: "z9",
+                sessions: [
+                    {
+                        ...session("s1", "p1"),
+                        wait: { dueAt: 900, startedAt: 100, toolCallId: "call-wait" },
+                    },
+                ],
+            }),
+        );
+
+        expect(store.projects()[0]?.sessions[0]?.wait).toEqual({ dueAt: 900, startedAt: 100 });
+    });
+});

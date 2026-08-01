@@ -3640,6 +3640,7 @@ export class InMemorySession {
             updatedAt: this.events.lastCreatedAt() ?? this.#now(),
             ...(this.#lastMessageAt !== undefined ? { lastMessageAt: this.#lastMessageAt } : {}),
             ...(lastEventId === undefined ? {} : { lastEventId }),
+            ...(this.#activity.wait === undefined ? {} : { wait: { ...this.#activity.wait } }),
             ...(this.#title !== undefined ? { title: this.#title } : {}),
             ...(this.#titleError !== undefined ? { titleError: this.#titleError } : {}),
             ...(this.#interruption !== undefined ? { interruption: this.#interruption } : {}),

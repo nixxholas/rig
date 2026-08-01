@@ -559,6 +559,14 @@ export interface SessionSummary {
     lastMessageAt?: number;
     /** Ordered identity of the newest session mutation/state event. */
     lastEventId?: EventId;
+    /**
+     * The session's current activity wait, present while the agent is inside a
+     * scheduled `wait` or `wait_until`.
+     *
+     * Activity is live-only, so this is what tells a client connecting in the
+     * middle of a long wait that the session is waiting.
+     */
+    wait?: SessionActivityWait;
     interruption?: SessionInterruption;
     inboxItems?: readonly {
         answers?: Readonly<Record<string, readonly string[]>>;

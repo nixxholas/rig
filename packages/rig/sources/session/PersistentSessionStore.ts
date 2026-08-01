@@ -21,6 +21,7 @@ import type {
     SecretSummary,
     SessionEvent,
     SessionAgentMetadata,
+    SessionActivityWait,
     SessionInterruption,
     SessionSummary,
     SessionTranscriptWindow,
@@ -641,7 +642,20 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     }
 
     #listSessions(activeOnly: boolean, options: { limit?: number }): readonly SessionSummary[] {
-        return querySessionSummaries(this.#tx(), activeOnly, options);
+        const summaries = querySessionSummaries(this.#tx(), activeOnly, options);
+        // A scheduled wait is live activity, so the stored row cannot carry it;
+        // it is overlaid from the loaded sessions, the only ones that can wait.
+        let waits: Map<string, SessionActivityWait> | undefined;
+        for (const session of this.#cachedSessions()) {
+            const wait = session.activity().wait;
+            if (wait !== undefined) (waits ??= new Map()).set(session.id, wait);
+        }
+        const found = waits;
+        if (found === undefined) return summaries;
+        return summaries.map((summary) => {
+            const wait = found.get(summary.id);
+            return wait === undefined ? summary : { ...summary, wait };
+        });
     }
 
     loadedSessions(): readonly InMemorySession[] {

@@ -1142,6 +1142,8 @@ export interface SessionSummary {
     updatedAt: number;
     lastMessageAt?: number;
     lastEventId?: EventId;
+    /** The session's current activity wait, present while the agent is inside a scheduled wait. */
+    wait?: SessionActivityWait;
     /** Whether the daemon keeps unread state for this chat at all. */
     trackUnread?: boolean;
     unread?: SessionUnreadState;
