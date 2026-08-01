@@ -2,9 +2,12 @@ name: Publish package
 
 on:
     push:
+        branches:
+            - main
         tags:
             - "v*"
             - "rig-connect-v*"
+    workflow_dispatch:
 
 env:
     RELEASE_PACKAGE: ${{ startsWith(github.ref_name, 'rig-connect-v') && 'rig-connect' || 'rig' }}
@@ -15,11 +18,13 @@ permissions:
 
 concurrency:
     group: publish-${{ github.ref }}
-    cancel-in-progress: false
+    # Only the newest canary build of main is worth finishing.
+    cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
     publish:
         name: Publish selected package
+        if: startsWith(github.ref, 'refs/tags/')
         runs-on: ubuntu-latest
         environment: npm
         timeout-minutes: 30
@@ -84,3 +89,95 @@ jobs:
 
             - name: Publish the package
               run: pnpm exec tsx scripts/publishPackage.ts
+
+    canary:
+        name: Publish the canary builds
+        if: github.ref == 'refs/heads/main' && github.repository == 'slopus/rig'
+        runs-on: ubuntu-latest
+        environment: npm
+        timeout-minutes: 20
+
+        steps:
+            - name: Check out the commit
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Set up pnpm
+              uses: pnpm/action-setup@v6
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v6
+              with:
+                  node-version: "24"
+                  package-manager-cache: false
+
+            - name: Install Linux sandbox dependencies
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install --yes bubblewrap ripgrep socat
+                  if [[ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]]; then
+                      sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+                  fi
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            # rig-connect ships on its own schedule, so it only needs a canary build when its
+            # own sources move.
+            - name: Check whether rig-connect changed
+              id: connect
+              env:
+                  PUSHED_FROM: ${{ github.event.before }}
+              run: |
+                  base="$PUSHED_FROM"
+                  if [[ -z "$base" ]] || ! git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                      base="$(git rev-parse HEAD~1)"
+                  fi
+                  if git diff --name-only "$base" HEAD | grep --quiet '^packages/rig-connect/'; then
+                      echo "Publishing a rig-connect canary build for this push."
+                      echo "changed=true" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "rig-connect is unchanged since ${base}; skipping its canary build."
+                      echo "changed=false" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Set the canary versions
+              env:
+                  CANARY_BUILD_NUMBER: ${{ github.run_number }}
+                  CANARY_COMMIT: ${{ github.sha }}
+                  CONNECT_CHANGED: ${{ steps.connect.outputs.changed }}
+              run: |
+                  RELEASE_PACKAGE=rig pnpm exec tsx scripts/setCanaryVersion.ts
+                  if [[ "$CONNECT_CHANGED" == "true" ]]; then
+                      RELEASE_PACKAGE=rig-connect pnpm exec tsx scripts/setCanaryVersion.ts
+                  fi
+
+            - name: Build the packages
+              env:
+                  CONNECT_CHANGED: ${{ steps.connect.outputs.changed }}
+              run: |
+                  pnpm run build
+                  if [[ "$CONNECT_CHANGED" == "true" ]]; then
+                      pnpm --filter @slopus/rig-connect build
+                  fi
+
+            # Canary builds stay fast: unit tests only, no gym, Docker, or live-provider suites.
+            - name: Run unit tests
+              env:
+                  # Keep Sandbox Runtime's home-directory mask away from the checkout.
+                  HOME: ${{ runner.temp }}/rig-test-home
+              run: |
+                  mkdir -p "$HOME"
+                  pnpm run test:scripts
+                  pnpm --recursive --filter './packages/**' --filter '!@slopus/rig-dev' --filter '!@slopus/rig-gym-tests' run test
+
+            - name: Publish the canary builds
+              env:
+                  CONNECT_CHANGED: ${{ steps.connect.outputs.changed }}
+                  RELEASE_DIST_TAG: canary
+              run: |
+                  RELEASE_PACKAGE=rig pnpm exec tsx scripts/publishPackage.ts
+                  if [[ "$CONNECT_CHANGED" == "true" ]]; then
+                      RELEASE_PACKAGE=rig-connect pnpm exec tsx scripts/publishPackage.ts
+                  fi

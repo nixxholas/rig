@@ -6,12 +6,18 @@ import { runCommand } from "./release/runCommand.js";
 const releasePackage = resolveReleasePackage(process.env.RELEASE_PACKAGE);
 const manifest = readPackageManifest(releasePackage);
 
-console.log(`Publishing ${manifest.name}@${manifest.version}...`);
-const publishResult = runCommand("pnpm", ["publish", "--access", "public", "--no-git-checks"], {
-    allowFailure: true,
-    captureOutput: true,
-    cwd: releasePackage.directory,
-});
+const distributionTag = process.env.RELEASE_DIST_TAG ?? "latest";
+
+console.log(`Publishing ${manifest.name}@${manifest.version} as ${distributionTag}...`);
+const publishResult = runCommand(
+    "pnpm",
+    ["publish", "--access", "public", "--no-git-checks", "--tag", distributionTag],
+    {
+        allowFailure: true,
+        captureOutput: true,
+        cwd: releasePackage.directory,
+    },
+);
 
 if (publishResult.stdout.length > 0) {
     console.log(publishResult.stdout);
