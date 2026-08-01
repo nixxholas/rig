@@ -84,6 +84,11 @@ describe("Happy plugin test host", () => {
         await expect(host.mcp.callTool("Project tools", "list_projects")).resolves.toMatchObject({
             content: [{ text: expect.stringContaining('"name":"Rig"'), type: "text" }],
         });
+        expect(
+            host.requests.filter(
+                (request) => request.method === "POST" && request.path.includes("/calls/"),
+            ),
+        ).toHaveLength(1);
         await expect(
             host.client.workspaces.list({ projectId: "project-1" }),
         ).resolves.toMatchObject([{ id: "workspace-1", name: "Plugin work" }]);
@@ -91,8 +96,13 @@ describe("Happy plugin test host", () => {
         expect(observed).toContain("GET /workspaces?projectId=project-1");
         expect(host.requests.some((request) => request.path === "/mcp/servers")).toBe(true);
 
+        const registrationId = server.registrationId;
         await server.close();
-        expect(host.mcp.listTools()).toEqual([]);
+        await expect.poll(() => host.mcp.listTools()).toEqual([]);
+        expect(host.requests).not.toContainEqual({
+            method: "DELETE",
+            path: `/mcp/servers/${registrationId}`,
+        });
     });
 
     it("creates writable plugin state and removes its temporary root on close", async () => {
@@ -149,6 +159,11 @@ describe("Happy plugin test host", () => {
             content: [{ text: "Expected plugin failure.", type: "text" }],
             isError: true,
         });
+        expect(
+            host.requests.filter(
+                (request) => request.method === "POST" && request.path.includes("/calls/"),
+            ),
+        ).toHaveLength(2);
     });
 
     it.each(["close", "end", "error"] as const)(
@@ -177,10 +192,15 @@ describe("Happy plugin test host", () => {
             await host.mcp.waitForTools(1, 2_000);
             await expect.poll(() => server.status, { timeout: 2_000 }).toBe("connected");
             expect(server.registrationId).not.toBe(firstRegistration);
+            expect(host.requests).not.toContainEqual({
+                method: "DELETE",
+                path: `/mcp/servers/${firstRegistration}`,
+            });
             await expect(host.mcp.callTool(`Recovery ${mode}`, "ping")).resolves.toEqual({
                 content: [{ text: "pong", type: "text" }],
             });
 
+            const activeRegistration = server.registrationId;
             const registrationCount = host.requests.filter(
                 (request) => request.method === "POST" && request.path === "/mcp/servers",
             ).length;
@@ -192,6 +212,10 @@ describe("Happy plugin test host", () => {
                     (request) => request.method === "POST" && request.path === "/mcp/servers",
                 ),
             ).toHaveLength(registrationCount);
+            expect(host.requests).not.toContainEqual({
+                method: "DELETE",
+                path: `/mcp/servers/${activeRegistration}`,
+            });
         },
     );
 });

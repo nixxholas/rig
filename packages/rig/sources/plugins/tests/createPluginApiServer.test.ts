@@ -128,7 +128,6 @@ describe("plugin API server", () => {
             content: [{ text: expect.stringContaining("request is too large"), type: "text" }],
             isError: true,
         });
-
         await closeServer(server);
         await rm(socketPath, { force: true });
         await expect.poll(() => contribution.status, { timeout: 2_000 }).toBe("reconnecting");
@@ -147,7 +146,141 @@ describe("plugin API server", () => {
         expect((await registry.load("/workspace", "auto")).tools).toHaveLength(2);
 
         await contribution.close();
-        expect((await registry.load("/workspace", "auto")).tools).toEqual([]);
+        await expect
+            .poll(async () => (await registry.load("/workspace", "auto")).tools)
+            .toEqual([]);
+    });
+
+    it("does not complete an in-flight MCP call after its real socket stream disconnects", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const registry = new PluginMcpRegistry();
+        cleanup.push(() => registry.close());
+        const server = createPluginApiServer({
+            mcp: registry.createConnection({ folder: "projects", name: "Projects" }),
+            pluginName: "Projects",
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        const requests: string[] = [];
+        server.on("request", (request) => {
+            requests.push(`${request.method ?? "GET"} ${request.url ?? "/"}`);
+        });
+        await listen(server, socketPath);
+        const callStarted = deferred<void>();
+        const callAborted = deferred<void>();
+
+        const contribution = await createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        }).mcp.startServer({
+            name: "Catalog",
+            tools: [
+                defineMcpTool({
+                    description: "List projects.",
+                    inputSchema: Type.Object({}),
+                    name: "list_projects",
+                    execute: (_input, { signal }) =>
+                        new Promise((_resolve, reject) => {
+                            callStarted.resolve();
+                            const abort = () => {
+                                callAborted.resolve();
+                                reject(new Error("The blocking call was aborted."));
+                            };
+                            if (signal.aborted) {
+                                abort();
+                                return;
+                            }
+                            signal.addEventListener("abort", abort, { once: true });
+                        }),
+                }),
+            ],
+        });
+        const retiredRegistrationId = contribution.registrationId;
+        const tool = (await registry.load("/workspace", "auto")).tools[0]!;
+        const call = Promise.resolve(tool.execute({} as never, {} as never, {}));
+        const rejectedCall = expect(call).rejects.toThrow("connection closed");
+        await callStarted.promise;
+
+        server.closeAllConnections();
+        await rejectedCall;
+        await callAborted.promise;
+        await expect
+            .poll(() => contribution.registrationId, { timeout: 2_000 })
+            .not.toBe(retiredRegistrationId);
+        await expect.poll(() => contribution.status, { timeout: 2_000 }).toBe("connected");
+        expect(
+            requests.some((request) =>
+                request.startsWith(`POST /mcp/servers/${retiredRegistrationId}/calls/`),
+            ),
+        ).toBe(false);
+        expect(requests).not.toContain(`DELETE /mcp/servers/${retiredRegistrationId}`);
+
+        await contribution.close();
+    });
+
+    it("does not unregister an MCP registration retired by closing its active stream", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".rig-plugin-api-"));
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const registry = new PluginMcpRegistry();
+        cleanup.push(() => registry.close());
+        const server = createPluginApiServer({
+            mcp: registry.createConnection({ folder: "projects", name: "Projects" }),
+            pluginName: "Projects",
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        const requests: string[] = [];
+        server.on("request", (request) => {
+            requests.push(`${request.method ?? "GET"} ${request.url ?? "/"}`);
+        });
+        await listen(server, socketPath);
+
+        const contribution = await createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        }).mcp.startServer({
+            name: "Catalog",
+            tools: [
+                defineMcpTool({
+                    description: "List projects.",
+                    inputSchema: Type.Object({}),
+                    name: "list_projects",
+                    execute: () => ({ content: [{ text: "[]", type: "text" }] }),
+                }),
+            ],
+        });
+        const retiredRegistrationId = contribution.registrationId;
+
+        await contribution.close();
+
+        expect(contribution.status).toBe("closed");
+        await expect
+            .poll(async () => (await registry.load("/workspace", "auto")).tools)
+            .toEqual([]);
+        expect(requests).not.toContain(`DELETE /mcp/servers/${retiredRegistrationId}`);
     });
 });
 
@@ -187,4 +320,12 @@ function unauthorizedStatus(socketPath: string): Promise<number> {
         request.once("error", reject);
         request.end();
     });
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value?: T) => void } {
+    let resolvePromise: (value: T | PromiseLike<T>) => void = () => {};
+    const promise = new Promise<T>((resolve) => {
+        resolvePromise = resolve;
+    });
+    return { promise, resolve: (value) => resolvePromise(value as T) };
 }

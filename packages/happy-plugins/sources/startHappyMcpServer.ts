@@ -39,6 +39,11 @@ interface HappyMcpEventStream {
     close(): void;
 }
 
+interface HappyMcpGeneration {
+    readonly registrationId: string;
+    stream?: HappyMcpEventStream;
+}
+
 export function defineMcpTool<const TInputSchema extends TSchema>(
     tool: HappyMcpTool<TInputSchema>,
 ): HappyMcpTool<TInputSchema> {
@@ -70,8 +75,9 @@ export async function startHappyMcpServer(
 
     const calls = new Map<string, AbortController>();
     const lifetime = new AbortController();
-    let activeStream: HappyMcpEventStream | undefined;
     let closing = false;
+    let closeTask: Promise<void> | undefined;
+    let currentGeneration: HappyMcpGeneration | undefined;
     let failure: string | undefined;
     let latestRegistrationId = "";
     let recovery: Promise<void> | undefined;
@@ -89,6 +95,11 @@ export async function startHappyMcpServer(
                 emptyResponseSchema,
             )
             .catch(() => undefined);
+    const unregisterUnattached = async (generation: HappyMcpGeneration): Promise<void> => {
+        if (currentGeneration !== generation || generation.stream !== undefined) return;
+        currentGeneration = undefined;
+        await unregister(generation.registrationId);
+    };
 
     const registerAndOpen = async (): Promise<void> => {
         const response = await transport.request(
@@ -98,15 +109,27 @@ export async function startHappyMcpServer(
             registration,
         );
         const registrationId = response.registrationId;
+        const generation: HappyMcpGeneration = { registrationId };
+        currentGeneration = generation;
         latestRegistrationId = registrationId;
         if (closing) {
-            await unregister(registrationId);
+            await unregisterUnattached(generation);
             return;
         }
         let opened: HappyMcpEventStream;
         try {
             opened = await openEventStream({
+                onOpen(stream) {
+                    generation.stream = stream;
+                },
                 onEvent(event) {
+                    if (
+                        closing ||
+                        currentGeneration !== generation ||
+                        generation.stream === undefined
+                    ) {
+                        return;
+                    }
                     if (event.type === "cancel") {
                         calls.get(event.callId)?.abort();
                         return;
@@ -114,14 +137,21 @@ export async function startHappyMcpServer(
                     const controller = new AbortController();
                     calls.set(event.callId, controller);
                     void executeCall(event, tools, controller.signal)
-                        .then((completion) =>
-                            transport.request(
+                        .then((completion) => {
+                            if (
+                                closing ||
+                                currentGeneration !== generation ||
+                                generation.stream === undefined
+                            ) {
+                                return;
+                            }
+                            return transport.request(
                                 "POST",
                                 `/mcp/servers/${encodeURIComponent(registrationId)}/calls/${encodeURIComponent(event.callId)}`,
                                 emptyResponseSchema,
                                 completion,
-                            ),
-                        )
+                            );
+                        })
                         .catch(() => undefined)
                         .finally(() => {
                             if (calls.get(event.callId) === controller) {
@@ -134,25 +164,27 @@ export async function startHappyMcpServer(
                 token: transport.token,
             });
         } catch (error) {
-            await unregister(registrationId);
+            await unregisterUnattached(generation);
             throw error;
         }
         if (closing) {
+            if (currentGeneration === generation) currentGeneration = undefined;
             opened.close();
-            await unregister(registrationId);
             return;
         }
 
-        activeStream = opened;
         failure = undefined;
         status = "connected";
         void opened.closed.then((error) => {
-            if (closing || activeStream !== opened) return;
-            activeStream = undefined;
+            if (closing || currentGeneration !== generation || generation.stream !== opened) {
+                return;
+            }
+            currentGeneration = undefined;
             abortCalls();
             failure = error.message;
             status = "reconnecting";
-            void unregister(registrationId);
+            // The host retires this registration when its stream closes. A DELETE here would race
+            // socket teardown and target a generation the host has already retired.
             beginRecovery();
         });
     };
@@ -193,19 +225,27 @@ export async function startHappyMcpServer(
         get status() {
             return status;
         },
-        async close() {
-            if (closing) return;
+        close() {
+            if (closeTask !== undefined) return closeTask;
             closing = true;
             status = "closed";
             lifetime.abort();
             const recoveryTask = recovery;
-            const registrationId = latestRegistrationId;
-            const stream = activeStream;
-            activeStream = undefined;
+            const generation = currentGeneration;
+            currentGeneration = undefined;
+            const stream = generation?.stream;
             stream?.close();
             abortCalls();
-            if (registrationId.length > 0) await unregister(registrationId);
-            if (recoveryTask !== undefined) await recoveryTask;
+            const task = (async () => {
+                if (stream !== undefined) {
+                    await stream.closed;
+                } else if (generation !== undefined) {
+                    await unregister(generation.registrationId);
+                }
+                if (recoveryTask !== undefined) await recoveryTask;
+            })();
+            closeTask = task;
+            return task;
         },
     };
 }
@@ -237,6 +277,7 @@ async function executeCall(
 }
 
 function openEventStream(options: {
+    onOpen: (stream: HappyMcpEventStream) => void;
     onEvent: (event: HappyMcpEvent) => void;
     path: string;
     socketPath: string;
@@ -275,6 +316,13 @@ function openEventStream(options: {
                         resolveClosed(error);
                     };
                 });
+                const stream: HappyMcpEventStream = {
+                    closed,
+                    close() {
+                        request.destroy();
+                    },
+                };
+                options.onOpen(stream);
                 response.setEncoding("utf8");
                 response.on("data", (chunk: string) => {
                     pending += chunk;
@@ -307,12 +355,7 @@ function openEventStream(options: {
                 response.once("close", () =>
                     settleClosed(new Error("The Happy MCP call stream closed unexpectedly.")),
                 );
-                resolve({
-                    closed,
-                    close() {
-                        request.destroy();
-                    },
-                });
+                resolve(stream);
             },
         );
         request.once("error", (error) => {

@@ -28,9 +28,9 @@ afterEach(async () => {
 
 describe("happy-plugins client", () => {
     it("authenticates over the provided Unix socket and validates the response schema", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-sdk-"));
+        const directory = await mkdtemp(join(process.cwd(), ".c-"));
         temporaryDirectories.push(directory);
-        const socketPath = join(directory, "api.sock");
+        const socketPath = join(directory, "s");
         const server = createServer((request, response) => {
             expect(request.headers.authorization).toBe("Bearer plugin-token");
             expect(request.method).toBe("GET");
@@ -54,9 +54,9 @@ describe("happy-plugins client", () => {
     });
 
     it("rejects invalid daemon responses through the TypeBox schema", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-sdk-"));
+        const directory = await mkdtemp(join(process.cwd(), ".c-"));
         temporaryDirectories.push(directory);
-        const socketPath = join(directory, "api.sock");
+        const socketPath = join(directory, "s");
         const server = createServer((_request, response) => {
             response.end(JSON.stringify({ projects: [{ name: "Missing fields" }] }));
         });
@@ -68,9 +68,9 @@ describe("happy-plugins client", () => {
     });
 
     it("surfaces daemon errors and missing injected settings in human language", async () => {
-        const directory = await mkdtemp(join(process.cwd(), ".happy-plugin-sdk-"));
+        const directory = await mkdtemp(join(process.cwd(), ".c-"));
         temporaryDirectories.push(directory);
-        const socketPath = join(directory, "api.sock");
+        const socketPath = join(directory, "s");
         const server = createServer((_request, response) => {
             response.writeHead(409);
             response.end(JSON.stringify({ error: "The workspace already exists." }));
