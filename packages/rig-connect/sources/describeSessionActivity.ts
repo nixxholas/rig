@@ -58,6 +58,7 @@ const TOOL_CATEGORIES = new Map<string, ToolCategory>([
     ["askuserquestion", "question"],
     ["ask_user_question", "question"],
     ["bash", "shell"],
+    ["codex_imagegen", "media"],
     ["create_goal", "planning"],
     ["create_workspace", "planning"],
     ["delegate_to_workspace", "subagent"],

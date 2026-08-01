@@ -5,9 +5,18 @@ import { assembleCodexTools } from "../agent/tools/codex/assembleCodexTools.js";
 import { codexCollaborationTools } from "../agent/tools/codex/assembleCodexTools.js";
 import { grokBuildTools } from "../tools/grok/index.js";
 import { createGeminiTools } from "../tools/gemini/createGeminiTools.js";
+import {
+    createImageGenerationTool,
+    type ImageGenerationProvider,
+} from "../tools/imageGeneration/createImageGenerationTool.js";
+import {
+    codexImageGenerationSurface,
+    imageGenerationSurface,
+} from "../tools/imageGeneration/imageGenerationSurfaces.js";
 
 export interface SelectToolsForModelOptions {
     geminiApiKey?: string;
+    imageGeneration?: readonly ImageGenerationProvider[];
     provider: Provider;
     model: Model;
 }
@@ -21,11 +30,12 @@ export function selectToolsForModel(
                 ? "claude"
                 : "codex"
             : options.provider.type;
+    const vendor = toolType === "claude" ? "claude" : toolType === "grok" ? "grok" : "codex";
     const collaborationNames = new Set(codexCollaborationTools.map((tool) => tool.name));
     const baseTools =
-        toolType === "claude"
+        vendor === "claude"
             ? claudeTools
-            : toolType === "grok"
+            : vendor === "grok"
               ? grokBuildTools
               : assembleCodexTools(
                     options.model.id,
@@ -35,7 +45,26 @@ export function selectToolsForModel(
         options.provider.type === "bedrock"
             ? baseTools.filter((tool) => tool.name !== "WebSearch")
             : baseTools;
-    if (options.geminiApiKey === undefined) return providerTools;
+    return [
+        ...providerTools,
+        ...(options.geminiApiKey === undefined ? [] : createGeminiTools(options.geminiApiKey)),
+        ...imageGenerationTools(options.imageGeneration ?? [], vendor),
+    ];
+}
 
-    return [...providerTools, ...createGeminiTools(options.geminiApiKey)];
+/**
+ * Image generation is one Rig capability behind a vendor-shaped surface: Codex models get the
+ * name and guidance their training expects, and every other family gets Rig's plain wording.
+ */
+function imageGenerationTools(
+    providers: readonly ImageGenerationProvider[],
+    vendor: "claude" | "codex" | "grok",
+): readonly AnyDefinedTool[] {
+    if (providers.length === 0) return [];
+    return [
+        createImageGenerationTool(
+            providers,
+            vendor === "codex" ? codexImageGenerationSurface : imageGenerationSurface,
+        ),
+    ];
 }

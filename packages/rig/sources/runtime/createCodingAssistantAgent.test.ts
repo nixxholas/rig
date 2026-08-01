@@ -10,6 +10,7 @@ import {
     modelXaiGrokBuild,
 } from "@slopus/rig-execution";
 import { createSystemPrompt } from "../agent/prompt/createSystemPrompt.js";
+import { toExecutorTool } from "../agent/tools/toExecutorTool.js";
 import { createCodingAssistantAgent } from "./createCodingAssistantAgent.js";
 
 describe("createCodingAssistantAgent", () => {
@@ -33,7 +34,7 @@ describe("createCodingAssistantAgent", () => {
         expect(runtime.agent.snapshot().instructions).toContain(cwd);
         expect(runtime.agent.snapshot().effort).toBe("medium");
         expect(runtime.agent.tools.map((tool) => tool.name)).toEqual(
-            expect.arrayContaining(["agent_me", "agent_info", "agent_send", "imagegen"]),
+            expect.arrayContaining(["agent_me", "agent_info", "agent_send", "codex_imagegen"]),
         );
     });
 
@@ -130,12 +131,12 @@ describe("createCodingAssistantAgent", () => {
             "TaskStop",
             "TaskInput",
             "AskUserQuestion",
+            "imagegen",
             "wait",
             "wait_until",
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
-            "imagegen",
             "agent_me",
             "agent_info",
             "agent_send",
@@ -151,6 +152,20 @@ describe("createCodingAssistantAgent", () => {
 
         expect(runtime.executor.id).toBe("claude");
         expect(runtime.agent.model).toEqual(modelAnthropicOpus5);
+    });
+
+    it("keeps image generation out of the reserved Responses image tool and namespace", () => {
+        const runtime = createCodingAssistantAgent({
+            cwd: "/tmp/rig-app-test",
+            env: {},
+            modelId: modelOpenaiGpt56Sol.id,
+        });
+
+        const names = runtime.agent.tools.map((tool) => tool.name);
+        expect(names).toContain("codex_imagegen");
+        expect(names).not.toContain("imagegen");
+        const imagegen = runtime.agent.tools.find((tool) => tool.name === "codex_imagegen");
+        expect(toExecutorTool(imagegen!)).not.toHaveProperty("namespace");
     });
 
     it("omits image generation when no Codex cloud provider is configured", () => {
@@ -184,12 +199,12 @@ describe("createCodingAssistantAgent", () => {
             "get_command_or_subagent_output",
             "kill_command_or_subagent",
             "send_command_input",
+            "imagegen",
             "wait",
             "wait_until",
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
-            "imagegen",
             "agent_me",
             "agent_info",
             "agent_send",
@@ -683,12 +698,12 @@ describe("createCodingAssistantAgent", () => {
             "request_user_input",
             "apply_patch",
             "view_image",
+            "codex_imagegen",
             "wait",
             "wait_until",
             "schedule_message",
             "cancel_ask",
             "get_provider_usage",
-            "imagegen",
             "agent_me",
             "agent_info",
             "agent_send",

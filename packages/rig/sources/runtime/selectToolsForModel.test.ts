@@ -16,7 +16,39 @@ describe("selectToolsForModel", () => {
             },
         });
 
-        expect(selectToolsForModel({ model: modelXaiGrokBuild, provider })).toBe(grokBuildTools);
+        expect(selectToolsForModel({ model: modelXaiGrokBuild, provider })).toEqual(grokBuildTools);
+    });
+
+    it("names the image tool for each model family and never duplicates it", () => {
+        const imageGeneration = [
+            {
+                id: "codex",
+                imageGeneration: { generate: () => Promise.reject(new Error("unused")) },
+            },
+        ];
+
+        const named = (toolProfile: "claude" | "codex" | "grok") =>
+            selectToolsForModel({
+                imageGeneration,
+                model: modelXaiGrokBuild,
+                provider: providerWithToolProfile(toolProfile),
+            })
+                .map((tool) => tool.name)
+                .filter((name) => name.endsWith("imagegen"));
+
+        expect(named("codex")).toEqual(["codex_imagegen"]);
+        expect(named("claude")).toEqual(["imagegen"]);
+        expect(named("grok")).toEqual(["imagegen"]);
+    });
+
+    it("omits the image tool when no provider can generate images", () => {
+        const tools = selectToolsForModel({
+            imageGeneration: [],
+            model: modelXaiGrokBuild,
+            provider: providerWithToolProfile("codex"),
+        });
+
+        expect(tools.map((tool) => tool.name)).not.toContain("codex_imagegen");
     });
 
     it("keeps WebFetch but omits unsupported WebSearch for Bedrock Claude models", () => {

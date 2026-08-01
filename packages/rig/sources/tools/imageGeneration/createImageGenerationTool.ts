@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { Type } from "@sinclair/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 import {
     ExecutorImageGenerationUnavailableError,
     type ExecutorImageGeneration,
@@ -21,38 +21,51 @@ const MAX_EDIT_IMAGES = 5;
 const MAX_EDIT_IMAGES_ENCODED_BYTES = 48 * 1024 * 1024;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+const imageGenerationArguments = Type.Object(
+    {
+        prompt: Type.String({ minLength: 2 }),
+        // Codex models trained against the built-in image tool send an explicit `null` instead of
+        // omitting an unused selector, so both selectors accept it.
+        num_last_images_to_include: Type.Optional(
+            Type.Union([Type.Integer({ minimum: 1, maximum: MAX_EDIT_IMAGES }), Type.Null()]),
+        ),
+        referenced_image_paths: Type.Optional(
+            Type.Union([Type.Array(Type.String(), { maxItems: MAX_EDIT_IMAGES }), Type.Null()]),
+        ),
+    },
+    { additionalProperties: false },
+);
+
+type ImageGenerationArguments = Static<typeof imageGenerationArguments>;
+
 export interface ImageGenerationProvider {
     id: string;
     imageGeneration: ExecutorImageGeneration;
 }
 
-export function createImageGenerationTool(providers: readonly ImageGenerationProvider[]) {
+/** The vendor-facing name and guidance for one model family's image tool. */
+export interface ImageGenerationSurface {
+    name: string;
+    description: string;
+}
+
+export function createImageGenerationTool(
+    providers: readonly ImageGenerationProvider[],
+    surface: ImageGenerationSurface,
+) {
     if (providers.length === 0) {
         throw new Error("Image generation requires at least one provider.");
     }
     let roundRobinOffset = 0;
 
     return defineTool({
-        name: "imagegen",
-        namespace: {
-            name: "image_gen",
-            description: "Tools for generating and editing images.",
-        },
+        // The Responses API reserves the `image_gen` namespace for its own image tool and rejects
+        // every request whose `image_gen.imagegen` definition differs from that built-in one, so
+        // every vendor surface stays a plain top-level function.
+        name: surface.name,
         label: "Image generation",
-        description:
-            "Generate a new image or edit up to five referenced images. Omit both image reference fields for a new image. For edits, provide local image paths or request the smallest sufficient number of recent conversation images, but never both.",
-        arguments: Type.Object(
-            {
-                prompt: Type.String({ minLength: 2 }),
-                num_last_images_to_include: Type.Optional(
-                    Type.Integer({ minimum: 1, maximum: MAX_EDIT_IMAGES }),
-                ),
-                referenced_image_paths: Type.Optional(
-                    Type.Array(Type.String(), { maxItems: MAX_EDIT_IMAGES }),
-                ),
-            },
-            { additionalProperties: false },
-        ),
+        description: surface.description,
+        arguments: imageGenerationArguments,
         returnType: Type.Object({
             bytes: Type.Number(),
             media_type: Type.Literal("image/png"),
@@ -60,44 +73,35 @@ export function createImageGenerationTool(providers: readonly ImageGenerationPro
             image_base64: Type.String(),
         }),
         requiresAutoOrFullAccess: true,
-        describeAutoPermissionAction: ({
-            prompt,
-            num_last_images_to_include,
-            referenced_image_paths,
-        }) =>
-            `sending ${quoteVisibleExact(prompt)}${
-                referenced_image_paths === undefined
-                    ? ""
-                    : ` and ${String(referenced_image_paths.length)} local image reference(s)`
+        describeAutoPermissionAction: (args) => {
+            const paths = selectedPaths(args);
+            const recent = selectedRecentCount(args);
+            return `sending ${quoteVisibleExact(args.prompt)}${
+                paths === undefined ? "" : ` and ${String(paths.length)} local image reference(s)`
             }${
-                num_last_images_to_include === undefined
-                    ? ""
-                    : ` and ${String(num_last_images_to_include)} recent conversation image(s)`
-            } to Codex image generation. If an account definitively refuses the request, Rig may send the same data to another of ${String(providers.length)} configured Codex cloud provider(s), including providers with custom endpoints. Access: conversation data, local filesystem read/write, and external Codex APIs`,
+                recent === undefined ? "" : ` and ${String(recent)} recent conversation image(s)`
+            } to Codex image generation. If an account definitively refuses the request, Rig may send the same data to another of ${String(providers.length)} configured Codex cloud provider(s), including providers with custom endpoints. Access: conversation data, local filesystem read/write, and external Codex APIs`;
+        },
         shouldReviewInAutoMode: () => true,
-        shouldRunInFullAccessInAutoMode: async ({ referenced_image_paths }, context) => {
-            for (const path of referenced_image_paths ?? []) {
+        shouldRunInFullAccessInAutoMode: async (args, context) => {
+            for (const path of selectedPaths(args) ?? []) {
                 if (await shouldReviewPathInAutoMode(path, context, { write: false })) return true;
             }
             return false;
         },
         execute: async (args, context, execution) => {
-            if (
-                args.referenced_image_paths !== undefined &&
-                args.num_last_images_to_include !== undefined
-            ) {
+            const paths = selectedPaths(args);
+            const recent = selectedRecentCount(args);
+            if (paths !== undefined && recent !== undefined) {
                 throw new Error(
                     "Provide only one of referenced_image_paths or num_last_images_to_include.",
                 );
             }
             const images =
-                args.referenced_image_paths === undefined
-                    ? recentConversationImages(
-                          execution.messages ?? [],
-                          args.num_last_images_to_include,
-                      )
+                paths === undefined
+                    ? recentConversationImages(execution.messages ?? [], recent)
                     : await prepareReferencedImages(
-                          args.referenced_image_paths,
+                          paths,
                           context.fs,
                           context.fs.cwd,
                           context.fs.home,
@@ -172,6 +176,16 @@ export function createImageGenerationTool(providers: readonly ImageGenerationPro
         toUI: (result) => `Generated image at ${result.path}`,
         locks: ["image_generation"],
     });
+}
+
+/** Reads the local-path selector, treating an explicit `null` as an unused selector. */
+function selectedPaths(args: ImageGenerationArguments): readonly string[] | undefined {
+    return args.referenced_image_paths ?? undefined;
+}
+
+/** Reads the recent-conversation selector, treating an explicit `null` as an unused selector. */
+function selectedRecentCount(args: ImageGenerationArguments): number | undefined {
+    return args.num_last_images_to_include ?? undefined;
 }
 
 async function prepareReferencedImages(
