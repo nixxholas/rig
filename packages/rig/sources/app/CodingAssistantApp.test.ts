@@ -4415,9 +4415,8 @@ describe("CodingAssistantApp", () => {
         expect(tui.stop).not.toHaveBeenCalled();
 
         app.handleInput("\x03");
-        await delay(30);
 
-        expect(tui.stop).toHaveBeenCalled();
+        await vi.waitFor(() => expect(tui.stop).toHaveBeenCalled());
     });
 
     it("renders one red session interruption notice when Escape aborts a run", async () => {
@@ -5086,9 +5085,8 @@ describe("CodingAssistantApp", () => {
         expect(tui.stop).not.toHaveBeenCalled();
 
         app.handleInput("\x03");
-        await delay(30);
 
-        expect(tui.stop).toHaveBeenCalled();
+        await vi.waitFor(() => expect(tui.stop).toHaveBeenCalled());
         expect(processManager.killAllStarted).toBe(true);
         app.handleInput("z");
         expect(stripAnsi(app.render(80).join("\n"))).not.toContain("› hz");
@@ -5127,9 +5125,7 @@ describe("CodingAssistantApp", () => {
 
         app.handleInput("\x1b[99;5u");
 
-        await delay(30);
-
-        expect(tui.stop).toHaveBeenCalled();
+        await vi.waitFor(() => expect(tui.stop).toHaveBeenCalled());
     });
 
     it("uses Shift-Enter for multiline input without submitting", async () => {
