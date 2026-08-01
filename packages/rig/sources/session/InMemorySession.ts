@@ -179,7 +179,7 @@ import { createErrorMessage } from "../agent/createErrorMessage.js";
 import { createErrorToolResultBlock } from "../agent/createErrorToolResultBlock.js";
 import { createModelSwitchHistoryMessage } from "../agent/createModelSwitchHistoryMessage.js";
 import { createToolResultBlock } from "../agent/createToolResultBlock.js";
-import type { AgentMessage, ErrorMessage, ToolResultBlock } from "../agent/types.js";
+import type { AgentMessage, ErrorMessage, ToolCallBlock, ToolResultBlock } from "../agent/types.js";
 import { isCodexV2CollaborationModel } from "../agent/tools/codex/isCodexV2CollaborationModel.js";
 import { createDurableSkillTool, type DurableSkillDefinition } from "../external-skills/index.js";
 import type {
@@ -2760,13 +2760,15 @@ export class InMemorySession {
             ...this.#queue.map((queued) => queued.runId),
         ];
         const discardedQueue = this.#queue;
-        for (const queued of discardedQueue) {
-            this.#persistence?.deleteQueuedRun(this.id, queued.runId);
-        }
         this.#queue = [];
         void Promise.all(discardedQueue.map((queued) => this.#closeDebugLog(queued)));
-        if (interruptedRunIds.length > 0) {
-            for (const runId of new Set(interruptedRunIds)) {
+        const persistInterruption = () => {
+            for (const queued of discardedQueue) {
+                this.#persistence?.deleteQueuedRun(this.id, queued.runId);
+            }
+            const uniqueRunIds = new Set(interruptedRunIds);
+            for (const runId of uniqueRunIds) {
+                this.#recordInterruptedToolResults(runId, interruption.message);
                 this.#append("run_error", {
                     errorMessage: interruption.message,
                     modelLocked: this.#modelLocked(),
@@ -2774,12 +2776,47 @@ export class InMemorySession {
                     startupInterruption: true,
                 });
             }
-            this.#restartMetadataSettlement();
+            if (uniqueRunIds.size > 0) this.#restartMetadataSettlement();
             this.#saveSession();
-            return;
+        };
+        if (this.#persistence?.transaction === undefined) persistInterruption();
+        else this.#persistence.transaction(persistInterruption);
+    }
+
+    #recordInterruptedToolResults(runId: string, message: string): void {
+        const answeredToolCallIds = new Set<string>();
+        for (const candidate of [
+            ...this.#messages.map((entry) => entry.message),
+            ...(this.#contextMessages ?? []),
+        ]) {
+            if (candidate.role !== "agent") continue;
+            for (const block of candidate.blocks) {
+                if (block.type === "tool_result") answeredToolCallIds.add(block.toolCallId);
+            }
         }
 
-        this.#saveSession();
+        const unansweredToolCalls = new Map<string, ToolCallBlock>();
+        for (const entry of this.#messages) {
+            if (entry.isPartial || entry.runId !== runId || entry.message.role !== "agent") {
+                continue;
+            }
+            for (const block of entry.message.blocks) {
+                if (block.type !== "tool_call" || answeredToolCallIds.has(block.id)) continue;
+                unansweredToolCalls.set(block.id, block);
+            }
+        }
+        if (unansweredToolCalls.size === 0) return;
+
+        const resultMessage: AgentMessage = {
+            blocks: [...unansweredToolCalls.values()].map((toolCall) =>
+                createErrorToolResultBlock(toolCall, message, { kind: "interrupted" }),
+            ),
+            id: createId(),
+            role: "agent",
+        };
+        this.#separateModelContextFromVisibleTranscript();
+        this.#contextMessages?.push(resultMessage);
+        this.#commitAgentMessage(runId, resultMessage);
     }
 
     markSuspendedAfterRestart(message: string, runId?: string): void {
