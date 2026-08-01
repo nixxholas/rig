@@ -4,20 +4,26 @@ import { formatManagedNetworkDenial } from "./formatManagedNetworkDenial.js";
 
 describe("formatManagedNetworkDenial", () => {
     it("distinguishes repository and global config without exposing an absolute home path", () => {
-        const message = formatManagedNetworkDenial({
-            host: "blocked.example",
-            port: 443,
-            protocol: "https_connect",
-            reason: "not_allowed",
-        });
+        const previous = process.env.RIG_CONFIGURATION_DIRECTORY;
+        delete process.env.RIG_CONFIGURATION_DIRECTORY;
+        try {
+            const message = formatManagedNetworkDenial({
+                host: "blocked.example",
+                port: 443,
+                protocol: "https_connect",
+                reason: "not_allowed",
+            });
 
-        expect(message).toContain("this repository's rig.toml (or its happy.toml fallback)");
-        expect(message).toContain(
-            process.platform === "darwin"
-                ? "~/Happy/Config/happy.toml"
-                : "~/happy/config/happy.toml",
-        );
-        expect(message).not.toMatch(/\/(?:Users|home)\//u);
+            expect(message).toContain("this repository's rig.toml (or its happy.toml fallback)");
+            expect(message).toContain(
+                process.platform === "darwin"
+                    ? "~/Happy/Config/happy.toml"
+                    : "~/happy/config/happy.toml",
+            );
+            expect(message).not.toMatch(/\/(?:Users|home)\//u);
+        } finally {
+            if (previous !== undefined) process.env.RIG_CONFIGURATION_DIRECTORY = previous;
+        }
     });
 
     it("points to the configured global directory without exposing its absolute value", () => {

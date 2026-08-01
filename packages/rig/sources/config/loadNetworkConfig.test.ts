@@ -131,7 +131,9 @@ describe("loadNetworkConfig", () => {
             ].join("\n"),
         );
 
-        await expect(loadNetworkConfig({ cwd: workspace, homeDirectory })).resolves.toEqual({
+        await expect(
+            loadNetworkConfig({ cwd: workspace, env: {}, homeDirectory }),
+        ).resolves.toEqual({
             allowedDomains: ["project.example"],
             deniedDomains: ["global-blocked.example", "project-blocked.example"],
         });
