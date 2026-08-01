@@ -6,33 +6,32 @@ import {
 } from "./codexInstructions.js";
 
 describe("createCodexCollaborationInstructions", () => {
-    it("defaults root agents to explicit-request-only delegation", () => {
+    it("keeps Codex collaboration mechanics separate from the shared delegation policy", () => {
         const instructions = createCodexCollaborationInstructions({
             canSpawn: true,
             depth: 0,
-            effort: "high",
             maxActive: 4,
         });
 
         expect(instructions).toContain("You are `/root`");
-        expect(instructions).toContain("Do not spawn sub-agents unless the user");
         expect(instructions).toContain("4 available concurrency slots");
         expect(instructions).toContain(
             "Every `spawn_agent` call states the child's `model` and `reasoning_effort`",
         );
         expect(instructions).toContain("only for work the user asked to run at that effort");
+        expect(instructions).not.toContain("Do not spawn sub-agents unless the user");
+        expect(instructions).not.toContain("Proactive multi-agent delegation is active");
     });
 
     it("gives child agents their parent handoff role", () => {
         const instructions = createCodexCollaborationInstructions({
             canSpawn: true,
             depth: 1,
-            effort: "ultra",
             maxActive: 4,
         });
 
         expect(instructions).toContain("immediately delivered back to your parent agent");
-        expect(instructions).toContain("Proactive multi-agent delegation is active");
+        expect(instructions).not.toContain("Proactive multi-agent delegation is active");
         expect(instructions).toContain("cannot be called from inside `functions.exec`");
     });
 
@@ -40,7 +39,6 @@ describe("createCodexCollaborationInstructions", () => {
         const instructions = createCodexCollaborationInstructions({
             canSpawn: false,
             depth: 3,
-            effort: "high",
             maxActive: 4,
         });
 

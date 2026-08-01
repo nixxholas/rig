@@ -559,6 +559,56 @@ describe("createCodingAssistantAgent", () => {
         expect(grokDeepest.agent.tools.map((tool) => tool.name)).not.toContain("spawn_subagent");
     });
 
+    it("explicitly permits parent delegation for every provider", async () => {
+        const controls = {
+            canSpawn: true,
+            depth: 0,
+            followUp: () => {
+                throw new Error("not used");
+            },
+            interrupt: () => {
+                throw new Error("not used");
+            },
+            list: () => [],
+            maxDepth: 3,
+            spawn: async () => {
+                throw new Error("not used");
+            },
+            wait: async () => ({ agents: [], timedOut: false }),
+        };
+        const runtimes = [
+            createCodingAssistantAgent({
+                cwd: "/tmp/rig-app-test",
+                modelId: modelOpenaiGpt56Sol.id,
+                subagents: controls,
+            }),
+            createCodingAssistantAgent({
+                cwd: "/tmp/rig-app-test",
+                modelId: modelAnthropicFable5.id,
+                subagents: controls,
+            }),
+            createCodingAssistantAgent({
+                cwd: "/tmp/rig-app-test",
+                env: { XAI_API_KEY: "xai-test-key" },
+                modelId: modelXaiGrok45.id,
+                subagents: controls,
+            }),
+        ];
+
+        for (const runtime of runtimes) {
+            const prompt = await createSystemPrompt({
+                context: runtime.context,
+                messages: [],
+                model: runtime.agent.model,
+                provider: runtime.executor,
+                tools: runtime.agent.tools,
+            });
+
+            expect(prompt).toContain("You are the parent agent");
+            expect(prompt).toContain("explicitly allowed to spawn subagents");
+        }
+    });
+
     it("keeps V2 child guidance at maximum depth and excludes Luna", async () => {
         const managed = {
             description: "Test",

@@ -530,6 +530,12 @@ describe("AgentSessionManager", () => {
             }),
             expect.objectContaining({ taskName: "model_check" }),
         );
+        const childInstructions = createSubagent.mock.calls[0]?.[0].instructions;
+        expect(childInstructions).toContain("You are a child subagent");
+        expect(childInstructions).toContain("You are not the parent agent");
+        expect(childInstructions).toContain(
+            "Do not spawn another subagent unless the parent explicitly instructed you",
+        );
         expect(child.submit).toHaveBeenCalledWith({
             agentMessageTriggerTurn: true,
             provenance: "agent",

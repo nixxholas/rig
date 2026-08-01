@@ -5,7 +5,6 @@ import { escapeXml } from "../skills/escapeXml.js";
 export function createCodexCollaborationInstructions(options: {
     canSpawn: boolean;
     depth: number;
-    effort?: string;
     maxActive: number;
 }): string {
     const usageHint =
@@ -14,11 +13,10 @@ export function createCodexCollaborationInstructions(options: {
                 ? `You are \`/root\`, the primary agent in a team of agents collaborating to fulfill the user's goals.
 
 At the start of your turn, you are the active agent.
-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents.
+You can spawn sub-agents to handle subtasks.
 All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
 
 You can use \`spawn_agent\` to create a new agent, \`followup_task\` to give an existing agent a new task and trigger a turn, and \`send_message\` to pass a message to a running agent without triggering a turn.
-Child agents can also spawn their own sub-agents.
 You can decide how much context you want to propagate to your sub-agents with the \`fork_turns\` parameter.
 
 You will receive messages in the analysis channel in the form:
@@ -44,12 +42,11 @@ Payload:
 \`\`\`
 They may be addressed as to=/root`
             : options.canSpawn
-              ? `You are an agent in a team of agents collaborating to complete a task.
+              ? `You are a child agent in a team of agents collaborating to complete a task for your parent agent.
 
-You can spawn sub-agents to handle subtasks, and those sub-agents can spawn their own sub-agents. All agents in the team, including the agents that you can assign tasks to, are equally intelligent and capable, and have access to the same set of tools.
+You have collaboration tools for communicating with the team. Although \`spawn_agent\` is available at this depth, do not use it unless your parent explicitly allowed nested delegation in your assigned task.
 
 You can use \`spawn_agent\` to create a new agent, \`followup_task\` to give an existing agent a new task and trigger a turn, and \`send_message\` to pass a message to a running agent.
-Child agents can also spawn their own sub-agents.
 
 When you provide a response in the final channel, that content is immediately delivered back to your parent agent.
 
@@ -62,7 +59,7 @@ Payload:
 <payload text>
 \`\`\`
 You may also see them addressed as to=/root/..., which indicates your identity is /root/...`
-              : `You are an agent in a team of agents collaborating to complete a task.
+              : `You are a child agent in a team of agents collaborating to complete a task for your parent agent.
 
 You cannot spawn additional sub-agents at this depth. Use the available collaboration tools only to manage agents that already exist.
 
@@ -95,13 +92,7 @@ There are ${options.maxActive} available concurrency slots, meaning that up to $
 A background agent notifies you when it finishes, even while you are idle, so never poll one. When there is nothing to do but wait, call \`wait_agent\` once without \`timeout_ms\`, which waits an hour, or simply end your turn. Every wait that times out costs another full model turn over your whole context and tells you nothing.`;
     const modelOverrideHint =
         "Every `spawn_agent` call states the child's `model` and `reasoning_effort`; nothing is inherited. Choose both for the task at hand: the model's default effort, or a lower level, suits research, review, and other bounded work, and `xhigh`, `max`, or `ultra` is only for work the user asked to run at that effort.";
-    const policy =
-        options.effort === "ultra"
-            ? "Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. Use sub-agents when parallel work would materially improve speed or quality. This mode remains active until a later multi-agent mode developer message changes it."
-            : "Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.";
-    return [usageHint, sharedHint, ...(options.canSpawn ? [modelOverrideHint] : []), policy].join(
-        "\n\n",
-    );
+    return [usageHint, sharedHint, ...(options.canSpawn ? [modelOverrideHint] : [])].join("\n\n");
 }
 
 export function createCodexPermissionInstructions(mode: PermissionMode): string {

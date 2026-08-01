@@ -6,7 +6,8 @@ import type { PermissionMode } from "../../permissions/index.js";
 import type { AnyDefinedTool } from "../types.js";
 
 /** Marks the role section so a child can strip its parent's copy before appending its own. */
-const SUBAGENT_INSTRUCTIONS_MARKER = "You are a subagent working on one delegated step.";
+const SUBAGENT_INSTRUCTIONS_MARKER =
+    "You are a child subagent working for a parent agent on one delegated task.";
 
 export const RIG_AGENT_TOOL_INSTRUCTIONS = `## Agent tool portability
 
@@ -98,8 +99,6 @@ export function createAvailableModelsInstructions(
                 "Every subagent you start needs an explicit model and effort; nothing is inherited. Pick both for the task: the model's default effort, or a lower one, is right for research, review, and other bounded work, and xhigh, max, or ultra is only for work the user asked to run at that effort.",
                 "",
                 "A background subagent notifies you when it finishes, even while you are idle, so never poll it. When there is nothing to do but wait, wait once for a long time — an hour is the normal wait — or simply end your turn. Every wait that times out costs another full model turn over your whole context and tells you nothing.",
-                "",
-                "A request that gives you only a bare model or family name—such as Codex, GPT, Opus, or Sonnet—usually means they want you to run that model somehow. When the request can be handled by a subagent, spawn a subagent with the closest available model and provider. This is usually safe to do without asking for confirmation.",
             ].join("\n"),
         );
     }
@@ -123,6 +122,14 @@ export function createAvailableModelsInstructions(
     return sections.join("\n\n");
 }
 
+export function createParentDelegationInstructions(): string {
+    return `# Delegation role
+
+You are the parent agent. You are explicitly allowed to spawn subagents for concrete, bounded work that is genuinely independent and benefits from parallel execution or separate context.
+
+Do simple work directly. When you delegate, give each child one clear task, keep doing useful work yourself, and combine the results into the response to the user. A child may delegate further only when you explicitly allow nested delegation in its assigned task.`;
+}
+
 export function createSubagentInstructions(
     parentInstructions: string | undefined,
     depth: number,
@@ -135,9 +142,9 @@ export function createSubagentInstructions(
             : parentInstructions;
     return [
         baseInstructions,
-        `${SUBAGENT_INSTRUCTIONS_MARKER} Complete the task independently and return a concise result to the parent agent.\n\nThe parent agent may send follow-up work after this step. Continue from your existing context when it does.`,
+        `${SUBAGENT_INSTRUCTIONS_MARKER} You are not the parent agent. Complete the assigned task directly, stay within its scope, and return a concise result to the parent agent.\n\nThe parent agent may send follow-up work after this step. Continue from your existing context when it does.`,
         depth < maxDepth
-            ? `Collaboration tools remain available at depth ${depth} of ${maxDepth}; their availability does not authorize additional delegation.`
+            ? `You are at depth ${depth} of ${maxDepth}. Do not spawn another subagent unless the parent explicitly instructed you in the delegated task that nested delegation is allowed. The presence of collaboration tools does not grant that permission.`
             : "You are at the maximum subagent depth and must complete the task directly.",
     ]
         .filter((part): part is string => part !== undefined && part.length > 0)

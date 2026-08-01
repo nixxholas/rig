@@ -2,6 +2,7 @@ import { AGENTS_MD_SPEC } from "./agentsMdSpec.js";
 import { createCodexCollaborationInstructions } from "./codexInstructions.js";
 import {
     createAvailableModelsInstructions,
+    createParentDelegationInstructions,
     createPermissionInstructions,
     RIG_AGENT_TOOL_INSTRUCTIONS,
 } from "./instructions.js";
@@ -74,9 +75,12 @@ export async function createSystemPrompt(
                 canSpawn: options.context.subagents.canSpawn,
                 depth: options.context.subagents.depth,
                 maxActive: options.context.subagents.maxActive ?? 4,
-                ...(options.effort === undefined ? {} : { effort: options.effort }),
             }),
         );
+    }
+
+    if (options.context.subagents?.canSpawn === true && options.context.subagents.depth === 0) {
+        parts.push(createParentDelegationInstructions());
     }
 
     if (options.tools?.some((tool) => tool.namespace?.name === "rig") === true) {
