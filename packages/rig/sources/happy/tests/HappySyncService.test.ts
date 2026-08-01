@@ -184,8 +184,164 @@ describe("HappySyncService machine spawning", () => {
     });
 });
 
+describe("HappySyncService session archival", () => {
+    it("ends Happy synchronization and does not reattach an archived Rig session", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-happy-service-archive-"));
+        directories.push(directory);
+        const databasePath = join(directory, "sessions.sqlite");
+        const store = new PersistentSessionStore({ databasePath, modelCatalog: catalog() });
+        const sockets: FakeSocket[] = [];
+        const secret = new Uint8Array(32).fill(5);
+        const configuration: HappyConnectionConfiguration = {
+            credentials: {
+                encryption: { secret, type: "legacy" },
+                token: "happy-token",
+            },
+            credentialsPath: join(directory, "access.key"),
+            happyHome: join(directory, "happy"),
+            imported: false,
+            serverUrl: "https://happy.example",
+        };
+        let archiveResponseCount = 0;
+        let resolveFirstArchive: ((response: Response) => void) | undefined;
+        const firstArchive = new Promise<Response>((resolve) => {
+            resolveFirstArchive = resolve;
+        });
+        const request = vi.fn<typeof fetch>(async (input, init) => {
+            const url = new URL(String(input));
+            if (url.pathname === "/v1/sessions") {
+                const body = JSON.parse(String(init?.body)) as { metadata: string };
+                return Response.json({
+                    session: {
+                        id: "happy-session-archive",
+                        metadata: body.metadata,
+                        metadataVersion: 0,
+                    },
+                });
+            }
+            if (url.pathname === "/v3/sessions/happy-session-archive/messages") {
+                return Response.json(
+                    init?.method === "POST" ? {} : { hasMore: false, messages: [] },
+                );
+            }
+            if (url.pathname === "/v1/sessions/happy-session-archive/archive") {
+                archiveResponseCount += 1;
+                if (archiveResponseCount === 1) return firstArchive;
+                return Response.json({ success: true });
+            }
+            return new Response("Not found", { status: 404 });
+        });
+        const createService = () =>
+            new HappySyncService({
+                configuration,
+                databasePath,
+                fetch: request,
+                modelCatalog: catalog(),
+                socketFactory: () => {
+                    const socket = new FakeSocket();
+                    sockets.push(socket);
+                    return socket;
+                },
+            });
+        const service = createService();
+        let restartedService: HappySyncService | undefined;
+        const session = store.create({ cwd: directory });
+
+        try {
+            service.attach(session);
+            await waitFor(() =>
+                sockets[0]?.emitted.some(([event]) => event === "session-alive") === true,
+            );
+
+            session.setArchived(true);
+            const archivedEvent = session.events.since(undefined)?.at(-1);
+            if (archivedEvent === undefined) throw new Error("The archive event was not recorded.");
+            service.observe(archivedEvent, session);
+
+            await waitFor(() =>
+                sockets[0]?.emitted.some(([event]) => event === "session-end") === true,
+            );
+            await waitFor(() => archiveRequestCount(request) === 1);
+            expect(sockets[0]?.emitted.find(([event]) => event === "session-end")?.[1]).toMatchObject(
+                {
+                    sid: "happy-session-archive",
+                },
+            );
+            const archivedMetadata = decryptMetadata(
+                secret,
+                sockets[0]?.emitted
+                    .filter(([event]) => event === "update-metadata")
+                    .at(-1)?.[1].metadata,
+            );
+            expect(archivedMetadata).toMatchObject({
+                archiveReason: "Session archived in Rig",
+                archivedBy: "rig",
+                lifecycleState: "archived",
+            });
+
+            service.attach(session);
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(sockets).toHaveLength(1);
+
+            session.setArchived(false);
+            const restoredEvent = session.events.since(undefined)?.at(-1);
+            if (restoredEvent === undefined) throw new Error("The restore event was not recorded.");
+            service.observe(restoredEvent, session);
+            service.attach(session);
+
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            expect(sockets).toHaveLength(1);
+            resolveFirstArchive?.(Response.json({ success: true }));
+
+            await waitFor(
+                () =>
+                    decryptMetadata(
+                        secret,
+                        sockets[1]?.emitted
+                            .filter(([event]) => event === "update-metadata")
+                            .at(-1)?.[1].metadata,
+                    )?.lifecycleState === "running",
+            );
+            const restoredMetadata = decryptMetadata(
+                secret,
+                sockets[1]?.emitted
+                    .filter(([event]) => event === "update-metadata")
+                    .at(-1)?.[1].metadata,
+            );
+            expect(restoredMetadata).not.toHaveProperty("archiveReason");
+            expect(restoredMetadata).not.toHaveProperty("archivedBy");
+            expect(sockets[0]?.connected).toBe(false);
+
+            await service.close();
+            restartedService = createService();
+            session.setArchived(true);
+            const restartedArchiveEvent = session.events.since(undefined)?.at(-1);
+            if (restartedArchiveEvent === undefined) {
+                throw new Error("The restarted archive event was not recorded.");
+            }
+            restartedService.observe(restartedArchiveEvent, session);
+
+            await waitFor(() => archiveRequestCount(request) === 2);
+            expect(sockets[2]?.emitted.find(([event]) => event === "session-end")?.[1]).toMatchObject(
+                {
+                    sid: "happy-session-archive",
+                },
+            );
+        } finally {
+            await restartedService?.close();
+            await service.close();
+            store.close();
+        }
+    });
+});
+
+/*
+ * The fake keeps socket events observable because archival has two independent
+ * remote effects: encrypted lifecycle metadata and the immediate session-end signal.
+ */
 class FakeSocket {
     connected = false;
+    readonly emitted: Array<[string, any]> = [];
     readonly #listeners = new Map<string, (...values: any[]) => void>();
 
     connect(): void {
@@ -198,6 +354,7 @@ class FakeSocket {
     }
 
     emit(event: string, ...values: any[]): void {
+        this.emitted.push([event, values[0]]);
         const callback = values.at(-1);
         if (typeof callback !== "function") return;
         if (event === "machine-update-metadata") {
@@ -235,6 +392,25 @@ function catalog(): ModelCatalog {
 
 function decode(secret: Uint8Array, value: string): unknown {
     return decryptHappyPayload(secret, "legacy", Buffer.from(value, "base64"));
+}
+
+function archiveRequestCount(request: ReturnType<typeof vi.fn<typeof fetch>>): number {
+    return request.mock.calls.filter(
+        ([input]) =>
+            new URL(String(input)).pathname ===
+            "/v1/sessions/happy-session-archive/archive",
+    ).length;
+}
+
+function decryptMetadata(
+    secret: Uint8Array,
+    value: unknown,
+): Record<string, unknown> | undefined {
+    if (typeof value !== "string") return undefined;
+    const decoded = decode(secret, value);
+    return typeof decoded === "object" && decoded !== null && !Array.isArray(decoded)
+        ? (decoded as Record<string, unknown>)
+        : undefined;
 }
 
 async function waitFor(predicate: () => boolean): Promise<void> {

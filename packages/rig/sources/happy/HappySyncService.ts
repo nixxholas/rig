@@ -36,7 +36,9 @@ export class HappySyncService {
     readonly #attachRetryAfter = new Map<string, number>();
     readonly #backfillTimers = new Map<string, NodeJS.Timeout>();
     readonly #clients = new Map<string, HappySessionClient>();
+    readonly #detachedClientClosures = new Map<string, Promise<void>>();
     readonly #messageMappers = new Map<string, HappyMessageMapper>();
+    readonly #pendingReattachments = new Set<string>();
     #closed = false;
     readonly #configuration: HappyConnectionConfiguration;
     readonly #credentialFingerprint: string;
@@ -97,8 +99,23 @@ export class HappySyncService {
     }
 
     attach(session: InMemorySession): void {
+        const closure = this.#detachedClientClosures.get(session.id);
+        if (closure !== undefined && !session.snapshot().archived) {
+            this.#scheduleReattach(session, closure);
+            return;
+        }
+        this.#attachSession(session, false);
+    }
+
+    #attachSession(session: InMemorySession, includeArchived: boolean): void {
         if (this.#closed) return;
-        if (session.snapshot().agent.type !== "primary") return;
+        const snapshot = session.snapshot();
+        if (
+            snapshot.agent.type !== "primary" ||
+            (snapshot.archived && !includeArchived)
+        ) {
+            return;
+        }
         let client = this.#clients.get(session.id);
         if (client === undefined) {
             if ((this.#attachRetryAfter.get(session.id) ?? 0) > Date.now()) return;
@@ -127,9 +144,11 @@ export class HappySyncService {
                         : { socketFactory: this.#socketFactory }),
                 });
                 this.#clients.set(session.id, client);
-                const backfill = backfillMessages(session);
-                this.#messageMappers.set(session.id, backfill.mapper);
-                client.enqueue(backfill.messages);
+                if (!includeArchived) {
+                    const backfill = backfillMessages(session);
+                    this.#messageMappers.set(session.id, backfill.mapper);
+                    client.enqueue(backfill.messages);
+                }
                 client.start();
                 this.#attachRetryAfter.delete(session.id);
             } catch (error) {
@@ -153,10 +172,15 @@ export class HappySyncService {
         this.#backfillTimers.clear();
         this.#attachRetryAfter.clear();
         const results = await Promise.allSettled(
-            [...this.#clients.values()].map((client) => client.close()),
+            [
+                ...[...this.#clients.values()].map((client) => client.close()),
+                ...this.#detachedClientClosures.values(),
+            ],
         );
         this.#clients.clear();
+        this.#detachedClientClosures.clear();
         this.#messageMappers.clear();
+        this.#pendingReattachments.clear();
         this.#repository.close();
         const failure =
             results.find(
@@ -169,9 +193,29 @@ export class HappySyncService {
 
     observe(event: SessionEvent, session: InMemorySession | undefined): void {
         if (this.#closed) return;
-        if (session === undefined || session.snapshot().agent.type !== "primary") return;
+        if (session === undefined) return;
+        const snapshot = session.snapshot();
+        if (snapshot.agent.type !== "primary") return;
+        if (snapshot.archived) {
+            if (
+                !this.#detachedClientClosures.has(session.id) &&
+                this.#repository.getSession(session.id) !== undefined
+            ) {
+                this.#attachSession(session, true);
+            }
+            this.#detach(session.id);
+            return;
+        }
+        const closure = this.#detachedClientClosures.get(session.id);
+        if (closure !== undefined) {
+            this.#scheduleReattach(session, closure);
+            return;
+        }
         try {
             this.attach(session);
+            if (event.type === "session_archived" && event.data.archived === false) {
+                this.#clients.get(session.id)?.resume();
+            }
             const mapper = this.#messageMappers.get(session.id) ?? new HappyMessageMapper();
             this.#messageMappers.set(session.id, mapper);
             this.#clients.get(session.id)?.enqueue(mapper.map(event));
@@ -193,6 +237,56 @@ export class HappySyncService {
     start(): void {
         if (this.#closed) return;
         this.#machineClient?.start();
+    }
+
+    #detach(sessionId: string): void {
+        const timer = this.#backfillTimers.get(sessionId);
+        if (timer !== undefined) clearTimeout(timer);
+        this.#backfillTimers.delete(sessionId);
+        this.#attachRetryAfter.delete(sessionId);
+        this.#messageMappers.delete(sessionId);
+        const client = this.#clients.get(sessionId);
+        if (client === undefined) return;
+        this.#clients.delete(sessionId);
+        const closure = client.archive();
+        this.#detachedClientClosures.set(sessionId, closure);
+        void closure.then(
+            () => {
+                if (this.#detachedClientClosures.get(sessionId) === closure) {
+                    this.#detachedClientClosures.delete(sessionId);
+                }
+            },
+            (error: unknown) => {
+                if (this.#detachedClientClosures.get(sessionId) === closure) {
+                    this.#detachedClientClosures.delete(sessionId);
+                }
+                rethrowDatabaseFailure(error);
+            },
+        );
+    }
+
+    #scheduleReattach(session: InMemorySession, closure: Promise<void>): void {
+        if (this.#pendingReattachments.has(session.id)) return;
+        this.#pendingReattachments.add(session.id);
+        void closure.then(
+            () => {
+                this.#pendingReattachments.delete(session.id);
+                if (this.#closed || session.snapshot().archived) return;
+                try {
+                    this.attach(session);
+                    this.#clients.get(session.id)?.resume();
+                } catch (error) {
+                    if (isDatabaseFailure(error)) throw error;
+                    console.error(
+                        `Happy sync could not restore session '${session.id}': ${String(error)}`,
+                    );
+                }
+            },
+            (error: unknown) => {
+                this.#pendingReattachments.delete(session.id);
+                rethrowDatabaseFailure(error);
+            },
+        );
     }
 
     #scheduleBackfill(session: InMemorySession): void {

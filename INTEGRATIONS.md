@@ -35,6 +35,13 @@ are applied before an idle session starts its next turn. The mobile stop action
 invokes Rig's normal abort path, including active subprocess and subagent
 cleanup.
 
+Archiving a Rig session also archives its Happy projection. Rig immediately
+sends Happy's `session-end` signal, publishes the encrypted `archived` lifecycle
+metadata, calls Happy's session archive endpoint, and tears down that session's
+socket and polling. Accessing the archived Rig session by ID does not reconnect
+it. Restoring the session reconnects synchronization and publishes the
+`running` lifecycle state again.
+
 Rig publishes encrypted, versioned metadata with its client identity, actual
 provider, provider-qualified model IDs, reasoning levels, current model and
 reasoning selection, capabilities, title, Rig session status, tools, skills, MCP

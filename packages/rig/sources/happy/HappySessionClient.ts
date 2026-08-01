@@ -70,8 +70,11 @@ export class HappySessionClient {
     readonly #repository: HappySyncRepository;
     readonly #session: InMemorySession;
     readonly #socketFactory: NonNullable<HappySessionClientOptions["socketFactory"]>;
+    #archivePromise: Promise<void> | undefined;
+    #archiving = false;
     #closed = false;
     readonly #closeController = new AbortController();
+    #lifecycleMetadata: Record<string, unknown> | undefined;
     #needsAnotherSync = false;
     #agentStateVersion: number | undefined;
     // Sessions are created with a null agent state, so nothing needs publishing
@@ -85,6 +88,7 @@ export class HappySessionClient {
     readonly #pendingAttachments = new Map<string, Promise<ImageBlock | undefined>>();
     readonly #remoteSessionWaiters = new Set<(sessionId: string | undefined) => void>();
     #socket: HappySocket | undefined;
+    #sentSessionEnd = false;
     #summaryTitle: string | undefined;
     #summaryUpdatedAt = Date.now();
     #syncPromise: Promise<void> | undefined;
@@ -102,15 +106,33 @@ export class HappySessionClient {
             options.socketFactory ?? ((url, socketOptions) => io(url, socketOptions) as Socket);
     }
 
+    archive(): Promise<void> {
+        if (this.#archivePromise !== undefined) return this.#archivePromise;
+        if (this.#closed) return Promise.resolve();
+        this.#archiving = true;
+        this.#lifecycleMetadata = {
+            archiveReason: "Session archived in Rig",
+            archivedBy: "rig",
+            lifecycleState: "archived",
+            lifecycleStateSince: Date.now(),
+        };
+        if (this.#timer !== undefined) {
+            clearInterval(this.#timer);
+            this.#timer = undefined;
+        }
+        this.#sendSessionEnd();
+        const archive = this.#finishArchive();
+        this.#archivePromise = archive;
+        return archive;
+    }
+
     async close(): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
-        this.#closeController.abort();
         if (this.#timer !== undefined) clearInterval(this.#timer);
-        const remoteSessionId = this.#repository.getSession(this.#session.id)?.remoteSessionId;
-        if (remoteSessionId !== undefined) {
-            this.#socket?.emit("session-end", { sid: remoteSessionId, time: Date.now() });
-        }
+        this.#timer = undefined;
+        this.#sendSessionEnd();
+        this.#closeController.abort();
         this.#socket?.disconnect();
         this.#socket = undefined;
         for (const resolve of this.#remoteSessionWaiters) resolve(undefined);
@@ -118,6 +140,17 @@ export class HappySessionClient {
         await this.#syncPromise?.catch((error: unknown) => {
             if (isDatabaseFailure(error)) throw error;
         });
+    }
+
+    resume(): void {
+        if (this.#closed || this.#archiving) return;
+        this.#lifecycleMetadata = {
+            archiveReason: undefined,
+            archivedBy: undefined,
+            lifecycleState: "running",
+            lifecycleStateSince: Date.now(),
+        };
+        this.kick();
     }
 
     enqueue(messages: readonly HappySessionProtocolMessage[]): void {
@@ -168,7 +201,7 @@ export class HappySessionClient {
                 if (state === undefined || this.#closed) return;
                 this.#ensureSocket(state.remoteSessionId!);
                 await this.#flushOutbox(state);
-                await this.#fetchIncoming(state);
+                if (!this.#archiving) await this.#fetchIncoming(state);
                 await this.#syncMetadata(state);
                 this.#sendKeepAlive(state.remoteSessionId!);
                 await this.#syncAgentState(state);
@@ -312,6 +345,7 @@ export class HappySessionClient {
         state: HappySessionState,
         message: HappyRemoteMessage,
     ): Promise<boolean> {
+        if (this.#archiving) return false;
         const decrypted = decryptHappyPayload(
             state.encryptionKey,
             state.encryptionVariant,
@@ -447,6 +481,10 @@ export class HappySessionClient {
             callback("");
             return;
         }
+        if (this.#archiving) {
+            callback(encodePayload(state, { error: "This session is archived." }));
+            return;
+        }
         let response: unknown;
         try {
             if (!isRecord(request) || typeof request.method !== "string") {
@@ -509,7 +547,7 @@ export class HappySessionClient {
         ) {
             return;
         }
-        const rigMetadata = this.#metadata();
+        const rigMetadata = { ...this.#metadata(), ...this.#lifecycleMetadata };
         let metadata = { ...this.#metadataBase, ...rigMetadata };
         let serialized = JSON.stringify(metadata);
         if (serialized === this.#lastMetadata) return;
@@ -724,6 +762,7 @@ export class HappySessionClient {
     }
 
     #sendKeepAlive(remoteSessionId: string): void {
+        if (this.#archiving) return;
         const activity = this.#session.activity();
         this.#socket?.emit("session-alive", {
             activity,
@@ -732,6 +771,36 @@ export class HappySessionClient {
             thinking: isWorkingActivity(activity.kind),
             time: Date.now(),
         });
+    }
+
+    async #finishArchive(): Promise<void> {
+        try {
+            this.kick();
+            await this.#syncPromise;
+            this.#sendSessionEnd();
+            const remoteSessionId = this.#repository.getSession(
+                this.#session.id,
+            )?.remoteSessionId;
+            if (remoteSessionId !== undefined) {
+                await this.#request(
+                    `${this.#configuration.serverUrl}/v1/sessions/${encodeURIComponent(remoteSessionId)}/archive`,
+                    { method: "POST" },
+                );
+            }
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            // Happy is optional. The immediate session-end signal still stops a connected session.
+        } finally {
+            await this.close();
+        }
+    }
+
+    #sendSessionEnd(): void {
+        if (this.#sentSessionEnd) return;
+        const remoteSessionId = this.#repository.getSession(this.#session.id)?.remoteSessionId;
+        if (remoteSessionId === undefined || this.#socket === undefined) return;
+        this.#sentSessionEnd = true;
+        this.#socket.emit("session-end", { sid: remoteSessionId, time: Date.now() });
     }
 
     async #request(url: string, init: RequestInit = {}): Promise<Response> {
