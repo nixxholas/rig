@@ -87,3 +87,4 @@ await cp(
 await cp("sources/config/happy.template.toml", "dist/happy.template.toml");
 await cp("sources/agent/prompt/guardian-policy-template.md", "dist/guardian-policy-template.md");
 await cp("sources/agent/prompt/guardian-policy.md", "dist/guardian-policy.md");
+await cp("../plugins/dist", "dist/plugin-sdk", { recursive: true });

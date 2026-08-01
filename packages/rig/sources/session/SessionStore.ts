@@ -57,6 +57,7 @@ export interface SessionStore {
         mutationId?: string,
     ): InMemorySession | undefined;
     fork(sessionId: string, targetSessionId?: string): InMemorySession | undefined;
+    findByAgentId(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     getProject(projectId: string): Project | undefined;
     getProjectAvatar(hash: string): Promise<ProjectAvatarAsset | undefined>;

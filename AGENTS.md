@@ -78,6 +78,12 @@ Coding-agent source trees are located at `~/Developer/coding-assistant-sources`.
 
 Always use `pnpm` for this project. Do not use `npm`, `npx`, or `yarn` for installs, scripts, dependency changes, or lockfile updates unless the user explicitly asks for a different package manager.
 
+## Runtime validation
+
+Use TypeBox schemas for every runtime type validation. Derive TypeScript types from those schemas
+with `Static`; do not hand-write parallel interfaces, object-key checks, type predicates, or other
+ad hoc validation.
+
 ## Code organization
 
 A file should hold one coherent piece of behavior. Most product code lands at one function per file; keep small helpers alongside the thing they serve rather than splitting every function out on principle. Match the surrounding package — `rig-providers` deliberately keeps larger files and documents why.
