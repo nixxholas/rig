@@ -266,9 +266,11 @@ export class ClaudeSession extends BaseSession {
             systemPrompt,
             tools,
         });
+        // The live MCP bridge can close a tool batch only while its results remain at the
+        // context tail. Replay any later notice in order instead of stranding the open SDK tool.
         const interruptedAfterToolBatch =
             this.lastQueryToolCalls.length > 0 &&
-            configuredContext.messages.at(-1)?.role === "user";
+            configuredContext.messages.at(-1)?.role !== "tool";
         const continuingQuery =
             this.activeQuery !== undefined &&
             this.activePromptQueue !== undefined &&

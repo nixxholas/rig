@@ -444,6 +444,73 @@ describe("ClaudeSession", () => {
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
     });
 
+    it("replays after a system notice interrupts a completed tool batch", async () => {
+        const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
+        if (credential === null) throw new Error("Expected test credential.");
+        const firstClose = vi.fn();
+        const query = vi.fn<ClaudeSdkQuery>(() => {
+            if (query.mock.calls.length === 1) return fakeToolCallQuery(firstClose);
+            return fakeQuery("RECOVERED");
+        });
+        const session = new ClaudeSession("system-interrupted-tool-session", {
+            instructions: "",
+            credential,
+            model: "sonnet[1m]",
+            query,
+            tools: [
+                {
+                    name: "Bash",
+                    type: "local",
+                    parameters: Type.Object({ command: Type.String() }),
+                },
+            ],
+        });
+
+        await expect(
+            collectSessionEvents(
+                session.run({
+                    context: { messages: [{ role: "user", content: "Run a command." }] },
+                }),
+            ),
+        ).resolves.toContainEqual({ type: "done", state: "tool_call" });
+
+        const events = await collectSessionEvents(
+            session.run({
+                context: {
+                    messages: [
+                        { role: "user", content: "Run a command." },
+                        {
+                            role: "assistant",
+                            content: "",
+                            toolCalls: [
+                                {
+                                    callId: "call-1",
+                                    name: "Bash",
+                                    arguments: '{"command":"echo done"}',
+                                },
+                            ],
+                        },
+                        {
+                            role: "tool",
+                            callId: "call-1",
+                            content: "Interrupted by steering.",
+                            isError: true,
+                        },
+                        {
+                            role: "system",
+                            content: "Background command 19 finished successfully.",
+                        },
+                    ],
+                },
+            }),
+        );
+
+        expect(query).toHaveBeenCalledTimes(2);
+        expect(firstClose).toHaveBeenCalledOnce();
+        expect(textFromSessionEvents(events)).toBe("RECOVERED");
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+    });
+
     it("replays parallel tool results as one complete Claude user turn", async () => {
         let capturedEntries: unknown;
         const credential = await ClaudeAuthTokenCredential.tryLoad({ authToken: "test-token" });
