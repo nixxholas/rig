@@ -434,8 +434,10 @@ import { HappyComputeProviderError } from "happy-plugins";
 throw new HappyComputeProviderError("invalid_request", "The requested file does not exist.");
 ```
 
-All nine compute error codes remain valid provider completions. Rig preserves the code and derives
-`retryable` itself. `invalid_request`, `instance_not_found`, `provider_not_found`, and
+All provider-side compute error codes remain valid provider completions. The daemon-owned
+`not_ready` code is not available through `HappyComputeProviderError` because only Rig knows an
+instance's authoritative lifecycle. Rig preserves provider codes and derives `retryable` itself.
+`invalid_request`, `instance_not_found`, `provider_not_found`, and
 `capacity_exhausted` are consumer-attributable and do not affect provider health. Untyped handler
 exceptions become provider-attributable `invalid_response` failures.
 
@@ -444,6 +446,7 @@ Consumers use the same namespace. Provider catalog entries include
 
 ```ts
 await happy.compute.list();
+await happy.compute.instances.list();
 const instance = await happy.compute.start({
     provider: "local-bash",
     workspaceSource: { type: "local_directory", path: "/absolute/source/folder" },
@@ -462,9 +465,16 @@ await happy.compute.exec({
 await happy.compute.stop({ instanceId: instance.instanceId });
 ```
 
-`start()` deliberately returns the validated, serializable identity `{ instanceId, provider }`
-rather than a method-bearing handle. Files are grouped under `compute.files`, while exec and stop
-remain flat. This keeps the same ID-based contract for normal consumers and cross-plugin driving.
+`start()` allocates a daemon-side instance in `provisioning`, asks the provider to materialize it,
+and runs a bounded `exec("true")` readiness probe inside the 30-second start budget. It resolves
+only with a validated `ready` instance record. Files are grouped under `compute.files`, instance
+records under `compute.instances`, while exec and stop remain flat.
+
+An operation that reaches an instance while it is `provisioning` or transiently `unavailable`
+waits up to ten seconds for `ready`, then returns `not_ready` with the current state and
+`retryable: true`. Every instance follows one daemon-owned
+`provisioning -> ready -> unavailable -> failed | stopped` lifecycle. Provider recovery can move
+`unavailable` back to `ready`; `failed` and `stopped` are terminal.
 
 For this first contract, `workspaceSource` has one form: `local_directory`. Happy canonicalizes the
 absolute source path and hands it to the provider; the provider materializes it by copying,
@@ -486,18 +496,29 @@ and terminally fails all its instances. New starts then return `provider_unhealt
 plugin restarts with a new generation.
 
 Each instance is leased to the consumer plugin process generation that started it. When that
-consumer generation ends, Rig releases its instances and asks the provider to stop them. Provider
-notification is always best-effort: `stop` releases the public ID even if the handler throws, times
-out, or is gone. Concurrent consumer stop, reaping, and shutdown share one stopping transition and
-do not double-notify. Rig also reaps instances after two hours of total lifetime or 30 minutes
-without a call touching them, and best-effort-stops live instances during daemon shutdown.
+consumer generation ends, Rig terminally stops its instances and asks the provider to clean them
+up. Provider notification is always best-effort and does not control the daemon-side transition.
+Concurrent consumer stop, reaping, and shutdown share one cleanup task and do not double-notify.
+Rig also reaps instances after two hours of total lifetime or 30 minutes without a call touching
+them, and best-effort-stops live instances during daemon shutdown.
+
+Rig retains at most 256 oldest-first terminal tombstones per daemon: final state, human-readable
+reason, creation time, and death time. Calls on a retained dead ID return `instance_failed` with
+`state: "failed" | "stopped"` and that reason. `instance_not_found` is reserved for IDs that never
+existed or whose tombstones were evicted.
+
+Provider `write` handlers must be atomic at operation level: commit the complete byte sequence or
+leave the destination untouched. A normal implementation writes a sibling temporary file and
+renames it over the destination. This makes retrying an interrupted write safe.
 
 The local reference is
 [`examples/local-bash`](examples/local-bash): it copies the source below the plugin's writable
-folder, uses direct bounded file I/O, runs `/bin/bash`, and implements idempotent provider stop.
+folder, uses bounded temp-file-plus-rename writes, runs `/bin/bash`, and implements idempotent
+provider stop.
 [`examples/daytona`](examples/daytona) uses Daytona's REST API directly: it creates an
 `ubuntu:24.04` sandbox, uploads at most 32 MiB of source files while skipping individual files over
-1 MiB, bounds command and file output, and treats delete 404 as success. It reads
+1 MiB, bounds command and file output, uploads writes to a sibling temporary path before an atomic
+sandbox-side `mv`, and treats delete 404 as success. It reads
 `DAYTONA_API_KEY` at startup. A missing key does not prevent plugin readiness; `start()` reports a
 clear configuration error until the key is set.
 
@@ -956,11 +977,12 @@ try {
 }
 ```
 
-Compute errors always set `code` and `retryable` and use one shape across provider completions and
-daemon HTTP responses. Codes are `provider_not_found`, `provider_unhealthy`, `provider_lost`,
-`instance_not_found`, `instance_failed`, `deadline_exceeded`, `capacity_exhausted`,
-`invalid_response`, and `invalid_request`. `retryable` is true only for `capacity_exhausted` and a
-`deadline_exceeded` error produced while the provider is still healthy.
+Compute errors always set `code` and `retryable`, may carry the authoritative instance `state`, and
+use one shape across provider completions and daemon HTTP responses. Codes are
+`provider_not_found`, `provider_unhealthy`, `provider_lost`, `instance_not_found`,
+`instance_failed`, `not_ready`, `deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and
+`invalid_request`. `not_ready`, `capacity_exhausted`, and `deadline_exceeded` are retryable.
+Terminal generation loss and retained failed/stopped instances are not.
 
 ## Testing outside Happy
 

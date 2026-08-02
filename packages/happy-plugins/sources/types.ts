@@ -1300,6 +1300,9 @@ export interface HappyPluginClient {
             read(input: ReadHappyComputeInput): Promise<Uint8Array>;
             write(input: WriteHappyComputeInput): Promise<void>;
         };
+        readonly instances: {
+            list(): Promise<readonly HappyComputeInstance[]>;
+        };
         list(): Promise<readonly HappyComputeProvider[]>;
         register(handlers: HappyComputeProviderHandlers): Promise<HappyComputeRegistration>;
         start(input: StartHappyComputeInput): Promise<HappyComputeInstance>;

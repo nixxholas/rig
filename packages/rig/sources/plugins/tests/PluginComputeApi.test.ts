@@ -63,8 +63,10 @@ describe("plugin compute API", () => {
             token: "private-plugin-token",
         });
         const files = new Map<string, Buffer>();
+        const commands: string[] = [];
         const handlers = {
             exec({ command }) {
+                commands.push(command);
                 files.set("command.txt", Buffer.from(command));
                 return {
                     exitCode: 0,
@@ -112,6 +114,14 @@ describe("plugin compute API", () => {
             provider: "memory-compute",
             workspaceSource: { path: source, type: "local_directory" },
         });
+        expect(instance).toMatchObject({ state: "ready" });
+        expect(commands).toEqual(["true"]);
+        await expect(client.compute.instances.list()).resolves.toEqual([
+            expect.objectContaining({
+                instanceId: instance.instanceId,
+                state: "ready",
+            }),
+        ]);
         await client.compute.files.write({
             bytes: Buffer.from("written"),
             instanceId: instance.instanceId,
@@ -168,7 +178,17 @@ describe("plugin compute API", () => {
                 instanceId: instance.instanceId,
                 path: "written.txt",
             }),
-        ).rejects.toMatchObject({ code: "instance_not_found", status: 404 });
+        ).rejects.toMatchObject({
+            code: "instance_failed",
+            state: "stopped",
+            status: 409,
+        });
+        await expect(client.compute.instances.list()).resolves.toEqual([
+            expect.objectContaining({
+                instanceId: instance.instanceId,
+                state: "stopped",
+            }),
+        ]);
 
         await registration.close();
     });

@@ -17,29 +17,43 @@ afterEach(async () => {
 describe("PluginComputeRegistry", () => {
     it("degrades after two consecutive provider failures and fails terminally after three", async () => {
         const harness = createHarness();
-        const instance = await harness.start();
-        const sibling = await harness.start();
-        harness.respondWithProviderError();
+        const instances = await Promise.all([harness.start(), harness.start(), harness.start()]);
+        const failures: Extract<HappyComputeEvent, { operation: "read"; type: "call" }>[] = [];
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "read") failures.push(event);
+            else harness.completeNormally(event);
+        });
+        const reads = instances.map((instance) => harness.read(instance.instanceId));
+        await expect.poll(() => failures.length).toBe(3);
 
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+        harness.completeWithProviderError(failures[0]!);
+        await expect(reads[0]).rejects.toMatchObject({
             code: "invalid_response",
+            state: "ready",
         });
         expect(harness.registry.list()[0]?.health).toBe("healthy");
 
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "invalid_response",
+        harness.completeWithProviderError(failures[1]!);
+        await expect(reads[1]).rejects.toMatchObject({
+            code: "not_ready",
+            retryable: true,
+            state: "unavailable",
         });
         expect(harness.registry.list()[0]?.health).toBe("degraded");
 
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+        harness.completeWithProviderError(failures[2]!);
+        await expect(reads[2]).rejects.toMatchObject({
             code: "provider_lost",
+            state: "failed",
         });
         expect(harness.registry.list()[0]?.health).toBe("failed");
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+        await expect(harness.read(instances[0]!.instanceId)).rejects.toMatchObject({
             code: "instance_failed",
+            state: "failed",
         });
-        await expect(harness.read(sibling.instanceId)).rejects.toMatchObject({
+        await expect(harness.read(instances[1]!.instanceId)).rejects.toMatchObject({
             code: "instance_failed",
+            state: "failed",
         });
         await expect(harness.start()).rejects.toMatchObject({
             code: "provider_unhealthy",
@@ -49,30 +63,37 @@ describe("PluginComputeRegistry", () => {
 
     it("resets consecutive failures and restores a degraded provider after a success", async () => {
         const harness = createHarness();
-        const instance = await harness.start();
-        harness.respondWithProviderError();
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+        const instances = await Promise.all([harness.start(), harness.start(), harness.start()]);
+        const calls: Extract<HappyComputeEvent, { operation: "read"; type: "call" }>[] = [];
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "read") calls.push(event);
+            else harness.completeNormally(event);
+        });
+        const reads = instances.map((instance) => harness.read(instance.instanceId));
+        await expect.poll(() => calls.length).toBe(3);
+
+        harness.completeWithProviderError(calls[0]!);
+        await expect(reads[0]).rejects.toMatchObject({
             code: "invalid_response",
         });
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "invalid_response",
+        harness.completeWithProviderError(calls[1]!);
+        await expect(reads[1]).rejects.toMatchObject({
+            code: "not_ready",
         });
         expect(harness.registry.list()[0]?.health).toBe("degraded");
 
-        harness.respondNormally();
-        await expect(harness.read(instance.instanceId)).resolves.toMatchObject({
+        harness.completeNormally(calls[2]!);
+        await expect(reads[2]).resolves.toMatchObject({
             contentBase64: "",
         });
         expect(harness.registry.list()[0]?.health).toBe("healthy");
-
-        harness.respondWithProviderError();
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "invalid_response",
-        });
-        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "invalid_response",
-        });
-        expect(harness.registry.list()[0]?.health).toBe("degraded");
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ state: "ready" }),
+                expect.objectContaining({ state: "ready" }),
+                expect.objectContaining({ state: "ready" }),
+            ]),
+        );
     });
 
     it("does not count consumer instance and capacity errors against provider health", async () => {
@@ -94,7 +115,9 @@ describe("PluginComputeRegistry", () => {
         });
 
         await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "invalid_response",
+            code: "not_ready",
+            retryable: true,
+            state: "unavailable",
         });
         expect(harness.registry.list()[0]?.health).toBe("degraded");
     });
@@ -151,7 +174,7 @@ describe("PluginComputeRegistry", () => {
         expect(harness.registry.list()[0]?.health).toBe("healthy");
     });
 
-    it("derives provider deadline retryability instead of trusting the provider", async () => {
+    it("keeps provider deadline failures retryable across healthy and unavailable states", async () => {
         const harness = createHarness();
         const instance = await harness.start();
         let failure = 0;
@@ -162,7 +185,7 @@ describe("PluginComputeRegistry", () => {
                     error: {
                         code: "deadline_exceeded",
                         message: `The provider timed out ${String(failure)}.`,
-                        retryable: failure === 2,
+                        retryable: true,
                     },
                 });
                 return;
@@ -180,9 +203,34 @@ describe("PluginComputeRegistry", () => {
         await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
             code: "deadline_exceeded",
             message: "The provider timed out 2.",
-            retryable: false,
+            retryable: true,
+            state: "unavailable",
         });
         expect(harness.registry.list()[0]?.health).toBe("degraded");
+    });
+
+    it("probes an unavailable instance and restores it before retrying the operation", async () => {
+        const harness = createHarness();
+        const instance = await harness.start();
+        harness.respondWithProviderError();
+
+        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+            code: "invalid_response",
+            state: "ready",
+        });
+        await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
+            code: "not_ready",
+            state: "unavailable",
+        });
+
+        harness.respondNormally();
+        await expect(harness.read(instance.instanceId)).resolves.toMatchObject({
+            contentBase64: "",
+        });
+        expect(harness.registry.list()[0]?.health).toBe("healthy");
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
+            expect.objectContaining({ state: "ready" }),
+        ]);
     });
 
     it("counts malformed completions as provider failures", async () => {
@@ -205,7 +253,9 @@ describe("PluginComputeRegistry", () => {
             code: "invalid_response",
         });
         await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "invalid_response",
+            code: "not_ready",
+            retryable: true,
+            state: "unavailable",
         });
         expect(harness.registry.list()[0]?.health).toBe("degraded");
     });
@@ -225,9 +275,243 @@ describe("PluginComputeRegistry", () => {
         });
         await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
             code: "deadline_exceeded",
-            retryable: false,
+            retryable: true,
+            state: "unavailable",
         });
         expect(harness.registry.list()[0]?.health).toBe("degraded");
+    });
+
+    it("waits for provisioning and maps exec and file operations to the same not_ready outcome", async () => {
+        const harness = createHarness({ provisioningGraceMs: 5 });
+        let startEvent:
+            | Extract<HappyComputeEvent, { operation: "start"; type: "call" }>
+            | undefined;
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "start") {
+                startEvent = event;
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const starting = harness.start();
+        await expect
+            .poll(() => harness.registry.listInstances(harness.consumer.generation))
+            .toEqual([expect.objectContaining({ state: "provisioning" })]);
+        const provisioning = harness.registry.listInstances(harness.consumer.generation)[0]!;
+
+        const operations = [
+            harness.read(provisioning.instanceId),
+            harness.registry.write(
+                {
+                    bytes: Buffer.from("updated"),
+                    instanceId: provisioning.instanceId,
+                    path: "message.txt",
+                },
+                harness.consumer.generation,
+            ),
+            harness.registry.exec(
+                {
+                    command: "true",
+                    instanceId: provisioning.instanceId,
+                    timeoutMs: 100,
+                },
+                harness.consumer.generation,
+            ),
+        ];
+        for (const operation of operations) {
+            await expect(operation).rejects.toMatchObject({
+                code: "not_ready",
+                retryable: true,
+                state: "provisioning",
+            });
+        }
+
+        harness.completeNormally(startEvent!);
+        await expect(starting).resolves.toMatchObject({ state: "ready" });
+    });
+
+    it("does not resolve start until the materialized instance passes its readiness probe", async () => {
+        const harness = createHarness();
+        let probe: Extract<HappyComputeEvent, { operation: "exec"; type: "call" }> | undefined;
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "exec" && event.command === "true") {
+                probe = event;
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const starting = harness.start();
+
+        await expect.poll(() => probe).toBeDefined();
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
+            expect.objectContaining({ state: "provisioning" }),
+        ]);
+        harness.completeNormally(probe!);
+
+        await expect(starting).resolves.toMatchObject({
+            provider: "local-bash",
+            state: "ready",
+        });
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
+            expect.objectContaining({ state: "ready" }),
+        ]);
+    });
+
+    it("returns the stopped tombstone when consumer stop wins an in-flight readiness probe", async () => {
+        const harness = createHarness();
+        let probe: Extract<HappyComputeEvent, { operation: "exec"; type: "call" }> | undefined;
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "exec" && event.command === "true") {
+                probe = event;
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const starting = harness.start();
+        await expect.poll(() => probe).toBeDefined();
+        const provisioning = harness.registry.listInstances(harness.consumer.generation)[0]!;
+
+        await harness.registry.stop(provisioning.instanceId, harness.consumer.generation);
+        harness.completeNormally(probe!);
+
+        await expect(starting).rejects.toMatchObject({
+            code: "instance_failed",
+            message: "stopped at its consumer's request",
+            retryable: false,
+            state: "stopped",
+        });
+    });
+
+    it("returns the stopped tombstone when consumer release wins an in-flight readiness probe", async () => {
+        const harness = createHarness();
+        let probe: Extract<HappyComputeEvent, { operation: "exec"; type: "call" }> | undefined;
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "exec" && event.command === "true") {
+                probe = event;
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const starting = harness.start();
+        await expect.poll(() => probe).toBeDefined();
+
+        harness.consumer.close();
+        harness.completeNormally(probe!);
+
+        await expect(starting).rejects.toMatchObject({
+            code: "instance_failed",
+            message: "its consumer plugin stopped",
+            retryable: false,
+            state: "stopped",
+        });
+    });
+
+    it("returns the failed tombstone when reaping wins an in-flight readiness probe", async () => {
+        vi.useFakeTimers();
+        const harness = createHarness({
+            idleTimeoutMs: 1_000,
+            maxLifetimeMs: 10,
+            reaperIntervalMs: 10,
+        });
+        let probe: Extract<HappyComputeEvent, { operation: "exec"; type: "call" }> | undefined;
+        harness.respond((event) => {
+            if (event.type === "call" && event.operation === "exec" && event.command === "true") {
+                probe = event;
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const starting = harness.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(probe).toBeDefined();
+
+        await vi.advanceTimersByTimeAsync(10);
+        harness.completeNormally(probe!);
+
+        await expect(starting).rejects.toMatchObject({
+            code: "instance_failed",
+            message: expect.stringContaining("maximum lifetime"),
+            retryable: false,
+            state: "failed",
+        });
+    });
+
+    it("moves a materialized instance to unavailable after a rejected probe and recovers it", async () => {
+        vi.useFakeTimers();
+        const harness = createHarness({ callTimeoutMs: 10, provisioningGraceMs: 10 });
+        let initialProbe:
+            | Extract<HappyComputeEvent, { operation: "exec"; type: "call" }>
+            | undefined;
+        harness.respond((event) => {
+            if (
+                event.type === "call" &&
+                event.operation === "exec" &&
+                event.command === "true" &&
+                initialProbe === undefined
+            ) {
+                initialProbe = event;
+                return;
+            }
+            harness.completeNormally(event);
+        });
+        const starting = harness.start();
+        const startFailure = expect(starting).rejects.toMatchObject({
+            code: "not_ready",
+            message: expect.stringContaining("readiness probe could not complete"),
+            retryable: true,
+            state: "unavailable",
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(initialProbe).toBeDefined();
+        const provisioning = harness.registry.listInstances(harness.consumer.generation)[0]!;
+
+        await vi.advanceTimersByTimeAsync(10);
+        await startFailure;
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
+            expect.objectContaining({
+                instanceId: provisioning.instanceId,
+                state: "unavailable",
+            }),
+        ]);
+
+        await expect(harness.read(provisioning.instanceId)).resolves.toMatchObject({
+            contentBase64: "",
+        });
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
+            expect.objectContaining({
+                instanceId: provisioning.instanceId,
+                state: "ready",
+            }),
+        ]);
+    });
+
+    it("returns bounded tombstones for dead instances and not_found after eviction", async () => {
+        const harness = createHarness({ maxTombstones: 1 });
+        const first = await harness.start();
+        await harness.registry.stop(first.instanceId, harness.consumer.generation);
+
+        await expect(harness.read(first.instanceId)).rejects.toMatchObject({
+            code: "instance_failed",
+            message: "stopped at its consumer's request",
+            retryable: false,
+            state: "stopped",
+        });
+        expect(harness.registry.listInstances(harness.consumer.generation)).toEqual([
+            expect.objectContaining({
+                diedAt: expect.any(Number),
+                instanceId: first.instanceId,
+                state: "stopped",
+            }),
+        ]);
+
+        const second = await harness.start();
+        await harness.registry.stop(second.instanceId, harness.consumer.generation);
+        await expect(harness.read(first.instanceId)).rejects.toMatchObject({
+            code: "instance_not_found",
+        });
+        await expect(harness.read("never-existed")).rejects.toMatchObject({
+            code: "instance_not_found",
+        });
     });
 
     it("rejects in-flight calls immediately with provider_lost when the stream closes", async () => {
@@ -242,7 +526,11 @@ describe("PluginComputeRegistry", () => {
 
         harness.detach();
 
-        await expect(pending).rejects.toMatchObject({ code: "provider_lost" });
+        await expect(pending).rejects.toMatchObject({
+            code: "provider_lost",
+            retryable: false,
+            state: "failed",
+        });
         expect(harness.registry.list()[0]?.health).toBe("failed");
     });
 
@@ -270,7 +558,10 @@ describe("PluginComputeRegistry", () => {
             Promise.resolve().then(() =>
                 harness.registry.stop(instance.instanceId, harness.consumer.generation),
             ),
-        ).rejects.toMatchObject({ code: "instance_not_found" });
+        ).rejects.toMatchObject({
+            code: "instance_failed",
+            state: "stopped",
+        });
     });
 
     it("reaps instances at their maximum lifetime and logs the reason", async () => {
@@ -288,7 +579,9 @@ describe("PluginComputeRegistry", () => {
         await expect.poll(() => harness.stopCalls()).toBe(1);
 
         await expect(harness.read(instance.instanceId)).rejects.toMatchObject({
-            code: "instance_not_found",
+            code: "instance_failed",
+            message: expect.stringContaining("maximum lifetime"),
+            state: "failed",
         });
         expect(log).toHaveBeenCalledWith(
             "info",
@@ -448,6 +741,17 @@ function createHarness(options: PluginComputeRegistryOptions = {}) {
 
     return {
         completeNormally,
+        completeWithProviderError(
+            event: Extract<HappyComputeEvent, { operation: "read"; type: "call" }>,
+        ) {
+            provider.complete(registrationId, event.callId, {
+                error: {
+                    code: "invalid_response",
+                    message: "The provider operation failed.",
+                    retryable: false,
+                },
+            });
+        },
         consumer,
         detach,
         provider,

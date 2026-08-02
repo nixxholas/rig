@@ -133,6 +133,7 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
                         code: computeError.code,
                         message: computeError.message,
                         retryable: computeError.retryable,
+                        ...(computeError.state === undefined ? {} : { state: computeError.state }),
                     });
                     return;
                 }
@@ -228,6 +229,14 @@ async function handleRequest(
     }
     if (request.method === "GET" && url.pathname === "/compute/providers") {
         sendJson(response, 200, { providers: requireComputeRegistry(options).list() });
+        return;
+    }
+    if (request.method === "GET" && url.pathname === "/compute/instances") {
+        sendJson(response, 200, {
+            instances: requireComputeRegistry(options).listInstances(
+                requireCompute(options).generation,
+            ),
+        });
         return;
     }
     if (request.method === "GET" && url.pathname === "/plugins") {

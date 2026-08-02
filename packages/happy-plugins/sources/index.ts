@@ -15,6 +15,7 @@ export type {
     HappyComputeExecResult,
     HappyComputeHandlerContext,
     HappyComputeInstance,
+    HappyComputeInstanceState,
     HappyComputeProvider,
     HappyComputeProviderContribution,
     HappyComputeProviderHandlers,

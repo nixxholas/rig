@@ -1,4 +1,4 @@
-import { access, mkdir, readdir, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -78,7 +78,17 @@ describe("Happy compute lifecycle", () => {
                 instanceId: instance.instanceId,
                 path: "message.txt",
             }),
-        ).rejects.toMatchObject({ status: 404 });
+        ).rejects.toMatchObject({
+            code: "instance_failed",
+            state: "stopped",
+            status: 409,
+        });
+        await expect(host.client.compute.instances.list()).resolves.toEqual([
+            expect.objectContaining({
+                instanceId: instance.instanceId,
+                state: "stopped",
+            }),
+        ]);
 
         await registration.close();
         await localBash.close();
@@ -104,6 +114,26 @@ describe("Happy compute lifecycle", () => {
             code: "invalid_request",
             message: expect.stringContaining("requested local Bash compute file is unavailable"),
         });
+        const [instanceFolder] = await readdir(instanceParent);
+        const materializedFile = join(instanceParent, instanceFolder!, "workspace", "message.txt");
+        const cancellation = new AbortController();
+        cancellation.abort();
+        await expect(
+            Promise.resolve(
+                localBash.handlers.write(
+                    {
+                        bytes: Buffer.from("torn"),
+                        instanceId,
+                        path: "message.txt",
+                    },
+                    { signal: cancellation.signal },
+                ),
+            ),
+        ).rejects.toThrow();
+        await expect(readFile(materializedFile, "utf8")).resolves.toBe("hello");
+        await expect(readdir(join(instanceParent, instanceFolder!, "workspace"))).resolves.toEqual([
+            "message.txt",
+        ]);
         await localBash.handlers.stop({ instanceId }, context);
         await expect(
             Promise.resolve(localBash.handlers.stop({ instanceId }, context)),
@@ -199,7 +229,7 @@ describe("Happy compute lifecycle", () => {
         await registration.close();
     });
 
-    it("releases a failed instance when it is stopped", async () => {
+    it("retains a failed instance tombstone after provider loss", async () => {
         const host = await createHappyPluginTestHost(
             { computeProvider: { name: "test-compute" } },
             { temporaryDirectory: process.cwd() },
@@ -227,11 +257,19 @@ describe("Happy compute lifecycle", () => {
 
         host.compute.disconnectProvider();
         await expect.poll(() => registration.status).toBe("closed");
-        await host.client.compute.stop({ instanceId: instance.instanceId });
-
         await expect(
             host.client.compute.stop({ instanceId: instance.instanceId }),
-        ).rejects.toMatchObject({ status: 404 });
+        ).rejects.toMatchObject({
+            code: "instance_failed",
+            state: "failed",
+            status: 409,
+        });
+        await expect(host.client.compute.instances.list()).resolves.toEqual([
+            expect.objectContaining({
+                instanceId: instance.instanceId,
+                state: "failed",
+            }),
+        ]);
         await registration.close();
     });
 });

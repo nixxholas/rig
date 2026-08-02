@@ -1,10 +1,40 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
+import { happyComputeErrorSchema, happyComputeInstanceSchema } from "../sources/computeTypes.js";
 import { happyPluginManifestSchema } from "../sources/types.js";
 import { HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS } from "../sources/types.js";
 
 describe("happy plugin manifest", () => {
+    it("validates compute readiness errors and terminal instance tombstones", () => {
+        expect(
+            Value.Check(happyComputeErrorSchema, {
+                code: "not_ready",
+                message: "The instance is still provisioning.",
+                retryable: true,
+                state: "provisioning",
+            }),
+        ).toBe(true);
+        expect(
+            Value.Check(happyComputeErrorSchema, {
+                code: "not_ready",
+                message: "The instance failed.",
+                retryable: true,
+                state: "failed",
+            }),
+        ).toBe(false);
+        expect(
+            Value.Check(happyComputeInstanceSchema, {
+                createdAt: 10,
+                diedAt: 20,
+                instanceId: "instance-1",
+                provider: "test-compute",
+                reason: "The provider crashed.",
+                state: "failed",
+            }),
+        ).toBe(true);
+    });
+
     it("accepts Dockerfile and prebuilt-image runtime declarations", () => {
         const manifest = {
             description: "Runs in a container.",

@@ -3,11 +3,17 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES } from "../sources/index.js";
 import { createDaytonaComputeProvider } from "../examples/daytona/daytonaCompute.ts";
 
 const directories: string[] = [];
 const context = { signal: new AbortController().signal };
+const observedCommandBodySchema = Type.Object(
+    { command: Type.String() },
+    { additionalProperties: true },
+);
 
 afterEach(async () => {
     await Promise.all(
@@ -39,6 +45,15 @@ describe("Daytona compute example", () => {
                 });
             }
             if (url.endsWith("/process/execute")) {
+                if (decodeWrappedCommand(requests.at(-1)?.body).includes("mv --")) {
+                    return commandResponse({
+                        exitCode: 0,
+                        stderr: "",
+                        stderrBytes: 0,
+                        stdout: "",
+                        stdoutBytes: 0,
+                    });
+                }
                 return commandResponse({
                     exitCode: 7,
                     stderr: "warning",
@@ -104,6 +119,18 @@ describe("Daytona compute example", () => {
             cwd: "/home/daytona/workspace",
             timeout: 2,
         });
+        const atomicUpload = requests.find(
+            (request) =>
+                request.url.includes("/files/upload-v2") &&
+                request.url.includes("saved.txt.happy-compute-"),
+        );
+        expect(new URL(atomicUpload!.url).searchParams.get("path")).toMatch(
+            /^\/home\/daytona\/workspace\/saved\.txt\.happy-compute-.+\.tmp$/,
+        );
+        const processRequests = requests.filter((request) =>
+            request.url.endsWith("/process/execute"),
+        );
+        expect(decodeWrappedCommand(processRequests[1]?.body)).toContain("mv --");
         expect(requests.at(-1)).toMatchObject({
             method: "DELETE",
             url: "https://app.daytona.io/api/sandbox/sandbox-1",
@@ -332,4 +359,10 @@ async function observedBody(body: RequestInit["body"]): Promise<unknown> {
     if (typeof body === "string") return JSON.parse(body) as unknown;
     if (body instanceof Uint8Array) return Buffer.from(body).toString("utf8");
     return body;
+}
+
+function decodeWrappedCommand(body: unknown): string {
+    const command = Value.Decode(observedCommandBodySchema, body).command;
+    const encoded = /printf %s '([^']+)'/.exec(command)?.[1];
+    return encoded === undefined ? "" : Buffer.from(encoded, "base64").toString("utf8");
 }

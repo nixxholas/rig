@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { lstat, opendir, readFile, realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 
@@ -178,10 +179,12 @@ export function createDaytonaComputeProvider(
             },
             async write({ bytes, instanceId, path }, context) {
                 const instance = requireInstance(instanceId);
+                const target = remotePath(path);
+                const temporary = `${target}.happy-compute-${randomUUID()}.tmp`;
                 let response: Response;
                 try {
                     response = await request(
-                        `${instance.toolboxUrl}/files/upload-v2?path=${encodeURIComponent(remotePath(path))}`,
+                        `${instance.toolboxUrl}/files/upload-v2?path=${encodeURIComponent(temporary)}`,
                         {
                             body: bytes,
                             headers: { "content-type": "application/octet-stream" },
@@ -189,6 +192,22 @@ export function createDaytonaComputeProvider(
                             signal: context.signal,
                         },
                     );
+                    await response.body?.cancel();
+                    context.signal.throwIfAborted();
+                    const moved = await executeInSandbox(
+                        instance,
+                        atomicMoveCommand(temporary, target),
+                        10_000,
+                        request,
+                        context.signal,
+                    );
+                    if (moved.timedOut || moved.exitCode !== 0) {
+                        throw new Error(
+                            moved.timedOut
+                                ? "Daytona timed out while committing an atomic file write."
+                                : `Daytona could not commit an atomic file write: ${moved.stderr || `exit code ${String(moved.exitCode)}`}`,
+                        );
+                    }
                 } catch (error) {
                     if (error instanceof DaytonaHttpError && error.status === 400) {
                         throw new HappyComputeProviderError(
@@ -196,24 +215,26 @@ export function createDaytonaComputeProvider(
                             "Daytona rejected the requested file path.",
                         );
                     }
+                    await executeInSandbox(
+                        instance,
+                        removeTemporaryFileCommand(temporary),
+                        2_000,
+                        request,
+                        AbortSignal.timeout(2_000),
+                    ).catch(() => undefined);
                     throw error;
                 }
-                await response.body?.cancel();
             },
             async exec({ command, instanceId, timeoutMs }, context) {
                 const instance = requireInstance(instanceId);
-                let response: Response;
                 try {
-                    response = await request(`${instance.toolboxUrl}/process/execute`, {
-                        body: JSON.stringify({
-                            command: commandWrapper(command),
-                            cwd: DAYTONA_WORKSPACE,
-                            timeout: Math.max(1, Math.ceil(timeoutMs / 1_000)),
-                        }),
-                        headers: { "content-type": "application/json" },
-                        method: "POST",
-                        signal: context.signal,
-                    });
+                    return await executeInSandbox(
+                        instance,
+                        command,
+                        timeoutMs,
+                        request,
+                        context.signal,
+                    );
                 } catch (error) {
                     if (error instanceof DaytonaHttpError && error.status === 408) {
                         return {
@@ -227,30 +248,6 @@ export function createDaytonaComputeProvider(
                     }
                     throw error;
                 }
-                const execute = Value.Decode(
-                    executeResponseSchema,
-                    await readJsonResponse(response, MAX_DAYTONA_JSON_BYTES),
-                );
-                const envelope = Value.Decode(
-                    commandEnvelopeSchema,
-                    JSON.parse(execute.result) as unknown,
-                );
-                const stdout = Buffer.from(envelope.stdoutBase64, "base64");
-                const stderr = Buffer.from(envelope.stderrBase64, "base64");
-                if (
-                    stdout.byteLength > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES ||
-                    stderr.byteLength > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES
-                ) {
-                    throw new Error("Daytona returned command output beyond Rig's size limit.");
-                }
-                return {
-                    exitCode: envelope.exitCode,
-                    stderr: stderr.toString("utf8"),
-                    stderrTruncated: envelope.stderrBytes > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
-                    stdout: stdout.toString("utf8"),
-                    stdoutTruncated: envelope.stdoutBytes > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
-                    timedOut: false,
-                };
             },
             async stop({ instanceId }) {
                 const instance = instances.get(instanceId);
@@ -324,6 +321,73 @@ async function* walkFiles(directory: string): AsyncGenerator<string> {
 
 function remotePath(path: string): string {
     return `${DAYTONA_WORKSPACE}/${path}`;
+}
+
+async function executeInSandbox(
+    instance: DaytonaInstance,
+    command: string,
+    timeoutMs: number,
+    request: (
+        url: string,
+        init: RequestInit,
+        acceptedStatuses?: readonly number[],
+    ) => Promise<Response>,
+    signal: AbortSignal,
+): Promise<{
+    exitCode: number | null;
+    stderr: string;
+    stderrTruncated: boolean;
+    stdout: string;
+    stdoutTruncated: boolean;
+    timedOut: boolean;
+}> {
+    const response = await request(`${instance.toolboxUrl}/process/execute`, {
+        body: JSON.stringify({
+            command: commandWrapper(command),
+            cwd: DAYTONA_WORKSPACE,
+            timeout: Math.max(1, Math.ceil(timeoutMs / 1_000)),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+        signal,
+    });
+    const execute = Value.Decode(
+        executeResponseSchema,
+        await readJsonResponse(response, MAX_DAYTONA_JSON_BYTES),
+    );
+    const envelope = Value.Decode(commandEnvelopeSchema, JSON.parse(execute.result) as unknown);
+    const stdout = Buffer.from(envelope.stdoutBase64, "base64");
+    const stderr = Buffer.from(envelope.stderrBase64, "base64");
+    if (
+        stdout.byteLength > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES ||
+        stderr.byteLength > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES
+    ) {
+        throw new Error("Daytona returned command output beyond Rig's size limit.");
+    }
+    return {
+        exitCode: envelope.exitCode,
+        stderr: stderr.toString("utf8"),
+        stderrTruncated: envelope.stderrBytes > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
+        stdout: stdout.toString("utf8"),
+        stdoutTruncated: envelope.stdoutBytes > HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
+        timedOut: false,
+    };
+}
+
+function atomicMoveCommand(source: string, target: string): string {
+    return pathCommand("mv --", source, target);
+}
+
+function removeTemporaryFileCommand(path: string): string {
+    return pathCommand("rm -f --", path);
+}
+
+function pathCommand(command: string, ...paths: readonly string[]): string {
+    const variables = paths.map(
+        (path, index) =>
+            `path${String(index)}=$(printf %s '${Buffer.from(path).toString("base64")}' | base64 -d)`,
+    );
+    return `${variables.join("; ")}; ${command} ${paths.map((_, index) => `"${`$path${String(index)}`}"`).join(" ")}`;
 }
 
 function commandWrapper(command: string): string {

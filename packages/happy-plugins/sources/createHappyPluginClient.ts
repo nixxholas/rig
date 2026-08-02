@@ -9,7 +9,9 @@ import {
     execHappyComputeResponseSchema,
     happyComputeErrorSchema,
     type HappyComputeErrorCode,
+    type HappyComputeInstanceState,
     happyComputeExecResultSchema,
+    listHappyComputeInstancesResponseSchema,
     listHappyComputeProvidersResponseSchema,
     readHappyComputeInputSchema,
     readHappyComputeResponseSchema,
@@ -78,6 +80,7 @@ const requiredSettingSchema = Type.String({ minLength: 1, pattern: "\\S" });
 export class HappyPluginApiError extends Error {
     readonly code: HappyComputeErrorCode | (string & {}) | undefined;
     readonly retryable: boolean;
+    readonly state: HappyComputeInstanceState | undefined;
     readonly status: number;
 
     constructor(
@@ -85,11 +88,13 @@ export class HappyPluginApiError extends Error {
         message: string,
         code?: HappyComputeErrorCode | (string & {}),
         retryable = false,
+        state?: HappyComputeInstanceState,
     ) {
         super(message);
         this.name = "HappyPluginApiError";
         this.code = code;
         this.retryable = retryable;
+        this.state = state;
         this.status = status;
     }
 }
@@ -195,6 +200,16 @@ export function createHappyPluginClient(
                         },
                     );
                 },
+            },
+            instances: {
+                list: async () =>
+                    (
+                        await request(
+                            "GET",
+                            "/compute/instances",
+                            listHappyComputeInstancesResponseSchema,
+                        )
+                    ).instances,
             },
             list: async () =>
                 (
@@ -500,6 +515,7 @@ function requestJson<TSchema_ extends TSchema>(options: {
                                         payload.message,
                                         payload.code,
                                         payload.retryable,
+                                        payload.state,
                                     ),
                                 );
                                 return;

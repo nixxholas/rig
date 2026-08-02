@@ -192,7 +192,7 @@ function handlerErrorToCompletion(error: unknown) {
             retryable: false as const,
         };
     }
-    if (error.code === "capacity_exhausted") {
+    if (error.code === "capacity_exhausted" || error.code === "deadline_exceeded") {
         return { code: error.code, message: error.message, retryable: true as const };
     }
     return { code: error.code, message: error.message, retryable: false as const };

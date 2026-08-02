@@ -3,9 +3,14 @@ import { Value } from "@sinclair/typebox/value";
 
 import { happyComputeErrorCodeSchema } from "./computeTypes.js";
 
+const happyComputeProviderErrorCodeSchema = Type.Exclude(
+    happyComputeErrorCodeSchema,
+    Type.Literal("not_ready"),
+);
+
 const happyComputeProviderErrorInputSchema = Type.Object(
     {
-        code: happyComputeErrorCodeSchema,
+        code: happyComputeProviderErrorCodeSchema,
         message: Type.String({ minLength: 1 }),
     },
     { additionalProperties: false },

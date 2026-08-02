@@ -247,24 +247,39 @@ the same whole-catalog `plugins_changed` event used for plugin lifecycle changes
 `GET /compute/providers` and the `/plugins` compute contribution include `healthy`, `degraded`, or
 `failed` health.
 
-Instances are leased to the consumer plugin process generation that started them. Stop first moves
-an instance into one shared stopping state, so explicit stop, consumer cleanup, reaping, and daemon
-shutdown join one notification attempt. The provider's stop call is best-effort and deadline-bound;
-the registry release is unconditional even when that call throws, times out, or cannot be sent.
-One registry reaper enforces a two-hour maximum lifetime and 30-minute idle timeout, logs the expiry
-reason, and avoids per-instance timers. Daemon shutdown drains best-effort stops while provider
-streams are still available.
+Instances are leased to the consumer plugin process generation that started them and follow one
+stored `provisioning -> ready -> unavailable -> failed | stopped` lifecycle. `start` creates the
+public provisioning record before provider materialization, then includes a cheap `exec("true")`
+probe inside its 30-second budget and returns only after `ready`. Exec and file operations that
+arrive during provisioning or transient unavailability wait up to ten seconds, then return
+`not_ready` with the current state. A provider success restores unavailable instances when the
+generation recovers; provider failure terminally fails every backed instance.
+
+Explicit stop transitions immediately to terminal `stopped`; provider cleanup is best-effort and
+deadline-bound. Explicit stop, consumer cleanup, reaping, and daemon shutdown join one cleanup task
+and cannot double-notify. One registry reaper enforces a two-hour maximum lifetime and 30-minute
+idle timeout, logs the attributed death reason, and avoids per-instance timers. Daemon shutdown
+drains best-effort stops while provider streams are still available.
+
+The registry retains at most 256 terminal tombstones with final state, reason, and created/died
+timestamps, evicting oldest first. A call using a retained dead ID returns `instance_failed` and
+the tombstone reason; `instance_not_found` means the ID never existed or its tombstone was evicted.
+`GET /compute/instances` exposes the same lifecycle records to the owning consumer generation.
 
 Every compute failure that crosses the socket uses the TypeBox-validated
-`{ code, message, retryable }` shape. The public codes are `provider_not_found`,
+`{ code, message, retryable, state? }` shape. The public codes are `provider_not_found`,
 `provider_unhealthy`, `provider_lost`, `instance_not_found`, `instance_failed`,
-`deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and `invalid_request`. Only capacity
-exhaustion and a deadline exceeded while the provider remains healthy are retryable.
+`not_ready`, `deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and `invalid_request`.
+`not_ready`, capacity exhaustion, and deadlines are retryable; dead generations and terminal
+instance tombstones are not.
 
 The first `workspaceSource` form is a canonical absolute local directory path. The daemon verifies
 and canonicalizes it, and the provider owns materialization by copy or checkout. This deliberately
 avoids buffering arbitrarily large workspaces through the socket. The SDK and registry are
 foundation only: custom computes are not yet wired into agent session execution.
+
+The provider write contract is atomic: the destination is fully replaced or left untouched.
+Providers normally write a same-directory temporary file and rename it as the commit step.
 
 `PluginAppRegistry` owns bounded manifest-declared static bundles, app-scoped MCP calls, and
 plugin-private JSON storage. Static bundles and their startup-attached tools are published together

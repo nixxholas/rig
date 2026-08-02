@@ -1,7 +1,17 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import {
+    cp,
+    lstat,
+    mkdir,
+    mkdtemp,
+    readFile,
+    realpath,
+    rename,
+    rm,
+    writeFile,
+} from "node:fs/promises";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -133,7 +143,7 @@ export function createLocalBashComputeProvider(
                 }
                 return bytes;
             },
-            async write({ bytes, instanceId, path }) {
+            async write({ bytes, instanceId, path }, context) {
                 if (bytes.byteLength > HAPPY_COMPUTE_MAX_FILE_BYTES) {
                     throw new HappyComputeProviderError(
                         "invalid_request",
@@ -147,7 +157,17 @@ export function createLocalBashComputeProvider(
                 } catch (error) {
                     throw new HappyComputeProviderError("invalid_request", errorToMessage(error));
                 }
-                await writeFile(target, bytes);
+                const temporary = join(
+                    dirname(target),
+                    `.${basename(target)}.happy-compute-${randomUUID()}.tmp`,
+                );
+                try {
+                    await writeFile(temporary, bytes, { flag: "wx" });
+                    context.signal.throwIfAborted();
+                    await rename(temporary, target);
+                } finally {
+                    await rm(temporary, { force: true });
+                }
             },
             exec({ command, instanceId, timeoutMs }, context) {
                 return runBoundedBash(

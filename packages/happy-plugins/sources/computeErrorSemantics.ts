@@ -1,8 +1,4 @@
-import type {
-    HappyComputeError,
-    HappyComputeErrorCode,
-    HappyComputeProviderHealth,
-} from "./computeTypes.js";
+import type { HappyComputeError, HappyComputeErrorCode } from "./computeTypes.js";
 
 export function happyComputeErrorStatus(
     code: HappyComputeErrorCode,
@@ -15,6 +11,8 @@ export function happyComputeErrorStatus(
             return 400;
         case "capacity_exhausted":
             return 429;
+        case "not_ready":
+            return 409;
         case "invalid_response":
             return 502;
         case "provider_lost":
@@ -27,19 +25,24 @@ export function happyComputeErrorStatus(
     }
 }
 
-export function normalizeHappyComputeError(
-    error: HappyComputeError,
-    providerHealth: HappyComputeProviderHealth,
-): HappyComputeError {
+export function normalizeHappyComputeError(error: HappyComputeError): HappyComputeError {
     switch (error.code) {
         case "capacity_exhausted":
-            return { code: error.code, message: error.message, retryable: true };
+            return {
+                code: error.code,
+                message: error.message,
+                retryable: true,
+                ...(error.state === undefined ? {} : { state: error.state }),
+            };
         case "deadline_exceeded":
             return {
                 code: error.code,
                 message: error.message,
-                retryable: providerHealth === "healthy",
+                retryable: true,
+                ...(error.state === undefined ? {} : { state: error.state }),
             };
+        case "not_ready":
+            return error;
         case "instance_failed":
         case "instance_not_found":
         case "invalid_request":
@@ -47,6 +50,11 @@ export function normalizeHappyComputeError(
         case "provider_lost":
         case "provider_not_found":
         case "provider_unhealthy":
-            return { code: error.code, message: error.message, retryable: false };
+            return {
+                code: error.code,
+                message: error.message,
+                retryable: false,
+                ...(error.state === undefined ? {} : { state: error.state }),
+            };
     }
 }

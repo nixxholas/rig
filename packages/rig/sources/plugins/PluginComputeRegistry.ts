@@ -6,6 +6,8 @@ import {
     type ExecHappyComputeHandlerInput,
     type HappyComputeError,
     type HappyComputeErrorCode,
+    type HappyComputeInstance,
+    type HappyComputeInstanceState,
     type HappyComputeProvider,
     type HappyComputeProviderManifest,
     type ReadHappyComputeInput,
@@ -25,6 +27,9 @@ const EXEC_DEADLINE_GRACE_MS = 2_000;
 const MAX_ACTIVE_COMPUTE_INSTANCES = 256;
 const MAX_PENDING_COMPUTE_CALLS = 256;
 const DEFAULT_REAPER_INTERVAL_MS = 30_000;
+const MAX_RETAINED_COMPUTE_TOMBSTONES = 256;
+const MAX_PROVISIONING_GRACE_MS = 10_000;
+const READINESS_PROBE_COMMAND_TIMEOUT_MS = 5_000;
 
 export const MAX_COMPUTE_INSTANCE_LIFETIME_MS = 2 * 60 * 60_000;
 export const MAX_COMPUTE_INSTANCE_IDLE_MS = 30 * 60_000;
@@ -88,14 +93,38 @@ type ComputeInstanceBase = {
     createdAt: number;
     id: string;
     lastTouchedAt: number;
-    providerInstanceId: string;
+    provider: string;
     registration: ComputeRegistration;
 };
 
+type ReadinessSignal = {
+    promise: Promise<void>;
+    settle(): void;
+};
+
 type ComputeInstance =
-    | (ComputeInstanceBase & { state: "active" })
-    | (ComputeInstanceBase & { failure: string; state: "failed" })
-    | (ComputeInstanceBase & { reason: string; state: "stopping"; task: Promise<void> });
+    | (ComputeInstanceBase & {
+          providerInstanceId?: string;
+          readiness: ReadinessSignal;
+          state: "provisioning";
+      })
+    | (ComputeInstanceBase & { providerInstanceId: string; state: "ready" })
+    | (ComputeInstanceBase & {
+          providerInstanceId: string;
+          readiness: ReadinessSignal;
+          reason: string;
+          state: "unavailable";
+      });
+
+type ComputeTombstone = {
+    consumerGeneration: string;
+    createdAt: number;
+    diedAt: number;
+    id: string;
+    provider: string;
+    reason: string;
+    state: "failed" | "stopped";
+};
 
 export interface PluginComputeConnection {
     readonly generation: string;
@@ -118,12 +147,14 @@ export interface PluginComputeConnectionOptions {
 export class PluginComputeError extends Error {
     readonly code: HappyComputeErrorCode;
     readonly retryable: boolean;
+    readonly state: HappyComputeInstanceState | undefined;
 
     constructor(error: HappyComputeError) {
         super(error.message);
         this.name = "PluginComputeError";
         this.code = error.code;
         this.retryable = error.retryable;
+        this.state = error.state;
     }
 }
 
@@ -140,7 +171,9 @@ export interface PluginComputeRegistryOptions {
     /** Lowers the daemon-wide instance budget. Intended for deterministic tests. */
     maxInstances?: number;
     maxLifetimeMs?: number;
+    maxTombstones?: number;
     now?: () => number;
+    provisioningGraceMs?: number;
     reaperIntervalMs?: number;
 }
 
@@ -160,9 +193,14 @@ export class PluginComputeRegistry {
     readonly #log: NonNullable<PluginComputeRegistryOptions["log"]>;
     readonly #maxInstances: number;
     readonly #maxLifetimeMs: number;
+    readonly #maxTombstones: number;
     readonly #now: () => number;
+    readonly #provisioningGraceMs: number;
     readonly #registrations = new Map<string, ComputeRegistration>();
+    readonly #recoveryTasks = new Map<string, Promise<void>>();
     readonly #reaper: NodeJS.Timeout;
+    readonly #stopTasks = new Map<string, Promise<void>>();
+    readonly #tombstones = new Map<string, ComputeTombstone>();
     #closeTask: Promise<void> | undefined;
     #closed = false;
     #reservedInstanceSlots = 0;
@@ -182,7 +220,15 @@ export class PluginComputeRegistry {
             options.maxLifetimeMs ?? MAX_COMPUTE_INSTANCE_LIFETIME_MS,
             MAX_COMPUTE_INSTANCE_LIFETIME_MS,
         );
+        this.#maxTombstones = Math.min(
+            options.maxTombstones ?? MAX_RETAINED_COMPUTE_TOMBSTONES,
+            MAX_RETAINED_COMPUTE_TOMBSTONES,
+        );
         this.#now = options.now ?? Date.now;
+        this.#provisioningGraceMs = Math.min(
+            options.provisioningGraceMs ?? MAX_PROVISIONING_GRACE_MS,
+            MAX_PROVISIONING_GRACE_MS,
+        );
         this.#reaper = setInterval(
             () => this.#reapExpiredInstances(),
             Math.min(
@@ -300,12 +346,7 @@ export class PluginComputeRegistry {
                         this.#recordProviderFailure(registration, decoded.error.message);
                     }
                     decoded = {
-                        error: normalizeHappyComputeError(
-                            decoded.error,
-                            registration.state.status === "registered"
-                                ? "failed"
-                                : registration.state.status,
-                        ),
+                        error: normalizeHappyComputeError(decoded.error),
                     };
                 }
                 if (registration.pendingCalls.get(callId) !== call) return;
@@ -398,6 +439,20 @@ export class PluginComputeRegistry {
             .sort((left, right) => left.name.localeCompare(right.name));
     }
 
+    listInstances(consumerGeneration: string): readonly HappyComputeInstance[] {
+        return [
+            ...[...this.#instances.values()]
+                .filter((instance) => instance.consumerGeneration === consumerGeneration)
+                .map((instance) => this.#toHappyComputeInstance(instance)),
+            ...[...this.#tombstones.values()]
+                .filter((tombstone) => tombstone.consumerGeneration === consumerGeneration)
+                .map((tombstone) => this.#toHappyComputeInstance(tombstone)),
+        ].sort(
+            (left, right) =>
+                left.createdAt - right.createdAt || left.instanceId.localeCompare(right.instanceId),
+        );
+    }
+
     subscribe(listener: () => void): () => void {
         this.#listeners.add(listener);
         return () => this.#listeners.delete(listener);
@@ -431,10 +486,24 @@ export class PluginComputeRegistry {
             throw computeError(
                 "capacity_exhausted",
                 `Rig can keep at most ${String(this.#maxInstances)} compute instances active.`,
-                true,
             );
         }
         this.#reservedInstanceSlots += 1;
+        const createdAt = this.#now();
+        const id = randomUUID();
+        const readiness = createReadinessSignal();
+        const instance: ComputeInstance = {
+            consumerGeneration,
+            createdAt,
+            id,
+            lastTouchedAt: createdAt,
+            provider: registration.owner.compute!.name,
+            readiness,
+            registration,
+            state: "provisioning",
+        };
+        this.#instances.set(id, instance);
+        const startDeadlineAt = Date.now() + this.#deadline("start");
         try {
             const completion = await this.#invoke(
                 registration,
@@ -442,13 +511,29 @@ export class PluginComputeRegistry {
                     operation: "start",
                     workspaceSource: input.workspaceSource,
                 },
-                this.#deadline("start"),
+                remainingDeadline(startDeadlineAt),
             );
-            if ("error" in completion) throw new PluginComputeError(completion.error);
+            if ("error" in completion) {
+                const error =
+                    completion.error.code === "not_ready"
+                        ? computeError(
+                              "invalid_response",
+                              "The provider reported not_ready before materializing an instance.",
+                              "failed",
+                          )
+                        : computeError(completion.error.code, completion.error.message, "failed");
+                this.#terminalizeInstance(
+                    instance,
+                    "failed",
+                    `The compute provider could not provision the instance. ${error.message}`,
+                );
+                throw error;
+            }
             const duplicate = [...this.#instances.values()].some(
-                (instance) =>
-                    instance.registration === registration &&
-                    instance.providerInstanceId === completion.result.instanceId,
+                (candidate) =>
+                    candidate !== instance &&
+                    candidate.registration === registration &&
+                    candidate.providerInstanceId === completion.result.instanceId,
             );
             if (duplicate) {
                 const message =
@@ -459,9 +544,22 @@ export class PluginComputeRegistry {
                     completion.result.instanceId,
                     "duplicate provider instance",
                 );
-                throw computeError("invalid_response", message);
+                this.#terminalizeInstance(instance, "failed", message);
+                throw computeError("invalid_response", message, "failed");
             }
-            this.#recordProviderSuccess(registration);
+            const current = this.#instances.get(id);
+            if (current?.state !== "provisioning") {
+                this.#stopProviderInstanceBestEffort(
+                    registration,
+                    completion.result.instanceId,
+                    "retired provisioning",
+                );
+                throw this.#terminalInstanceError(id, consumerGeneration);
+            }
+            this.#instances.set(id, {
+                ...current,
+                providerInstanceId: completion.result.instanceId,
+            });
             if (
                 !this.#isCallableRegistration(registration) ||
                 !this.#consumerGenerations.has(consumerGeneration)
@@ -474,27 +572,81 @@ export class PluginComputeRegistry {
                 throw computeError(
                     "provider_lost",
                     "The compute provider or consumer generation retired while it was starting the instance.",
+                    "failed",
                 );
             }
-            const now = this.#now();
-            const id = randomUUID();
-            this.#instances.set(id, {
-                consumerGeneration,
-                createdAt: now,
-                id,
-                lastTouchedAt: now,
-                providerInstanceId: completion.result.instanceId,
+            const probe = await this.#invoke(
                 registration,
-                state: "active",
-            });
-            return { instanceId: id, provider: registration.owner.compute!.name };
+                {
+                    command: "true",
+                    instanceId: completion.result.instanceId,
+                    operation: "exec",
+                    timeoutMs: Math.min(
+                        READINESS_PROBE_COMMAND_TIMEOUT_MS,
+                        remainingDeadline(startDeadlineAt),
+                    ),
+                },
+                remainingDeadline(startDeadlineAt),
+            );
+            this.#requireProvisioningInstance(id, consumerGeneration);
+            if ("error" in probe) {
+                const unavailable = this.#transitionInstanceUnavailable(
+                    id,
+                    `The readiness probe failed. ${probe.error.message}`,
+                );
+                throw computeError("not_ready", unavailable.reason, "unavailable");
+            }
+            if (probe.result.exitCode !== 0 || probe.result.timedOut) {
+                const reason = probe.result.timedOut
+                    ? "The compute instance readiness probe timed out."
+                    : `The compute instance readiness probe exited with code ${String(probe.result.exitCode)}.`;
+                this.#recordProviderFailure(registration, reason);
+                if (!this.#isCallableRegistration(registration)) {
+                    throw this.#terminalInstanceError(id, consumerGeneration);
+                }
+                this.#requireProvisioningInstance(id, consumerGeneration);
+                this.#transitionInstanceUnavailable(id, reason);
+                throw computeError("not_ready", reason, "unavailable");
+            }
+            this.#recordProviderSuccess(registration);
+            this.#requireProvisioningInstance(id, consumerGeneration);
+            const ready = this.#transitionInstanceReady(id);
+            return this.#toHappyComputeInstance(ready);
+        } catch (error) {
+            const current = this.#instances.get(id);
+            if (current?.state === "provisioning" && current.providerInstanceId === undefined) {
+                this.#terminalizeInstance(
+                    current,
+                    "failed",
+                    `The compute instance failed during provisioning. ${errorToMessage(error)}`,
+                );
+            } else if (current?.state === "provisioning") {
+                const unavailable = this.#transitionInstanceUnavailable(
+                    id,
+                    `The readiness probe could not complete. ${errorToMessage(error)}`,
+                );
+                throw computeError("not_ready", unavailable.reason, "unavailable");
+            }
+            const tombstone = this.#tombstones.get(id);
+            if (
+                tombstone?.consumerGeneration === consumerGeneration &&
+                error instanceof PluginComputeError &&
+                error.state === undefined
+            ) {
+                throw computeError(
+                    error.code,
+                    `${error.message} ${tombstone.reason}`,
+                    tombstone.state,
+                );
+            }
+            throw error;
         } finally {
             this.#reservedInstanceSlots -= 1;
         }
     }
 
     async read(input: ReadHappyComputeInput, consumerGeneration: string) {
-        const instance = this.#requireCallableInstance(input.instanceId, consumerGeneration);
+        const instance = await this.#requireReadyInstance(input.instanceId, consumerGeneration);
         return this.#runInstanceCall(instance, "read", {
             instanceId: instance.providerInstanceId,
             operation: "read",
@@ -503,7 +655,7 @@ export class PluginComputeRegistry {
     }
 
     async write(input: WriteHappyComputeInput, consumerGeneration: string): Promise<void> {
-        const instance = this.#requireCallableInstance(input.instanceId, consumerGeneration);
+        const instance = await this.#requireReadyInstance(input.instanceId, consumerGeneration);
         await this.#runInstanceCall(instance, "write", {
             contentBase64: Buffer.from(input.bytes).toString("base64"),
             instanceId: instance.providerInstanceId,
@@ -513,7 +665,7 @@ export class PluginComputeRegistry {
     }
 
     async exec(input: ExecHappyComputeHandlerInput, consumerGeneration: string) {
-        const instance = this.#requireCallableInstance(input.instanceId, consumerGeneration);
+        const instance = await this.#requireReadyInstance(input.instanceId, consumerGeneration);
         return this.#runInstanceCall(
             instance,
             "exec",
@@ -528,8 +680,10 @@ export class PluginComputeRegistry {
     }
 
     stop(instanceId: string, consumerGeneration: string): Promise<void> {
-        const instance = this.#requireOwnedInstance(instanceId, consumerGeneration);
-        return this.#beginStop(instance, "requested by its consumer");
+        const existing = this.#stopTasks.get(instanceId);
+        if (existing !== undefined) return existing;
+        const instance = this.#requireLiveInstance(instanceId, consumerGeneration);
+        return this.#beginStop(instance, "stopped at its consumer's request", "stopped");
     }
 
     close(): Promise<void> {
@@ -541,7 +695,7 @@ export class PluginComputeRegistry {
         this.#closed = true;
         clearInterval(this.#reaper);
         const stopTasks = [...this.#instances.values()].map((instance) =>
-            this.#beginStop(instance, "Rig daemon shutdown"),
+            this.#beginStop(instance, "Rig daemon shutdown", "stopped"),
         );
         await Promise.all(stopTasks);
         for (const registration of this.#registrations.values()) {
@@ -553,16 +707,52 @@ export class PluginComputeRegistry {
     }
 
     async #runInstanceCall<T extends Exclude<ComputeOperation, "start" | "stop">>(
-        instance: Extract<ComputeInstance, { state: "active" }>,
+        instance: Extract<ComputeInstance, { state: "ready" }>,
         operation: T,
         event: ComputeCallPayload<T>,
         deadlineMs = this.#deadline(operation),
     ): Promise<ComputeOperationResult<T>> {
         instance.lastTouchedAt = this.#now();
-        const completion = await this.#invoke(instance.registration, event, deadlineMs);
-        if ("error" in completion) throw new PluginComputeError(completion.error);
-        this.#recordProviderSuccess(instance.registration);
-        return (completion as { result: ComputeOperationResult<T> }).result;
+        try {
+            const completion = await this.#invoke(instance.registration, event, deadlineMs);
+            if ("error" in completion) throw new PluginComputeError(completion.error);
+            this.#recordProviderSuccess(instance.registration);
+            return (completion as { result: ComputeOperationResult<T> }).result;
+        } catch (error) {
+            const tombstone = this.#tombstones.get(instance.id);
+            if (tombstone !== undefined) {
+                if (error instanceof PluginComputeError && error.code === "provider_lost") {
+                    throw computeError(
+                        "provider_lost",
+                        `${error.message} ${tombstone.reason}`,
+                        tombstone.state,
+                    );
+                }
+                throw this.#tombstoneError(tombstone);
+            }
+            if (error instanceof PluginComputeError && error.code === "not_ready") {
+                const unavailable = this.#transitionInstanceUnavailable(instance.id, error.message);
+                throw computeError("not_ready", unavailable.reason, "unavailable");
+            }
+            if (
+                error instanceof PluginComputeError &&
+                isProviderAttributableCompletionError(error.code) &&
+                instance.registration.state.status === "degraded"
+            ) {
+                const unavailable = this.#transitionInstanceUnavailable(
+                    instance.id,
+                    `The compute instance is temporarily unavailable. ${error.message}`,
+                );
+                if (error.code === "deadline_exceeded") {
+                    throw computeError("deadline_exceeded", error.message, "unavailable");
+                }
+                throw computeError("not_ready", unavailable.reason, "unavailable");
+            }
+            if (error instanceof PluginComputeError && error.state === undefined) {
+                throw computeError(error.code, error.message, "ready");
+            }
+            throw error;
+        }
     }
 
     #invoke<T extends ComputeOperation>(
@@ -583,7 +773,6 @@ export class PluginComputeRegistry {
                 computeError(
                     "capacity_exhausted",
                     `A compute provider can have at most ${String(MAX_PENDING_COMPUTE_CALLS)} calls in flight.`,
-                    true,
                 ),
             );
         }
@@ -609,13 +798,7 @@ export class PluginComputeRegistry {
                     }
                 }
                 this.#recordProviderFailure(registration, message);
-                fail(
-                    computeError(
-                        "deadline_exceeded",
-                        message,
-                        registration.state.status === "healthy",
-                    ),
-                );
+                fail(computeError("deadline_exceeded", message));
             }, deadlineMs);
             timer.unref();
             registration.pendingCalls.set(callId, {
@@ -652,26 +835,62 @@ export class PluginComputeRegistry {
         });
     }
 
-    #requireOwnedInstance(instanceId: string, consumerGeneration: string): ComputeInstance {
+    #requireLiveInstance(instanceId: string, consumerGeneration: string): ComputeInstance {
         const instance = this.#instances.get(instanceId);
-        if (instance === undefined || instance.consumerGeneration !== consumerGeneration) {
-            throw computeError("instance_not_found", "That compute instance was not found.");
+        if (instance !== undefined && instance.consumerGeneration === consumerGeneration) {
+            return instance;
         }
-        return instance;
+        const tombstone = this.#tombstones.get(instanceId);
+        if (tombstone?.consumerGeneration === consumerGeneration) {
+            throw this.#tombstoneError(tombstone);
+        }
+        throw computeError("instance_not_found", "That compute instance was not found.");
     }
 
-    #requireCallableInstance(
+    #requireProvisioningInstance(
         instanceId: string,
         consumerGeneration: string,
-    ): Extract<ComputeInstance, { state: "active" }> {
-        const instance = this.#requireOwnedInstance(instanceId, consumerGeneration);
-        if (instance.state === "failed") {
-            throw computeError("instance_failed", instance.failure);
+    ): Extract<ComputeInstance, { state: "provisioning" }> {
+        const instance = this.#instances.get(instanceId);
+        if (
+            instance?.consumerGeneration === consumerGeneration &&
+            instance.state === "provisioning"
+        ) {
+            return instance;
         }
-        if (instance.state === "stopping") {
-            throw computeError("instance_not_found", "That compute instance is stopping.");
+        throw this.#terminalInstanceError(instanceId, consumerGeneration);
+    }
+
+    async #requireReadyInstance(
+        instanceId: string,
+        consumerGeneration: string,
+    ): Promise<Extract<ComputeInstance, { state: "ready" }>> {
+        const instance = this.#requireLiveInstance(instanceId, consumerGeneration);
+        if (instance.state === "ready") return instance;
+        if (instance.state === "unavailable") this.#recoverUnavailableInstance(instance);
+        const waitingFor = instance.readiness.promise;
+        await waitForReadiness(waitingFor, this.#provisioningGraceMs);
+        const current = this.#instances.get(instanceId);
+        if (current?.consumerGeneration === consumerGeneration && current.state === "ready") {
+            return current;
         }
-        return instance;
+        const tombstone = this.#tombstones.get(instanceId);
+        if (tombstone?.consumerGeneration === consumerGeneration) {
+            throw this.#tombstoneError(tombstone);
+        }
+        if (
+            current?.consumerGeneration === consumerGeneration &&
+            (current.state === "provisioning" || current.state === "unavailable")
+        ) {
+            throw computeError(
+                "not_ready",
+                current.state === "provisioning"
+                    ? "The compute instance is still provisioning."
+                    : current.reason,
+                current.state,
+            );
+        }
+        throw computeError("instance_not_found", "That compute instance was not found.");
     }
 
     #recordProviderSuccess(registration: ComputeRegistration): void {
@@ -683,7 +902,66 @@ export class PluginComputeRegistry {
             send: state.send,
             status: "healthy",
         };
+        for (const instance of this.#instances.values()) {
+            if (instance.registration === registration && instance.state === "unavailable") {
+                this.#transitionInstanceReady(instance.id);
+            }
+        }
         if (recovered) this.#notify();
+    }
+
+    #recoverUnavailableInstance(
+        instance: Extract<ComputeInstance, { state: "unavailable" }>,
+    ): void {
+        if (this.#recoveryTasks.has(instance.id)) return;
+        const deadline = Math.max(
+            1,
+            Math.min(
+                this.#provisioningGraceMs,
+                READINESS_PROBE_COMMAND_TIMEOUT_MS + EXEC_DEADLINE_GRACE_MS,
+            ),
+        );
+        const task = this.#invoke(
+            instance.registration,
+            {
+                command: "true",
+                instanceId: instance.providerInstanceId,
+                operation: "exec",
+                timeoutMs: Math.min(READINESS_PROBE_COMMAND_TIMEOUT_MS, deadline),
+            },
+            deadline,
+        )
+            .then((completion) => {
+                if ("error" in completion) {
+                    const current = this.#instances.get(instance.id);
+                    if (current?.state === "unavailable") {
+                        this.#instances.set(instance.id, {
+                            ...current,
+                            reason: `The recovery probe failed. ${completion.error.message}`,
+                        });
+                    }
+                    return;
+                }
+                if (completion.result.exitCode === 0 && !completion.result.timedOut) {
+                    this.#recordProviderSuccess(instance.registration);
+                    return;
+                }
+                const reason = completion.result.timedOut
+                    ? "The recovery probe timed out."
+                    : `The recovery probe exited with code ${String(completion.result.exitCode)}.`;
+                this.#recordProviderFailure(instance.registration, reason);
+            })
+            .catch((error: unknown) => {
+                const current = this.#instances.get(instance.id);
+                if (current?.state === "unavailable") {
+                    this.#instances.set(instance.id, {
+                        ...current,
+                        reason: `The recovery probe failed. ${errorToMessage(error)}`,
+                    });
+                }
+            })
+            .finally(() => this.#recoveryTasks.delete(instance.id));
+        this.#recoveryTasks.set(instance.id, task);
     }
 
     #recordProviderFailure(registration: ComputeRegistration, reason: string): void {
@@ -703,6 +981,14 @@ export class PluginComputeRegistry {
                 send: state.send,
                 status: "degraded",
             };
+            for (const instance of this.#instances.values()) {
+                if (instance.registration === registration && instance.state === "ready") {
+                    this.#transitionInstanceUnavailable(
+                        instance.id,
+                        `The ${JSON.stringify(instance.provider)} compute provider is degraded. ${reason}`,
+                    );
+                }
+            }
             this.#notify();
             return;
         }
@@ -729,12 +1015,12 @@ export class PluginComputeRegistry {
         if (registration.state.status === "failed") return;
         registration.state = { reason, status: "failed" };
         for (const instance of this.#instances.values()) {
-            if (instance.registration !== registration || instance.state !== "active") continue;
-            this.#instances.set(instance.id, {
-                ...instance,
-                failure: `The compute provider failed. ${reason}`,
-                state: "failed",
-            });
+            if (instance.registration !== registration) continue;
+            this.#terminalizeInstance(
+                instance,
+                "failed",
+                `The ${JSON.stringify(instance.provider)} compute provider crashed or disconnected. ${reason}`,
+            );
         }
         for (const call of registration.pendingCalls.values()) {
             call.cleanup();
@@ -760,36 +1046,33 @@ export class PluginComputeRegistry {
     #releaseConsumerInstances(consumerGeneration: string): void {
         for (const instance of this.#instances.values()) {
             if (instance.consumerGeneration !== consumerGeneration) continue;
-            void this.#beginStop(instance, "its consumer plugin stopped");
+            void this.#beginStop(instance, "its consumer plugin stopped", "stopped");
         }
     }
 
-    #beginStop(instance: ComputeInstance, reason: string): Promise<void> {
+    #beginStop(
+        instance: ComputeInstance,
+        reason: string,
+        finalState: "failed" | "stopped",
+    ): Promise<void> {
+        const existing = this.#stopTasks.get(instance.id);
+        if (existing !== undefined) return existing;
         const current = this.#instances.get(instance.id);
         if (current === undefined) return Promise.resolve();
-        if (current.state === "stopping") return current.task;
-        let run = () => undefined;
-        const task = new Promise<void>((resolve) => {
-            run = () => {
-                void this.#finishStop(current, reason).finally(resolve);
-            };
+        this.#terminalizeInstance(current, finalState, reason);
+        const task = this.#finishStop(current, reason).finally(() => {
+            this.#stopTasks.delete(current.id);
         });
-        this.#instances.set(current.id, {
-            ...current,
-            reason,
-            state: "stopping",
-            task,
-        });
-        run();
+        this.#stopTasks.set(current.id, task);
         return task;
     }
 
-    async #finishStop(
-        instance: Exclude<ComputeInstance, { state: "stopping" }>,
-        reason: string,
-    ): Promise<void> {
+    async #finishStop(instance: ComputeInstance, reason: string): Promise<void> {
         try {
-            if (this.#isCallableRegistration(instance.registration)) {
+            if (
+                instance.providerInstanceId !== undefined &&
+                this.#isCallableRegistration(instance.registration)
+            ) {
                 const completion = await this.#invoke(
                     instance.registration,
                     {
@@ -826,9 +1109,6 @@ export class PluginComputeRegistry {
                     error: errorToMessage(error),
                 },
             );
-        } finally {
-            const current = this.#instances.get(instance.id);
-            if (current?.state === "stopping") this.#instances.delete(instance.id);
         }
     }
 
@@ -879,7 +1159,6 @@ export class PluginComputeRegistry {
         if (this.#closed) return;
         const now = this.#now();
         for (const instance of this.#instances.values()) {
-            if (instance.state === "stopping") continue;
             const lifetime = now - instance.createdAt;
             const idle = now - instance.lastTouchedAt;
             const reason =
@@ -901,7 +1180,145 @@ export class PluginComputeRegistry {
                     reason,
                 },
             );
-            void this.#beginStop(instance, reason);
+            void this.#beginStop(
+                instance,
+                `The compute instance died because its ${reason}.`,
+                "failed",
+            );
+        }
+    }
+
+    #transitionInstanceReady(instanceId: string): Extract<ComputeInstance, { state: "ready" }> {
+        const current = this.#instances.get(instanceId);
+        if (current === undefined) {
+            throw new Error("The compute instance ended before it became ready.");
+        }
+        if (current.state === "ready") return current;
+        if (current.providerInstanceId === undefined) {
+            throw new Error("The compute provider did not materialize the instance.");
+        }
+        const ready: Extract<ComputeInstance, { state: "ready" }> = {
+            consumerGeneration: current.consumerGeneration,
+            createdAt: current.createdAt,
+            id: current.id,
+            lastTouchedAt: this.#now(),
+            provider: current.provider,
+            providerInstanceId: current.providerInstanceId,
+            registration: current.registration,
+            state: "ready",
+        };
+        this.#instances.set(instanceId, ready);
+        current.readiness.settle();
+        return ready;
+    }
+
+    #transitionInstanceUnavailable(
+        instanceId: string,
+        reason: string,
+    ): Extract<ComputeInstance, { state: "unavailable" }> {
+        const current = this.#instances.get(instanceId);
+        if (current === undefined) {
+            throw new Error("The compute instance ended while becoming unavailable.");
+        }
+        if (current.state === "unavailable") {
+            const unavailable = { ...current, reason };
+            this.#instances.set(instanceId, unavailable);
+            return unavailable;
+        }
+        if (current.providerInstanceId === undefined) {
+            throw new Error("An unmaterialized compute instance cannot become unavailable.");
+        }
+        const unavailable: Extract<ComputeInstance, { state: "unavailable" }> = {
+            ...current,
+            providerInstanceId: current.providerInstanceId,
+            readiness: createReadinessSignal(),
+            reason,
+            state: "unavailable",
+        };
+        this.#instances.set(instanceId, unavailable);
+        if (current.state === "provisioning") current.readiness.settle();
+        return unavailable;
+    }
+
+    #terminalizeInstance(
+        instance: ComputeInstance,
+        state: "failed" | "stopped",
+        reason: string,
+    ): ComputeTombstone {
+        const current = this.#instances.get(instance.id);
+        if (current !== instance) {
+            return (
+                this.#tombstones.get(instance.id) ?? {
+                    consumerGeneration: instance.consumerGeneration,
+                    createdAt: instance.createdAt,
+                    diedAt: this.#now(),
+                    id: instance.id,
+                    provider: instance.provider,
+                    reason,
+                    state,
+                }
+            );
+        }
+        this.#instances.delete(instance.id);
+        if (instance.state !== "ready") instance.readiness.settle();
+        const tombstone: ComputeTombstone = {
+            consumerGeneration: instance.consumerGeneration,
+            createdAt: instance.createdAt,
+            diedAt: this.#now(),
+            id: instance.id,
+            provider: instance.provider,
+            reason,
+            state,
+        };
+        this.#tombstones.set(instance.id, tombstone);
+        while (this.#tombstones.size > this.#maxTombstones) {
+            const oldest = this.#tombstones.keys().next().value;
+            if (oldest === undefined) break;
+            this.#tombstones.delete(oldest);
+        }
+        return tombstone;
+    }
+
+    #terminalInstanceError(instanceId: string, consumerGeneration: string): PluginComputeError {
+        const tombstone = this.#tombstones.get(instanceId);
+        if (tombstone?.consumerGeneration === consumerGeneration) {
+            return this.#tombstoneError(tombstone);
+        }
+        return computeError("instance_not_found", "That compute instance was not found.");
+    }
+
+    #tombstoneError(tombstone: ComputeTombstone): PluginComputeError {
+        return computeError("instance_failed", tombstone.reason, tombstone.state);
+    }
+
+    #toHappyComputeInstance(instance: ComputeInstance | ComputeTombstone): HappyComputeInstance {
+        switch (instance.state) {
+            case "provisioning":
+            case "ready":
+                return {
+                    createdAt: instance.createdAt,
+                    instanceId: instance.id,
+                    provider: instance.provider,
+                    state: instance.state,
+                };
+            case "unavailable":
+                return {
+                    createdAt: instance.createdAt,
+                    instanceId: instance.id,
+                    provider: instance.provider,
+                    reason: instance.reason,
+                    state: instance.state,
+                };
+            case "failed":
+            case "stopped":
+                return {
+                    createdAt: instance.createdAt,
+                    diedAt: instance.diedAt,
+                    instanceId: instance.id,
+                    provider: instance.provider,
+                    reason: instance.reason,
+                    state: instance.state,
+                };
         }
     }
 
@@ -925,15 +1342,38 @@ export class PluginComputeRegistry {
 function computeError(
     code: HappyComputeErrorCode,
     message: string,
-    retryable = false,
+    state?: HappyComputeInstanceState,
 ): PluginComputeError {
-    if (code === "capacity_exhausted") {
-        return new PluginComputeError({ code, message, retryable: true });
+    switch (code) {
+        case "capacity_exhausted":
+        case "deadline_exceeded":
+            return new PluginComputeError({
+                code,
+                message,
+                retryable: true,
+                ...(state === undefined ? {} : { state }),
+            });
+        case "not_ready":
+            return new PluginComputeError({
+                code,
+                message,
+                retryable: true,
+                state: state === "provisioning" || state === "unavailable" ? state : "unavailable",
+            });
+        case "instance_failed":
+        case "instance_not_found":
+        case "invalid_request":
+        case "invalid_response":
+        case "provider_lost":
+        case "provider_not_found":
+        case "provider_unhealthy":
+            return new PluginComputeError({
+                code,
+                message,
+                retryable: false,
+                ...(state === undefined ? {} : { state }),
+            });
     }
-    if (code === "deadline_exceeded") {
-        return new PluginComputeError({ code, message, retryable });
-    }
-    return new PluginComputeError({ code, message, retryable: false });
 }
 
 function isProviderAttributableCompletionError(code: HappyComputeErrorCode): boolean {
@@ -946,10 +1386,34 @@ function isProviderAttributableCompletionError(code: HappyComputeErrorCode): boo
         case "deadline_exceeded":
         case "instance_failed":
         case "invalid_response":
+        case "not_ready":
         case "provider_lost":
         case "provider_unhealthy":
             return true;
     }
+}
+
+function createReadinessSignal(): ReadinessSignal {
+    let settle: () => void = () => undefined;
+    const promise = new Promise<void>((resolve) => {
+        settle = resolve;
+    });
+    return { promise, settle };
+}
+
+function waitForReadiness(readiness: Promise<void>, timeoutMs: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, timeoutMs);
+        timer.unref();
+        void readiness.then(() => {
+            clearTimeout(timer);
+            resolve();
+        });
+    });
+}
+
+function remainingDeadline(deadlineAt: number): number {
+    return Math.max(1, deadlineAt - Date.now());
 }
 
 function errorToMessage(error: unknown): string {

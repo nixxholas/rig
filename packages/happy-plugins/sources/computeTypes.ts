@@ -9,6 +9,15 @@ export const HAPPY_COMPUTE_MAX_COMMAND_TIMEOUT_MS = 5 * 60_000;
 export const HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 export const HAPPY_COMPUTE_MAX_FILE_BYTES = 1024 * 1024;
 
+export const happyComputeInstanceStateSchema = Type.Union([
+    Type.Literal("provisioning"),
+    Type.Literal("ready"),
+    Type.Literal("unavailable"),
+    Type.Literal("failed"),
+    Type.Literal("stopped"),
+]);
+export type HappyComputeInstanceState = Static<typeof happyComputeInstanceStateSchema>;
+
 export const happyComputeProviderNameSchema = Type.String({
     maxLength: 64,
     minLength: 1,
@@ -81,13 +90,55 @@ export const startHappyComputeHandlerInputSchema = Type.Pick(startHappyComputeIn
 ]);
 export type StartHappyComputeHandlerInput = Static<typeof startHappyComputeHandlerInputSchema>;
 
-export const happyComputeInstanceSchema = Type.Object(
+const happyComputeInstanceBaseSchema = Type.Object(
     {
+        createdAt: Type.Integer({ minimum: 0 }),
         instanceId: instanceIdSchema,
         provider: happyComputeProviderNameSchema,
     },
     exact,
 );
+export const happyComputeInstanceSchema = Type.Union([
+    Type.Composite(
+        [
+            happyComputeInstanceBaseSchema,
+            Type.Object(
+                {
+                    state: Type.Union([Type.Literal("provisioning"), Type.Literal("ready")]),
+                },
+                exact,
+            ),
+        ],
+        exact,
+    ),
+    Type.Composite(
+        [
+            happyComputeInstanceBaseSchema,
+            Type.Object(
+                {
+                    reason: nonEmptyText,
+                    state: Type.Literal("unavailable"),
+                },
+                exact,
+            ),
+        ],
+        exact,
+    ),
+    Type.Composite(
+        [
+            happyComputeInstanceBaseSchema,
+            Type.Object(
+                {
+                    diedAt: Type.Integer({ minimum: 0 }),
+                    reason: nonEmptyText,
+                    state: Type.Union([Type.Literal("failed"), Type.Literal("stopped")]),
+                },
+                exact,
+            ),
+        ],
+        exact,
+    ),
+]);
 export type HappyComputeInstance = Static<typeof happyComputeInstanceSchema>;
 
 export const readHappyComputeInputSchema = Type.Object(
@@ -154,6 +205,10 @@ const outputBytesBase64Schema = Type.String({
 
 export const listHappyComputeProvidersResponseSchema = Type.Object(
     { providers: Type.Array(happyComputeProviderSchema, { maxItems: 64 }) },
+    exact,
+);
+export const listHappyComputeInstancesResponseSchema = Type.Object(
+    { instances: Type.Array(happyComputeInstanceSchema, { maxItems: 512 }) },
     exact,
 );
 export const startHappyComputeBodySchema = startHappyComputeInputSchema;
@@ -257,6 +312,7 @@ export const happyComputeErrorCodeSchema = Type.Union([
     Type.Literal("invalid_response"),
     Type.Literal("instance_failed"),
     Type.Literal("instance_not_found"),
+    Type.Literal("not_ready"),
     Type.Literal("provider_lost"),
     Type.Literal("provider_not_found"),
     Type.Literal("provider_unhealthy"),
@@ -272,9 +328,13 @@ const nonRetryableComputeErrorCodeSchema = Type.Union([
     Type.Literal("provider_not_found"),
     Type.Literal("provider_unhealthy"),
 ]);
+const computeErrorState = {
+    state: Type.Optional(happyComputeInstanceStateSchema),
+};
 export const happyComputeErrorSchema = Type.Union([
     Type.Object(
         {
+            ...computeErrorState,
             code: Type.Literal("capacity_exhausted"),
             message: nonEmptyText,
             retryable: Type.Literal(true),
@@ -283,14 +343,25 @@ export const happyComputeErrorSchema = Type.Union([
     ),
     Type.Object(
         {
+            ...computeErrorState,
             code: Type.Literal("deadline_exceeded"),
             message: nonEmptyText,
-            retryable: Type.Boolean(),
+            retryable: Type.Literal(true),
         },
         exact,
     ),
     Type.Object(
         {
+            code: Type.Literal("not_ready"),
+            message: nonEmptyText,
+            retryable: Type.Literal(true),
+            state: Type.Union([Type.Literal("provisioning"), Type.Literal("unavailable")]),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            ...computeErrorState,
             code: nonRetryableComputeErrorCodeSchema,
             message: nonEmptyText,
             retryable: Type.Literal(false),

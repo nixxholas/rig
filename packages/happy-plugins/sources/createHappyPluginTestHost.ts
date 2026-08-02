@@ -19,6 +19,7 @@ import {
     type HappyComputeCallCompletion,
     type HappyComputeError,
     type HappyComputeEvent,
+    type HappyComputeInstanceState,
 } from "./computeTypes.js";
 import { normalizeHappyMcpName } from "./createHappyMcpToolName.js";
 import { createPluginWorkspaceCommandExecutor } from "./createPluginWorkspaceCommandExecutor.js";
@@ -186,12 +187,20 @@ interface TestComputeCall extends TestCall<HappyComputeCallCompletion> {
     operation: Extract<HappyComputeEvent, { type: "call" }>["operation"];
 }
 
-interface TestComputeInstance {
-    failed?: string;
+type TestComputeInstanceBase = {
+    createdAt: number;
     id: string;
     providerInstanceId: string;
     registrationId: string;
-}
+};
+
+type TestComputeInstance =
+    | (TestComputeInstanceBase & { state: "ready" })
+    | (TestComputeInstanceBase & {
+          diedAt: number;
+          reason: string;
+          state: "failed" | "stopped";
+      });
 
 /** Starts an in-memory, Unix-socket Happy host for plugin tests and local authoring. */
 export async function createHappyPluginTestHost(
@@ -353,6 +362,28 @@ export async function createHappyPluginTestHost(
                                       pluginName: "Test Plugin",
                                   },
                               ],
+                });
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/compute/instances") {
+                send(response, 200, {
+                    instances: [...computeInstances.values()].map((instance) =>
+                        instance.state === "ready"
+                            ? {
+                                  createdAt: instance.createdAt,
+                                  instanceId: instance.id,
+                                  provider: declaredCompute?.name ?? "test-compute",
+                                  state: instance.state,
+                              }
+                            : {
+                                  createdAt: instance.createdAt,
+                                  diedAt: instance.diedAt,
+                                  instanceId: instance.id,
+                                  provider: declaredCompute?.name ?? "test-compute",
+                                  reason: instance.reason,
+                                  state: instance.state,
+                              },
+                    ),
                 });
                 return;
             }
@@ -525,13 +556,54 @@ export async function createHappyPluginTestHost(
                         "The test compute provider returned the wrong operation result.",
                     );
                 }
+                const probe = await invokeTestCompute(
+                    computeRegistration,
+                    computeCalls,
+                    nextComputeCallId,
+                    {
+                        command: "true",
+                        instanceId: completion.result.instanceId,
+                        operation: "exec",
+                        timeoutMs: 5_000,
+                    },
+                );
+                if ("error" in probe) {
+                    send(response, 409, {
+                        code: "not_ready",
+                        message: `The test compute instance readiness probe failed. ${probe.error.message}`,
+                        retryable: true,
+                        state: "unavailable",
+                    });
+                    return;
+                }
+                if (probe.operation !== "exec") {
+                    throw new PluginApiRequestError(
+                        "The test compute provider returned the wrong readiness probe result.",
+                    );
+                }
+                if (probe.result.exitCode !== 0 || probe.result.timedOut) {
+                    send(response, 409, {
+                        code: "not_ready",
+                        message: "The test compute instance readiness probe did not succeed.",
+                        retryable: true,
+                        state: "unavailable",
+                    });
+                    return;
+                }
                 const instanceId = `test-compute-instance-${String(nextId++)}`;
                 computeInstances.set(instanceId, {
+                    createdAt: Date.now(),
                     id: instanceId,
                     providerInstanceId: completion.result.instanceId,
                     registrationId: computeRegistration.id,
+                    state: "ready",
                 });
-                send(response, 201, { instanceId, provider: input.provider });
+                send(response, 201, {
+                    createdAt: computeInstances.get(instanceId)!.createdAt,
+                    instanceId,
+                    provider: input.provider,
+                    state: "ready",
+                });
                 return;
             }
             if (
@@ -552,6 +624,15 @@ export async function createHappyPluginTestHost(
                 }
                 const registration = computeRegistration;
                 if (parts.length === 4 && parts[3] === "stop") {
+                    if (instance.state !== "ready") {
+                        send(response, 409, {
+                            code: "instance_failed",
+                            message: instance.reason,
+                            retryable: false,
+                            state: instance.state,
+                        });
+                        return;
+                    }
                     try {
                         if (
                             registration?.response !== undefined &&
@@ -565,16 +646,22 @@ export async function createHappyPluginTestHost(
                             // unconditional even when the handler reports an error.
                         }
                     } finally {
-                        computeInstances.delete(instance.id);
+                        computeInstances.set(instance.id, {
+                            ...instance,
+                            diedAt: Date.now(),
+                            reason: "The test compute instance was stopped by its consumer.",
+                            state: "stopped",
+                        });
                     }
                     send(response, 200, {});
                     return;
                 }
-                if (instance.failed !== undefined) {
+                if (instance.state !== "ready") {
                     send(response, 409, {
                         code: "instance_failed",
-                        message: instance.failed,
+                        message: instance.reason,
                         retryable: false,
+                        state: instance.state,
                     });
                     return;
                 }
@@ -582,11 +669,17 @@ export async function createHappyPluginTestHost(
                     registration?.response === undefined ||
                     registration.id !== instance.registrationId
                 ) {
-                    instance.failed = "That compute instance belongs to a stale generation.";
+                    computeInstances.set(instance.id, {
+                        ...instance,
+                        diedAt: Date.now(),
+                        reason: "That compute instance belongs to a stale generation.",
+                        state: "failed",
+                    });
                     send(response, 409, {
                         code: "instance_failed",
-                        message: instance.failed,
+                        message: "That compute instance belongs to a stale generation.",
                         retryable: false,
+                        state: "failed",
                     });
                     return;
                 }
@@ -607,7 +700,7 @@ export async function createHappyPluginTestHost(
                         },
                     );
                     if ("error" in completion) {
-                        sendTestComputeError(response, completion.error);
+                        sendTestComputeError(response, completion.error, "ready");
                         return;
                     }
                     send(response, 200, completion.result);
@@ -631,7 +724,7 @@ export async function createHappyPluginTestHost(
                         },
                     );
                     if ("error" in completion) {
-                        sendTestComputeError(response, completion.error);
+                        sendTestComputeError(response, completion.error, "ready");
                         return;
                     }
                     send(response, 200, {});
@@ -656,7 +749,7 @@ export async function createHappyPluginTestHost(
                         (input.timeoutMs ?? HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS) + 2_000,
                     );
                     if ("error" in completion) {
-                        sendTestComputeError(response, completion.error);
+                        sendTestComputeError(response, completion.error, "ready");
                         return;
                     }
                     send(response, 200, completion.result);
@@ -1548,7 +1641,13 @@ function failTestComputeGeneration(
     calls: Map<string, TestComputeCall>,
 ): void {
     for (const instance of instances.values()) {
-        if (instance.registrationId === registrationId) instance.failed = reason;
+        if (instance.registrationId !== registrationId || instance.state !== "ready") continue;
+        instances.set(instance.id, {
+            ...instance,
+            diedAt: Date.now(),
+            reason,
+            state: "failed",
+        });
     }
     for (const call of calls.values()) {
         call.cleanup();
@@ -1613,8 +1712,14 @@ function send(response: ServerResponse, status: number, value: unknown): void {
     response.end(body);
 }
 
-function sendTestComputeError(response: ServerResponse, error: HappyComputeError): void {
-    const normalized = normalizeHappyComputeError(error, "healthy");
+function sendTestComputeError(
+    response: ServerResponse,
+    error: HappyComputeError,
+    state?: HappyComputeInstanceState,
+): void {
+    const normalized = normalizeHappyComputeError(
+        error.code === "not_ready" || state === undefined ? error : { ...error, state },
+    );
     send(response, happyComputeErrorStatus(normalized.code), normalized);
 }
 
