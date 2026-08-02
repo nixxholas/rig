@@ -54,6 +54,7 @@ import { workspaceBeginArchive } from "../persistence/project/workspaceBeginArch
 import { workspaceCompleteArchive } from "../persistence/project/workspaceCompleteArchive.js";
 import { workspaceInheritTitle } from "../persistence/project/workspaceInheritTitle.js";
 import { workspaceMarkInitializationFailed } from "../persistence/project/workspaceMarkInitializationFailed.js";
+import { workspaceMarkFailed } from "../persistence/project/workspaceMarkFailed.js";
 import { workspaceMarkReady } from "../persistence/project/workspaceMarkReady.js";
 import { workspaceRename } from "../persistence/project/workspaceRename.js";
 import { workspaceReorder } from "../persistence/project/workspaceReorder.js";
@@ -68,6 +69,11 @@ import { createGitWorktree } from "../git/createGitWorktree.js";
 import { detectGitDefaultBranch } from "../git/detectGitDefaultBranch.js";
 import { isGitWorktreeAt } from "../git/isGitWorktreeAt.js";
 import { parseHostingRepository } from "../git/parseHostingRepository.js";
+import {
+    prepareWorkspaceTransfer,
+    type PreparedWorkspaceTransfer,
+    WorkspaceTransferTargetRestoreError,
+} from "../git/prepareWorkspaceTransfer.js";
 import { type GitRepositoryProbe, probeGitRepository } from "../git/probeGitRepository.js";
 import { readGitCommonDir } from "../git/readGitCommonDir.js";
 import { readGitTopLevel } from "../git/readGitTopLevel.js";
@@ -289,6 +295,83 @@ export class ProjectRepository {
 
     getWorkspace(projectId: string, workspaceId: string): ProjectWorkspace | undefined {
         return queryWorkspace(this.#database, projectId, workspaceId);
+    }
+
+    async prepareSessionTransfer(
+        projectId: string,
+        sourceWorkspaceId: string,
+        targetWorkspaceId: string,
+        beforeApply?: () => void | Promise<void>,
+    ): Promise<{ prepared: PreparedWorkspaceTransfer; target: ProjectWorkspace }> {
+        const { source, target } = this.validateSessionTransfer(
+            projectId,
+            sourceWorkspaceId,
+            targetWorkspaceId,
+        );
+        try {
+            return {
+                prepared: await prepareWorkspaceTransfer({
+                    ...(beforeApply === undefined ? {} : { beforeApply }),
+                    git: this.#git,
+                    sourcePath: source.path,
+                    targetPath: target.path,
+                }),
+                target,
+            };
+        } catch (error) {
+            if (!(error instanceof WorkspaceTransferTargetRestoreError)) throw error;
+            throw this.markSessionTransferTargetFailed(projectId, targetWorkspaceId, error);
+        }
+    }
+
+    markSessionTransferTargetFailed(
+        projectId: string,
+        targetWorkspaceId: string,
+        error: WorkspaceTransferTargetRestoreError,
+    ): WorkspaceTransferTargetRestoreError {
+        const target = this.getWorkspace(projectId, targetWorkspaceId);
+        if (target === undefined) return error;
+        const failure = new WorkspaceTransferTargetRestoreError(
+            error.originalError,
+            error.restoreError,
+            target.name,
+        );
+        this.#mutate((tx) => {
+            const changed = workspaceMarkFailed(
+                tx,
+                projectId,
+                targetWorkspaceId,
+                failure.message.slice(0, PROJECT_ERROR_LENGTH),
+                this.#now(),
+            );
+            if (changed > 0) this.#publishedWorkspace(projectId, targetWorkspaceId);
+        });
+        return failure;
+    }
+
+    validateSessionTransfer(
+        projectId: string,
+        sourceWorkspaceId: string,
+        targetWorkspaceId: string,
+    ): { source: ProjectWorkspace; target: ProjectWorkspace } {
+        if (sourceWorkspaceId === targetWorkspaceId) {
+            throw new Error("Choose a different workspace for the session transfer.");
+        }
+        const source = this.getWorkspace(projectId, sourceWorkspaceId);
+        if (source === undefined) {
+            throw new Error("The session's current workspace was not found.");
+        }
+        if (source.status !== "ready") {
+            throw new Error("The session's current workspace is not ready.");
+        }
+        const target = this.getWorkspace(projectId, targetWorkspaceId);
+        if (target === undefined) {
+            throw new Error("The target workspace was not found in this project.");
+        }
+        if (target.status !== "ready" || target.presence !== "present") {
+            throw new Error("The target workspace must be ready and available.");
+        }
+        return { source, target };
     }
 
     async reconcileInitializingWorkspaces(): Promise<void> {

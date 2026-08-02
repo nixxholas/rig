@@ -268,6 +268,8 @@ export type {
     UpdateGlobalInstructionsRequest,
     UpdateGlobalInstructionsResponse,
     UpdateSessionRequest,
+    TransferSessionRequest,
+    TransferSessionResponse,
     UserInputRequestedEvent,
     GetPresenceResponse,
     SetPresenceResponse,
@@ -330,6 +332,7 @@ export {
     SESSION_DRAFT_MAX_CLOCK_SKEW_MS,
     SESSION_DRAFT_MAX_LENGTH,
     SESSION_STREAM_TURN_LIMIT,
+    transferSessionRequestSchema,
 } from "./SessionProtocol.js";
 export {
     AttachmentImagePreviewSchema,

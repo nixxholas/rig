@@ -20,6 +20,8 @@ import type {
     SubagentSummary,
     TimelineAgent,
     TimelineScope,
+    TransferSessionRequest,
+    TransferSessionResponse,
 } from "../protocol/index.js";
 import { AgentSessionManager } from "./AgentSessionManager.js";
 import { InMemorySession, type InMemorySessionOptions } from "./InMemorySession.js";
@@ -64,6 +66,10 @@ import { SlotEntryStore } from "../slots/index.js";
 import { WebappStore } from "../webapps/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { configureSessionRequest } from "./configureSessionRequest.js";
+import {
+    executeSessionWorkspaceTransfer,
+    scheduleSessionWorkspaceTransfer,
+} from "./transferSessionWorkspace.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -101,6 +107,7 @@ export class InMemorySessionStore implements SessionStore {
     readonly webapps: WebappStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
+    readonly #workspaceTransferReservations = new Map<string, string>();
     #activeTransaction: TX | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
 
@@ -192,6 +199,39 @@ export class InMemorySessionStore implements SessionStore {
                 queryAgentTreeUsage: (sessionId) => this.queryAgentTreeUsage(sessionId),
                 ownedWorkspace: (ownerSessionId, projectId, workspaceId) =>
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
+                completeScheduledSessionTransfer: async (sessionId, targetWorkspaceId) => {
+                    const result = await this.#executeSessionTransfer(
+                        sessionId,
+                        targetWorkspaceId,
+                        true,
+                    );
+                    if (result === undefined) {
+                        throw new Error("The session is no longer available.");
+                    }
+                },
+                scheduleSessionTransfer: (sessionId, targetWorkspaceId) => {
+                    const session = this.get(sessionId);
+                    if (session === undefined) {
+                        throw new Error("The session is no longer available.");
+                    }
+                    return scheduleSessionWorkspaceTransfer({
+                        hasAttachedSessions: (workspaceId) =>
+                            [...this.#sessions.values()].some((candidate) => {
+                                const snapshot = candidate.snapshot();
+                                return (
+                                    snapshot.archived !== true &&
+                                    snapshot.workspaceId === workspaceId
+                                );
+                            }),
+                        projects: this.#projects,
+                        releaseTarget: (workspaceId, ownerSessionId) =>
+                            this.#releaseWorkspaceTransferTarget(workspaceId, ownerSessionId),
+                        reserveTarget: (workspaceId, ownerSessionId) =>
+                            this.#reserveWorkspaceTransferTarget(workspaceId, ownerSessionId),
+                        session,
+                        targetWorkspaceId,
+                    });
+                },
             },
         });
     }
@@ -306,6 +346,9 @@ export class InMemorySessionStore implements SessionStore {
         const state = source.createForkState();
         const sourceSnapshot = source.snapshot();
         if (sourceSnapshot.workspaceId !== undefined) {
+            this.#assertWorkspaceAcceptingSessions(sourceSnapshot.workspaceId);
+        }
+        if (sourceSnapshot.workspaceId !== undefined) {
             const workspace = this.#projects.getWorkspace(
                 sourceSnapshot.projectId,
                 sourceSnapshot.workspaceId,
@@ -399,6 +442,9 @@ export class InMemorySessionStore implements SessionStore {
                 ...(inheritedWorkspace === undefined ? {} : { workspace: inheritedWorkspace }),
             };
         })();
+        if (ownership.workspace !== undefined) {
+            this.#assertWorkspaceAcceptingSessions(ownership.workspace.id);
+        }
         const session = new InMemorySession({
             presence: this.presence,
             agentManager: this.#agentManager,
@@ -543,6 +589,37 @@ export class InMemorySessionStore implements SessionStore {
             );
         return buildTimeline(agents, events, {
             ...(request.since === undefined ? {} : { since: request.since }),
+        });
+    }
+
+    async transferSession(
+        sessionId: string,
+        request: TransferSessionRequest,
+    ): Promise<TransferSessionResponse | undefined> {
+        return this.#executeSessionTransfer(sessionId, request.targetWorkspaceId, false);
+    }
+
+    async #executeSessionTransfer(
+        sessionId: string,
+        targetWorkspaceId: string,
+        scheduled: boolean,
+    ): Promise<TransferSessionResponse | undefined> {
+        const session = this.get(sessionId);
+        if (session === undefined) return undefined;
+        return executeSessionWorkspaceTransfer({
+            hasAttachedSessions: (workspaceId) =>
+                [...this.#sessions.values()].some((candidate) => {
+                    const snapshot = candidate.snapshot();
+                    return snapshot.archived !== true && snapshot.workspaceId === workspaceId;
+                }),
+            projects: this.#projects,
+            releaseTarget: (workspaceId, ownerSessionId) =>
+                this.#releaseWorkspaceTransferTarget(workspaceId, ownerSessionId),
+            reserveTarget: (workspaceId, ownerSessionId) =>
+                this.#reserveWorkspaceTransferTarget(workspaceId, ownerSessionId),
+            scheduled,
+            session,
+            targetWorkspaceId,
         });
     }
 
@@ -850,6 +927,28 @@ export class InMemorySessionStore implements SessionStore {
             .sort((left, right) => compareOrderKeys(left.orderKey, right.orderKey))
             .at(-1);
         return generateKeyBetween(last?.orderKey ?? null, null);
+    }
+
+    #assertWorkspaceAcceptingSessions(workspaceId: string): void {
+        if (this.#workspaceTransferReservations.has(workspaceId)) {
+            throw new Error(
+                "That workspace is receiving a session transfer and cannot start another session yet.",
+            );
+        }
+    }
+
+    #reserveWorkspaceTransferTarget(workspaceId: string, sessionId: string): void {
+        const owner = this.#workspaceTransferReservations.get(workspaceId);
+        if (owner !== undefined && owner !== sessionId) {
+            throw new Error("That workspace is already reserved for another session transfer.");
+        }
+        this.#workspaceTransferReservations.set(workspaceId, sessionId);
+    }
+
+    #releaseWorkspaceTransferTarget(workspaceId: string, sessionId: string): void {
+        if (this.#workspaceTransferReservations.get(workspaceId) === sessionId) {
+            this.#workspaceTransferReservations.delete(workspaceId);
+        }
     }
 
     #publishGlobalEvent(event: Parameters<GlobalEventQueue["append"]>[0]): void {

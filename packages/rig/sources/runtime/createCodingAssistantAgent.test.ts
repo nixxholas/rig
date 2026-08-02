@@ -83,6 +83,9 @@ describe("createCodingAssistantAgent", () => {
                 spawn: async () => {
                     throw new Error("unused");
                 },
+                transfer: async () => {
+                    throw new Error("unused");
+                },
             },
         });
         const names = runtime.agent.tools.map((tool) => tool.name);
@@ -229,6 +232,9 @@ describe("createCodingAssistantAgent", () => {
                 listSessions: () => [],
                 listWorkspaces: () => [],
                 spawn: async () => {
+                    throw new Error("unused");
+                },
+                transfer: async () => {
                     throw new Error("unused");
                 },
             },
@@ -727,6 +733,9 @@ describe("createCodingAssistantAgent", () => {
             listSessions: () => [],
             listWorkspaces: () => [],
             spawn: async () => {
+                throw new Error("unused");
+            },
+            transfer: async () => {
                 throw new Error("unused");
             },
         };

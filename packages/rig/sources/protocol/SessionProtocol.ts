@@ -1,3 +1,5 @@
+import { Type, type Static } from "@sinclair/typebox";
+
 import type {
     AgentCompactionResult,
     AgentLoopEvent,
@@ -599,6 +601,21 @@ export interface CreateSessionRequest {
     id?: string;
     /** Identity to give the project when this directory is not one yet. */
     projectId?: string;
+}
+
+export const transferSessionRequestSchema = Type.Object(
+    {
+        targetWorkspaceId: Type.String({ minLength: 1 }),
+    },
+    { additionalProperties: false },
+);
+
+export type TransferSessionRequest = Static<typeof transferSessionRequestSchema>;
+
+export interface TransferSessionResponse {
+    commit: string;
+    session: ProtocolSession & { workspaceId: string };
+    state: "succeeded";
 }
 
 export interface UpdateSessionRequest {

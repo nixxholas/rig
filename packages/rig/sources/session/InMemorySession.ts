@@ -146,6 +146,9 @@ import { createAbortRequestKey } from "./impl/createAbortRequestKey.js";
 import { createGoalTitle } from "./impl/createGoalTitle.js";
 import { formatBackgroundProcessExit } from "./formatBackgroundProcessExit.js";
 import { formatShellCommandContext } from "./impl/formatShellCommandContext.js";
+import { formatSessionTransferNotice } from "./formatSessionTransferNotice.js";
+import { formatSessionTransferFailureNotice } from "./formatSessionTransferFailureNotice.js";
+import type { SessionWorkspaceTransferState } from "./sessionWorkspaceTransferState.js";
 import { getProviderIdForModel } from "../model-catalog/getProviderIdForModel.js";
 import { getProviderIdsForModel } from "../model-catalog/getProviderIdsForModel.js";
 import { resolveInitialModelSelection } from "./impl/resolveInitialModelSelection.js";
@@ -297,6 +300,7 @@ export interface PersistedSessionState {
     systemPrompt?: string;
     workflows?: readonly PersistedWorkflowRun[];
     workflowsEnabled?: boolean;
+    workspaceTransfer?: SessionWorkspaceTransferState;
 }
 
 export interface PersistedWorkflowRun {
@@ -333,7 +337,19 @@ export interface InMemorySessionPersistence {
     pruneDurableWaits?(sessionId: string, retain: number): void;
     pruneScheduledMessages?(sessionId: string, retain: number): readonly string[];
     saveSession(state: PersistedSessionState): void;
+    setWorkspaceTransferState?(input: {
+        contextMessages?: readonly Message[];
+        sessionId: string;
+        state: SessionWorkspaceTransferState;
+    }): void;
     transaction?<T>(body: () => T): T;
+    transferWorkspace?(input: {
+        contextMessages: readonly Message[];
+        cwd: string;
+        sessionId: string;
+        state: SessionWorkspaceTransferState;
+        workspaceId: string;
+    }): void;
     upsertMessage(sessionId: string, message: PersistedSessionMessage): void;
     upsertExternalToolCall?(call: ExternalToolCall): void;
     upsertDurableUserInput?(call: DurableUserInputCall): void;
@@ -607,6 +623,7 @@ export class InMemorySession {
     #workflowsEnabled: boolean;
     readonly #workspaceFeatures: WorkspaceFeatures;
     #workspaceArchived = false;
+    #workspaceTransfer: SessionWorkspaceTransferState = { status: "idle" };
 
     constructor(options: InMemorySessionOptions) {
         this.#agentManager = options.agentManager;
@@ -729,6 +746,7 @@ export class InMemorySession {
                     ? undefined
                     : [...options.initialContextMessages]
                 : [...options.restore.contextMessages];
+        this.#workspaceTransfer = options.restore?.workspaceTransfer ?? { status: "idle" };
         this.#models = this.#modelsForProvider(this.#providerId);
         this.#status = options.restore?.status ?? "idle";
         // The status a session opens in is already on the snapshot every client
@@ -865,7 +883,20 @@ export class InMemorySession {
         }
 
         this.#ensureKnownModel(this.#modelId, this.#providerId);
-        this.#saveSession();
+        if (
+            this.#workspaceTransfer.status === "scheduled" ||
+            this.#workspaceTransfer.status === "transferring"
+        ) {
+            this.failWorkspaceTransfer(
+                this.#workspaceTransfer.targetWorkspaceId,
+                new Error(
+                    "The session transfer did not happen because the local server stopped before it could finish.",
+                ),
+                "not_touched",
+            );
+        } else {
+            this.#saveSession();
+        }
         if (options.restore === undefined) {
             if (options.emitCreatedEvent !== false) {
                 this.emitCreatedEvent();
@@ -1462,6 +1493,201 @@ export class InMemorySession {
         );
     }
 
+    scheduleWorkspaceTransfer(targetWorkspaceId: string): {
+        projectId: string;
+        sourceWorkspaceId: string;
+    } {
+        this.#assertAcceptingWork();
+        const sourceWorkspaceId = this.#workspaceTransferSource(targetWorkspaceId);
+        if (this.#activeRun === undefined && this.#restoredActiveRunId === undefined) {
+            throw new Error("A session transfer can only be scheduled during an active response.");
+        }
+        if (
+            this.#compactionActive ||
+            [...this.#workflowRuns.values()].some((run) => run.state.status === "running")
+        ) {
+            throw new Error(
+                "Wait for compaction and workflow runs to finish before transferring this session.",
+            );
+        }
+        this.#setWorkspaceTransferState({ status: "scheduled", targetWorkspaceId });
+        return { projectId: this.#projectId, sourceWorkspaceId };
+    }
+
+    beginWorkspaceTransfer(
+        targetWorkspaceId: string,
+        options: { scheduled?: boolean } = {},
+    ): { projectId: string; sourceWorkspaceId: string } {
+        this.#assertAcceptingWork();
+        const sourceWorkspaceId =
+            options.scheduled === true
+                ? this.#workspaceId
+                : this.#workspaceTransferSource(targetWorkspaceId);
+        if (sourceWorkspaceId === undefined) {
+            throw new Error("Only a session in a managed workspace can be transferred.");
+        }
+        const active = this.#activeRun !== undefined || this.#restoredActiveRunId !== undefined;
+        if (options.scheduled === true) {
+            if (
+                this.#workspaceTransfer.status !== "scheduled" ||
+                this.#workspaceTransfer.targetWorkspaceId !== targetWorkspaceId
+            ) {
+                throw new Error("The scheduled session transfer is no longer pending.");
+            }
+            if (active) {
+                throw new Error("The session transfer cannot start until this response finishes.");
+            }
+        } else if (
+            active ||
+            this.#queue.length > 0 ||
+            this.#compactionActive ||
+            [...this.#workflowRuns.values()].some((run) => run.state.status === "running")
+        ) {
+            throw new Error(
+                "Wait for the active response to finish before transferring this session.",
+            );
+        }
+        this.#setWorkspaceTransferState({ status: "transferring", targetWorkspaceId });
+        return { projectId: this.#projectId, sourceWorkspaceId };
+    }
+
+    async completeWorkspaceTransfer(input: {
+        commit: string;
+        targetWorkspaceId: string;
+        workspacePath: string;
+    }): Promise<ProtocolSession & { workspaceId: string }> {
+        if (
+            this.#workspaceTransfer.status !== "transferring" ||
+            this.#workspaceTransfer.targetWorkspaceId !== input.targetWorkspaceId
+        ) {
+            throw new Error("The session transfer is no longer active.");
+        }
+        const runtimeSnapshot = this.#runtime?.agent.snapshot();
+        const contextMessages = [
+            ...(
+                runtimeSnapshot?.contextMessages ??
+                runtimeSnapshot?.messages ??
+                this.#contextMessages ??
+                this.#committedMessages()
+            ).filter((message) => !isExcludedFromModelContext(message)),
+            ...(runtimeSnapshot?.queue.map((queued) => queued.message) ?? []),
+        ];
+        const notice: SystemMessage = {
+            blocks: [
+                {
+                    type: "text",
+                    text: formatSessionTransferNotice({
+                        commit: input.commit,
+                        ...(this.#request.docker === undefined
+                            ? {}
+                            : { docker: this.#request.docker }),
+                        workspacePath: input.workspacePath,
+                    }),
+                },
+            ],
+            id: createId(),
+            internal: true,
+            role: "system",
+        };
+        const nextContextMessages = [...contextMessages, notice];
+        await this.#teardownRuntimeForWorkspaceTransfer();
+        const succeeded: SessionWorkspaceTransferState = {
+            status: "succeeded",
+            targetWorkspaceId: input.targetWorkspaceId,
+        };
+
+        this.#persistence?.transferWorkspace?.({
+            contextMessages: nextContextMessages,
+            cwd: input.workspacePath,
+            sessionId: this.id,
+            state: succeeded,
+            workspaceId: input.targetWorkspaceId,
+        });
+
+        this.#request = {
+            ...this.#request,
+            cwd: input.workspacePath,
+            workspaceId: input.targetWorkspaceId,
+        };
+        this.#workspaceId = input.targetWorkspaceId;
+        this.#git = undefined;
+        this.#contextMessages = nextContextMessages;
+        this.#workspaceTransfer = succeeded;
+        this.#append("session_updated", { session: this.snapshot() });
+        return { ...this.snapshot(), workspaceId: input.targetWorkspaceId };
+    }
+
+    failWorkspaceTransfer(
+        targetWorkspaceId: string,
+        error: unknown,
+        target: Extract<
+            SessionWorkspaceTransferState,
+            { status: "failed" }
+        >["target"] = "not_touched",
+        runId?: string,
+    ): void {
+        if (
+            this.#workspaceTransfer.status === "failed" &&
+            this.#workspaceTransfer.targetWorkspaceId === targetWorkspaceId
+        ) {
+            if (runId !== undefined) {
+                this.#append("run_error", {
+                    errorMessage: `Session transfer failed: ${this.#workspaceTransfer.errorMessage}`,
+                    modelLocked: this.#modelLocked(),
+                    runId,
+                });
+            }
+            return;
+        }
+        if (
+            (this.#workspaceTransfer.status === "scheduled" ||
+                this.#workspaceTransfer.status === "transferring") &&
+            this.#workspaceTransfer.targetWorkspaceId === targetWorkspaceId
+        ) {
+            const errorMessage = errorToMessage(error);
+            const notice: SystemMessage = {
+                blocks: [
+                    {
+                        type: "text",
+                        text: formatSessionTransferFailureNotice({
+                            errorMessage,
+                            workspacePath: this.#request.cwd,
+                        }),
+                    },
+                ],
+                id: createId(),
+                internal: true,
+                role: "system",
+            };
+            const contextMessages = [...this.#workspaceTransferContextMessages(), notice];
+            this.#setWorkspaceTransferState(
+                {
+                    errorMessage,
+                    status: "failed",
+                    target,
+                    targetWorkspaceId,
+                },
+                contextMessages,
+            );
+            if (this.#runtime?.agent.snapshot().status === "idle") {
+                this.#runtime.agent.recordMessage(notice);
+            }
+            if (runId !== undefined) {
+                this.#append("run_error", {
+                    errorMessage: `Session transfer failed: ${errorMessage}`,
+                    modelLocked: this.#modelLocked(),
+                    runId,
+                });
+            } else {
+                this.#append("session_updated", { session: this.snapshot() });
+            }
+        }
+    }
+
+    workspaceTransferState(): SessionWorkspaceTransferState {
+        return this.#workspaceTransfer;
+    }
+
     changeModel(request: ChangeModelRequest): ProtocolSession {
         // Resolving the provider before the idle guard keeps an unknown model reported as an
         // unknown model rather than as a busy session.
@@ -1726,6 +1952,7 @@ export class InMemorySession {
             titleStatus: title === undefined ? "idle" : "ready",
             tools: [],
             workflows: [],
+            workspaceTransfer: { status: "idle" },
             ...(title !== undefined ? { title } : {}),
         };
     }
@@ -3722,6 +3949,7 @@ export class InMemorySession {
             permissionReviews: [...this.#permissionReviews.values()],
             projectId: this.#projectId,
             ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
+            workspaceTransfer: structuredClone(this.#workspaceTransfer),
             secretIds: this.#secrets.sessionIds(),
             queuedRuns: [...this.#queue],
             ...(this.#recap !== undefined ? { recap: this.#recap } : {}),
@@ -4984,6 +5212,7 @@ export class InMemorySession {
         } finally {
             if (this.#activeRun?.runId === runId) this.#activeRun = undefined;
             this.#syncContextMessages();
+            await this.#completePendingWorkspaceTransfer(runId);
             this.#saveSession();
         }
     }
@@ -6042,6 +6271,8 @@ export class InMemorySession {
                         agentManager.listWorkspaces(this.id, projectId, { crossWorkspace }),
                     spawn: (request, signal) =>
                         agentManager.spawnInWorkspace(this.id, request, signal),
+                    transfer: (targetWorkspaceId) =>
+                        agentManager.scheduleSessionTransfer(this.id, targetWorkspaceId),
                 };
             }
         }
@@ -6623,6 +6854,7 @@ export class InMemorySession {
                 this.#runtime = undefined;
             } else {
                 this.#syncContextMessages();
+                await this.#completePendingWorkspaceTransfer(queued.runId);
             }
             this.#saveSession();
             await this.#closeDebugLog(queued);
@@ -6686,6 +6918,87 @@ export class InMemorySession {
         if (this.#closing || this.#taskDrain?.closing === true) {
             throw new Error("The local daemon is shutting down.");
         }
+        if (this.#workspaceTransfer.status === "transferring") {
+            throw new Error("This session is being transferred to another workspace.");
+        }
+    }
+
+    #setWorkspaceTransferState(
+        state: SessionWorkspaceTransferState,
+        contextMessages?: readonly Message[],
+    ): void {
+        this.#persistence?.setWorkspaceTransferState?.({
+            ...(contextMessages === undefined ? {} : { contextMessages }),
+            sessionId: this.id,
+            state,
+        });
+        this.#workspaceTransfer = state;
+        if (contextMessages !== undefined) this.#contextMessages = [...contextMessages];
+    }
+
+    #workspaceTransferContextMessages(): readonly Message[] {
+        const snapshot = this.#runtime?.agent.snapshot();
+        return [
+            ...(
+                snapshot?.contextMessages ??
+                snapshot?.messages ??
+                this.#contextMessages ??
+                this.#committedMessages()
+            ).filter((message) => !isExcludedFromModelContext(message)),
+            ...(snapshot?.queue.map((queued) => queued.message) ?? []),
+        ];
+    }
+
+    async #teardownRuntimeForWorkspaceTransfer(): Promise<void> {
+        const runtime = this.#runtime;
+        await this.#killRuntimeProcesses({ includeBackground: true });
+        const release = this.#mcpToolRelease;
+        this.#mcpToolRelease = undefined;
+        this.#mcpLoaded = false;
+        this.#mcpServers = [];
+        this.#mcpToolNames.clear();
+        this.#tools = [];
+        try {
+            await release?.().catch(() => undefined);
+            await runtime?.agent.close();
+        } finally {
+            if (this.#runtime === runtime) this.#runtime = undefined;
+        }
+    }
+
+    async #completePendingWorkspaceTransfer(runId: string): Promise<void> {
+        if (this.#workspaceTransfer.status !== "scheduled") return;
+        const targetWorkspaceId = this.#workspaceTransfer.targetWorkspaceId;
+        try {
+            const manager = this.#agentManager;
+            if (manager === undefined) {
+                throw new Error("This session cannot be transferred between workspaces.");
+            }
+            await manager.completeScheduledSessionTransfer(this.id, targetWorkspaceId);
+        } catch (error) {
+            this.failWorkspaceTransfer(targetWorkspaceId, error, "not_touched", runId);
+            if (isDatabaseFailure(error)) throw error;
+        }
+    }
+
+    #workspaceTransferSource(targetWorkspaceId: string): string {
+        if (this.isSubagent()) {
+            throw new Error("Subagent sessions cannot be transferred between workspaces.");
+        }
+        if (
+            this.#workspaceTransfer.status === "scheduled" ||
+            this.#workspaceTransfer.status === "transferring"
+        ) {
+            throw new Error("This session already has a workspace transfer in progress.");
+        }
+        const sourceWorkspaceId = this.#workspaceId;
+        if (sourceWorkspaceId === undefined) {
+            throw new Error("Only a session in a managed workspace can be transferred.");
+        }
+        if (sourceWorkspaceId === targetWorkspaceId) {
+            throw new Error("Choose a different workspace for the session transfer.");
+        }
+        return sourceWorkspaceId;
     }
 
     #assertSupportedEffort(effort: string): void {

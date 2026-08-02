@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { Model, ServiceTier } from "@slopus/rig-execution";
+import { Value } from "@sinclair/typebox/value";
 
 import type { Message } from "../../agent/types.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
@@ -20,6 +21,10 @@ import type {
     PersistedSessionState,
     PersistedWorkflowRun,
 } from "../../session/InMemorySession.js";
+import {
+    sessionWorkspaceTransferStateSchema,
+    type SessionWorkspaceTransferState,
+} from "../../session/sessionWorkspaceTransferState.js";
 import type { TX } from "../Transaction.js";
 import { parsePersistedUsage } from "./impl/persistedUsage.js";
 import {
@@ -95,6 +100,9 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     const id = readString(row, "id");
     const projectId = readString(row, "project_id");
     const workspaceId = readOptionalString(row, "workspace_id");
+    const workspaceTransfer = parseWorkspaceTransferState(
+        readString(row, "workspace_transfer_json"),
+    );
     const agent: SessionAgentMetadata = {
         depth: readNumber(row, "depth"),
         rootSessionId: readOptionalString(row, "root_session_id") ?? id,
@@ -149,6 +157,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         permissionMode,
         projectId,
         ...(workspaceId === undefined ? {} : { workspaceId }),
+        workspaceTransfer,
         secretIds: secretIdsJson === undefined ? [] : (JSON.parse(secretIdsJson) as string[]),
         queuedRuns: queryQueuedRuns(tx, sessionId),
         scheduledMessages: [...queryScheduledMessages(tx, sessionId)],
@@ -203,6 +212,14 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
         restore,
         ...(workspaceId === undefined ? {} : { workspaceId }),
     };
+}
+
+function parseWorkspaceTransferState(value: string): SessionWorkspaceTransferState {
+    const parsed: unknown = JSON.parse(value);
+    if (!Value.Check(sessionWorkspaceTransferStateSchema, parsed)) {
+        throw new Error("The stored session workspace transfer state is invalid.");
+    }
+    return parsed;
 }
 
 function queryContextMessages(tx: TX, sessionId: string): Message[] {

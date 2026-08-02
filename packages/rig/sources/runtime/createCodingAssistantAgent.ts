@@ -306,7 +306,10 @@ export function createCodingAssistantAgent(
                 );
     const toolsWithoutGoals = [
         ...baseTools,
-        ...selectCommonToolsForModel({ isSubagent: options.isSubagent === true }),
+        ...selectCommonToolsForModel({
+            hasWorkspaceContext: options.workspaces !== undefined,
+            isSubagent: options.isSubagent === true,
+        }),
         ...(options.workspaces === undefined
             ? []
             : options.workspaces.crossWorkspace

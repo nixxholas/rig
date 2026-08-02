@@ -5,6 +5,12 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { createId } from "@paralleldrive/cuid2";
+import {
+    defineProvider,
+    modelOpenaiGpt56Sol,
+    type AssistantMessage,
+    type InferenceStream,
+} from "@slopus/rig-execution";
 import Database from "better-sqlite3";
 import sharp from "sharp";
 import { eq, sql } from "drizzle-orm";
@@ -14,8 +20,12 @@ import { migrateSessionDatabase } from "../../persistence/database/migrateSessio
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { projects, projectWorkspaces } from "../../persistence/database/schema.js";
 import { PersistentGlobalEventQueue } from "../../global-event/PersistentGlobalEventQueue.js";
-import type { InMemorySession } from "../../session/InMemorySession.js";
+import { Agent, createNodeAgentContext } from "../../agent/index.js";
+import type { CodingAssistantRuntime } from "../../runtime/CodingAssistantRuntime.js";
+import type { CreateCodingAssistantAgentOptions } from "../../runtime/createCodingAssistantAgent.js";
+import type { InMemorySession, InMemorySessionOptions } from "../../session/InMemorySession.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
+import { NativeProcessManager } from "../../processes/index.js";
 import type { GitCommandRunner } from "../../git/types.js";
 import { ProjectRepository } from "../ProjectRepository.js";
 
@@ -239,6 +249,402 @@ describe("projects", () => {
         await expect(access(ready.path)).rejects.toThrow();
         await mkdir(ready.path, { recursive: true });
         expect(() => fixture.store.create({ cwd: ready.path })).toThrow("archived");
+    });
+
+    it("transfers the commit, working files, ignored files, and .context with .happyignore", async () => {
+        const transfer = await createTransferFixture();
+        await writeFile(join(transfer.source.path, "committed.txt"), "committed\n");
+        await writeFile(join(transfer.source.path, "tracked-excluded.txt"), "committed overlay\n");
+        await git(transfer.source.path, ["add", "committed.txt", "tracked-excluded.txt"]);
+        await git(transfer.source.path, ["commit", "-m", "Source commit"]);
+        const commit = await git(transfer.source.path, ["rev-parse", "HEAD"]);
+        await writeFile(join(transfer.source.path, "dirty.txt"), "dirty\n");
+        await writeFile(join(transfer.source.path, "ignored.txt"), "ignored\n");
+        await writeFile(join(transfer.source.path, "excluded.txt"), "excluded\n");
+        await writeFile(
+            join(transfer.source.path, ".happyignore"),
+            "excluded.txt\ntracked-excluded.txt\n",
+        );
+        await rm(join(transfer.source.path, "tracked-excluded.txt"));
+        await execFile("mkfifo", [join(transfer.source.path, "runtime.fifo")]);
+        await mkdir(join(transfer.source.path, ".context"));
+        await writeFile(join(transfer.source.path, ".context", "handoff.md"), "context\n");
+
+        const result = await transfer.fixture.store.transferSession(transfer.session.id, {
+            targetWorkspaceId: transfer.target.id,
+        });
+
+        expect(result).toMatchObject({
+            commit,
+            session: {
+                id: transfer.session.id,
+                workspaceId: transfer.target.id,
+                cwd: transfer.target.path,
+            },
+            state: "succeeded",
+        });
+        await expect(readFile(join(transfer.target.path, "committed.txt"), "utf8")).resolves.toBe(
+            "committed\n",
+        );
+        await expect(readFile(join(transfer.target.path, "dirty.txt"), "utf8")).resolves.toBe(
+            "dirty\n",
+        );
+        await expect(readFile(join(transfer.target.path, "ignored.txt"), "utf8")).resolves.toBe(
+            "ignored\n",
+        );
+        await expect(
+            readFile(join(transfer.target.path, ".context", "handoff.md"), "utf8"),
+        ).resolves.toBe("context\n");
+        await expect(access(join(transfer.target.path, "excluded.txt"))).rejects.toThrow();
+        await expect(access(join(transfer.target.path, "tracked-excluded.txt"))).rejects.toThrow();
+        await expect(access(join(transfer.target.path, "runtime.fifo"))).rejects.toThrow();
+        expect(await git(transfer.target.path, ["rev-parse", "HEAD"])).toBe(commit);
+    });
+
+    it("rejects a transfer while the session has an active turn", async () => {
+        const transfer = await createTransferFixture();
+        transfer.session.submit({ text: "Keep this turn busy." });
+
+        await expect(
+            transfer.fixture.store.transferSession(transfer.session.id, {
+                targetWorkspaceId: transfer.target.id,
+            }),
+        ).rejects.toThrow("active response");
+    });
+
+    it("executes a requested mid-turn transfer after the turn and shows the notice next turn", async () => {
+        const firstStarted = deferred<void>();
+        const finishFirst = deferred<void>();
+        let response = 0;
+        const runtimeOptions: CreateCodingAssistantAgentOptions[] = [];
+        const provider = defineProvider({
+            id: "codex",
+            models: [modelOpenaiGpt56Sol],
+            stream() {
+                response += 1;
+                if (response === 1) {
+                    firstStarted.resolve();
+                    return transferResponseStream("First turn complete.", finishFirst.promise);
+                }
+                return transferResponseStream("Second turn complete.");
+            },
+        });
+        const transfer = await createTransferFixture({
+            createRuntime: (options) => {
+                runtimeOptions.push(options);
+                return createTransferTestRuntime(options, provider);
+            },
+        });
+        const run = transfer.session.submit({ text: "Move this session." });
+        await firstStarted.promise;
+        const workspaceContext = runtimeOptions[0]?.workspaces;
+        if (workspaceContext === undefined) throw new Error("Expected workspace tools.");
+
+        await expect(workspaceContext.transfer(transfer.target.id)).resolves.toEqual({
+            state: "scheduled",
+            targetWorkspaceId: transfer.target.id,
+        });
+        await expect(workspaceContext.transfer(transfer.target.id)).rejects.toThrow(
+            "already has a workspace transfer in progress",
+        );
+        expect(() =>
+            transfer.fixture.store.create({
+                cwd: transfer.target.path,
+                workspaceId: transfer.target.id,
+            }),
+        ).toThrow("receiving a session transfer");
+        expect(transfer.session.workspaceTransferState()).toEqual({
+            status: "scheduled",
+            targetWorkspaceId: transfer.target.id,
+        });
+        expect(transfer.session.snapshot()).toMatchObject({
+            cwd: transfer.source.path,
+            workspaceId: transfer.source.id,
+        });
+        await writeFile(join(transfer.source.path, "after-request.txt"), "included later\n");
+        await expect(access(join(transfer.target.path, "after-request.txt"))).rejects.toThrow();
+
+        finishFirst.resolve();
+        await transfer.session.waitForRun(run.runId);
+        await waitFor(
+            () => transfer.session.snapshot(),
+            (snapshot) => snapshot.workspaceId === transfer.target.id,
+        );
+        await expect(
+            readFile(join(transfer.target.path, "after-request.txt"), "utf8"),
+        ).resolves.toBe("included later\n");
+
+        const next = transfer.session.submit({ text: "Where am I now?" });
+        await transfer.session.waitForRun(next.runId);
+        const nextOptions = runtimeOptions[1];
+        expect(nextOptions?.cwd).toBe(transfer.target.path);
+        const noticeText = nextOptions?.contextMessages
+            ?.flatMap((message) =>
+                message.role === "system"
+                    ? message.blocks.flatMap((block) => (block.type === "text" ? [block.text] : []))
+                    : [],
+            )
+            .find((text) => text.includes("<session-transfer-notice>"));
+        expect(noticeText).toContain(transfer.target.path);
+        expect(noticeText).toContain("working-tree overlay");
+        expect(noticeText).toContain("Subagents spawned earlier");
+    });
+
+    it("records a durable failure notice when a turn-end transfer fails", async () => {
+        const started = deferred<void>();
+        const finish = deferred<void>();
+        const runtimeOptions: CreateCodingAssistantAgentOptions[] = [];
+        let failSourceLsTree = true;
+        const provider = defineProvider({
+            id: "codex",
+            models: [modelOpenaiGpt56Sol],
+            stream() {
+                started.resolve();
+                return transferResponseStream("Turn complete.", finish.promise);
+            },
+        });
+        const transfer = await createTransferFixture({
+            createRuntime: (options) => {
+                runtimeOptions.push(options);
+                return createTransferTestRuntime(options, provider);
+            },
+            projectGit: async (cwd, args) => {
+                if (failSourceLsTree && cwd.includes("source") && args[0] === "ls-tree") {
+                    failSourceLsTree = false;
+                    throw new Error("Injected turn-end transfer failure.");
+                }
+                return git(cwd, args);
+            },
+        });
+        const run = transfer.session.submit({ text: "Move after this turn." });
+        await started.promise;
+        const workspaceContext = runtimeOptions[0]?.workspaces;
+        if (workspaceContext === undefined) throw new Error("Expected workspace tools.");
+        await workspaceContext.transfer(transfer.target.id);
+
+        finish.resolve();
+        await transfer.session.waitForRun(run.runId);
+        await waitFor(
+            () => transfer.session.workspaceTransferState(),
+            (state) => state.status === "failed",
+        );
+        expect(transfer.session.workspaceTransferState()).toMatchObject({
+            errorMessage: "Injected turn-end transfer failure.",
+            status: "failed",
+        });
+        expect(
+            transfer.session.events
+                .all()
+                .some(
+                    (event) =>
+                        event.type === "run_error" &&
+                        event.data.errorMessage.includes("Session transfer failed"),
+                ),
+        ).toBe(true);
+
+        const next = transfer.session.submit({ text: "Did the move work?" });
+        await transfer.session.waitForRun(next.runId);
+        const failureNotice = transfer.session
+            .state()
+            .contextMessages?.flatMap((message) =>
+                message.role === "system"
+                    ? message.blocks.flatMap((block) => (block.type === "text" ? [block.text] : []))
+                    : [],
+            )
+            .find((text) => text.includes("<session-transfer-failure-notice>"));
+        expect(failureNotice).toContain("FAILED");
+        expect(failureNotice).toContain(transfer.source.path);
+        expect(failureNotice).toContain("Injected turn-end transfer failure.");
+    });
+
+    it("restores the target commit clean and keeps the source untouched when applying fails", async () => {
+        let failSourceLsTree = false;
+        const transfer = await createTransferFixture({
+            projectGit: async (cwd, args) => {
+                if (failSourceLsTree && cwd.includes("source") && args[0] === "ls-tree") {
+                    failSourceLsTree = false;
+                    throw new Error("Injected transfer failure.");
+                }
+                return git(cwd, args);
+            },
+        });
+        const targetCommit = await git(transfer.target.path, ["rev-parse", "HEAD"]);
+        await writeFile(join(transfer.target.path, "target-only.txt"), "preserve me\n");
+        await writeFile(join(transfer.source.path, "dirty.txt"), "source change\n");
+        failSourceLsTree = true;
+
+        await expect(
+            transfer.fixture.store.transferSession(transfer.session.id, {
+                targetWorkspaceId: transfer.target.id,
+            }),
+        ).rejects.toThrow("Injected transfer failure");
+
+        expect(transfer.session.snapshot()).toMatchObject({
+            cwd: transfer.source.path,
+            workspaceId: transfer.source.id,
+        });
+        expect(transfer.session.workspaceTransferState()).toMatchObject({
+            status: "failed",
+            targetWorkspaceId: transfer.target.id,
+        });
+        expect(await git(transfer.target.path, ["rev-parse", "HEAD"])).toBe(targetCommit);
+        await expect(access(join(transfer.target.path, "target-only.txt"))).rejects.toThrow();
+        await expect(access(join(transfer.target.path, "dirty.txt"))).rejects.toThrow();
+        await expect(readFile(join(transfer.source.path, "dirty.txt"), "utf8")).resolves.toBe(
+            "source change\n",
+        );
+    });
+
+    it("quarantines and names a target workspace when restoring it fails", async () => {
+        let applyingFailed = false;
+        const transfer = await createTransferFixture({
+            projectGit: async (cwd, args) => {
+                if (cwd.includes("source") && args[0] === "ls-tree") {
+                    applyingFailed = true;
+                    throw new Error("Original apply failure.");
+                }
+                if (applyingFailed && cwd.includes("target") && args[0] === "reset") {
+                    throw new Error("Target restore failure.");
+                }
+                return git(cwd, args);
+            },
+        });
+
+        await expect(
+            transfer.fixture.store.transferSession(transfer.session.id, {
+                targetWorkspaceId: transfer.target.id,
+            }),
+        ).rejects.toThrow(
+            "workspace 'Transfer Target': Original apply failure. The workspace could not be restored: Target restore failure.",
+        );
+        expect(transfer.session.workspaceTransferState()).toMatchObject({
+            errorMessage: expect.stringContaining("Original apply failure."),
+            status: "failed",
+            target: "restore_failed",
+        });
+        expect(
+            transfer.fixture.store.getWorkspace(transfer.target.projectId, transfer.target.id),
+        ).toMatchObject({
+            error: expect.stringContaining("Target restore failure."),
+            status: "failed",
+        });
+        expect(() =>
+            transfer.fixture.store.create({
+                cwd: transfer.target.path,
+                workspaceId: transfer.target.id,
+            }),
+        ).toThrow("is failed");
+    });
+
+    it("rejects a target workspace that already has an attached session", async () => {
+        const transfer = await createTransferFixture();
+        transfer.fixture.store.create({
+            cwd: transfer.target.path,
+            workspaceId: transfer.target.id,
+        });
+
+        await expect(
+            transfer.fixture.store.transferSession(transfer.session.id, {
+                targetWorkspaceId: transfer.target.id,
+            }),
+        ).rejects.toThrow("no attached sessions");
+        expect(transfer.session.snapshot()).toMatchObject({
+            cwd: transfer.source.path,
+            workspaceId: transfer.source.id,
+        });
+    });
+
+    it("accepts a target workspace whose only attached sessions are archived", async () => {
+        const transfer = await createTransferFixture();
+        const archived = transfer.fixture.store.create({
+            cwd: transfer.target.path,
+            workspaceId: transfer.target.id,
+        });
+        archived.setArchived(true);
+
+        await expect(
+            transfer.fixture.store.transferSession(transfer.session.id, {
+                targetWorkspaceId: transfer.target.id,
+            }),
+        ).resolves.toMatchObject({ state: "succeeded" });
+    });
+
+    it("abandons a persisted pending transfer on restart with a failure notice", async () => {
+        const started = deferred<void>();
+        const neverFinish = deferred<void>();
+        const runtimeOptions: CreateCodingAssistantAgentOptions[] = [];
+        const provider = defineProvider({
+            id: "codex",
+            models: [modelOpenaiGpt56Sol],
+            stream() {
+                started.resolve();
+                return transferResponseStream("Still running.", neverFinish.promise);
+            },
+        });
+        const transfer = await createTransferFixture({
+            createRuntime: (options) => {
+                runtimeOptions.push(options);
+                return createTransferTestRuntime(options, provider);
+            },
+        });
+        transfer.session.submit({ text: "Schedule and crash." });
+        await started.promise;
+        const workspaceContext = runtimeOptions[0]?.workspaces;
+        if (workspaceContext === undefined) throw new Error("Expected workspace tools.");
+        await workspaceContext.transfer(transfer.target.id);
+        transfer.fixture.store.close();
+
+        const restarted = await transfer.fixture.restart();
+        const restored = restarted.get(transfer.session.id);
+        if (restored === undefined) throw new Error("Expected restored session.");
+        expect(restored.workspaceTransferState()).toMatchObject({
+            errorMessage: expect.stringContaining("local server stopped"),
+            status: "failed",
+            target: "not_touched",
+            targetWorkspaceId: transfer.target.id,
+        });
+        const failureNotice = restored
+            .state()
+            .contextMessages?.flatMap((message) =>
+                message.role === "system"
+                    ? message.blocks.flatMap((block) => (block.type === "text" ? [block.text] : []))
+                    : [],
+            )
+            .find((text) => text.includes("<session-transfer-failure-notice>"));
+        expect(failureNotice).toContain("FAILED");
+        expect(failureNotice).toContain(transfer.source.path);
+        expect(failureNotice).toContain("local server stopped");
+    });
+
+    it("persists an internal move notice for the next turn", async () => {
+        const transfer = await createTransferFixture();
+        const commit = await git(transfer.source.path, ["rev-parse", "HEAD"]);
+
+        await transfer.fixture.store.transferSession(transfer.session.id, {
+            targetWorkspaceId: transfer.target.id,
+        });
+
+        transfer.fixture.store.close();
+        const restarted = await transfer.fixture.restart();
+        const restored = restarted.get(transfer.session.id);
+        if (restored === undefined) throw new Error("Expected the transferred session.");
+        const notice = restored
+            .state()
+            .contextMessages?.findLast(
+                (message) =>
+                    message.role === "system" &&
+                    message.blocks.some(
+                        (block) =>
+                            block.type === "text" &&
+                            block.text.includes("<session-transfer-notice>"),
+                    ),
+            );
+        const noticeText = notice?.blocks
+            .flatMap((block) => (block.type === "text" ? [block.text] : []))
+            .join("\n");
+        expect(notice).toMatchObject({ internal: true, role: "system" });
+        expect(noticeText).toContain(transfer.target.path);
+        expect(noticeText).toContain(commit);
     });
 
     it("archives a workspace while an observer writes on its own connection", async () => {
@@ -1168,6 +1574,7 @@ async function createFixture(
         onSessionAccess?: (session: InMemorySession) => void;
         onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
         projectGit?: GitCommandRunner;
+        createRuntime?: InMemorySessionOptions["createRuntime"];
         workspacesDirectory?: string;
     } = {},
 ): Promise<{
@@ -1185,6 +1592,9 @@ async function createFixture(
     const databasePath = join(state, "sessions.sqlite");
     const open = () =>
         new PersistentSessionStore({
+            ...(options.createRuntime === undefined
+                ? {}
+                : { createRuntime: options.createRuntime }),
             databasePath,
             ...(options.durableGlobalEventQueue === undefined
                 ? {}
@@ -1216,6 +1626,115 @@ async function createFixture(
         return next;
     };
     return { databasePath, home, restart, root, state, store: stores[0]! };
+}
+
+async function createTransferFixture(
+    options: {
+        createRuntime?: InMemorySessionOptions["createRuntime"];
+        projectGit?: GitCommandRunner;
+    } = {},
+): Promise<{
+    fixture: Awaited<ReturnType<typeof createFixture>>;
+    session: InMemorySession;
+    source: NonNullable<Awaited<ReturnType<PersistentSessionStore["createWorkspace"]>>>;
+    target: NonNullable<Awaited<ReturnType<PersistentSessionStore["createWorkspace"]>>>;
+}> {
+    const fixture = await createFixture(options);
+    const repository = await createRepository(fixture.root, "transfer-source");
+    await writeFile(join(repository, ".gitignore"), "ignored.txt\n");
+    await git(repository, ["add", ".gitignore"]);
+    await git(repository, ["commit", "-m", "Ignore fixture"]);
+    const rootSession = fixture.store.create({ cwd: repository });
+    const projectId = rootSession.snapshot().projectId;
+    await waitForProject(
+        fixture.store,
+        projectId,
+        (project) => project.initializationStatus === "ready",
+    );
+    const sourceReserved = await fixture.store.createWorkspace(projectId, {
+        baseRef: "HEAD",
+        name: "Transfer Source",
+    });
+    const targetReserved = await fixture.store.createWorkspace(projectId, {
+        baseRef: "HEAD",
+        name: "Transfer Target",
+    });
+    if (sourceReserved === undefined || targetReserved === undefined) {
+        throw new Error("Expected transfer workspaces.");
+    }
+    const source = await waitForWorkspace(
+        fixture.store,
+        projectId,
+        sourceReserved.id,
+        (workspace) => workspace.status === "ready",
+    );
+    const target = await waitForWorkspace(
+        fixture.store,
+        projectId,
+        targetReserved.id,
+        (workspace) => workspace.status === "ready",
+    );
+    const session = fixture.store.create({ cwd: source.path, workspaceId: source.id });
+    return { fixture, session, source, target };
+}
+
+function createTransferTestRuntime(
+    options: CreateCodingAssistantAgentOptions,
+    provider: ReturnType<typeof defineProvider>,
+): CodingAssistantRuntime {
+    const processManager = new NativeProcessManager();
+    const context = createNodeAgentContext({ cwd: options.cwd, processManager });
+    if (options.workspaces !== undefined) context.workspaces = options.workspaces;
+    return {
+        agent: new Agent({
+            context,
+            modelId: options.modelId ?? modelOpenaiGpt56Sol.id,
+            printToConsole: false,
+            provider,
+            tools: [],
+        }),
+        context,
+        cwd: options.cwd,
+        processManager,
+        executor: provider,
+    };
+}
+
+function transferResponseStream(text: string, release = Promise.resolve()): InferenceStream {
+    const message: AssistantMessage = {
+        api: "test",
+        content: [{ text, type: "text" }],
+        model: modelOpenaiGpt56Sol.id,
+        provider: "codex",
+        role: "assistant",
+        stopReason: "stop",
+        timestamp: 1,
+        usage: {
+            cacheRead: 0,
+            cacheWrite: 0,
+            cost: {
+                cacheRead: 0,
+                cacheWrite: 0,
+                input: 0,
+                output: 0,
+                total: 0,
+            },
+            input: 0,
+            output: 0,
+            totalTokens: 0,
+        },
+    };
+    return {
+        async *[Symbol.asyncIterator]() {
+            await release;
+            yield { partial: message, type: "start" as const };
+            yield { message, reason: "stop" as const, type: "done" as const };
+        },
+        async result() {
+            await release;
+            return message;
+        },
+    };
 }
 
 /** Uses a real driver fault so the test cannot drift from what SQLite actually throws. */

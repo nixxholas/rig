@@ -16,6 +16,8 @@ import type {
     SubagentSummary,
     SessionSummary,
     TimelineAgent,
+    TransferSessionRequest,
+    TransferSessionResponse,
 } from "../protocol/index.js";
 import type { AgentTreeUsage } from "../agent/index.js";
 import type { InMemorySession } from "./InMemorySession.js";
@@ -138,5 +140,9 @@ export interface SessionStore {
     registerSecret(request: RegisterSecretRequest): SecretSummary;
     /** The agents a scope covers and when each of them worked, waited, or asked. */
     timeline(request: GetTimelineRequest): readonly TimelineAgent[];
+    transferSession(
+        sessionId: string,
+        request: TransferSessionRequest,
+    ): Promise<TransferSessionResponse | undefined>;
     unregisterSecret(secretId: string): boolean;
 }

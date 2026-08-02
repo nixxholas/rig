@@ -4,8 +4,13 @@ import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 
 describe("selectCommonToolsForModel", () => {
     it("gives primary agents all scheduling tools", () => {
-        expect(selectCommonToolsForModel({ isSubagent: false }).map((tool) => tool.name)).toEqual([
+        expect(
+            selectCommonToolsForModel({ hasWorkspaceContext: true, isSubagent: false }).map(
+                (tool) => tool.name,
+            ),
+        ).toEqual([
             "attach",
+            "transfer_session",
             "wait",
             "wait_until",
             "schedule_message",
@@ -29,7 +34,11 @@ describe("selectCommonToolsForModel", () => {
     });
 
     it("never gives schedule_message to subagents", () => {
-        expect(selectCommonToolsForModel({ isSubagent: true }).map((tool) => tool.name)).toEqual([
+        expect(
+            selectCommonToolsForModel({ hasWorkspaceContext: true, isSubagent: true }).map(
+                (tool) => tool.name,
+            ),
+        ).toEqual([
             "attach",
             "wait",
             "wait_until",
@@ -49,5 +58,13 @@ describe("selectCommonToolsForModel", () => {
             "webapp_revert",
             "webapp_list",
         ]);
+    });
+
+    it("never gives transfer_session to a session without workspace context", () => {
+        expect(
+            selectCommonToolsForModel({ hasWorkspaceContext: false, isSubagent: false }).map(
+                (tool) => tool.name,
+            ),
+        ).not.toContain("transfer_session");
     });
 });

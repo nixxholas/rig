@@ -30,6 +30,7 @@ import type {
     AgentWorkspaceSession,
     DelegatedSession,
     DelegatedSessionRequest,
+    AgentSessionTransferSchedule,
 } from "../agent/context/WorkspaceContext.js";
 import type { Message } from "../agent/types.js";
 import type { PermissionMode } from "../permissions/index.js";
@@ -81,6 +82,11 @@ export interface AgentSessionRepository {
         workspaceId: string,
     ): ProjectWorkspace | undefined;
     workspace?(projectId: string, workspaceId: string): ProjectWorkspace | undefined;
+    completeScheduledSessionTransfer?(sessionId: string, targetWorkspaceId: string): Promise<void>;
+    scheduleSessionTransfer?(
+        sessionId: string,
+        targetWorkspaceId: string,
+    ): AgentSessionTransferSchedule;
 }
 
 export interface AgentSessionManagerOptions {
@@ -176,6 +182,28 @@ export class AgentSessionManager {
             throw new Error("This workspace was not created by the current session.");
         }
         return workspace;
+    }
+
+    async scheduleSessionTransfer(
+        sessionId: string,
+        targetWorkspaceId: string,
+    ): Promise<AgentSessionTransferSchedule> {
+        const schedule = this.#repository.scheduleSessionTransfer;
+        if (schedule === undefined) {
+            throw new Error("This session cannot be transferred between workspaces.");
+        }
+        return schedule(sessionId, targetWorkspaceId);
+    }
+
+    async completeScheduledSessionTransfer(
+        sessionId: string,
+        targetWorkspaceId: string,
+    ): Promise<void> {
+        const complete = this.#repository.completeScheduledSessionTransfer;
+        if (complete === undefined) {
+            throw new Error("This session cannot be transferred between workspaces.");
+        }
+        await complete(sessionId, targetWorkspaceId);
     }
 
     listProjects(sessionId: string): readonly AgentProject[] {

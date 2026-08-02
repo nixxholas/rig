@@ -11,6 +11,7 @@ import {
     listWorkspacesTool,
     spawnWorkspaceAgentTool,
 } from "./workspaceTools.js";
+import { transferSessionTool } from "./transfer_session.js";
 
 describe("workspace tools", () => {
     it("creates a workspace through the session-owned context", async () => {
@@ -174,6 +175,43 @@ describe("workspace tools", () => {
             ),
         ).toContain("outside this conversation's own workspace");
     });
+
+    it("schedules a transfer with destructive target and overlay behavior disclosed", async () => {
+        const harness = createJustBashToolHarness();
+        const result = {
+            state: "scheduled" as const,
+            targetWorkspaceId: "workspace-2",
+        };
+        const transfer = vi.fn(async () => result);
+        harness.context.workspaces = workspaceContext({ transfer });
+
+        await expect(
+            transferSessionTool.execute(
+                { target_workspace_id: "workspace-2" },
+                harness.context,
+                {},
+            ),
+        ).resolves.toEqual(result);
+        expect(transfer).toHaveBeenCalledWith("workspace-2");
+        expect(transferSessionTool.description).toContain(".happyignore");
+        expect(transferSessionTool.description).toContain("working-tree regular-file");
+        expect(transferSessionTool.description).toContain("all local working state are discarded");
+        expect(transferSessionTool.description).toContain(
+            "Subagents spawned earlier remain in the previous workspace",
+        );
+        expect(transferSessionTool.locks).toEqual([]);
+        expect(
+            transferSessionTool.describeAutoPermissionAction?.(
+                {
+                    target_workspace_id: "workspace-2",
+                },
+                harness.context,
+            ),
+        ).toContain("discarding");
+        expect(transferSessionTool.toLLM(result)[0]).toMatchObject({
+            text: expect.stringContaining("further filesystem changes"),
+        });
+    });
 });
 
 function workspaceContext(overrides: Partial<WorkspaceContext>): WorkspaceContext {
@@ -186,6 +224,7 @@ function workspaceContext(overrides: Partial<WorkspaceContext>): WorkspaceContex
         listSessions: vi.fn(() => []),
         listWorkspaces: vi.fn(() => []),
         spawn: vi.fn(),
+        transfer: vi.fn(),
         ...overrides,
     } as WorkspaceContext;
 }

@@ -85,6 +85,8 @@ import type {
     SubmitMessageRequest,
     SubmitMessageResponse,
     TrimGlobalEventsResponse,
+    TransferSessionRequest,
+    TransferSessionResponse,
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
@@ -478,6 +480,17 @@ export class ProtocolHttpClient {
         request: UpdateSessionRequest,
     ): Promise<{ session: ProtocolSession }> {
         return this.#requestJson("PATCH", `/sessions/${encodeURIComponent(sessionId)}`, request);
+    }
+
+    transferSession(
+        sessionId: string,
+        request: TransferSessionRequest,
+    ): Promise<TransferSessionResponse> {
+        return this.#requestJson(
+            "POST",
+            `/sessions/${encodeURIComponent(sessionId)}/transfer`,
+            request,
+        );
     }
 
     archiveSession(sessionId: string): Promise<SessionArchiveResponse> {

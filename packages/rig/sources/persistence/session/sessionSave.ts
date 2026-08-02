@@ -91,6 +91,7 @@ export function sessionSave(
             workflowsEnabled: state.workflowsEnabled !== false,
             workflowsJson: JSON.stringify(state.workflows ?? []),
             workspaceId: state.workspaceId ?? null,
+            workspaceTransferJson: JSON.stringify(state.workspaceTransfer ?? { status: "idle" }),
         };
         const { createdAtMs: _createdAtMs, id: _id, ...updates } = values;
         tx.insert(sessions)
@@ -101,7 +102,11 @@ export function sessionSave(
     });
 }
 
-function replaceContextMessages(tx: TX, sessionId: string, messages: readonly Message[]): void {
+export function replaceContextMessages(
+    tx: TX,
+    sessionId: string,
+    messages: readonly Message[],
+): void {
     tx.delete(sessionContextMessages)
         .where(
             and(

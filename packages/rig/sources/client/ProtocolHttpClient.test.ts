@@ -9,6 +9,38 @@ import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 
 describe("ProtocolHttpClient", () => {
+    it("sends session transfers to the daemon operation", async () => {
+        const directory = await createTestSocketDirectory();
+        const socketPath = join(directory, "server.sock");
+        let body = "";
+        let path = "";
+        const server = createServer((request, response) => {
+            path = request.url ?? "";
+            request.setEncoding("utf8");
+            request.on("data", (chunk) => {
+                body += chunk;
+            });
+            request.on("end", () => {
+                response.writeHead(200, { "content-type": "application/json" });
+                response.end('{"commit":"abc","session":{},"state":"succeeded"}');
+            });
+        });
+        try {
+            await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+            const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
+
+            await client.transferSession("session/one", {
+                targetWorkspaceId: "workspace-2",
+            });
+
+            expect(path).toBe("/sessions/session%2Fone/transfer");
+            expect(JSON.parse(body)).toEqual({ targetWorkspaceId: "workspace-2" });
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it("rejects a transcript limit on event catch-up", async () => {
         const client = new ProtocolHttpClient({
             socketPath: "/tmp/rig-client-no-request.sock",

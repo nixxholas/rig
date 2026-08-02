@@ -156,6 +156,9 @@ export const sessions = sqliteTable(
         // Added by later migrations, so they follow the columns of the initial schema.
         delegatedBySessionId: text("delegated_by_session_id"),
         lifetimeTotalTokens: integer("lifetime_total_tokens").notNull().default(0),
+        workspaceTransferJson: text("workspace_transfer_json")
+            .notNull()
+            .default('{"status":"idle"}'),
     },
     (table) => [
         index("sessions_agent_id").on(table.agentId),

@@ -55,6 +55,11 @@ export interface DelegatedSession {
     workspacePath: string;
 }
 
+export interface AgentSessionTransferSchedule {
+    state: "scheduled";
+    targetWorkspaceId: string;
+}
+
 export interface WorkspaceContext {
     /** Whether this session may inspect, and start work in, other projects and workspaces. */
     crossWorkspace: boolean;
@@ -68,4 +73,5 @@ export interface WorkspaceContext {
     }): readonly AgentWorkspaceSession[];
     listWorkspaces(projectId?: string): readonly AgentWorkspace[];
     spawn(request: WorkspaceAgentRequest, signal?: AbortSignal): Promise<SpawnSubagentResult>;
+    transfer(targetWorkspaceId: string): Promise<AgentSessionTransferSchedule>;
 }

@@ -28,6 +28,8 @@ import type {
     SessionTranscriptWindow,
     SubagentSummary,
     TimelineAgent,
+    TransferSessionRequest,
+    TransferSessionResponse,
 } from "../protocol/index.js";
 import type { Message } from "../agent/types.js";
 import {
@@ -101,6 +103,9 @@ import { sessionRewind } from "../persistence/session/sessionRewind.js";
 import { sessionSave } from "../persistence/session/sessionSave.js";
 import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js";
 import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRun.js";
+import { sessionTransferWorkspace } from "../persistence/session/sessionTransferWorkspace.js";
+import { sessionSetWorkspaceTransferState } from "../persistence/session/sessionSetWorkspaceTransferState.js";
+import { queryWorkspaceHasAttachedSessions } from "../persistence/session/queryWorkspaceHasAttachedSessions.js";
 import { durableWaitSave } from "../persistence/scheduling/durableWaitSave.js";
 import { durableWaitPrune } from "../persistence/scheduling/durableWaitPrune.js";
 import { scheduledMessageSave } from "../persistence/scheduling/scheduledMessageSave.js";
@@ -142,6 +147,10 @@ import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { configureSessionRequest } from "./configureSessionRequest.js";
+import {
+    executeSessionWorkspaceTransfer,
+    scheduleSessionWorkspaceTransfer,
+} from "./transferSessionWorkspace.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
 const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
@@ -190,6 +199,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #secrets: SecretRegistry;
     readonly #workspaceFeatures: WorkspaceFeatures;
     #sessions = new Map<string, WeakRef<InMemorySession>>();
+    readonly #workspaceTransferReservations = new Map<string, string>();
     #scheduledMessageTimer: ReturnType<typeof setTimeout> | undefined;
     #sessionFinalizer = new FinalizationRegistry<{
         id: string;
@@ -318,6 +328,33 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     this.#projects.getOwnedWorkspace(ownerSessionId, projectId, workspaceId),
                 workspace: (projectId, workspaceId) =>
                     this.#projects.getWorkspace(projectId, workspaceId),
+                completeScheduledSessionTransfer: async (sessionId, targetWorkspaceId) => {
+                    const result = await this.#executeSessionTransfer(
+                        sessionId,
+                        targetWorkspaceId,
+                        true,
+                    );
+                    if (result === undefined) {
+                        throw new Error("The session is no longer available.");
+                    }
+                },
+                scheduleSessionTransfer: (sessionId, targetWorkspaceId) => {
+                    const session = this.get(sessionId);
+                    if (session === undefined) {
+                        throw new Error("The session is no longer available.");
+                    }
+                    return scheduleSessionWorkspaceTransfer({
+                        hasAttachedSessions: (workspaceId) =>
+                            queryWorkspaceHasAttachedSessions(this.#tx(), workspaceId),
+                        projects: this.#projects,
+                        releaseTarget: (workspaceId, ownerSessionId) =>
+                            this.#releaseWorkspaceTransferTarget(workspaceId, ownerSessionId),
+                        reserveTarget: (workspaceId, ownerSessionId) =>
+                            this.#reserveWorkspaceTransferTarget(workspaceId, ownerSessionId),
+                        session,
+                        targetWorkspaceId,
+                    });
+                },
             },
             ...(this.#taskDrain === undefined ? {} : { taskDrain: this.#taskDrain }),
         });
@@ -482,6 +519,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         const state = source.createForkState();
         const sourceSnapshot = source.snapshot();
         if (sourceSnapshot.workspaceId !== undefined) {
+            this.#assertWorkspaceAcceptingSessions(sourceSnapshot.workspaceId);
+        }
+        if (sourceSnapshot.workspaceId !== undefined) {
             const workspace = this.#projects.getWorkspace(
                 sourceSnapshot.projectId,
                 sourceSnapshot.workspaceId,
@@ -596,6 +636,9 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     ...(inheritedWorkspace === undefined ? {} : { workspace: inheritedWorkspace }),
                 };
             })();
+            if (ownership.workspace !== undefined) {
+                this.#assertWorkspaceAcceptingSessions(ownership.workspace.id);
+            }
             session = new InMemorySession({
                 presence: this.presence,
                 agentManager: this.#agentManager,
@@ -1155,6 +1198,51 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
+    setWorkspaceTransferState(
+        input: Parameters<NonNullable<InMemorySessionPersistence["setWorkspaceTransferState"]>>[0],
+    ): void {
+        sessionSetWorkspaceTransferState(this.#tx(), { ...input, now: this.#now() });
+    }
+
+    transferWorkspace(input: {
+        contextMessages: readonly Message[];
+        cwd: string;
+        sessionId: string;
+        state: Parameters<typeof sessionTransferWorkspace>[1]["state"];
+        workspaceId: string;
+    }): void {
+        sessionTransferWorkspace(this.#tx(), { ...input, now: this.#now() });
+    }
+
+    async transferSession(
+        sessionId: string,
+        request: TransferSessionRequest,
+    ): Promise<TransferSessionResponse | undefined> {
+        return this.#executeSessionTransfer(sessionId, request.targetWorkspaceId, false);
+    }
+
+    async #executeSessionTransfer(
+        sessionId: string,
+        targetWorkspaceId: string,
+        scheduled: boolean,
+    ): Promise<TransferSessionResponse | undefined> {
+        this.#assertAcceptingMutations();
+        const session = this.get(sessionId);
+        if (session === undefined) return undefined;
+        return executeSessionWorkspaceTransfer({
+            hasAttachedSessions: (workspaceId) =>
+                queryWorkspaceHasAttachedSessions(this.#tx(), workspaceId),
+            projects: this.#projects,
+            releaseTarget: (workspaceId, ownerSessionId) =>
+                this.#releaseWorkspaceTransferTarget(workspaceId, ownerSessionId),
+            reserveTarget: (workspaceId, ownerSessionId) =>
+                this.#reserveWorkspaceTransferTarget(workspaceId, ownerSessionId),
+            scheduled,
+            session,
+            targetWorkspaceId,
+        });
+    }
+
     transaction<T>(body: () => T): T {
         return this.#transaction(() => body());
     }
@@ -1442,6 +1530,28 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #newLastSessionOrderKey(projectId: string, workspaceId: string | undefined): string {
         const items = this.#sessionOrderItems(projectId, workspaceId);
         return generateKeyBetween(items.at(-1)?.orderKey ?? null, null);
+    }
+
+    #assertWorkspaceAcceptingSessions(workspaceId: string): void {
+        if (this.#workspaceTransferReservations.has(workspaceId)) {
+            throw new Error(
+                "That workspace is receiving a session transfer and cannot start another session yet.",
+            );
+        }
+    }
+
+    #reserveWorkspaceTransferTarget(workspaceId: string, sessionId: string): void {
+        const owner = this.#workspaceTransferReservations.get(workspaceId);
+        if (owner !== undefined && owner !== sessionId) {
+            throw new Error("That workspace is already reserved for another session transfer.");
+        }
+        this.#workspaceTransferReservations.set(workspaceId, sessionId);
+    }
+
+    #releaseWorkspaceTransferTarget(workspaceId: string, sessionId: string): void {
+        if (this.#workspaceTransferReservations.get(workspaceId) === sessionId) {
+            this.#workspaceTransferReservations.delete(workspaceId);
+        }
     }
 
     #sessionOrderItems(

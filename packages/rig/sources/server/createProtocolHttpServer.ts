@@ -90,6 +90,8 @@ import type {
     SubmitMessageResponse,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
+    TransferSessionRequest,
+    TransferSessionResponse,
     UninstallPluginResponse,
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
@@ -107,9 +109,11 @@ import {
     RIG_PROTOCOL_VERSION,
     SESSION_DRAFT_MAX_LENGTH,
     updateProjectSettingsRequestSchema,
+    transferSessionRequestSchema,
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
+import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { isOpenQuestion } from "../user-input/index.js";
 import type {
@@ -2279,6 +2283,30 @@ async function handleRequest(
         return;
     }
 
+    if (request.method === "POST" && route.name === "transfer") {
+        const body = await readJson<unknown>(request);
+        if (!Value.Check(transferSessionRequestSchema, body)) {
+            sendJson(response, 400, {
+                error: "Choose an existing target workspace.",
+            });
+            return;
+        }
+        try {
+            const result = await store.transferSession(sessionId, body as TransferSessionRequest);
+            if (result === undefined) {
+                sendJson(response, 404, { error: "Session not found" });
+                return;
+            }
+            sendJson<TransferSessionResponse>(response, 200, result);
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, error instanceof WorkspaceTransferTargetRestoreError ? 500 : 409, {
+                error: errorToMessage(error),
+            });
+        }
+        return;
+    }
+
     if (request.method === "POST" && (route.name === "archive" || route.name === "unarchive")) {
         if (session.isSubagent()) {
             sendJson(response, 409, {
@@ -3378,6 +3406,7 @@ function matchRoute(pathname: string):
               | "session-state"
               | "steer"
               | "transcript"
+              | "transfer"
               | "subagents"
               | "unarchive"
               | "usage";
@@ -3727,6 +3756,7 @@ function matchRoute(pathname: string):
     if (parts[2] === "state") return { name: "session-state", sessionId };
     if (parts[2] === "steer") return { name: "steer", sessionId };
     if (parts[2] === "transcript") return { name: "transcript", sessionId };
+    if (parts[2] === "transfer") return { name: "transfer", sessionId };
     if (parts[2] === "subagents") return { name: "subagents", sessionId };
     if (parts[2] === "usage") return { name: "usage", sessionId };
     if (parts[2] === "unarchive") return { name: "unarchive", sessionId };

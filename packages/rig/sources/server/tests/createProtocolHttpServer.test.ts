@@ -22,6 +22,7 @@ import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import type { PersistedSessionState } from "../../session/InMemorySession.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import type { SessionStore } from "../../session/SessionStore.js";
+import { WorkspaceTransferTargetRestoreError } from "../../git/prepareWorkspaceTransfer.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import type { FileSearchServiceContract } from "../../file-search/FileSearchService.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
@@ -45,6 +46,44 @@ const removeFixtureOptions = {
 } as const;
 
 describe("createProtocolHttpServer", () => {
+    it("keeps busy transfers as conflicts and reports target restore failures as server errors", async () => {
+        const directory = await mkdtemp(join(tmpdir(), "rig-transfer-http-"));
+        const store = new InMemorySessionStore();
+        const session = store.create({ cwd: directory });
+        const transfer = vi.spyOn(store, "transferSession");
+        const { close, socketPath } = await startServer({ store });
+        try {
+            transfer.mockRejectedValueOnce(
+                new Error(
+                    "Wait for the active response to finish before transferring this session.",
+                ),
+            );
+            await expect(
+                requestRawJson(socketPath, `/sessions/${session.id}/transfer`, {
+                    body: JSON.stringify({ targetWorkspaceId: "workspace-2" }),
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 409 });
+
+            transfer.mockRejectedValueOnce(
+                new WorkspaceTransferTargetRestoreError(
+                    new Error("Transfer failed."),
+                    new Error("Restore failed."),
+                ),
+            );
+            await expect(
+                requestRawJson(socketPath, `/sessions/${session.id}/transfer`, {
+                    body: JSON.stringify({ targetWorkspaceId: "workspace-2" }),
+                    method: "POST",
+                }),
+            ).resolves.toMatchObject({ statusCode: 500 });
+        } finally {
+            await close();
+            store.close();
+            await rm(directory, removeFixtureOptions);
+        }
+    });
+
     it("downloads committed attachments only from their host-visible generated snapshot", async () => {
         const workspace = await mkdtemp(join(tmpdir(), "rig-attachment-workspace-"));
         const outside = await mkdtemp(join(tmpdir(), "rig-attachment-outside-"));

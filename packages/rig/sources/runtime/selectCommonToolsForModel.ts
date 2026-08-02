@@ -13,12 +13,15 @@ import { webappListTool } from "../tools/webapps/webapp_list.js";
 import { webappRevertTool } from "../tools/webapps/webapp_revert.js";
 import { webappUpdateTool } from "../tools/webapps/webapp_update.js";
 import { attachTool } from "../tools/attachments/attach.js";
+import { transferSessionTool } from "../tools/workspaces/transfer_session.js";
 
 export function selectCommonToolsForModel(options: {
+    hasWorkspaceContext: boolean;
     isSubagent: boolean;
 }): readonly AnyDefinedTool[] {
     return [
         attachTool,
+        ...(options.isSubagent || !options.hasWorkspaceContext ? [] : [transferSessionTool]),
         waitTool,
         waitUntilTool,
         ...(options.isSubagent ? [] : [scheduleMessageTool, cancelAskTool]),
