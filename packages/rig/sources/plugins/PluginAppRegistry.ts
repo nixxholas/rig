@@ -37,11 +37,13 @@ export type PluginAppErrorCode =
     | "tool_not_found";
 
 export class PluginAppError extends Error {
-    constructor(
-        readonly code: PluginAppErrorCode,
-        message: string,
-    ) {
+    // A plain field rather than a constructor parameter property: the gym runs this source through
+    // Node's strip-only TypeScript support, which refuses to parse parameter properties.
+    readonly code: PluginAppErrorCode;
+
+    constructor(code: PluginAppErrorCode, message: string) {
         super(message);
+        this.code = code;
         this.name = "PluginAppError";
     }
 }
@@ -71,8 +73,11 @@ export class PluginAppRegistry {
     readonly #apps = new Map<string, RegisteredApp>();
     readonly #listeners = new Set<() => void>();
     readonly #storageQueues = new Map<string, Promise<void>>();
+    readonly mcp: PluginMcpRegistry;
 
-    constructor(readonly mcp: PluginMcpRegistry) {}
+    constructor(mcp: PluginMcpRegistry) {
+        this.mcp = mcp;
+    }
 
     register(plugin: BuiltPlugin, generation: string, dataDirectory: string): () => void {
         const owned: string[] = [];

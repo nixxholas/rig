@@ -12,10 +12,15 @@ import { responseStreamError } from "@/protocol/responses/responseStreamError.js
 
 interface ActiveOutputItem {
     callId?: string;
-    execution?: string;
     name?: string;
     namespace?: string;
-    type: "message" | "reasoning" | "function_call" | "custom_tool_call" | "tool_search_call";
+    type:
+        | "message"
+        | "reasoning"
+        | "function_call"
+        | "custom_tool_call"
+        | "tool_search_call"
+        | "server_tool_call";
     argumentsJson?: string;
     receivedTextDelta?: boolean;
 }
@@ -42,6 +47,12 @@ export async function* mapOpenAIResponseStream(
         failureMessage: string;
         requireTerminalEvent?: boolean;
         vendor?: "codex" | "grok" | "responses";
+        /**
+         * Names of the tools this request declared for the client to execute. A custom tool call
+         * for anything else came from a hosted tool the provider ran itself, so it is reported as
+         * a server tool call instead of one the client is expected to answer.
+         */
+        clientToolNames?: ReadonlySet<string>;
     },
 ): AsyncGenerator<SessionEvent, OpenAIResponseRunResult> {
     const activeItems = new Map<number, ActiveOutputItem>();
@@ -76,7 +87,6 @@ export async function* mapOpenAIResponseStream(
                 activeItems.set(event.output_index, {
                     type: "function_call",
                     callId: event.item.call_id,
-                    execution: "client",
                     name: event.item.name,
                     ...(event.item.namespace === undefined
                         ? {}
@@ -99,12 +109,33 @@ export async function* mapOpenAIResponseStream(
                         delta: event.item.arguments,
                     };
                 }
+            } else if (
+                event.item.type === "custom_tool_call" &&
+                serverExecutedItemName(event.item, options.clientToolNames) !== undefined
+            ) {
+                activeItems.set(event.output_index, {
+                    type: "server_tool_call",
+                    callId: event.item.call_id,
+                    name: event.item.name,
+                    argumentsJson: event.item.input,
+                });
+                yield {
+                    type: "server_tool_call_start",
+                    callId: event.item.call_id,
+                    name: event.item.name,
+                };
+                if (event.item.input.length > 0) {
+                    yield {
+                        type: "server_tool_call_delta",
+                        callId: event.item.call_id,
+                        delta: event.item.input,
+                    };
+                }
             } else if (event.item.type === "custom_tool_call") {
                 sawToolUse = true;
                 activeItems.set(event.output_index, {
                     type: "custom_tool_call",
                     callId: event.item.call_id,
-                    execution: "client",
                     name: event.item.name,
                     ...(event.item.namespace === undefined
                         ? {}
@@ -137,7 +168,6 @@ export async function* mapOpenAIResponseStream(
                 activeItems.set(event.output_index, {
                     type: "tool_search_call",
                     callId: event.item.call_id,
-                    execution: "client",
                     name: "tool_search",
                     argumentsJson,
                 });
@@ -152,6 +182,17 @@ export async function* mapOpenAIResponseStream(
                     callId: event.item.call_id,
                     delta: argumentsJson,
                 };
+            } else {
+                const name = serverExecutedItemName(event.item, options.clientToolNames);
+                if (name !== undefined) {
+                    const callId = serverToolCallId(event.item, event.output_index);
+                    activeItems.set(event.output_index, {
+                        type: "server_tool_call",
+                        callId,
+                        name,
+                    });
+                    yield { type: "server_tool_call_start", callId, name };
+                }
             }
             continue;
         }
@@ -187,26 +228,27 @@ export async function* mapOpenAIResponseStream(
             const activeItem = activeItems.get(event.output_index);
             if (activeItem?.type !== "function_call" || activeItem.callId === undefined) continue;
             activeItem.argumentsJson = (activeItem.argumentsJson ?? "") + event.delta;
-            if (activeItem.execution === "server") {
-                yield {
-                    type: "server_tool_call_delta",
-                    callId: activeItem.callId,
-                    delta: event.delta,
-                };
-            } else {
-                yield {
-                    type: "tool_call_delta",
-                    callId: activeItem.callId,
-                    delta: event.delta,
-                };
-            }
+            yield {
+                type: "tool_call_delta",
+                callId: activeItem.callId,
+                delta: event.delta,
+            };
             continue;
         }
 
         if (event.type === "response.custom_tool_call_input.delta") {
             const activeItem = activeItems.get(event.output_index);
-            if (activeItem?.type !== "custom_tool_call" || activeItem.callId === undefined)
+            if (activeItem?.callId === undefined) continue;
+            if (activeItem.type === "server_tool_call") {
+                activeItem.argumentsJson = (activeItem.argumentsJson ?? "") + event.delta;
+                yield {
+                    type: "server_tool_call_delta",
+                    callId: activeItem.callId,
+                    delta: event.delta,
+                };
                 continue;
+            }
+            if (activeItem.type !== "custom_tool_call") continue;
             activeItem.argumentsJson = (activeItem.argumentsJson ?? "") + event.delta;
             yield {
                 type: "tool_call_delta",
@@ -229,6 +271,26 @@ export async function* mapOpenAIResponseStream(
                         .map((part) => (part.type === "output_text" ? part.text : part.refusal))
                         .join("");
                 }
+            }
+            const serverToolName =
+                activeItem?.type === "server_tool_call"
+                    ? activeItem.name
+                    : serverExecutedItemName(event.item, options.clientToolNames);
+            if (serverToolName !== undefined) {
+                const callId =
+                    activeItem?.callId ?? serverToolCallId(event.item, event.output_index);
+                const argumentsJson = serverToolCallArguments(event.item);
+                if (activeItem === undefined) {
+                    yield { type: "server_tool_call_start", callId, name: serverToolName };
+                }
+                yield {
+                    type: "server_tool_call_end",
+                    callId,
+                    name: serverToolName,
+                    arguments: argumentsJson,
+                };
+                activeItems.delete(event.output_index);
+                continue;
             }
             if (
                 event.item.type === "function_call" &&
@@ -413,6 +475,24 @@ export async function* mapOpenAIResponseStream(
                 responseItems.set(outputIndex, JSON.stringify(item));
             }
             for (const [outputIndex, activeItem] of activeItems) {
+                // A hosted call always finishes inside its own response, so a still-open one only
+                // means we never saw its done event. Close it rather than leave it running.
+                if (
+                    activeItem.type !== "server_tool_call" ||
+                    activeItem.callId === undefined ||
+                    activeItem.name === undefined
+                ) {
+                    continue;
+                }
+                yield {
+                    type: "server_tool_call_end",
+                    callId: activeItem.callId,
+                    name: activeItem.name,
+                    arguments: activeItem.argumentsJson ?? "",
+                };
+                activeItems.delete(outputIndex);
+            }
+            for (const [outputIndex, activeItem] of activeItems) {
                 if (
                     (activeItem.type !== "function_call" &&
                         activeItem.type !== "custom_tool_call" &&
@@ -502,6 +582,53 @@ export async function* mapOpenAIResponseStream(
         toolCalls,
         usage,
     };
+}
+
+/**
+ * Names the hosted tool behind an output item the provider executed itself.
+ *
+ * Two shapes reach us. A hosted search with its own item type is unambiguous. Grok's X search
+ * instead reports its backend sub-calls as ordinary custom tool calls, so the only sound signal
+ * is that the client never declared that tool: a call the client cannot execute, and is never
+ * asked to answer, was answered by the provider. Function calls are deliberately excluded, since
+ * an undeclared function name is a model mistake the model still needs to hear about.
+ */
+function serverExecutedItemName(
+    item: unknown,
+    clientToolNames: ReadonlySet<string> | undefined,
+): string | undefined {
+    const { type, name } = asOutputItem(item);
+    if (type === "web_search_call") return "web_search";
+    if (type !== "custom_tool_call" || name === undefined) return undefined;
+    return clientToolNames !== undefined && !clientToolNames.has(name) ? name : undefined;
+}
+
+/**
+ * Identifies a hosted call. Grok's X search carries a `call_id` and its web search only an `id`;
+ * the output index stands in for anything that reports neither, so two concurrent calls can never
+ * collide under one empty identifier.
+ */
+function serverToolCallId(item: unknown, outputIndex: number): string {
+    const { call_id, id } = asOutputItem(item);
+    return call_id ?? id ?? `server_tool_call_${outputIndex}`;
+}
+
+function serverToolCallArguments(item: unknown): string {
+    const { input, action } = asOutputItem(item);
+    if (typeof input === "string") return input;
+    return action === undefined ? "" : JSON.stringify(action);
+}
+
+/** The few fields a hosted call carries, across the item shapes that can hold one. */
+function asOutputItem(item: unknown): {
+    type?: string;
+    name?: string;
+    id?: string;
+    call_id?: string;
+    input?: string;
+    action?: unknown;
+} {
+    return item as { type?: string };
 }
 
 function responseToolVendor(
