@@ -886,7 +886,7 @@ export class InMemorySession {
     ): Promise<AbortRunResponse> {
         if (
             options.expectedRunId !== undefined &&
-            this.#activeRun?.runId !== options.expectedRunId
+            (this.#activeRun?.runId ?? this.#restoredActiveRunId) !== options.expectedRunId
         ) {
             return Promise.resolve({ aborted: false });
         }

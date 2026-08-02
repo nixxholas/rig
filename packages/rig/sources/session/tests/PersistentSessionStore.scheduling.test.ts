@@ -83,6 +83,50 @@ describe("persistent scheduling", () => {
         }
     });
 
+    it("aborts a durable wait by its restored run ID after daemon restart", async () => {
+        const databasePath = await createDatabasePath();
+        installGymInference(() => ({
+            content: [
+                {
+                    arguments: { hours: 12 },
+                    id: "restart-abort-provider-call",
+                    name: "wait",
+                    type: "toolCall",
+                },
+            ],
+        }));
+
+        let store = new PersistentSessionStore({
+            databasePath,
+            modelCatalog: gymCatalog(),
+        });
+        const session = store.create(gymSessionRequest("/tmp/rig-restart-abort-wait"));
+        const submitted = session.submit({ text: "Wait until I stop this run." });
+        await vi.waitFor(() => expect(session.activity().kind).toBe("waiting"));
+
+        await store.prepareForShutdown("shutdown");
+        store.close();
+
+        store = new PersistentSessionStore({
+            databasePath,
+            modelCatalog: gymCatalog(),
+        });
+        try {
+            const restored = store.get(session.id);
+            if (restored === undefined) throw new Error("Expected the waiting session.");
+            await expect(restored.abort({ expectedRunId: submitted.runId })).resolves.toMatchObject(
+                {
+                    aborted: true,
+                },
+            );
+            expect(restored.activity().kind).not.toBe("waiting");
+            expect(restored.state().activeRunId).toBeUndefined();
+        } finally {
+            await store.prepareForShutdown("shutdown");
+            store.close();
+        }
+    });
+
     it("ends a long wait when a message arrives and reports actual elapsed time", async () => {
         const requests: GymInferenceRequest[] = [];
         let now = 1_700_000_000_000;
