@@ -28,6 +28,7 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
     eventSchema: TEventSchema;
     label: string;
     onEvent: (event: Static<TEventSchema>, registrationId: string) => void | Promise<void>;
+    onGenerationClosed?: (registrationId: string) => void;
     registerPath: string;
     recover?: boolean;
     transport: HappyMcpTransport;
@@ -96,6 +97,7 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
                 return;
             }
             currentGeneration = undefined;
+            options.onGenerationClosed?.(generation.registrationId);
             failure = error.message;
             status = options.recover === false ? "closed" : "reconnecting";
             if (options.recover === false) {

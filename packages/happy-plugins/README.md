@@ -19,7 +19,7 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 The SDK is an early preview. The current surface covers projects, workspace commands and files,
 sessions, messages to agents, UI slots, generated-media publishing, provider usage, MCP tool
 contributions, managed-network interception, local application contributions, system-prompt
-middleware, and lifecycle tracing.
+middleware, lifecycle tracing, and plugin-provided compute environments.
 
 Plugins can add persistent content to Happy's fixed UI slots. Happy validates the same content and
 slot/scope rules used by its HTTP API and agent tools, and records the plugin as the entry's author.
@@ -97,6 +97,7 @@ The manifest is intentionally small and exact:
     "main": "index.ts",
     "icon": "icon.png",
     "docker": { "image": "registry.example.com/project-counter:1.0.0" },
+    "compute": { "name": "local-bash" },
     "systemPrompt": { "path": "SYSTEM_PROMPT.md" },
     "apps": [
         {
@@ -111,8 +112,8 @@ The manifest is intentionally small and exact:
 ```
 
 `name`, `description`, and `icon` are required. `main`, `skills`, `systemPrompt`, `version`,
-`docker`, and `apps` are optional, but at least a main entry point, a skills directory, or a
-system-prompt contribution must be present. Extra fields are rejected.
+`docker`, `apps`, and `compute` are optional, but at least a main entry point, a skills directory,
+or a system-prompt contribution must be present. Extra fields are rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
@@ -125,6 +126,8 @@ system-prompt contribution must be present. Extra fields are rejected.
   relative ordinary file inside the plugin folder. A contribution and the combined active-plugin
   contribution are each capped at 256 KiB.
 - `icon`: a relative path to a PNG file inside the plugin folder.
+- `compute`: one lowercase provider name contributed by this plugin process. A compute contribution
+  requires `main`, and startup code must call `happy.compute.register(...)`.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
   sidebar metadata, and optional image icon.
 - `interceptDomains`: up to 16 exact hostnames whose already-allowed managed-proxy traffic the
@@ -346,6 +349,9 @@ child root there.
 Use `host.network.request()` to exercise a registered `happy.network.onRequest` handler and
 `host.network.tunnel()` to send an observation to `happy.network.onTunnel`, without opening a real
 network connection.
+Seed `computeProvider: { name: "local-bash" }`, register provider handlers, and use
+`host.client.compute.*` to exercise the complete compute lifecycle. `host.compute.waitForProvider()`
+waits for the provider stream to attach.
 
 ## Runtime model
 
@@ -388,6 +394,87 @@ import { happy } from "happy-plugins";
 ```
 
 All methods return promises. Inputs and daemon responses are validated with TypeBox at runtime.
+
+### Compute
+
+A compute provider owns a filesystem plus command execution. One plugin declares one provider in
+its manifest and registers these exact handlers:
+
+```ts
+type HappyComputeProviderHandlers = {
+    start(
+        input: { workspaceSource: HappyComputeWorkspaceSource },
+        context: HappyComputeHandlerContext,
+    ): string | Promise<string>;
+    read(
+        input: { instanceId: string; path: string },
+        context: HappyComputeHandlerContext,
+    ): Uint8Array | Promise<Uint8Array>;
+    write(
+        input: { instanceId: string; path: string; bytes: Uint8Array },
+        context: HappyComputeHandlerContext,
+    ): void | Promise<void>;
+    exec(
+        input: { instanceId: string; command: string; timeoutMs: number },
+        context: HappyComputeHandlerContext,
+    ): HappyComputeExecResult | Promise<HappyComputeExecResult>;
+    stop(input: { instanceId: string }, context: HappyComputeHandlerContext): void | Promise<void>;
+};
+
+await happy.compute.register(handlers);
+await happy.ready("Ready.");
+```
+
+Consumers use the same namespace:
+
+```ts
+await happy.compute.list();
+const instance = await happy.compute.start({
+    provider: "local-bash",
+    workspaceSource: { type: "local_directory", path: "/absolute/source/folder" },
+});
+await happy.compute.files.read({ instanceId: instance.instanceId, path: "README.md" });
+await happy.compute.files.write({
+    instanceId: instance.instanceId,
+    path: "notes.txt",
+    bytes: Buffer.from("ready\n"),
+});
+await happy.compute.exec({
+    instanceId: instance.instanceId,
+    command: "pnpm test",
+    timeoutMs: 30_000,
+});
+await happy.compute.stop({ instanceId: instance.instanceId });
+```
+
+`start()` deliberately returns the validated, serializable identity `{ instanceId, provider }`
+rather than a method-bearing handle. Files are grouped under `compute.files`, while exec and stop
+remain flat. This keeps the same ID-based contract for normal consumers and cross-plugin driving.
+
+For this first contract, `workspaceSource` has one form: `local_directory`. Happy canonicalizes the
+absolute source path and hands it to the provider; the provider materializes it by copying,
+checking out, or otherwise importing it. This avoids buffering a potentially large folder through
+the plugin socket. A future remote provider can add a streamed/archive source variant without
+changing instance operations.
+
+Every operation is a blocking, TypeBox-validated socket round trip with a deadline. Reads and
+writes are capped at 1 MiB, command timeout is at most five minutes, and stdout and stderr are each
+capped at 1 MiB. Exec results report `timedOut`, `stdoutTruncated`, and `stderrTruncated`
+independently. A missed operation deadline terminally fails only that instance; sibling instances
+and the provider registration remain usable. Provider stream loss, plugin stop, or restart retires
+the whole provider generation and makes all of its instance IDs stale.
+
+Each instance is leased to the consumer plugin process generation that started it. When that
+consumer generation ends, Rig releases its instances and asks the provider to stop them. Calling
+`stop` also releases a failed instance and makes a best-effort provider cleanup call, so failed
+instances cannot permanently consume the daemon's bounded instance budget.
+
+The working example is
+[`examples/local-bash`](examples/local-bash): it copies the source below the plugin's writable
+folder, uses direct bounded file I/O, runs `/bin/bash`, and removes the instance on stop.
+
+Compute is not yet connected to agent session execution. Plugins can provide and consume computes
+today; choosing a compute for an agent session is a later product step.
 
 ### Prompt hooks and tracing
 

@@ -1,10 +1,12 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, extname } from "node:path";
+import { lstat, realpath } from "node:fs/promises";
+import { basename, extname, isAbsolute } from "node:path";
 
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type {
     AgentMessageDelivery,
+    HappyComputeWorkspaceSource,
     HappyPlugin,
     HappyPluginStatus,
     HappyProviderUsageEntry,
@@ -16,6 +18,7 @@ import type {
 } from "happy-plugins";
 import {
     HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
+    HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
     HAPPY_PLUGIN_MAX_MEDIA_BYTES,
     HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES,
     archiveWorkspaceBodySchema,
@@ -42,9 +45,14 @@ import {
 import {
     classifyPluginApiRequestError,
     createPluginWorkspaceCommandExecutor,
+    execHappyComputeBodySchema,
+    happyComputeCallCompletionSchema,
     PluginApiRequestError,
     PluginApiRequestTooLargeError,
+    readHappyComputeBodySchema,
     readPluginWorkspaceFile,
+    startHappyComputeBodySchema,
+    writeHappyComputeBodySchema,
     writePluginWorkspaceFile,
 } from "happy-plugins/internal";
 
@@ -64,6 +72,11 @@ import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
 import type { PluginHookConnection } from "./PluginHookRegistry.js";
+import {
+    PluginComputeError,
+    type PluginComputeConnection,
+    type PluginComputeRegistry,
+} from "./PluginComputeRegistry.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
 import type { PluginNetworkConnection } from "./PluginNetworkRegistry.js";
 import type { PluginStartupState } from "./PluginStartupState.js";
@@ -71,10 +84,13 @@ import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
 import { readPluginMediaFile } from "./readPluginMediaFile.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_COMPUTE_COMPLETION_REQUEST_BYTES = 4 * 1024 * 1024;
 const MAX_WORKSPACE_FILE_REQUEST_BYTES = 2 * 1024 * 1024;
 const MAX_MEDIA_REQUEST_BYTES = 15 * 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
+    compute?: PluginComputeConnection;
+    computeRegistry?: PluginComputeRegistry;
     defaultDocker?: DockerExecutionConfig;
     generatedMedia?: GeneratedMediaStore;
     listPlugins: () => Promise<readonly PluginSummary[]>;
@@ -105,8 +121,11 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
                     response,
                     error instanceof PluginHookConflictError
                         ? 409
-                        : classifyPluginApiRequestError(error),
+                        : error instanceof PluginComputeError
+                          ? computeErrorStatus(error)
+                          : classifyPluginApiRequestError(error),
                     {
+                        ...(error instanceof PluginComputeError ? { code: error.code } : {}),
                         error: errorToMessage(error),
                     },
                 );
@@ -125,6 +144,7 @@ async function handleRequest(
     if (request.method === "POST" && url.pathname === "/ready") {
         const readiness = await readJson(request, happyPluginReadyBodySchema, "Plugin readiness");
         try {
+            options.compute?.assertReady();
             options.startup.ready();
             options.onStatus?.(readiness.status);
         } catch (error) {
@@ -187,6 +207,10 @@ async function handleRequest(
         });
         return;
     }
+    if (request.method === "GET" && url.pathname === "/compute/providers") {
+        sendJson(response, 200, { providers: requireComputeRegistry(options).list() });
+        return;
+    }
     if (request.method === "GET" && url.pathname === "/plugins") {
         const snapshot = await options.listPlugins();
         const bounded = snapshot.slice(0, MAX_INSTALLED_PLUGINS);
@@ -196,6 +220,7 @@ async function handleRequest(
         }
         const plugins = bounded.map(
             (plugin): HappyPlugin => ({
+                ...(plugin.compute === undefined ? {} : { compute: plugin.compute }),
                 folder: plugin.folder,
                 isSelf: plugin.folder === options.pluginFolder,
                 name: plugin.name,
@@ -285,6 +310,150 @@ async function handleRequest(
     }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (request.method === "POST" && url.pathname === "/compute/providers") {
+        assertStartupContribution(options, "Compute provider registration");
+        sendJson(response, 201, {
+            registrationId: requireCompute(options).register(),
+        });
+        return;
+    }
+    if (request.method === "POST" && url.pathname === "/compute/instances") {
+        const body = await readJson(request, startHappyComputeBodySchema, "Compute start settings");
+        sendJson(
+            response,
+            201,
+            await requireComputeRegistry(options).start(
+                {
+                    ...body,
+                    workspaceSource: await canonicalizeComputeSource(body.workspaceSource),
+                },
+                requireCompute(options).generation,
+            ),
+        );
+        return;
+    }
+    if (
+        parts.length === 4 &&
+        parts[0] === "compute" &&
+        parts[1] === "providers" &&
+        parts[2] !== undefined &&
+        parts[3] === "events" &&
+        request.method === "GET"
+    ) {
+        assertStartupContribution(options, "Compute provider stream attachment");
+        const compute = requireCompute(options);
+        const detach = compute.attach(parts[2], (event) => {
+            if (response.destroyed || response.writableEnded) return false;
+            response.write(`${JSON.stringify(event)}\n`);
+            return true;
+        });
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        response.once("close", detach);
+        return;
+    }
+    if (
+        parts.length === 5 &&
+        parts[0] === "compute" &&
+        parts[1] === "providers" &&
+        parts[2] !== undefined &&
+        parts[3] === "calls" &&
+        parts[4] !== undefined &&
+        request.method === "POST"
+    ) {
+        const completion = await readJson(
+            request,
+            happyComputeCallCompletionSchema,
+            "Compute provider result",
+            MAX_COMPUTE_COMPLETION_REQUEST_BYTES,
+        );
+        requireCompute(options).complete(parts[2], parts[4], completion);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length === 3 &&
+        parts[0] === "compute" &&
+        parts[1] === "providers" &&
+        parts[2] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        requireCompute(options).unregister(parts[2]);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length >= 4 &&
+        parts[0] === "compute" &&
+        parts[1] === "instances" &&
+        parts[2] !== undefined &&
+        request.method === "POST"
+    ) {
+        const compute = requireComputeRegistry(options);
+        const instanceId = parts[2];
+        if (parts.length === 5 && parts[3] === "files" && parts[4] === "read") {
+            const body = await readJson(
+                request,
+                readHappyComputeBodySchema,
+                "Compute file read settings",
+            );
+            sendJson(
+                response,
+                200,
+                await compute.read(
+                    { instanceId, path: body.path },
+                    requireCompute(options).generation,
+                ),
+            );
+            return;
+        }
+        if (parts.length === 5 && parts[3] === "files" && parts[4] === "write") {
+            const body = await readJson(
+                request,
+                writeHappyComputeBodySchema,
+                "Compute file write settings",
+                MAX_WORKSPACE_FILE_REQUEST_BYTES,
+            );
+            await compute.write(
+                {
+                    bytes: Buffer.from(body.contentBase64, "base64"),
+                    instanceId,
+                    path: body.path,
+                },
+                requireCompute(options).generation,
+            );
+            sendJson(response, 200, {});
+            return;
+        }
+        if (parts.length === 4 && parts[3] === "exec") {
+            const body = await readJson(
+                request,
+                execHappyComputeBodySchema,
+                "Compute command settings",
+            );
+            sendJson(
+                response,
+                200,
+                await compute.exec(
+                    {
+                        command: body.command,
+                        instanceId,
+                        timeoutMs: body.timeoutMs ?? HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+                    },
+                    requireCompute(options).generation,
+                ),
+            );
+            return;
+        }
+        if (parts.length === 4 && parts[3] === "stop") {
+            await compute.stop(instanceId, requireCompute(options).generation);
+            sendJson(response, 200, {});
+            return;
+        }
+    }
     if (
         parts.length === 2 &&
         parts[0] === "slots" &&
@@ -770,6 +939,54 @@ async function handleRequest(
 function requireGeneratedMedia(options: CreatePluginApiServerOptions): GeneratedMediaStore {
     if (options.generatedMedia !== undefined) return options.generatedMedia;
     throw new PluginApiRequestError("Generated media is unavailable to this plugin.");
+}
+
+function requireCompute(options: CreatePluginApiServerOptions): PluginComputeConnection {
+    if (options.compute !== undefined) return options.compute;
+    throw new PluginApiRequestError("Compute registration is unavailable to this plugin.");
+}
+
+function requireComputeRegistry(options: CreatePluginApiServerOptions): PluginComputeRegistry {
+    if (options.computeRegistry !== undefined) return options.computeRegistry;
+    throw new PluginApiRequestError("Compute providers are unavailable to this plugin.");
+}
+
+async function canonicalizeComputeSource(
+    source: HappyComputeWorkspaceSource,
+): Promise<HappyComputeWorkspaceSource> {
+    if (!isAbsolute(source.path)) {
+        throw new PluginApiRequestError(
+            "A local compute source must be an absolute directory path.",
+        );
+    }
+    let path: string;
+    try {
+        path = await realpath(source.path);
+        if (!(await lstat(path)).isDirectory()) {
+            throw new PluginApiRequestError("A local compute source must be a directory.");
+        }
+    } catch (error) {
+        if (error instanceof PluginApiRequestError) throw error;
+        throw new PluginApiRequestError("The local compute source directory is unavailable.");
+    }
+    return { path, type: "local_directory" };
+}
+
+function computeErrorStatus(error: PluginComputeError): 404 | 409 | 422 | 504 {
+    switch (error.code) {
+        case "provider_not_found":
+        case "instance_not_found":
+            return 404;
+        case "deadline_missed":
+            return 504;
+        case "operation_failed":
+        case "provider_failed":
+            return 422;
+        case "instance_failed":
+        case "registration_conflict":
+        case "stale_generation":
+            return 409;
+    }
 }
 
 function requirePluginDataDirectory(options: CreatePluginApiServerOptions): string {

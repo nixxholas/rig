@@ -39,6 +39,7 @@ import { readPluginManifest } from "./readPluginManifest.js";
 import { removePluginDockerImages } from "./preparePluginDockerImage.js";
 import { resolvePluginDockerImage } from "./resolvePluginDockerRuntime.js";
 import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
+import { PluginComputeRegistry } from "./PluginComputeRegistry.js";
 import { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
@@ -53,6 +54,7 @@ const PLUGIN_PROCESS_EXIT_SETTLE_MS = 100;
 
 export interface PluginManagerOptions {
     appRegistry?: PluginAppRegistry;
+    computeRegistry?: PluginComputeRegistry;
     daemonLog: DaemonLog;
     defaultDocker?: DockerExecutionConfig;
     directory?: string;
@@ -113,6 +115,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     #catalog: { promise: Promise<PluginCatalog>; version: EventId } | undefined;
     readonly #createEventId = createEventIdFactory();
     #catalogVersion: EventId = this.#createEventId();
+    readonly #computeRegistry: PluginComputeRegistry;
     readonly #daemonLog: DaemonLog;
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #docker: Dockerode;
@@ -145,6 +148,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             throw new Error("PluginManager requires the shared MCP registry.");
         }
         this.#appRegistry = options.appRegistry ?? new PluginAppRegistry(options.mcpRegistry!);
+        this.#computeRegistry = options.computeRegistry ?? new PluginComputeRegistry();
         this.#daemonLog = options.daemonLog;
         this.#defaultDocker = options.defaultDocker;
         this.#docker = options.docker ?? createPluginDockerClient(options.defaultDocker);
@@ -498,9 +502,16 @@ export class PluginManager implements ManagedNetworkInterceptor {
                     status: "stopped" as const,
                     updatedAt: this.#now(),
                 };
+                const compute =
+                    state.status === "running"
+                        ? this.#computeRegistry
+                              .list()
+                              .find((provider) => provider.pluginFolder === plugin.folderName)
+                        : undefined;
                 return {
                     apps:
                         state.status === "running" ? this.#appRegistry.list(plugin.folderName) : [],
+                    ...(compute === undefined ? {} : { compute: { name: compute.name } }),
                     dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
                     description: plugin.manifest.description,
                     directory: plugin.directory,
@@ -648,6 +659,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             ),
         );
         this.#running.clear();
+        this.#computeRegistry.close();
         this.#networkRegistry.close();
     }
 
@@ -684,6 +696,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             const startupStartedAt = Date.now();
             const starting = this.#start(plugin, {
                 appRegistry: this.#appRegistry,
+                computeRegistry: this.#computeRegistry,
                 ...(this.#defaultDocker === undefined
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),

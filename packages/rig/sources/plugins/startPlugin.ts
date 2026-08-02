@@ -19,6 +19,7 @@ import {
 } from "./createPluginApiServer.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
+import type { PluginComputeRegistry } from "./PluginComputeRegistry.js";
 import type { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistrationRetirement, PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import type { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
@@ -57,6 +58,7 @@ export interface StartPluginOptions {
     hookRegistry?: PluginHookRegistry;
     listPlugins: CreatePluginApiServerOptions["listPlugins"];
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
+    computeRegistry?: PluginComputeRegistry;
     mcpRegistry?: PluginMcpRegistry;
     networkRegistry?: PluginNetworkRegistry;
     onStatus?: (status: HappyPluginStatus) => void;
@@ -121,6 +123,16 @@ export async function startPlugin(
         reportRetirement(event);
     };
     let statusMessage: string | undefined;
+    const compute = options.computeRegistry?.createConnection(
+        {
+            ...(plugin.manifest.compute === undefined ? {} : { compute: plugin.manifest.compute }),
+            folder: plugin.folderName,
+            name: plugin.manifest.name,
+        },
+        {
+            onRequiredRegistrationRetired: handleRequiredRegistrationRetirement,
+        },
+    );
     const mcp = options.mcpRegistry?.createConnection(
         {
             folder: plugin.folderName,
@@ -151,12 +163,17 @@ export async function startPlugin(
                 ? undefined
                 : options.appRegistry?.register(runtime, mcp.generation, dataDirectory);
     } catch (error) {
+        compute?.close();
         hooks?.close();
         mcp?.close();
         network?.close();
         throw error;
     }
     const server = createPluginApiServer({
+        ...(compute === undefined ? {} : { compute }),
+        ...(options.computeRegistry === undefined
+            ? {}
+            : { computeRegistry: options.computeRegistry }),
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
         ...(options.listProviderUsage === undefined
             ? {}
@@ -192,6 +209,7 @@ export async function startPlugin(
         }
     } catch (error) {
         unregisterApps?.();
+        compute?.close();
         hooks?.close();
         mcp?.close();
         network?.close();
@@ -229,6 +247,7 @@ export async function startPlugin(
         processState = "running";
     } catch (error) {
         unregisterApps?.();
+        compute?.close();
         hooks?.close();
         mcp?.close();
         network?.close();
@@ -249,6 +268,7 @@ export async function startPlugin(
             rm(socketPath, { force: true }),
         ]).then(() => {
             unregisterApps?.();
+            compute?.close();
             hooks?.close();
             mcp?.close();
             network?.close();

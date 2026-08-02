@@ -1,6 +1,7 @@
 {
     "extends": "./tsconfig.json",
     "compilerOptions": {
+        "allowImportingTsExtensions": false,
         "declaration": true,
         "declarationMap": true,
         "noEmit": false,
@@ -9,5 +10,5 @@
         "sourceMap": true,
         "types": ["node"]
     },
-    "exclude": ["tests"]
+    "exclude": ["examples", "tests"]
 }

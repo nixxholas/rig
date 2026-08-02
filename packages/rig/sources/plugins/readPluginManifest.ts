@@ -51,6 +51,9 @@ export async function readPluginManifest(
             : resolveOwnedPath(directory, manifest.main, "main entry point");
     const folderName = options.folderName ?? directory.split(/[\\/]/u).at(-1) ?? directory;
     const iconPath = resolveOwnedPath(directory, manifest.icon, "icon");
+    if (manifest.compute !== undefined && entryPath === undefined) {
+        throw new Error("A plugin that provides compute must declare a main entry point.");
+    }
     const [docker, skillsPath, systemPrompt] = await Promise.all([
         resolvePluginDockerRuntime({
             declaration: manifest.docker,

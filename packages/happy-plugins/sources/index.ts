@@ -1,5 +1,30 @@
 export { createHappyPluginClient, HappyPluginApiError } from "./createHappyPluginClient.js";
 export { createHappyPluginClient as connectHappy } from "./createHappyPluginClient.js";
+export {
+    HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+    HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
+    HAPPY_COMPUTE_MAX_COMMAND_TIMEOUT_MS,
+    HAPPY_COMPUTE_MAX_FILE_BYTES,
+} from "./computeTypes.js";
+export type {
+    ExecHappyComputeHandlerInput,
+    ExecHappyComputeInput,
+    HappyComputeErrorCode,
+    HappyComputeExecResult,
+    HappyComputeHandlerContext,
+    HappyComputeInstance,
+    HappyComputeProvider,
+    HappyComputeProviderHandlers,
+    HappyComputeProviderManifest,
+    HappyComputeProviderName,
+    HappyComputeRegistration,
+    HappyComputeWorkspaceSource,
+    ReadHappyComputeInput,
+    StartHappyComputeInput,
+    StartHappyComputeHandlerInput,
+    StopHappyComputeInput,
+    WriteHappyComputeInput,
+} from "./computeTypes.js";
 export { createHappyMcpToolName, normalizeHappyMcpName } from "./createHappyMcpToolName.js";
 export { happyMcpCompletionToResult } from "./happyMcpCompletionToResult.js";
 export {

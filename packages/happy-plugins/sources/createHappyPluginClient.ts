@@ -3,6 +3,21 @@ import { request as requestHttp } from "node:http";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
+import {
+    emptyHappyComputeResponseSchema,
+    execHappyComputeInputSchema,
+    execHappyComputeResponseSchema,
+    type HappyComputeErrorCode,
+    happyComputeExecResultSchema,
+    listHappyComputeProvidersResponseSchema,
+    readHappyComputeInputSchema,
+    readHappyComputeResponseSchema,
+    startHappyComputeInputSchema,
+    startHappyComputeResponseSchema,
+    stopHappyComputeInputSchema,
+    writeHappyComputeInputSchema,
+} from "./computeTypes.js";
+import { startHappyComputeProvider } from "./startHappyComputeProvider.js";
 import { startHappyMcpServer } from "./startHappyMcpServer.js";
 import {
     startHappyNetworkRequestHandler,
@@ -49,16 +64,24 @@ import {
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
-const errorResponseSchema = Type.Object({ error: Type.String() }, { additionalProperties: true });
+const errorResponseSchema = Type.Object(
+    {
+        code: Type.Optional(Type.String({ minLength: 1 })),
+        error: Type.String(),
+    },
+    { additionalProperties: true },
+);
 const requiredSettingSchema = Type.String({ minLength: 1, pattern: "\\S" });
 
 /** An HTTP error returned by the owning Happy daemon for an otherwise valid SDK request. */
 export class HappyPluginApiError extends Error {
+    readonly code: HappyComputeErrorCode | (string & {}) | undefined;
     readonly status: number;
 
-    constructor(status: number, message: string) {
+    constructor(status: number, message: string, code?: HappyComputeErrorCode | (string & {})) {
         super(message);
         this.name = "HappyPluginApiError";
+        this.code = code;
         this.status = status;
     }
 }
@@ -117,6 +140,78 @@ export function createHappyPluginClient(
                     `/agents/${encodeURIComponent(input.agentId)}/messages`,
                     agentMessageDeliverySchema,
                     { message: input.message },
+                );
+            },
+        },
+        compute: {
+            exec: async (input) => {
+                Value.Assert(execHappyComputeInputSchema, input);
+                const response = await request(
+                    "POST",
+                    `/compute/instances/${encodeURIComponent(input.instanceId)}/exec`,
+                    execHappyComputeResponseSchema,
+                    {
+                        command: input.command,
+                        ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+                    },
+                );
+                return Value.Decode(happyComputeExecResultSchema, {
+                    exitCode: response.exitCode,
+                    stderr: Buffer.from(response.stderrBase64, "base64").toString("utf8"),
+                    stderrTruncated: response.stderrTruncated,
+                    stdout: Buffer.from(response.stdoutBase64, "base64").toString("utf8"),
+                    stdoutTruncated: response.stdoutTruncated,
+                    timedOut: response.timedOut,
+                });
+            },
+            files: {
+                read: async (input) => {
+                    Value.Assert(readHappyComputeInputSchema, input);
+                    const response = await request(
+                        "POST",
+                        `/compute/instances/${encodeURIComponent(input.instanceId)}/files/read`,
+                        readHappyComputeResponseSchema,
+                        { path: input.path },
+                    );
+                    return Buffer.from(response.contentBase64, "base64");
+                },
+                write: async (input) => {
+                    Value.Assert(writeHappyComputeInputSchema, input);
+                    await request(
+                        "POST",
+                        `/compute/instances/${encodeURIComponent(input.instanceId)}/files/write`,
+                        emptyHappyComputeResponseSchema,
+                        {
+                            contentBase64: Buffer.from(input.bytes).toString("base64"),
+                            path: input.path,
+                        },
+                    );
+                },
+            },
+            list: async () =>
+                (
+                    await request(
+                        "GET",
+                        "/compute/providers",
+                        listHappyComputeProvidersResponseSchema,
+                    )
+                ).providers,
+            register: (handlers) => startHappyComputeProvider(handlers, streamTransport),
+            start: (input) => {
+                Value.Assert(startHappyComputeInputSchema, input);
+                return request(
+                    "POST",
+                    "/compute/instances",
+                    startHappyComputeResponseSchema,
+                    input,
+                );
+            },
+            stop: async (input) => {
+                Value.Assert(stopHappyComputeInputSchema, input);
+                await request(
+                    "POST",
+                    `/compute/instances/${encodeURIComponent(input.instanceId)}/stop`,
+                    emptyHappyComputeResponseSchema,
                 );
             },
         },
@@ -393,7 +488,15 @@ function requestJson<TSchema_ extends TSchema>(options: {
                             const message = Value.Check(errorResponseSchema, payload)
                                 ? payload.error
                                 : `Happy rejected the plugin request with HTTP ${String(status)}.`;
-                            reject(new HappyPluginApiError(status, message));
+                            reject(
+                                new HappyPluginApiError(
+                                    status,
+                                    message,
+                                    Value.Check(errorResponseSchema, payload)
+                                        ? payload.code
+                                        : undefined,
+                                ),
+                            );
                             return;
                         }
                         resolve(Value.Decode(options.responseSchema, payload));

@@ -1,0 +1,10 @@
+{
+    "name": "Local Bash Compute",
+    "description": "Copies a source folder into an isolated temporary directory and runs Bash commands there.",
+    "version": "1.0.0",
+    "main": "index.ts",
+    "icon": "icon.png",
+    "compute": {
+        "name": "local-bash"
+    }
+}

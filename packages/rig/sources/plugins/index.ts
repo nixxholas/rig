@@ -21,6 +21,14 @@ export {
     type PluginAppResource,
 } from "./PluginAppRegistry.js";
 export {
+    PluginComputeError,
+    PluginComputeRegistry,
+    type PluginComputeConnection,
+    type PluginComputeConnectionOptions,
+    type PluginComputeRegistrationRetirement,
+    type PluginComputeRegistryOptions,
+} from "./PluginComputeRegistry.js";
+export {
     PluginHookRegistry,
     type PluginHookConnection,
     type PluginHookConnectionOptions,

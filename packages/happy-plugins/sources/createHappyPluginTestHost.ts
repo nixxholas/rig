@@ -1,13 +1,23 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { createHappyPluginClient } from "./createHappyPluginClient.js";
+import {
+    HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+    execHappyComputeBodySchema,
+    happyComputeCallCompletionSchema,
+    readHappyComputeBodySchema,
+    startHappyComputeBodySchema,
+    writeHappyComputeBodySchema,
+    type HappyComputeCallCompletion,
+    type HappyComputeEvent,
+} from "./computeTypes.js";
 import { normalizeHappyMcpName } from "./createHappyMcpToolName.js";
 import { createPluginWorkspaceCommandExecutor } from "./createPluginWorkspaceCommandExecutor.js";
 import { happyMcpCompletionToResult } from "./happyMcpCompletionToResult.js";
@@ -64,6 +74,7 @@ import {
 import { writePluginWorkspaceFile } from "./writePluginWorkspaceFile.js";
 
 const CALL_TIMEOUT_MS = 10_000;
+const MAXIMUM_COMPUTE_COMPLETION_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_BODY_BYTES = 1024 * 1024;
 
 export interface HappyPluginTestHost {
@@ -82,6 +93,11 @@ export interface HappyPluginTestHost {
         };
     };
     readonly client: HappyPluginClient;
+    readonly compute: {
+        /** Simulates the owning provider process or stream ending. */
+        disconnectProvider(mode?: "close" | "end" | "error"): void;
+        waitForProvider(timeoutMs?: number): Promise<void>;
+    };
     readonly environment: Readonly<{
         HAPPY_PLUGIN_DIRECTORY: string;
         HAPPY_PLUGIN_SOCKET_PATH: string;
@@ -159,6 +175,22 @@ interface TestNetworkRegistration {
     type: "request" | "tunnel";
 }
 
+interface TestComputeRegistration {
+    id: string;
+    response?: ServerResponse;
+}
+
+interface TestComputeCall extends TestCall<HappyComputeCallCompletion> {
+    operation: Extract<HappyComputeEvent, { type: "call" }>["operation"];
+}
+
+interface TestComputeInstance {
+    failed?: string;
+    id: string;
+    providerInstanceId: string;
+    registrationId: string;
+}
+
 /** Starts an in-memory, Unix-socket Happy host for plugin tests and local authoring. */
 export async function createHappyPluginTestHost(
     seed: HappyPluginTestSeed = {},
@@ -178,6 +210,7 @@ export async function createHappyPluginTestHost(
     const sessions: HappySession[] = structuredClone(seed.sessions ?? []);
     const providerUsage = structuredClone(seed.providerUsage ?? []);
     const plugins: HappyPlugin[] = structuredClone(seed.plugins ?? []);
+    const declaredCompute = structuredClone(seed.computeProvider);
     const requests: HappyPluginTestRequest[] = [];
     const registrations = new Map<string, TestRegistration>();
     let ready = false;
@@ -186,11 +219,16 @@ export async function createHappyPluginTestHost(
     let tracingSubscription: TestEventRegistration | undefined;
     const systemPromptCalls = new Map<string, TestCall<HappySystemPromptHookResult>>();
     const calls = new Map<string, TestCall<HappyMcpToolResult>>();
+    const computeCalls = new Map<string, TestComputeCall>();
+    const computeInstances = new Map<string, TestComputeInstance>();
+    let computeRegistration: TestComputeRegistration | undefined;
+    const computeWaiters = new Set<() => void>();
     const networkCalls = new Map<string, TestCall<HappyNetworkRequestCompletion>>();
     const networkRegistrations = new Map<string, TestNetworkRegistration>();
     const appStorage = new Map<string, string>();
     const executeWorkspaceCommand = createPluginWorkspaceCommandExecutor();
     let nextId = 1;
+    const nextComputeCallId = () => `test-compute-call-${String(nextId++)}`;
     let closed = false;
     const toolWaiters = new Set<() => void>();
     const activeToolCount = () =>
@@ -209,15 +247,20 @@ export async function createHappyPluginTestHost(
                 request.method === "GET" ||
                 request.method === "DELETE" ||
                 (request.method === "POST" &&
-                    (url.pathname === "/hooks/system-prompt" ||
+                    (url.pathname === "/compute/providers" ||
+                        url.pathname.endsWith("/stop") ||
+                        url.pathname === "/hooks/system-prompt" ||
                         url.pathname === "/tracing/subscriptions"));
             const body = requestHasNoBody
                 ? undefined
                 : await readBody(
                       request,
-                      url.pathname.endsWith("/files/write")
-                          ? 2 * MAXIMUM_BODY_BYTES
-                          : MAXIMUM_BODY_BYTES,
+                      url.pathname.startsWith("/compute/providers/") &&
+                          url.pathname.includes("/calls/")
+                          ? MAXIMUM_COMPUTE_COMPLETION_BYTES
+                          : url.pathname.endsWith("/files/write")
+                            ? 2 * MAXIMUM_BODY_BYTES
+                            : MAXIMUM_BODY_BYTES,
                   );
             const observedRequest = {
                 ...(body === undefined ? {} : { body: structuredClone(body) }),
@@ -236,6 +279,11 @@ export async function createHappyPluginTestHost(
                 );
                 if (ready)
                     throw new Error("The fake Happy host already received plugin readiness.");
+                if (declaredCompute !== undefined && computeRegistration?.response === undefined) {
+                    throw new Error(
+                        "The manifest-declared compute provider must register and attach before the plugin reports ready.",
+                    );
+                }
                 pluginStatus = readiness.status;
                 ready = true;
                 send(response, 200, {});
@@ -289,6 +337,294 @@ export async function createHappyPluginTestHost(
                     ),
                 });
                 return;
+            }
+            if (request.method === "GET" && url.pathname === "/compute/providers") {
+                send(response, 200, {
+                    providers:
+                        computeRegistration?.response === undefined || declaredCompute === undefined
+                            ? []
+                            : [
+                                  {
+                                      name: declaredCompute.name,
+                                      pluginFolder: "test-plugin",
+                                      pluginName: "Test Plugin",
+                                  },
+                              ],
+                });
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/compute/providers") {
+                if (ready) {
+                    throw new Error(
+                        "Compute provider registration must be declared before the plugin reports ready.",
+                    );
+                }
+                if (declaredCompute === undefined) {
+                    send(response, 400, {
+                        error: "The test host has no manifest-declared compute provider.",
+                    });
+                    return;
+                }
+                if (computeRegistration !== undefined) {
+                    send(response, 409, {
+                        error: "The test compute provider is already registered.",
+                    });
+                    return;
+                }
+                computeRegistration = { id: `test-compute-${String(nextId++)}` };
+                send(response, 201, { registrationId: computeRegistration.id });
+                return;
+            }
+            if (
+                request.method === "GET" &&
+                parts.length === 4 &&
+                parts[0] === "compute" &&
+                parts[1] === "providers" &&
+                computeRegistration !== undefined &&
+                parts[2] === computeRegistration?.id &&
+                parts[3] === "events"
+            ) {
+                if (ready) {
+                    throw new Error(
+                        "Compute provider stream attachment must be declared before the plugin reports ready.",
+                    );
+                }
+                const registration = computeRegistration;
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                registration.response = response;
+                response.once("close", () => {
+                    if (computeRegistration !== registration) return;
+                    computeRegistration = undefined;
+                    failTestComputeGeneration(
+                        registration.id,
+                        "The test compute provider generation ended.",
+                        computeInstances,
+                        computeCalls,
+                    );
+                });
+                for (const notify of computeWaiters) notify();
+                computeWaiters.clear();
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length === 5 &&
+                parts[0] === "compute" &&
+                parts[1] === "providers" &&
+                parts[2] === computeRegistration?.id &&
+                parts[3] === "calls" &&
+                parts[4] !== undefined
+            ) {
+                const call = computeCalls.get(parts[4]);
+                if (call === undefined) {
+                    send(response, 409, { error: "That compute call is no longer active." });
+                    return;
+                }
+                const completion = decodeRequest(
+                    happyComputeCallCompletionSchema,
+                    body,
+                    "Compute provider result",
+                );
+                if ("operation" in completion && completion.operation !== call.operation) {
+                    send(response, 409, {
+                        error: `The provider completed a ${call.operation} compute call with a ${completion.operation} result.`,
+                    });
+                    return;
+                }
+                computeCalls.delete(parts[4]);
+                call.resolve(completion);
+                send(response, 200, {});
+                return;
+            }
+            if (
+                request.method === "DELETE" &&
+                parts.length === 3 &&
+                parts[0] === "compute" &&
+                parts[1] === "providers" &&
+                computeRegistration !== undefined &&
+                parts[2] === computeRegistration?.id
+            ) {
+                const registration = computeRegistration;
+                computeRegistration = undefined;
+                registration.response?.end();
+                failTestComputeGeneration(
+                    registration.id,
+                    "The test compute provider generation ended.",
+                    computeInstances,
+                    computeCalls,
+                );
+                send(response, 200, {});
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/compute/instances") {
+                const input = decodeRequest(
+                    startHappyComputeBodySchema,
+                    body,
+                    "Compute start settings",
+                );
+                if (
+                    declaredCompute?.name !== input.provider ||
+                    computeRegistration?.response === undefined
+                ) {
+                    send(response, 404, {
+                        error: `No running compute provider is named "${input.provider}".`,
+                    });
+                    return;
+                }
+                if (!isAbsolute(input.workspaceSource.path)) {
+                    send(response, 400, {
+                        error: "A local compute source must be an absolute directory path.",
+                    });
+                    return;
+                }
+                const sourcePath = await realpath(input.workspaceSource.path);
+                if (!(await lstat(sourcePath)).isDirectory()) {
+                    send(response, 400, {
+                        error: "A local compute source must be a directory.",
+                    });
+                    return;
+                }
+                const completion = await invokeTestCompute(
+                    computeRegistration,
+                    computeCalls,
+                    nextComputeCallId,
+                    {
+                        operation: "start",
+                        workspaceSource: { path: sourcePath, type: "local_directory" },
+                    },
+                );
+                if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                if (completion.operation !== "start") {
+                    throw new PluginApiRequestError(
+                        "The test compute provider returned the wrong operation result.",
+                    );
+                }
+                const instanceId = `test-compute-instance-${String(nextId++)}`;
+                computeInstances.set(instanceId, {
+                    id: instanceId,
+                    providerInstanceId: completion.result.instanceId,
+                    registrationId: computeRegistration.id,
+                });
+                send(response, 201, { instanceId, provider: input.provider });
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length >= 4 &&
+                parts[0] === "compute" &&
+                parts[1] === "instances" &&
+                parts[2] !== undefined
+            ) {
+                const instance = computeInstances.get(parts[2]);
+                if (instance === undefined) {
+                    send(response, 404, { error: "That compute instance was not found." });
+                    return;
+                }
+                const registration = computeRegistration;
+                if (parts.length === 4 && parts[3] === "stop") {
+                    try {
+                        if (
+                            registration?.response !== undefined &&
+                            registration.id === instance.registrationId
+                        ) {
+                            const completion = await invokeTestCompute(
+                                registration,
+                                computeCalls,
+                                nextComputeCallId,
+                                {
+                                    instanceId: instance.providerInstanceId,
+                                    operation: "stop",
+                                },
+                            );
+                            if ("error" in completion) {
+                                throw new PluginApiRequestError(completion.error);
+                            }
+                        }
+                    } finally {
+                        computeInstances.delete(instance.id);
+                    }
+                    send(response, 200, {});
+                    return;
+                }
+                if (instance.failed !== undefined) {
+                    send(response, 409, { error: instance.failed });
+                    return;
+                }
+                if (
+                    registration?.response === undefined ||
+                    registration.id !== instance.registrationId
+                ) {
+                    instance.failed = "That compute instance belongs to a stale generation.";
+                    send(response, 409, { error: instance.failed });
+                    return;
+                }
+                if (parts.length === 5 && parts[3] === "files" && parts[4] === "read") {
+                    const input = decodeRequest(
+                        readHappyComputeBodySchema,
+                        body,
+                        "Compute file read settings",
+                    );
+                    const completion = await invokeTestCompute(
+                        registration,
+                        computeCalls,
+                        nextComputeCallId,
+                        {
+                            instanceId: instance.providerInstanceId,
+                            operation: "read",
+                            path: input.path,
+                        },
+                    );
+                    if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                    send(response, 200, completion.result);
+                    return;
+                }
+                if (parts.length === 5 && parts[3] === "files" && parts[4] === "write") {
+                    const input = decodeRequest(
+                        writeHappyComputeBodySchema,
+                        body,
+                        "Compute file write settings",
+                    );
+                    const completion = await invokeTestCompute(
+                        registration,
+                        computeCalls,
+                        nextComputeCallId,
+                        {
+                            contentBase64: input.contentBase64,
+                            instanceId: instance.providerInstanceId,
+                            operation: "write",
+                            path: input.path,
+                        },
+                    );
+                    if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                    send(response, 200, {});
+                    return;
+                }
+                if (parts.length === 4 && parts[3] === "exec") {
+                    const input = decodeRequest(
+                        execHappyComputeBodySchema,
+                        body,
+                        "Compute command settings",
+                    );
+                    const completion = await invokeTestCompute(
+                        registration,
+                        computeCalls,
+                        nextComputeCallId,
+                        {
+                            command: input.command,
+                            instanceId: instance.providerInstanceId,
+                            operation: "exec",
+                            timeoutMs: input.timeoutMs ?? HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+                        },
+                        (input.timeoutMs ?? HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS) + 2_000,
+                    );
+                    if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                    send(response, 200, completion.result);
+                    return;
+                }
             }
             if (
                 request.method === "POST" &&
@@ -877,6 +1213,30 @@ export async function createHappyPluginTestHost(
             },
         },
         client: createHappyPluginClient({ socketPath, token }),
+        compute: {
+            disconnectProvider(mode = "end") {
+                disconnectResponse(computeRegistration?.response, mode, "compute provider");
+            },
+            waitForProvider(timeoutMs = CALL_TIMEOUT_MS) {
+                if (computeRegistration?.response !== undefined) return Promise.resolve();
+                return new Promise<void>((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        computeWaiters.delete(notify);
+                        reject(
+                            new Error("The fake host timed out waiting for a compute provider."),
+                        );
+                    }, timeoutMs);
+                    timer.unref();
+                    const notify = () => {
+                        if (computeRegistration?.response === undefined) return;
+                        clearTimeout(timer);
+                        computeWaiters.delete(notify);
+                        resolve();
+                    };
+                    computeWaiters.add(notify);
+                });
+            },
+        },
         environment,
         hooks: {
             applySystemPrompt(input, timeoutMs = CALL_TIMEOUT_MS) {
@@ -1044,6 +1404,13 @@ export async function createHappyPluginTestHost(
                 call.reject(new Error("The fake Happy host closed."));
             }
             calls.clear();
+            for (const call of computeCalls.values()) {
+                call.cleanup();
+                call.reject(new Error("The fake Happy host closed."));
+            }
+            computeCalls.clear();
+            computeRegistration?.response?.end();
+            computeRegistration = undefined;
             for (const call of networkCalls.values()) {
                 call.cleanup();
                 call.reject(new Error("The fake Happy host closed."));
@@ -1072,6 +1439,77 @@ export async function createHappyPluginTestHost(
         },
     };
     return host;
+}
+
+type ComputeCallWithoutEnvelope<T> = T extends { callId: string; type: "call" }
+    ? Omit<T, "callId" | "type">
+    : never;
+type TestComputeCallEvent = ComputeCallWithoutEnvelope<HappyComputeEvent>;
+
+function invokeTestCompute(
+    registration: TestComputeRegistration,
+    calls: Map<string, TestComputeCall>,
+    createCallId: () => string,
+    event: TestComputeCallEvent,
+    timeoutMs = CALL_TIMEOUT_MS,
+): Promise<HappyComputeCallCompletion> {
+    if (registration.response === undefined) {
+        return Promise.reject(new Error("No compute provider is attached to the fake Happy host."));
+    }
+    const callId = createCallId();
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => clearTimeout(timer);
+        const finishReject = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            calls.delete(callId);
+            cleanup();
+            reject(error);
+        };
+        const finishResolve = (completion: HappyComputeCallCompletion) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(completion);
+        };
+        const timer = setTimeout(() => {
+            registration.response?.write(`${JSON.stringify({ callId, type: "cancel" })}\n`);
+            finishReject(
+                new Error(`The fake compute call timed out after ${String(timeoutMs)}ms.`),
+            );
+        }, timeoutMs);
+        timer.unref();
+        calls.set(callId, {
+            cleanup,
+            operation: event.operation,
+            reject: finishReject,
+            resolve: finishResolve,
+        });
+        registration.response!.write(
+            `${JSON.stringify({
+                ...event,
+                callId,
+                type: "call",
+            })}\n`,
+        );
+    });
+}
+
+function failTestComputeGeneration(
+    registrationId: string,
+    reason: string,
+    instances: Map<string, TestComputeInstance>,
+    calls: Map<string, TestComputeCall>,
+): void {
+    for (const instance of instances.values()) {
+        if (instance.registrationId === registrationId) instance.failed = reason;
+    }
+    for (const call of calls.values()) {
+        call.cleanup();
+        call.reject(new Error(reason));
+    }
+    calls.clear();
 }
 
 function decodeNetworkCompletion(

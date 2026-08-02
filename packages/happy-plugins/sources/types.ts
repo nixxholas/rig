@@ -1,5 +1,19 @@
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
+import type {
+    ExecHappyComputeInput,
+    HappyComputeExecResult,
+    HappyComputeInstance,
+    HappyComputeProvider,
+    HappyComputeProviderHandlers,
+    HappyComputeRegistration,
+    ReadHappyComputeInput,
+    StartHappyComputeInput,
+    StopHappyComputeInput,
+    WriteHappyComputeInput,
+} from "./computeTypes.js";
+import { happyComputeProviderManifestSchema } from "./computeTypes.js";
+
 const exact = { additionalProperties: false } as const;
 const nonEmptyText = Type.String({ minLength: 1 });
 
@@ -733,6 +747,7 @@ export const happyPluginManifestSchema = Type.Object(
                 uniqueItems: true,
             }),
         ),
+        compute: Type.Optional(happyComputeProviderManifestSchema),
         description: Type.String({ minLength: 1 }),
         docker: Type.Optional(happyPluginDockerSchema),
         icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
@@ -927,6 +942,7 @@ export type HappyPluginStatus = Static<typeof happyPluginStatusSchema>;
 
 export const happyPluginSchema = Type.Object(
     {
+        compute: Type.Optional(happyComputeProviderManifestSchema),
         folder: Type.String({ maxLength: 255, minLength: 1 }),
         isSelf: Type.Boolean(),
         name: nonEmptyText,
@@ -1218,6 +1234,7 @@ export const listHappyProviderUsageResponseSchema = Type.Object(
 
 export const happyPluginTestSeedSchema = Type.Object(
     {
+        computeProvider: Type.Optional(happyComputeProviderManifestSchema),
         plugins: Type.Optional(
             Type.Array(happyPluginSchema, { maxItems: HAPPY_PLUGIN_MAX_LIST_ITEMS }),
         ),
@@ -1268,6 +1285,18 @@ export interface HappyPluginClient {
     /** Send a durable notification to an agent identified by a session's stable Agent ID. */
     readonly agents: {
         sendMessage(input: SendAgentMessageInput): Promise<AgentMessageDelivery>;
+    };
+    /** Register or consume generation-scoped filesystem-and-command compute providers. */
+    readonly compute: {
+        exec(input: ExecHappyComputeInput): Promise<HappyComputeExecResult>;
+        readonly files: {
+            read(input: ReadHappyComputeInput): Promise<Uint8Array>;
+            write(input: WriteHappyComputeInput): Promise<void>;
+        };
+        list(): Promise<readonly HappyComputeProvider[]>;
+        register(handlers: HappyComputeProviderHandlers): Promise<HappyComputeRegistration>;
+        start(input: StartHappyComputeInput): Promise<HappyComputeInstance>;
+        stop(input: StopHappyComputeInput): Promise<void>;
     };
     /** Register middleware that may replace the composed system prompt before an agent turn. */
     readonly hooks: {

@@ -227,6 +227,22 @@ same composite MCP path as configured servers, so provider tool assembly and
 readiness, the generation becomes failed and stops; it cannot remain running without the tools it
 declared at startup. That retirement publishes the changed plugin catalog immediately.
 
+`PluginComputeRegistry` owns manifest-declared filesystem-and-command compute providers. A plugin
+declares one stable provider name and attaches one generation-scoped NDJSON call stream with
+`happy.compute.register`. Other plugins list and drive live providers through the same authenticated
+socket. Each operation is a blocking TypeBox-validated round trip with a deadline; a missed
+deadline terminally fails only the instance whose operation missed while leaving sibling instances
+and the provider registration usable. Stream loss, process exit, replacement, or restart retires
+the provider generation and fails all instances backed by it. Instances are leased to the consumer
+plugin process generation that started them; consumer retirement releases those IDs and sends
+best-effort stop calls. Explicit stop likewise works for failed instances. Failed instance records
+have bounded retention so precise terminal errors do not become an unbounded store.
+
+The first `workspaceSource` form is a canonical absolute local directory path. The daemon verifies
+and canonicalizes it, and the provider owns materialization by copy or checkout. This deliberately
+avoids buffering arbitrarily large workspaces through the socket. The SDK and registry are
+foundation only: custom computes are not yet wired into agent session execution.
+
 `PluginAppRegistry` owns bounded manifest-declared static bundles, app-scoped MCP calls, and
 plugin-private JSON storage. Static bundles and their startup-attached tools are published together
 when the plugin reports ready, including apps with no tools. Stable identity combines the plugin
