@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { webapps, webappVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import type { WebappAllowedScopes } from "../../protocol/WebappProtocol.js";
 
 /** Records a newly imported version and makes it current in one consistent step. */
 export function webappAddVersion(
@@ -11,6 +12,7 @@ export function webappAddVersion(
     version: number,
     changeDescription: string,
     now: number,
+    allowedScopes?: WebappAllowedScopes,
 ): void {
     inTx(tx, (transaction) => {
         transaction
@@ -24,7 +26,13 @@ export function webappAddVersion(
             .run();
         transaction
             .update(webapps)
-            .set({ currentVersion: version, updatedAtMs: now })
+            .set({
+                currentVersion: version,
+                updatedAtMs: now,
+                ...(allowedScopes === undefined
+                    ? {}
+                    : { allowedScopesJson: JSON.stringify(allowedScopes) }),
+            })
             .where(eq(webapps.name, name))
             .run();
     });

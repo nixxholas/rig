@@ -1,6 +1,11 @@
 import { sql } from "drizzle-orm";
+import { Value } from "@sinclair/typebox/value";
 
-import type { Webapp, WebappVersion } from "../../protocol/WebappProtocol.js";
+import {
+    webappAllowedScopesSchema,
+    type Webapp,
+    type WebappVersion,
+} from "../../protocol/WebappProtocol.js";
 import type { TX } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 import { webappIconUrl } from "../../webapps/readWebappIcon.js";
@@ -31,6 +36,10 @@ export function readWebappRow(
 ): Webapp {
     const sourceDescription = readOptionalString(row, "source_description");
     return {
+        allowedScopes: Value.Decode(
+            webappAllowedScopesSchema,
+            JSON.parse(readString(row, "allowed_scopes_json")),
+        ),
         name: readString(row, "name"),
         description: readString(row, "description"),
         purpose: readString(row, "purpose"),

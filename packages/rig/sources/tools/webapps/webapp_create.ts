@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
-import { webappSchema } from "../../protocol/WebappProtocol.js";
+import { webappAllowedScopesSchema, webappSchema } from "../../protocol/WebappProtocol.js";
 import { getWebappsDirectory } from "../../webapps/getWebappsDirectory.js";
 import { requireSlots } from "../slots/requireSlots.js";
 import { assertShareableLocalPath } from "../attachments/assertShareableLocalPath.js";
@@ -11,7 +11,7 @@ export const webappCreateTool = defineTool({
     name: "webapp_create",
     label: "Create webapp",
     description:
-        "Create a webapp by importing a source folder of static files and a required 512x512 PNG icon. Both sources must be inside the active workspace or Rig-generated media directory. Rig copies the folder into the webapp's data directory as version v1 and serves it over HTTP with index.html as the entry point; nothing is ever written into the webapp folder directly. The description says what the webapp is and the purpose says why it exists.",
+        "Create a webapp by importing a source folder of static files and a required 512x512 PNG icon. Both sources must be inside the active workspace or Rig-generated media directory. Rig copies the folder into the webapp's data directory as version v1 and serves it over HTTP with index.html as the entry point; nothing is ever written into the webapp folder directly. The webapp may optionally limit which slot scopes can open it; the default is all scopes. The description says what the webapp is and the purpose says why it exists.",
     arguments: Type.Object(
         {
             name: Type.String({
@@ -19,6 +19,7 @@ export const webappCreateTool = defineTool({
             }),
             description: Type.String({ description: "What the webapp is." }),
             purpose: Type.String({ description: "Why the webapp exists." }),
+            allowedScopes: Type.Optional(webappAllowedScopesSchema),
             path: Type.String({
                 description: "Absolute path of the source folder to import.",
             }),

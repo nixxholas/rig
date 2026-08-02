@@ -19,7 +19,9 @@ import {
     type SlotsChangedEvent,
     type UpdateSlotEntryRequest,
 } from "../protocol/SlotProtocol.js";
+import type { Webapp } from "../protocol/WebappProtocol.js";
 import { allowedSlotScopes, describeAllowedScopesForSlot } from "../protocol/SlotScopeRules.js";
+import { describeWebappScopeNotAllowed } from "../webapps/describeWebappScopeNotAllowed.js";
 import { SlotEntryInvalidError } from "./SlotEntryInvalidError.js";
 import { SlotEntryNotFoundError } from "./SlotEntryNotFoundError.js";
 
@@ -33,6 +35,7 @@ export interface SlotEntryStoreOptions {
      */
     sessionExists: (sessionId: string) => boolean;
     tx: () => TX;
+    webapp: (name: string) => Webapp | undefined;
 }
 
 /**
@@ -49,12 +52,14 @@ export class SlotEntryStore {
     readonly #publish: (event: SlotsChangedEvent) => void;
     readonly #sessionExists: (sessionId: string) => boolean;
     readonly #tx: () => TX;
+    readonly #webapp: (name: string) => Webapp | undefined;
 
     constructor(options: SlotEntryStoreOptions) {
         this.#now = options.now ?? Date.now;
         this.#publish = options.publish;
         this.#sessionExists = options.sessionExists;
         this.#tx = options.tx;
+        this.#webapp = options.webapp;
     }
 
     create(request: CreateSlotEntryRequest): SlotEntry {
@@ -62,6 +67,7 @@ export class SlotEntryStore {
             throw new SlotEntryInvalidError(describeInvalid(createSlotEntryRequestSchema, request));
         }
         requireAllowedSlotScope(request.slot, request.scope);
+        this.#requireWebappScope(request.content, request.scope);
         const now = this.#now();
         const entry: SlotEntry = {
             id: createId(),
@@ -121,6 +127,9 @@ export class SlotEntryStore {
             if (request.slot !== undefined) {
                 requireAllowedSlotScope(entry.slot, entry.scope);
             }
+            if (request.slot !== undefined || request.content !== undefined) {
+                this.#requireWebappScope(entry.content, entry.scope);
+            }
             slotEntryUpdate(tx, entry);
             return entry;
         });
@@ -159,6 +168,13 @@ export class SlotEntryStore {
                 `The ${entry.scope} ${id} the slot entry points at does not exist.`,
             );
         }
+    }
+
+    #requireWebappScope(content: SlotEntry["content"], scope: SlotEntry["scope"]): void {
+        if (content.type !== "button" || content.action.type !== "open-webapp") return;
+        const webapp = this.#webapp(content.action.webapp);
+        if (webapp === undefined || webapp.allowedScopes.includes(scope)) return;
+        throw new SlotEntryInvalidError(describeWebappScopeNotAllowed(webapp, scope));
     }
 }
 

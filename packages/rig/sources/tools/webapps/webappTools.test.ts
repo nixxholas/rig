@@ -19,6 +19,7 @@ describe("webapp tools", () => {
         };
 
         expect(Value.Check(webappCreateTool.arguments, args)).toBe(true);
+        expect(Value.Check(webappCreateTool.arguments, { ...args, allowedScopes: [] })).toBe(false);
         expect(Value.Check(webappCreateTool.arguments, { ...args, iconPath: undefined })).toBe(
             false,
         );

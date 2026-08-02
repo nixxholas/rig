@@ -109,14 +109,15 @@ export class InMemorySessionStore implements SessionStore {
         this.#client = opened.client;
         this.#database = opened.database;
         migrateSessionDatabase(this.#database);
+        this.webapps = new WebappStore({
+            publish: (event) => this.#publishGlobalEvent(event),
+            tx: () => this.#activeTransaction ?? this.#database,
+        });
         this.slots = new SlotEntryStore({
             publish: (event) => this.#publishGlobalEvent(event),
             sessionExists: (sessionId) => this.#sessions.has(sessionId),
             tx: () => this.#activeTransaction ?? this.#database,
-        });
-        this.webapps = new WebappStore({
-            publish: (event) => this.#publishGlobalEvent(event),
-            tx: () => this.#activeTransaction ?? this.#database,
+            webapp: (name) => this.webapps.get(name),
         });
         this.#projects = new ProjectRepository({
             database: this.#database,

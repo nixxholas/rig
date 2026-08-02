@@ -88,6 +88,15 @@ type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
 type _Attachment = Assignable<local.Attachment, daemon.Attachment>;
 type _Webapp = Assignable<local.Webapp, daemon.Webapp>;
+type _ResolveWebappOpenRequest = Assignable<
+    daemon.ResolveWebappOpenRequest,
+    local.ResolveWebappOpenRequest
+>;
+type _ResolveWebappOpenResponse = Assignable<
+    local.ResolveWebappOpenResponse,
+    daemon.ResolveWebappOpenResponse
+>;
+type _WebappContext = Assignable<local.WebappContext, daemon.WebappContext>;
 type _SlotAction = Assignable<local.SlotAction, daemon.SlotAction>;
 type LocalOpenWebappAction = Extract<local.SlotAction, { type: "open-webapp" }>;
 type DaemonOpenWebappAction = Extract<daemon.SlotAction, { type: "open-webapp" }>;

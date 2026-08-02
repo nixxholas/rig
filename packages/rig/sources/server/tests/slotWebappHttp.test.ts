@@ -173,6 +173,8 @@ describe("slot HTTP protocol", () => {
         const port = await startServer();
         const denied = await request(port, { path: "/slots", token: "wrong" });
         expect(denied.status).toBe(401);
+        const unknown = await request(port, { path: "/unknown-route", token: "wrong" });
+        expect(unknown.status).toBe(401);
     });
 });
 
@@ -258,6 +260,7 @@ describe("webapp HTTP protocol", () => {
         expect(created.status).toBe(201);
         expect(JSON.parse(created.body)).toMatchObject({
             webapp: {
+                allowedScopes: ["everywhere", "project", "workspace", "session"],
                 currentVersion: 1,
                 iconThumbhash: expect.any(String),
                 iconUrl: "/webapps/usage-dashboard/favicon.png",
@@ -265,6 +268,48 @@ describe("webapp HTTP protocol", () => {
                 versions: [{ changeDescription: "Initial import", version: 1 }],
             },
         });
+
+        const opened = await request(port, {
+            body: JSON.stringify({
+                path: "reports/daily.html",
+                query: { range: "7d" },
+                sessionId: "session-1",
+            }),
+            method: "POST",
+            path: "/webapps/usage-dashboard/open",
+        });
+        expect(opened.status).toBe(200);
+        const openUrl = new URL(
+            (JSON.parse(opened.body) as { url: string }).url,
+            "http://rig.test",
+        );
+        expect(openUrl.pathname).toBe("/webapps/usage-dashboard/files/reports/daily.html");
+        expect(openUrl.searchParams.get("range")).toBe("7d");
+        const contextToken = openUrl.searchParams.get("rigContext");
+        expect(contextToken).toMatch(/^[A-Za-z0-9_-]{40,}$/u);
+
+        const unauthorizedContext = await request(port, {
+            path: "/webapps/usage-dashboard/context?token=wrong",
+            token: "wrong",
+        });
+        expect(unauthorizedContext.status).toBe(401);
+        const context = await request(port, {
+            path: `/webapps/usage-dashboard/context?token=${encodeURIComponent(contextToken!)}`,
+            token: "wrong",
+        });
+        expect(context.status).toBe(200);
+        expect(context.headers["cache-control"]).toBe("no-store");
+        expect(JSON.parse(context.body)).toEqual({
+            projectId: expect.any(String),
+            sessionId: "session-1",
+            version: 1,
+            webapp: "usage-dashboard",
+        });
+        const reused = await request(port, {
+            path: `/webapps/usage-dashboard/context?token=${encodeURIComponent(contextToken!)}`,
+            token: "wrong",
+        });
+        expect(reused.status).toBe(401);
 
         const favicon = await request(port, {
             path: "/webapps/usage-dashboard/favicon.png",
@@ -359,11 +404,83 @@ describe("webapp HTTP protocol", () => {
             webapps: [{ currentVersion: 1, name: "usage-dashboard" }],
         });
     });
+
+    it("rejects opening a webapp after its declaration narrows past an existing slot", async () => {
+        const port = await startServer();
+        const sources = await createTempDirectory("rig-webapp-scopes-");
+        const sourceV1 = join(sources, "v1");
+        const sourceV2 = join(sources, "v2");
+        await mkdir(sourceV1);
+        await mkdir(sourceV2);
+        await writeFile(join(sourceV1, "index.html"), "<h1>one</h1>");
+        await writeFile(join(sourceV2, "index.html"), "<h1>two</h1>");
+        const iconPath = join(sources, "icon.png");
+        await createIcon(iconPath, 512);
+
+        const slot = await request(port, {
+            body: JSON.stringify({
+                authorSessionId: "session-1",
+                content: {
+                    action: { type: "open-webapp", webapp: "scoped-dashboard" },
+                    label: "Open dashboard",
+                    type: "button",
+                },
+                description: "Dashboard",
+                purpose: "Track work",
+                scope: "everywhere",
+                slot: "status-line",
+            }),
+            method: "POST",
+            path: "/slots",
+        });
+        expect(slot.status).toBe(201);
+
+        const created = await request(port, {
+            body: JSON.stringify({
+                allowedScopes: ["everywhere"],
+                authorSessionId: "session-1",
+                description: "Scoped dashboard",
+                iconPath,
+                name: "scoped-dashboard",
+                path: sourceV1,
+                purpose: "Track work",
+            }),
+            method: "POST",
+            path: "/webapps",
+        });
+        expect(created.status).toBe(201);
+
+        const narrowed = await request(port, {
+            body: JSON.stringify({
+                allowedScopes: ["project"],
+                changeDescription: "Use project lifetime",
+                path: sourceV2,
+            }),
+            method: "POST",
+            path: "/webapps/scoped-dashboard/versions",
+        });
+        expect(narrowed.status).toBe(200);
+
+        const opened = await request(port, {
+            body: JSON.stringify({}),
+            method: "POST",
+            path: "/webapps/scoped-dashboard/open",
+        });
+        expect(opened.status).toBe(400);
+        expect(JSON.parse(opened.body)).toEqual({
+            error: {
+                code: "invalid_webapp",
+                message:
+                    'The webapp "scoped-dashboard" does not allow the everywhere scope. It allows only the project scope.',
+            },
+        });
+    });
 });
 
 async function startServer(): Promise<number> {
     process.env.HAPPY_WEBAPPS_DIRECTORY = await createTempDirectory("rig-webapps-test-");
     const store = new InMemorySessionStore();
+    store.createWithId("session-1", { cwd: "/tmp/rig-webapp-context-test" });
     cleanups.push(() => store.close());
     const server = createProtocolHttpServer({ store, token: "secret" });
     servers.push(server);

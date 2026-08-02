@@ -1629,6 +1629,7 @@ export interface WebappVersion {
 
 /** An imported, versioned webapp whose current version rig serves as static files. */
 export interface Webapp {
+    allowedScopes: readonly SlotScope[];
     authorSessionId: string;
     createdAt: number;
     currentVersion: number;
@@ -1640,6 +1641,26 @@ export interface Webapp {
     sourceDescription?: string;
     updatedAt: number;
     versions: readonly WebappVersion[];
+}
+
+export interface ResolveWebappOpenRequest {
+    path?: string;
+    projectId?: string;
+    query?: Record<string, string>;
+    sessionId?: string;
+    workspaceId?: string;
+}
+
+export interface ResolveWebappOpenResponse {
+    url: string;
+}
+
+export interface WebappContext {
+    projectId?: string;
+    sessionId?: string;
+    version: number;
+    webapp: string;
+    workspaceId?: string;
 }
 
 export interface MutationRequest {

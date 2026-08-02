@@ -1,8 +1,10 @@
 import { webapps, webappVersions } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import type { WebappAllowedScopes } from "../../protocol/WebappProtocol.js";
 
 export interface WebappCreateRecord {
+    allowedScopes: WebappAllowedScopes;
     authorSessionId: string;
     changeDescription: string;
     createdAt: number;
@@ -19,6 +21,7 @@ export function webappCreate(tx: TX, record: WebappCreateRecord): void {
         transaction
             .insert(webapps)
             .values({
+                allowedScopesJson: JSON.stringify(record.allowedScopes),
                 authorSessionId: record.authorSessionId,
                 createdAtMs: record.createdAt,
                 currentVersion: 1,

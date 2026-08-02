@@ -52,6 +52,37 @@ describe("WebappStore", () => {
         });
     });
 
+    it("persists declared scopes and replaces them when a new version declares new scopes", async () => {
+        const data = await temporaryDirectory("rig-webapp-store-");
+        const source = await temporaryDirectory("rig-webapp-source-");
+        await writeFile(join(source, "index.html"), "<h1>one</h1>");
+        await writeFile(join(source, "icon.png"), await iconPng());
+        const databasePath = join(data, "sessions.db");
+
+        const first = createStore(data, databasePath);
+        await expect(
+            first.webapps.create({
+                allowedScopes: ["session", "workspace"],
+                authorSessionId: "agent-1",
+                description: "A dashboard",
+                iconPath: join(source, "icon.png"),
+                name: "dashboard",
+                path: source,
+                purpose: "Track work",
+            }),
+        ).resolves.toMatchObject({ allowedScopes: ["session", "workspace"] });
+        await first.webapps.update("dashboard", {
+            allowedScopes: ["project"],
+            changeDescription: "Project-only lifetime",
+            path: source,
+        });
+        const restored = createStore(data, databasePath);
+        expect(restored.webapps.get("dashboard")).toMatchObject({
+            allowedScopes: ["project"],
+            currentVersion: 2,
+        });
+    });
+
     it("rejects symbolic links in the imported source tree before recording a version", async () => {
         const root = await temporaryDirectory("rig-webapp-store-");
         const source = await temporaryDirectory("rig-webapp-source-");
@@ -193,11 +224,14 @@ describe("WebappStore", () => {
     });
 });
 
-function createStore(root: string): {
+function createStore(
+    root: string,
+    databasePath = ":memory:",
+): {
     database: ReturnType<typeof openSessionDatabase>["database"];
     webapps: WebappStore;
 } {
-    const opened = openSessionDatabase(":memory:");
+    const opened = openSessionDatabase(databasePath);
     migrateSessionDatabase(opened.database);
     const store = new WebappStore({
         environment: { HAPPY_WEBAPPS_DIRECTORY: root },

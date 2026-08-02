@@ -15,6 +15,7 @@ import { webappSetCurrentVersion } from "../persistence/webapps/webappSetCurrent
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
 import {
     createWebappRequestSchema,
+    defaultWebappAllowedScopes,
     revertWebappRequestSchema,
     updateWebappRequestSchema,
     type CreateWebappRequest,
@@ -111,6 +112,7 @@ export class WebappStore {
                     );
                 }
                 webappCreate(tx, {
+                    allowedScopes: request.allowedScopes ?? [...defaultWebappAllowedScopes],
                     authorSessionId: request.authorSessionId,
                     changeDescription: "Initial import",
                     createdAt: this.#now(),
@@ -195,7 +197,14 @@ export class WebappStore {
             resolveWebappSourceReader(sourceFileSystem),
         );
         const updated = inTx(this.#tx(), (tx) => {
-            webappAddVersion(tx, name, nextVersion, request.changeDescription, this.#now());
+            webappAddVersion(
+                tx,
+                name,
+                nextVersion,
+                request.changeDescription,
+                this.#now(),
+                request.allowedScopes,
+            );
             return queryWebapp(tx, name);
         });
         this.#publishChanged();

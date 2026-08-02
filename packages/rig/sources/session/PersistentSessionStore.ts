@@ -244,17 +244,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             options.durableGlobalEventQueue === true
                 ? new PersistentGlobalEventQueue(this.#database)
                 : new InMemoryGlobalEventQueue();
+        this.webapps = new WebappStore({
+            now: this.#now,
+            publish: (event) => this.#publishGlobalEvent(event),
+            tx: () => this.#tx(),
+        });
         this.slots = new SlotEntryStore({
             now: this.#now,
             publish: (event) => this.#publishGlobalEvent(event),
             sessionExists: (sessionId) =>
                 querySlotScopeTargetExists(this.#tx(), "session", sessionId),
             tx: () => this.#tx(),
-        });
-        this.webapps = new WebappStore({
-            now: this.#now,
-            publish: (event) => this.#publishGlobalEvent(event),
-            tx: () => this.#tx(),
+            webapp: (name) => this.webapps.get(name),
         });
         this.#projects = new ProjectRepository({
             database: this.#database,

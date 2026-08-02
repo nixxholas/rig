@@ -174,18 +174,34 @@ import type {
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginAppError, PluginNotFoundError } from "../plugins/index.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
-import { readWebappFile, WebappInvalidError, WebappNotFoundError } from "../webapps/index.js";
+import {
+    describeWebappScopeNotAllowed,
+    readWebappFile,
+    resolveWebappOpenUrl,
+    WebappContextTokenStore,
+    WebappInvalidError,
+    WebappNotFoundError,
+} from "../webapps/index.js";
 import { MAX_ATTACHMENT_FILE_BYTES } from "../tools/attachments/prepareAttachment.js";
-import { createWebappRequestSchema, slotNameSchema } from "../protocol/index.js";
+import {
+    createWebappRequestSchema,
+    resolveWebappOpenRequestSchema,
+    slotNameSchema,
+} from "../protocol/index.js";
 import type {
     CreateSlotEntryRequest,
     ListSlotEntriesResponse,
     ListWebappsResponse,
+    ResolveWebappOpenRequest,
+    ResolveWebappOpenResponse,
     RevertWebappRequest,
     SlotEntryResponse,
     SlotManagementErrorCode,
+    SlotScope,
     UpdateSlotEntryRequest,
     UpdateWebappRequest,
+    Webapp,
+    WebappContext,
     WebappManagementErrorCode,
     WebappResponse,
 } from "../protocol/index.js";
@@ -261,6 +277,7 @@ export function createProtocolHttpServer(
         });
     const identity = options.identity ?? getDaemonIdentity();
     const fileSearchService = options.fileSearchService ?? new FileSearchService();
+    const webappContextTokens = new WebappContextTokenStore();
     const runtimeConfig: ProtocolServerRuntimeConfig = {
         codexStreamMaxRetries: options.codexStreamMaxRetries ?? DEFAULT_CODEX_STREAM_MAX_RETRIES,
         gitStateTracker: options.gitStateTracker,
@@ -305,6 +322,7 @@ export function createProtocolHttpServer(
                 options.getProviderQuota,
                 sessionEventStreamLeases,
                 sessionTerminals,
+                webappContextTokens,
             );
         const handling =
             mutating && options.taskDrain !== undefined ? options.taskDrain.run(handle) : handle();
@@ -408,14 +426,32 @@ async function handleRequest(
     getProviderQuota: ((providerId: string) => Promise<ProviderQuota | undefined>) | undefined,
     sessionEventStreamLeases: Set<SessionEventStreamLease>,
     sessionTerminals: SessionTerminalTracker,
+    webappContextTokens: WebappContextTokenStore,
 ): Promise<void> {
+    const url = new URL(request.url ?? "/", "http://unix");
+    const route = matchRoute(url.pathname);
+    if (route?.name === "webapp-context") {
+        if (request.method !== "GET") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const contextToken = url.searchParams.get("token");
+        const context =
+            contextToken === null
+                ? undefined
+                : webappContextTokens.exchange(route.webappName, contextToken);
+        if (context === undefined) {
+            sendJson(response, 401, { error: "Unauthorized" });
+            return;
+        }
+        response.setHeader("cache-control", "no-store");
+        sendJson<WebappContext>(response, 200, context);
+        return;
+    }
     if (!isAuthorizedProtocolRequest(request, token)) {
         sendJson(response, 401, { error: "Unauthorized" });
         return;
     }
-
-    const url = new URL(request.url ?? "/", "http://unix");
-    const route = matchRoute(url.pathname);
     if (route === undefined) {
         sendJson(response, 404, { error: "Not found" });
         return;
@@ -829,6 +865,47 @@ async function handleRequest(
             }
             throw error;
         }
+        return;
+    }
+    if (route.name === "webapp-open") {
+        if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        let body: unknown;
+        try {
+            body = await readJson<unknown>(request, 64 * 1024);
+        } catch (error) {
+            sendInvalidWebappBody(response, error);
+            return;
+        }
+        if (!Value.Check(resolveWebappOpenRequestSchema, body)) {
+            sendWebappManagementError(
+                response,
+                400,
+                "invalid_request",
+                "A webapp open request must contain only a relative path, string query values, and optional session, project, or workspace ids.",
+            );
+            return;
+        }
+        const webapp = store.webapps.get(route.webappName);
+        if (webapp === undefined) {
+            sendWebappManagementError(
+                response,
+                404,
+                "webapp_not_found",
+                `No webapp named ${JSON.stringify(route.webappName)} exists.`,
+            );
+            return;
+        }
+        const resolution = resolveWebappContext(store, webapp, body);
+        if (resolution.type === "error") {
+            sendWebappManagementError(response, 400, resolution.code, resolution.message);
+            return;
+        }
+        sendJson<ResolveWebappOpenResponse>(response, 200, {
+            url: resolveWebappOpenUrl(webapp.name, body, resolution.context, webappContextTokens),
+        });
         return;
     }
     if (route.name === "webapp-icon") {
@@ -3058,6 +3135,103 @@ function parseArchivedFilter(value: string | null): boolean | "all" | undefined 
     return undefined;
 }
 
+function resolveWebappContext(
+    store: SessionStore,
+    webapp: Webapp,
+    request: ResolveWebappOpenRequest,
+):
+    | { context: WebappContext; type: "context" }
+    | {
+          code: "invalid_request" | "invalid_webapp";
+          message: string;
+          type: "error";
+      } {
+    let context: WebappContext;
+    let scope: SlotScope;
+    if (request.sessionId !== undefined) {
+        const session = store.get(request.sessionId);
+        if (session === undefined) {
+            return {
+                code: "invalid_request",
+                message: `No session with the id ${request.sessionId} exists.`,
+                type: "error",
+            };
+        }
+        const identity = session.projectIdentity();
+        if (request.projectId !== undefined && request.projectId !== identity.projectId) {
+            return {
+                code: "invalid_request",
+                message: `The session ${request.sessionId} belongs to project ${identity.projectId}, not project ${request.projectId}.`,
+                type: "error",
+            };
+        }
+        if (request.workspaceId !== undefined && request.workspaceId !== identity.workspaceId) {
+            return {
+                code: "invalid_request",
+                message:
+                    identity.workspaceId === undefined
+                        ? `The session ${request.sessionId} does not belong to a workspace.`
+                        : `The session ${request.sessionId} belongs to workspace ${identity.workspaceId}, not workspace ${request.workspaceId}.`,
+                type: "error",
+            };
+        }
+        context = {
+            webapp: webapp.name,
+            version: webapp.currentVersion,
+            sessionId: request.sessionId,
+            projectId: identity.projectId,
+            ...(identity.workspaceId === undefined ? {} : { workspaceId: identity.workspaceId }),
+        };
+        scope = "session";
+    } else {
+        if (request.workspaceId !== undefined && request.projectId === undefined) {
+            return {
+                code: "invalid_request",
+                message: "A workspace webapp context also needs its project id.",
+                type: "error",
+            };
+        }
+        if (request.projectId !== undefined && store.getProject(request.projectId) === undefined) {
+            return {
+                code: "invalid_request",
+                message: `No project with the id ${request.projectId} exists.`,
+                type: "error",
+            };
+        }
+        if (
+            request.projectId !== undefined &&
+            request.workspaceId !== undefined &&
+            store.getWorkspace(request.projectId, request.workspaceId) === undefined
+        ) {
+            return {
+                code: "invalid_request",
+                message: `No workspace with the id ${request.workspaceId} exists in project ${request.projectId}.`,
+                type: "error",
+            };
+        }
+        context = {
+            webapp: webapp.name,
+            version: webapp.currentVersion,
+            ...(request.projectId === undefined ? {} : { projectId: request.projectId }),
+            ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
+        };
+        scope =
+            request.workspaceId !== undefined
+                ? "workspace"
+                : request.projectId !== undefined
+                  ? "project"
+                  : "everywhere";
+    }
+    if (!webapp.allowedScopes.includes(scope)) {
+        return {
+            code: "invalid_webapp",
+            message: describeWebappScopeNotAllowed(webapp, scope),
+            type: "error",
+        };
+    }
+    return { context, type: "context" };
+}
+
 function parseFileSearchLimit(value: string | null): number {
     if (value === null) {
         return 20;
@@ -3101,7 +3275,11 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
-    | { name: "webapp-revert" | "webapp-versions"; sessionId?: undefined; webappName: string }
+    | {
+          name: "webapp-context" | "webapp-open" | "webapp-revert" | "webapp-versions";
+          sessionId?: undefined;
+          webappName: string;
+      }
     | {
           format: "ico" | "png";
           name: "webapp-icon";
@@ -3266,6 +3444,18 @@ function matchRoute(pathname: string):
         const segments = rawSegments.map(decodeUrlComponent);
         if (segments.some((segment) => segment === undefined)) return undefined;
         return { name: "webapp-file", webappFilePath: segments.join("/"), webappName };
+    }
+    const webappContext = /^\/webapps\/([^/]+)\/context$/u.exec(pathname);
+    if (webappContext !== null) {
+        const webappName = decodeUrlComponent(webappContext[1]);
+        if (webappName === undefined) return undefined;
+        return { name: "webapp-context", webappName };
+    }
+    const webappOpen = /^\/webapps\/([^/]+)\/open$/u.exec(pathname);
+    if (webappOpen !== null) {
+        const webappName = decodeUrlComponent(webappOpen[1]);
+        if (webappName === undefined) return undefined;
+        return { name: "webapp-open", webappName };
     }
     const webappOperation = /^\/webapps\/([^/]+)\/(versions|revert)$/u.exec(pathname);
     if (webappOperation !== null) {

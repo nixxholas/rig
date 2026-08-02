@@ -1,6 +1,23 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { EventId } from "./EventId.js";
+import { slotScopeSchema } from "./SlotProtocol.js";
+
+export const defaultWebappAllowedScopes = [
+    "everywhere",
+    "project",
+    "workspace",
+    "session",
+] as const;
+
+export const webappAllowedScopesSchema = Type.Array(slotScopeSchema, {
+    description: "The slot entry scopes from which the webapp may be opened.",
+    maxItems: defaultWebappAllowedScopes.length,
+    minItems: 1,
+    uniqueItems: true,
+});
+
+export type WebappAllowedScopes = Static<typeof webappAllowedScopesSchema>;
 
 export const webappVersionSchema = Type.Object(
     {
@@ -23,6 +40,7 @@ export const webappSchema = Type.Object(
         name: Type.String({ description: "Human-readable kebab-case webapp name." }),
         description: Type.String({ description: "What the webapp is." }),
         purpose: Type.String({ description: "Why the webapp exists." }),
+        allowedScopes: webappAllowedScopesSchema,
         iconThumbhash: Type.String({
             description: "ThumbHash for the webapp's persisted 512 by 512 icon.",
             minLength: 1,
@@ -54,6 +72,7 @@ export const createWebappRequestSchema = Type.Object(
         name: Type.String({ description: "Human-readable kebab-case webapp name." }),
         description: Type.String({ description: "What the webapp is." }),
         purpose: Type.String({ description: "Why the webapp exists." }),
+        allowedScopes: Type.Optional(webappAllowedScopesSchema),
         authorSessionId: Type.String(),
         path: Type.String({ description: "Absolute path of the source folder to import." }),
         iconPath: Type.String({
@@ -74,11 +93,51 @@ export const updateWebappRequestSchema = Type.Object(
     {
         path: Type.String({ description: "Absolute path of the source folder to import." }),
         changeDescription: Type.String({ description: "What changed in this import." }),
+        allowedScopes: Type.Optional(webappAllowedScopesSchema),
     },
     { additionalProperties: false },
 );
 
 export type UpdateWebappRequest = Static<typeof updateWebappRequestSchema>;
+
+export const resolveWebappOpenRequestSchema = Type.Object(
+    {
+        path: Type.Optional(
+            Type.String({ description: "Optional relative path within the webapp to open." }),
+        ),
+        query: Type.Optional(
+            Type.Record(Type.String(), Type.String(), {
+                description: "Optional query parameters forwarded when opening the webapp.",
+            }),
+        ),
+        sessionId: Type.Optional(Type.String()),
+        projectId: Type.Optional(Type.String()),
+        workspaceId: Type.Optional(Type.String()),
+    },
+    { additionalProperties: false },
+);
+
+export type ResolveWebappOpenRequest = Static<typeof resolveWebappOpenRequestSchema>;
+
+export const resolveWebappOpenResponseSchema = Type.Object(
+    { url: Type.String({ minLength: 1 }) },
+    { additionalProperties: false },
+);
+
+export type ResolveWebappOpenResponse = Static<typeof resolveWebappOpenResponseSchema>;
+
+export const webappContextSchema = Type.Object(
+    {
+        webapp: Type.String({ minLength: 1 }),
+        version: Type.Integer({ minimum: 1 }),
+        sessionId: Type.Optional(Type.String({ minLength: 1 })),
+        projectId: Type.Optional(Type.String({ minLength: 1 })),
+        workspaceId: Type.Optional(Type.String({ minLength: 1 })),
+    },
+    { additionalProperties: false },
+);
+
+export type WebappContext = Static<typeof webappContextSchema>;
 
 export const revertWebappRequestSchema = Type.Object(
     {

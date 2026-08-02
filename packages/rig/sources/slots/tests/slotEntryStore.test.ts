@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
 import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
 import { slotEntryCreate } from "../../persistence/slots/slotEntryCreate.js";
+import { webappCreate } from "../../persistence/webapps/webappCreate.js";
 import type { GlobalLiveEvent } from "../../protocol/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { SlotEntryInvalidError } from "../SlotEntryInvalidError.js";
@@ -223,6 +224,55 @@ describe("slot entry store", () => {
             "The sidebar slot allows only the everywhere scope.",
         );
         expect(store.slots.list()).toEqual([entry]);
+    });
+
+    it("rejects creating or updating a webapp button whose scope the webapp disallows", async () => {
+        const databasePath = await createDatabasePath();
+        createSessionDatabaseFixture(databasePath);
+        const opened = openSessionDatabase(databasePath);
+        webappCreate(opened.database, {
+            allowedScopes: ["session"],
+            authorSessionId: "session-1",
+            changeDescription: "Initial import",
+            createdAt: 1,
+            description: "A dashboard",
+            iconThumbhash: "thumbhash",
+            name: "dashboard",
+            purpose: "Track work",
+        });
+        opened.client.close();
+        const store = new PersistentSessionStore({ databasePath });
+        cleanups.push(() => store.close());
+        const webappButton = {
+            action: { type: "open-webapp", webapp: "dashboard" },
+            label: "Open dashboard",
+            type: "button",
+        } as const;
+
+        expect(() =>
+            store.slots.create({
+                authorSessionId: "session-1",
+                content: webappButton,
+                description: "Dashboard",
+                purpose: "Track work",
+                scope: "everywhere",
+                slot: "status-line",
+            }),
+        ).toThrow(
+            'The webapp "dashboard" does not allow the everywhere scope. It allows only the session scope.',
+        );
+
+        const entry = store.slots.create({
+            authorSessionId: "session-1",
+            content: { markdown: "hi", type: "text" },
+            description: "Dashboard",
+            purpose: "Track work",
+            scope: "everywhere",
+            slot: "status-line",
+        });
+        expect(() => store.slots.update(entry.id, { content: webappButton })).toThrow(
+            SlotEntryInvalidError,
+        );
     });
 
     it("allows description-only updates of legacy entries with incompatible slot scopes", async () => {
