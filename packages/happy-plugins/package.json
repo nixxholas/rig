@@ -1,6 +1,6 @@
 {
     "name": "happy-plugins",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "description": "The typed API available to TypeScript plugins running inside Happy.",
     "license": "MIT",
     "repository": {
