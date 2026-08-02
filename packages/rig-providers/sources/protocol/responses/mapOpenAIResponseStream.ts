@@ -10,6 +10,9 @@ import type {
 } from "@/protocol/responses/ResponsesToolVendor.js";
 import { responseStreamError } from "@/protocol/responses/responseStreamError.js";
 
+/** Call-id prefix the provider puts on searches it ran itself; client calls never carry it. */
+const HOSTED_SEARCH_CALL_PREFIX = "xs_";
+
 interface ActiveOutputItem {
     callId?: string;
     name?: string;
@@ -47,12 +50,13 @@ export async function* mapOpenAIResponseStream(
         failureMessage: string;
         requireTerminalEvent?: boolean;
         vendor?: "codex" | "grok" | "responses";
-        /**
-         * Names of the tools this request declared for the client to execute. A custom tool call
-         * for anything else came from a hosted tool the provider ran itself, so it is reported as
-         * a server tool call instead of one the client is expected to answer.
-         */
+        /** Names of the tools this request declared for the client to execute. */
         clientToolNames?: ReadonlySet<string>;
+        /**
+         * Names of the tools this request asked the provider to run on its own backend. Empty or
+         * absent means nothing ran upstream, so every tool call is one the client must answer.
+         */
+        hostedToolNames?: ReadonlySet<string>;
     },
 ): AsyncGenerator<SessionEvent, OpenAIResponseRunResult> {
     const activeItems = new Map<number, ActiveOutputItem>();
@@ -61,6 +65,7 @@ export async function* mapOpenAIResponseStream(
     let sawToolUse = false;
     const toolCalls: SessionToolCall[] = [];
     const responseItems = new Map<number, string>();
+    const finishedServerToolCalls = new Set<string>();
     let usage: SessionCacheUsage = { ...EMPTY_SESSION_CACHE_USAGE };
 
     for await (const event of responseStream) {
@@ -111,7 +116,7 @@ export async function* mapOpenAIResponseStream(
                 }
             } else if (
                 event.item.type === "custom_tool_call" &&
-                serverExecutedItemName(event.item, options.clientToolNames) !== undefined
+                serverExecutedItemName(event.item, options) !== undefined
             ) {
                 activeItems.set(event.output_index, {
                     type: "server_tool_call",
@@ -183,7 +188,7 @@ export async function* mapOpenAIResponseStream(
                     delta: argumentsJson,
                 };
             } else {
-                const name = serverExecutedItemName(event.item, options.clientToolNames);
+                const name = serverExecutedItemName(event.item, options);
                 if (name !== undefined) {
                     const callId = serverToolCallId(event.item, event.output_index);
                     activeItems.set(event.output_index, {
@@ -275,7 +280,7 @@ export async function* mapOpenAIResponseStream(
             const serverToolName =
                 activeItem?.type === "server_tool_call"
                     ? activeItem.name
-                    : serverExecutedItemName(event.item, options.clientToolNames);
+                    : serverExecutedItemName(event.item, options);
             if (serverToolName !== undefined) {
                 const callId =
                     activeItem?.callId ?? serverToolCallId(event.item, event.output_index);
@@ -289,6 +294,7 @@ export async function* mapOpenAIResponseStream(
                     name: serverToolName,
                     arguments: argumentsJson,
                 };
+                finishedServerToolCalls.add(callId);
                 activeItems.delete(event.output_index);
                 continue;
             }
@@ -414,7 +420,12 @@ export async function* mapOpenAIResponseStream(
             for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
                 responseItems.set(outputIndex, JSON.stringify(item));
             }
-            yield* closeOpenServerToolCalls(activeItems);
+            yield* settleServerToolCalls(
+                activeItems,
+                event.response.output ?? [],
+                finishedServerToolCalls,
+                options,
+            );
             for (const [outputIndex, activeItem] of activeItems) {
                 if (
                     (activeItem.type !== "function_call" &&
@@ -475,7 +486,12 @@ export async function* mapOpenAIResponseStream(
             for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
                 responseItems.set(outputIndex, JSON.stringify(item));
             }
-            yield* closeOpenServerToolCalls(activeItems);
+            yield* settleServerToolCalls(
+                activeItems,
+                event.response.output ?? [],
+                finishedServerToolCalls,
+                options,
+            );
             for (const [outputIndex, activeItem] of activeItems) {
                 if (
                     (activeItem.type !== "function_call" &&
@@ -569,15 +585,22 @@ export async function* mapOpenAIResponseStream(
 }
 
 /**
- * Ends every hosted call still open when a response reaches its terminal event.
+ * Settles every hosted call against the terminal response, as ordinary tool calls already are.
  *
- * A hosted call always completes inside the response that started it, so one still open here only
- * means its own done event never arrived — whether the response completed or was truncated. Its
- * end is the durable half of the pair, so failing to emit it would strand a live row and lose the
- * record that the provider searched at all.
+ * A hosted call completes inside the response that started it, so anything unsettled here only
+ * means its own streamed events never arrived. The terminal payload is the authority when both
+ * exist: a call whose arguments finished only there would otherwise be reported empty, and one
+ * that never streamed at all would go unreported even though the provider ran it. The end is the
+ * durable half of the pair, so losing it strands a live row and erases the record of the search.
  */
-function* closeOpenServerToolCalls(
+function* settleServerToolCalls(
     activeItems: Map<number, ActiveOutputItem>,
+    terminalOutput: readonly unknown[],
+    finished: Set<string>,
+    options: {
+        clientToolNames?: ReadonlySet<string> | undefined;
+        hostedToolNames?: ReadonlySet<string> | undefined;
+    },
 ): Generator<SessionEvent> {
     for (const [outputIndex, activeItem] of activeItems) {
         if (
@@ -587,33 +610,75 @@ function* closeOpenServerToolCalls(
         ) {
             continue;
         }
+        const callId = activeItem.callId;
+        const terminal = terminalOutput.find(
+            (item, terminalIndex) =>
+                serverExecutedItemName(item, options) !== undefined &&
+                serverToolCallId(item, terminalIndex) === callId,
+        );
+        const settled =
+            terminal === undefined
+                ? undefined
+                : emptyToUndefined(serverToolCallArguments(terminal));
         yield {
             type: "server_tool_call_end",
-            callId: activeItem.callId,
+            callId,
             name: activeItem.name,
-            arguments: activeItem.argumentsJson ?? "",
+            arguments: settled ?? activeItem.argumentsJson ?? "",
         };
+        finished.add(callId);
         activeItems.delete(outputIndex);
     }
+
+    for (const [terminalIndex, item] of terminalOutput.entries()) {
+        const name = serverExecutedItemName(item, options);
+        if (name === undefined) continue;
+        const callId = serverToolCallId(item, terminalIndex);
+        if (finished.has(callId)) continue;
+        yield { type: "server_tool_call_start", callId, name };
+        yield {
+            type: "server_tool_call_end",
+            callId,
+            name,
+            arguments: serverToolCallArguments(item),
+        };
+        finished.add(callId);
+    }
+}
+
+function emptyToUndefined(value: string): string | undefined {
+    return value.length === 0 ? undefined : value;
 }
 
 /**
  * Names the hosted tool behind an output item the provider executed itself.
  *
  * Two shapes reach us. A hosted search with its own item type is unambiguous. Grok's X search
- * instead reports its backend sub-calls as ordinary custom tool calls, so the only sound signal
- * is that the client never declared that tool: a call the client cannot execute, and is never
- * asked to answer, was answered by the provider. Function calls are deliberately excluded, since
- * an undeclared function name is a model mistake the model still needs to hear about.
+ * instead reports its backend sub-calls as ordinary custom tool calls, which look exactly like a
+ * call the client must answer, so classification rests on two facts that are true only of a
+ * hosted call. The request must have asked for hosted tools at all: nothing runs upstream that
+ * was never enabled, which also keeps compaction, which sends none, entirely out of this path.
+ * Beyond that, the provider marks its own search calls with a reserved call-id prefix, which is
+ * the one signal that stays right even if a client tool happens to share a backend sub-call's
+ * name. Absent that marker an undeclared name is the fallback, so a sub-call named in some way we
+ * have not seen is still not mistaken for work the client owes an answer. Function calls never
+ * qualify, since an undeclared function name is a model mistake the model needs to hear about.
  */
 function serverExecutedItemName(
     item: unknown,
-    clientToolNames: ReadonlySet<string> | undefined,
+    options: {
+        clientToolNames?: ReadonlySet<string> | undefined;
+        hostedToolNames?: ReadonlySet<string> | undefined;
+    },
 ): string | undefined {
-    const { type, name } = asOutputItem(item);
+    if (options.hostedToolNames === undefined || options.hostedToolNames.size === 0) {
+        return undefined;
+    }
+    const { type, name, call_id } = asOutputItem(item);
     if (type === "web_search_call") return "web_search";
     if (type !== "custom_tool_call" || name === undefined) return undefined;
-    return clientToolNames !== undefined && !clientToolNames.has(name) ? name : undefined;
+    if (call_id?.startsWith(HOSTED_SEARCH_CALL_PREFIX) === true) return name;
+    return options.clientToolNames?.has(name) === true ? undefined : name;
 }
 
 /**

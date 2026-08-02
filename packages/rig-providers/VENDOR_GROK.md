@@ -146,11 +146,21 @@ call Rig must answer, so `mapOpenAIResponseStream` reports them as `server_tool_
 `server_tool_call_delta`, and `server_tool_call_end`, keeps them out of the run's tool calls, and
 leaves the terminal state `normal` rather than `tool_call`.
 
-The signal for the custom-tool shape is that the client never declared that tool: `clientToolNames`
-carries the declared names, and a custom tool call for anything else was answered upstream.
-Function calls are deliberately excluded from that rule, because an undeclared function name is a
-model mistake the model still needs to hear about. A mapper given no `clientToolNames` treats every
-custom tool call as client-executed, so Codex and Bedrock behavior is unchanged.
+Classification rests on two facts true only of a hosted call. The request must have declared hosted
+tools, carried by `hostedToolNames`: nothing runs upstream that was never enabled. That alone keeps
+compaction out of this path, so a compaction sample that calls a tool is still counted as one and
+resampled. Beyond that, Grok marks its own search calls with the reserved `xs_` call-id prefix,
+which stays correct even if a client tool happens to share a backend sub-call's name; absent that
+marker, a name the client never declared is the fallback, so a sub-call named in some way we have
+not captured is still not mistaken for work Rig owes an answer. Function calls never qualify,
+because an undeclared function name is a model mistake the model needs to hear about. A mapper
+given no `hostedToolNames` treats every tool call as client-executed, so Codex and Bedrock behavior
+is unchanged.
+
+Hosted calls are settled against the terminal response the way ordinary tool calls already are. One
+that streamed a start but never its completion is closed using the terminal payload's arguments,
+and one that appears only in that payload still reports both a start and an end, so the durable
+record of a search never depends on which streamed events happened to arrive.
 
 Results live in the encrypted reasoning items that follow each call, so replay needs no special
 case: the opaque `responseItems` return verbatim and nothing fabricates a tool output to pair with

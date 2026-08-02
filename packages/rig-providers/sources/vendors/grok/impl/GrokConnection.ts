@@ -51,10 +51,10 @@ export class GrokConnection {
         const client = await this.resolve();
         const clientTools = options.tools ?? this.options.tools;
         // Compaction summarizes context that already exists, so it has nothing to search for.
-        const tools =
-            options.compaction === true
-                ? clientTools
-                : [...clientTools, ...(this.options.hostedTools ?? [])];
+        // Sending no hosted tools also means nothing in its response can be read as hosted, so a
+        // compaction sample that calls a tool still counts as one and is resampled.
+        const hostedTools = options.compaction === true ? [] : (this.options.hostedTools ?? []);
+        const tools = [...clientTools, ...hostedTools];
         const responseStream = await client.responses.create(
             createGrokOpenAIRequest({
                 apiModelId: options.model,
@@ -85,6 +85,7 @@ export class GrokConnection {
             requireTerminalEvent: true,
             vendor: "grok",
             clientToolNames: new Set(clientTools.map((tool) => tool.name)),
+            hostedToolNames: new Set(hostedTools.map((tool) => tool.name)),
         });
     }
 

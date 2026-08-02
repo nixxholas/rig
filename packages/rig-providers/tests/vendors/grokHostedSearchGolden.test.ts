@@ -160,6 +160,7 @@ describe("Grok hosted search goldens", () => {
                 failureMessage: "unused",
                 vendor: "grok",
                 clientToolNames: new Set(["read_file"]),
+                hostedToolNames: new Set(["x_search"]),
             },
         );
         let next = await mapped.next();
@@ -178,6 +179,197 @@ describe("Grok hosted search goldens", () => {
         // It is still nothing the client has to run.
         expect(next.value.toolCalls).toEqual([]);
         expect(next.value.stopReason).toBe("length");
+    });
+
+    it("trusts the provider's own marking over a client tool that shares the name", async () => {
+        // Rig would never name a tool this, but if it did, only the provider's reserved call-id
+        // prefix still says who ran it. Executing a local tool here would answer a call nobody
+        // asked Rig to answer, and drop the search the model actually performed.
+        const { events, result } = await replayEvents(
+            [
+                {
+                    type: "response.output_item.added",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "xs_call-1",
+                        name: "x_keyword_search",
+                        input: "",
+                    },
+                },
+                {
+                    type: "response.output_item.done",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "xs_call-1",
+                        name: "x_keyword_search",
+                        input: '{"query":"Claude Code"}',
+                    },
+                },
+                {
+                    type: "response.completed",
+                    response: { output: [], usage: { total_tokens: 1 } },
+                },
+            ],
+            {
+                clientToolNames: new Set(["x_keyword_search"]),
+                hostedToolNames: new Set(["x_search"]),
+            },
+        );
+
+        expect(result.toolCalls).toEqual([]);
+        expect(result.stopReason).toBe("stop");
+        expect(events).toContainEqual({
+            type: "server_tool_call_end",
+            callId: "xs_call-1",
+            name: "x_keyword_search",
+            arguments: '{"query":"Claude Code"}',
+        });
+    });
+
+    it("still runs a client tool the provider did not mark as its own", async () => {
+        const { events, result } = await replayEvents(
+            [
+                {
+                    type: "response.output_item.done",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "call-1",
+                        name: "format_document",
+                        input: '{"path":"a.ts"}',
+                    },
+                },
+                {
+                    type: "response.completed",
+                    response: { output: [], usage: { total_tokens: 1 } },
+                },
+            ],
+            {
+                clientToolNames: new Set(["format_document"]),
+                hostedToolNames: new Set(["x_search"]),
+            },
+        );
+
+        expect(result.toolCalls.map((call) => call.name)).toEqual(["format_document"]);
+        expect(result.stopReason).toBe("tool_use");
+        expect(events.some((event) => event.type.startsWith("server_tool_call"))).toBe(false);
+    });
+
+    it("treats every tool call as the client's when no hosted tool was requested", async () => {
+        // Compaction sends no hosted tools, so a call during it must still invalidate the sample.
+        const { events, result } = await replayEvents(
+            [
+                {
+                    type: "response.output_item.added",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "call-1",
+                        name: "x_keyword_search",
+                        input: "",
+                    },
+                },
+                {
+                    type: "response.output_item.done",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "call-1",
+                        name: "x_keyword_search",
+                        input: '{"query":"anything"}',
+                    },
+                },
+                {
+                    type: "response.completed",
+                    response: { output: [], usage: { total_tokens: 1 } },
+                },
+            ],
+            { clientToolNames: new Set(["read_file"]) },
+        );
+
+        expect(result.toolCalls.map((call) => call.name)).toEqual(["x_keyword_search"]);
+        expect(result.stopReason).toBe("tool_use");
+        expect(events.some((event) => event.type.startsWith("server_tool_call"))).toBe(false);
+    });
+
+    it("reports a hosted call that only ever appears in the terminal response", async () => {
+        const { events, result } = await replayEvents(
+            [
+                {
+                    type: "response.completed",
+                    response: {
+                        output: [
+                            {
+                                type: "web_search_call",
+                                id: "ws-1",
+                                status: "completed",
+                                action: { type: "search", query: "Node.js release" },
+                            },
+                        ],
+                        usage: { total_tokens: 3 },
+                    },
+                },
+            ],
+            { hostedToolNames: new Set(["web_search"]) },
+        );
+
+        expect(events).toContainEqual({
+            type: "server_tool_call_start",
+            callId: "ws-1",
+            name: "web_search",
+        });
+        const ended = events.find((event) => event.type === "server_tool_call_end");
+        expect(JSON.parse(ended!.arguments as string)).toMatchObject({ query: "Node.js release" });
+        expect(result.toolCalls).toEqual([]);
+        expect(result.stopReason).toBe("stop");
+    });
+
+    it("prefers the terminal arguments when a hosted call never streamed its own completion", async () => {
+        const { events } = await replayEvents(
+            [
+                {
+                    type: "response.output_item.added",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "xs-1",
+                        name: "x_keyword_search",
+                        input: "",
+                    },
+                },
+                {
+                    type: "response.completed",
+                    response: {
+                        output: [
+                            {
+                                type: "custom_tool_call",
+                                call_id: "xs-1",
+                                name: "x_keyword_search",
+                                input: '{"query":"Claude Code","limit":"5"}',
+                            },
+                        ],
+                        usage: { total_tokens: 3 },
+                    },
+                },
+            ],
+            {
+                clientToolNames: new Set(["read_file"]),
+                hostedToolNames: new Set(["x_search"]),
+            },
+        );
+
+        // Exactly one pair, carrying the arguments the terminal payload settled.
+        expect(events.filter((event) => event.type === "server_tool_call_start")).toHaveLength(1);
+        expect(events.filter((event) => event.type === "server_tool_call_end")).toEqual([
+            {
+                type: "server_tool_call_end",
+                callId: "xs-1",
+                name: "x_keyword_search",
+                arguments: '{"query":"Claude Code","limit":"5"}',
+            },
+        ]);
     });
 
     it("keeps an undeclared custom tool executable when the client declared no tool names", async () => {
@@ -227,6 +419,28 @@ const readFileTool: SessionTool = {
     description: "Read a file.",
 };
 
+/** Maps a hand-built event sequence and returns both the events and the run result. */
+async function replayEvents(
+    events: readonly unknown[],
+    options: {
+        clientToolNames?: ReadonlySet<string>;
+        hostedToolNames?: ReadonlySet<string>;
+    },
+) {
+    const mapped = mapOpenAIResponseStream(stream(events), {
+        failureMessage: "unused",
+        vendor: "grok",
+        ...options,
+    });
+    const collected: SessionEvent[] = [];
+    let next = await mapped.next();
+    while (next.done !== true) {
+        collected.push(next.value);
+        next = await mapped.next();
+    }
+    return { events: collected, result: next.value };
+}
+
 async function replay(golden: any) {
     const events: SessionEvent[] = [];
     const clientToolNames = new Set<string>(
@@ -239,6 +453,7 @@ async function replay(golden: any) {
         requireTerminalEvent: true,
         vendor: "grok",
         clientToolNames,
+        hostedToolNames: new Set(["web_search", "x_search"]),
     });
     let next = await mapped.next();
     while (next.done !== true) {
