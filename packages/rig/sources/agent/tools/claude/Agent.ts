@@ -65,6 +65,12 @@ export const claudeAgentTool = defineTool({
                     "Agents run in the background by default. Set to false to wait for the result before continuing.",
             }),
         ),
+        service_tier: Type.Optional(
+            Type.Literal("priority", {
+                description:
+                    "Service tier override for the new agent. Omit unless explicitly requested.",
+            }),
+        ),
     }),
     returnType: Type.Union([completedAgentResultSchema, backgroundAgentResultSchema]),
     shouldReviewInAutoMode: () => false,
@@ -78,6 +84,7 @@ export const claudeAgentTool = defineTool({
             provider,
             read_only,
             run_in_background = true,
+            service_tier,
         },
         context,
         execution,
@@ -98,6 +105,7 @@ export const claudeAgentTool = defineTool({
                 prompt,
                 ...(read_only === undefined ? {} : { readOnly: read_only }),
                 ...(provider === undefined ? {} : { providerId: provider }),
+                ...(service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
                 ...(execution.toolCallId !== undefined
                     ? { parentToolCallId: execution.toolCallId }
                     : {}),

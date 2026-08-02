@@ -1931,6 +1931,8 @@ describe("AgentSessionManager", () => {
         } as unknown as InMemorySession;
         const parent = {
             agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            effortLevelsForModel: () => ["low", "medium", "high"],
+            hasModel: () => true,
             id: "root-1",
             isSubagent: () => false,
             recordSubagentChanged: vi.fn(),
@@ -1980,7 +1982,12 @@ describe("AgentSessionManager", () => {
         await manager.spawnInWorkspace(parent.id, {
             background: true,
             description: "Fix parser",
+            effort: "high",
+            modelId: "openai/gpt-5.6-terra",
             prompt: "Repair the parser.",
+            providerId: "codex",
+            readOnly: true,
+            serviceTier: "fast",
             taskName: "fix_parser",
             workspaceId: "workspace-1",
         });
@@ -1991,6 +1998,11 @@ describe("AgentSessionManager", () => {
                 docker: expect.objectContaining({
                     name: "rig-workspace-workspace-1-1",
                 }),
+                effort: "high",
+                modelId: "openai/gpt-5.6-terra",
+                permissionMode: "read_only",
+                providerId: "codex",
+                serviceTier: "fast",
                 workspaceId: "workspace-1",
             }),
             expect.objectContaining({
@@ -2002,7 +2014,10 @@ describe("AgentSessionManager", () => {
         await expect(
             manager.spawnInWorkspace(parent.id, {
                 description: "Invade",
+                effort: "medium",
+                modelId: "openai/gpt-5.6-sol",
                 prompt: "Do not run.",
+                providerId: "codex",
                 workspaceId: "workspace-owned-by-someone-else",
             }),
         ).rejects.toThrow("not created by the current session");
@@ -2023,7 +2038,12 @@ describe("AgentSessionManager", () => {
             submit: vi.fn(() => ({ runId: "delegate-run" })),
             waitForRun: vi.fn(() => new Promise(() => {})),
         } as unknown as InMemorySession;
-        const delegator = delegatorSession();
+        const delegator = delegatorSession({
+            effortLevelsForModel: () => ["medium", "high"],
+            hasModel: (modelId, providerId) =>
+                modelId === "anthropic/sonnet-5" && providerId === "claude",
+            providerIdsForModel: (modelId) => (modelId === "anthropic/sonnet-5" ? ["claude"] : []),
+        });
         const createDelegatedSession = vi.fn(() => delegated);
         const manager = new AgentSessionManager({
             repository: {
@@ -2046,7 +2066,11 @@ describe("AgentSessionManager", () => {
 
         await expect(
             manager.delegate(delegator.id, {
+                effort: "high",
+                modelId: "anthropic/sonnet-5",
                 prompt: "Update the changelog.",
+                readOnly: true,
+                serviceTier: "fast",
                 title: "Update the changelog",
                 workspaceId: "workspace-2",
             }),
@@ -2061,8 +2085,12 @@ describe("AgentSessionManager", () => {
         expect(createDelegatedSession).toHaveBeenCalledWith(
             expect.objectContaining({
                 cwd: "/workspaces/changelog",
-                permissionMode: "auto",
+                effort: "high",
+                modelId: "anthropic/sonnet-5",
+                permissionMode: "read_only",
                 projectId: "project-1",
+                providerId: "claude",
+                serviceTier: "fast",
                 trackUnread: true,
                 workspaceId: "workspace-2",
             }),
@@ -2074,7 +2102,13 @@ describe("AgentSessionManager", () => {
             expect.any(String),
         );
         await expect(
-            manager.delegate(delegator.id, { prompt: "Nope.", workspaceId: "missing-workspace" }),
+            manager.delegate(delegator.id, {
+                effort: "medium",
+                modelId: "openai/gpt-5.6-sol",
+                prompt: "Nope.",
+                providerId: "codex",
+                workspaceId: "missing-workspace",
+            }),
         ).rejects.toThrow("was not found in that project");
     });
 
@@ -2170,6 +2204,8 @@ describe("AgentSessionManager", () => {
         } as unknown as InMemorySession;
         const parent = {
             agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
+            effortLevelsForModel: () => ["low", "medium", "high"],
+            hasModel: () => true,
             id: "root-1",
             isSubagent: () => false,
             recordSubagentChanged: vi.fn(),
@@ -2202,7 +2238,10 @@ describe("AgentSessionManager", () => {
         const spawning = manager.spawnInWorkspace(parent.id, {
             background: true,
             description: "Wait for setup",
+            effort: "medium",
+            modelId: "openai/gpt-5.6-sol",
             prompt: "Start only when setup finishes.",
+            providerId: "codex",
             taskName: "wait_for_setup",
             workspaceId: "workspace-1",
         });

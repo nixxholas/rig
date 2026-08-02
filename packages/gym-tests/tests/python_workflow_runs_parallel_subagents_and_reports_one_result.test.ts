@@ -44,10 +44,10 @@ describe("Python workflow orchestration", () => {
                                     script: [
                                         'phase("Inspect")',
                                         "results = parallel([",
-                                        '    {"prompt": "Return WORKFLOW_ALPHA only.", "label": "Alpha check", "model": "openai/gym"},',
-                                        '    {"prompt": "Return WORKFLOW_BETA only.", "label": "Beta check", "model": "openai/gym"},',
+                                        '    {"prompt": "Return WORKFLOW_ALPHA only.", "label": "Alpha check", "model": "openai/gym", "effort": "off"},',
+                                        '    {"prompt": "Return WORKFLOW_BETA only.", "label": "Beta check", "model": "openai/gym", "effort": "off"},',
                                         "])",
-                                        'summary = agent("Consolidate the completed inspection reports. Return WORKFLOW_CONSOLIDATED only.", {"label": "Consolidate", "model": "openai/gym"})',
+                                        'summary = agent("Consolidate the completed inspection reports. Return WORKFLOW_CONSOLIDATED only.", {"label": "Consolidate", "model": "openai/gym", "effort": "off"})',
                                         '{"checks": results, "summary": summary}',
                                     ].join("\n"),
                                 },

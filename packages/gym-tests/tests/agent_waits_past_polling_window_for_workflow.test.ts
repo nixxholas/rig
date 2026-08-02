@@ -59,7 +59,7 @@ describe("waiting for a long workflow", () => {
                                     name: "long-wait",
                                     script: [
                                         'phase("Long check")',
-                                        'result = agent("Return LONG_WORKFLOW_RESULT only.", {"label": "Long child"})',
+                                        'result = agent("Return LONG_WORKFLOW_RESULT only.", {"label": "Long child", "model": "openai/gym", "effort": "off"})',
                                         '{"result": result}',
                                     ].join("\n"),
                                 },

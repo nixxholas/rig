@@ -32,7 +32,7 @@ describe("passive active-work list", () => {
                                     name: "visible-workflow",
                                     script: [
                                         'phase("Inspect")',
-                                        'agent("Wait, then return WORKFLOW_FINISHED only.", {"label": "Visible child"})',
+                                        'agent("Wait, then return WORKFLOW_FINISHED only.", {"label": "Visible child", "model": "openai/gym", "effort": "off"})',
                                         '"done"',
                                     ].join("\n"),
                                 },

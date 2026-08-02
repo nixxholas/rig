@@ -30,6 +30,7 @@ import type {
     AgentWorkspaceSession,
     DelegatedSession,
     DelegatedSessionRequest,
+    WorkspaceAgentRequest,
     AgentSessionTransferSchedule,
 } from "../agent/context/WorkspaceContext.js";
 import type { Message } from "../agent/types.js";
@@ -279,12 +280,18 @@ export class AgentSessionManager {
             throw new Error("That workspace is the one this session already works in.");
         }
         const sessionId = createId();
+        const selection = this.#resolveSubagentSelection(delegator, request);
         const workspaceRequest = {
-            ...delegator.requestForSubagent(),
+            ...(selection.parentRequest ?? delegator.requestForSubagent()),
             cwd: workspace.path,
+            effort: request.effort,
+            modelId: request.modelId,
             projectId,
             trackUnread: true,
             workspaceId: workspace.id,
+            ...(selection.providerId === undefined ? {} : { providerId: selection.providerId }),
+            ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
+            ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
         };
         const delegate = create(
             this.#repository.configureWorkspaceRequest?.(workspaceRequest) ?? workspaceRequest,
@@ -417,7 +424,7 @@ export class AgentSessionManager {
 
     async spawnInWorkspace(
         parentSessionId: string,
-        request: Omit<SpawnSubagentRequest, "cwd" | "workspaceId"> & { workspaceId: string },
+        request: WorkspaceAgentRequest,
         signal?: AbortSignal,
     ): Promise<SpawnSubagentResult> {
         const parent = this.#repository.get(parentSessionId);
@@ -824,74 +831,10 @@ export class AgentSessionManager {
                 "Native encrypted collaboration only works within the current compatible provider and region. Use `rig.spawn_agent` and provide the task normally when selecting or crossing a model, provider, or region.",
             );
         }
-        let parentRequest: CreateSessionRequest | undefined;
-        let childModelId = request.modelId;
-        let childProviderId = request.providerId;
-        if (childModelId !== undefined) {
-            parentRequest = parent.requestForSubagent();
-            if (childProviderId !== undefined && !parent.hasModel(childModelId, childProviderId)) {
-                throw new Error(
-                    `Model '${childModelId}' is not available for provider '${childProviderId}'.`,
-                );
-            }
-            if (childProviderId === undefined) {
-                const currentProviderId = parentRequest.providerId;
-                const lastSuccessfulProviderId =
-                    this.#lastSuccessfulProviderByModel.get(childModelId);
-                if (
-                    lastSuccessfulProviderId !== undefined &&
-                    parent.hasModel(childModelId, lastSuccessfulProviderId)
-                ) {
-                    childProviderId = lastSuccessfulProviderId;
-                } else if (
-                    currentProviderId !== undefined &&
-                    parent.hasModel(childModelId, currentProviderId)
-                ) {
-                    childProviderId = currentProviderId;
-                } else {
-                    const matchingProviderIds = parent.providerIdsForModel(childModelId);
-                    if (matchingProviderIds.length === 0) {
-                        throw new Error(`Model '${childModelId}' is not available.`);
-                    }
-                    childProviderId = matchingProviderIds[0];
-                }
-            }
-        } else if (childProviderId !== undefined) {
-            parentRequest = parent.requestForSubagent();
-            const providerModelIds = parent.modelIdsForProvider(childProviderId);
-            if (providerModelIds.length === 0) {
-                throw new Error(`Provider '${childProviderId}' is not available.`);
-            }
-            const lastSuccessfulModelId = this.#lastSuccessfulModelByProvider.get(childProviderId);
-            childModelId =
-                (lastSuccessfulModelId !== undefined &&
-                providerModelIds.includes(lastSuccessfulModelId)
-                    ? lastSuccessfulModelId
-                    : undefined) ??
-                (parentRequest.modelId !== undefined &&
-                providerModelIds.includes(parentRequest.modelId)
-                    ? parentRequest.modelId
-                    : undefined) ??
-                providerModelIds[0];
-        }
-        if (request.effort !== undefined) {
-            parentRequest ??= parent.requestForSubagent();
-            childModelId ??= parentRequest.modelId;
-            const effectiveChildProviderId = childProviderId ?? parentRequest.providerId;
-            if (childModelId === undefined || effectiveChildProviderId === undefined) {
-                throw new Error("A subagent effort requires a resolved model and provider.");
-            }
-            const effortLevels = parent.effortLevelsForModel(
-                childModelId,
-                effectiveChildProviderId,
-            );
-            if (effortLevels === undefined || !effortLevels.includes(request.effort)) {
-                const allowed = effortLevels?.join(", ") || "none";
-                throw new Error(
-                    `Model '${childModelId}' does not support '${request.effort}' effort. Allowed effort levels: ${allowed}.`,
-                );
-            }
-        }
+        const selection = this.#resolveSubagentSelection(parent, request);
+        let parentRequest = selection.parentRequest;
+        const childModelId = selection.modelId;
+        const childProviderId = selection.providerId;
 
         const parentMetadata = parent.agentMetadata();
         const depth = parentMetadata.depth + 1;
@@ -1006,6 +949,79 @@ export class AgentSessionManager {
             signal?.removeEventListener("abort", abortChild);
             this.#stoppedExplicitly.delete(child.id);
         }
+    }
+
+    #resolveSubagentSelection(
+        parent: InMemorySession,
+        request: { effort?: string; modelId?: string; providerId?: string },
+    ): {
+        modelId: string | undefined;
+        parentRequest: CreateSessionRequest | undefined;
+        providerId: string | undefined;
+    } {
+        let parentRequest: CreateSessionRequest | undefined;
+        const inheritedRequest = () => (parentRequest ??= parent.requestForSubagent());
+        let modelId = request.modelId;
+        let providerId = request.providerId;
+        if (modelId !== undefined) {
+            if (providerId !== undefined && !parent.hasModel(modelId, providerId)) {
+                throw new Error(
+                    `Model '${modelId}' is not available for provider '${providerId}'.`,
+                );
+            }
+            if (providerId === undefined) {
+                const currentProviderId = inheritedRequest().providerId;
+                const lastSuccessfulProviderId = this.#lastSuccessfulProviderByModel.get(modelId);
+                if (
+                    lastSuccessfulProviderId !== undefined &&
+                    parent.hasModel(modelId, lastSuccessfulProviderId)
+                ) {
+                    providerId = lastSuccessfulProviderId;
+                } else if (
+                    currentProviderId !== undefined &&
+                    parent.hasModel(modelId, currentProviderId)
+                ) {
+                    providerId = currentProviderId;
+                } else {
+                    const matchingProviderIds = parent.providerIdsForModel(modelId);
+                    if (matchingProviderIds.length === 0) {
+                        throw new Error(`Model '${modelId}' is not available.`);
+                    }
+                    providerId = matchingProviderIds[0];
+                }
+            }
+        } else if (providerId !== undefined) {
+            const providerModelIds = parent.modelIdsForProvider(providerId);
+            if (providerModelIds.length === 0) {
+                throw new Error(`Provider '${providerId}' is not available.`);
+            }
+            const lastSuccessfulModelId = this.#lastSuccessfulModelByProvider.get(providerId);
+            const currentModelId = inheritedRequest().modelId;
+            modelId =
+                (lastSuccessfulModelId !== undefined &&
+                providerModelIds.includes(lastSuccessfulModelId)
+                    ? lastSuccessfulModelId
+                    : undefined) ??
+                (currentModelId !== undefined && providerModelIds.includes(currentModelId)
+                    ? currentModelId
+                    : undefined) ??
+                providerModelIds[0];
+        }
+        if (request.effort !== undefined) {
+            modelId ??= inheritedRequest().modelId;
+            const effectiveProviderId = providerId ?? inheritedRequest().providerId;
+            if (modelId === undefined || effectiveProviderId === undefined) {
+                throw new Error("A subagent effort requires a resolved model and provider.");
+            }
+            const effortLevels = parent.effortLevelsForModel(modelId, effectiveProviderId);
+            if (effortLevels === undefined || !effortLevels.includes(request.effort)) {
+                const allowed = effortLevels?.join(", ") || "none";
+                throw new Error(
+                    `Model '${modelId}' does not support '${request.effort}' effort. Allowed effort levels: ${allowed}.`,
+                );
+            }
+        }
+        return { modelId, parentRequest, providerId };
     }
 
     async #reserveSlot(

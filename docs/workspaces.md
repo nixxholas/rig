@@ -136,6 +136,9 @@ and reports its result back to you.
     "workspace_id": "ws_...",
     "description": "Port the retry policy",
     "prompt": "Full instructions...",
+    "provider": "codex",
+    "model": "openai/gpt-5.6-sol",
+    "reasoning_effort": "medium",
     "background": true
 }
 ```
@@ -144,6 +147,11 @@ It returns `{ sessionId, taskName, path, status, output }`. Background agents ar
 the default; read their output with `TaskOutput` (or your provider's equivalent),
 stop them with `TaskStop`, and send follow-up work with `SendMessage`. `read_only:
 true` restricts the child to Read only instead of inheriting your permission mode.
+Model and reasoning effort are required. `provider` is optional and selects a
+specific visible account when the user's request calls for one; otherwise Rig
+resolves and routes the provider. `context: "parent"` includes the delegator's
+conversation; the default, `"task"`, starts with only the prompt.
+`service_tier: "priority"` requests priority service when supported.
 
 Use this when the workspace's work is _your_ work, delegated for isolation, and
 the user only needs your final answer.
@@ -158,11 +166,17 @@ afterwards through `agent_info` + `agent_send` with the returned `agentId`.
 {
     "workspace_id": "ws_...",
     "title": "Retry policy rewrite",
-    "prompt": "Full instructions..."
+    "prompt": "Full instructions...",
+    "provider": "codex",
+    "model": "openai/gpt-5.6-sol",
+    "reasoning_effort": "medium"
 }
 ```
 
 It returns `{ agentId, sessionId, projectId, title, workspaceId, workspacePath }`.
+Model and reasoning effort are required here too. `provider`, `read_only`, and
+`service_tier` are optional and have the same meaning as for a hidden workspace
+agent.
 
 Two things flow back to you automatically:
 

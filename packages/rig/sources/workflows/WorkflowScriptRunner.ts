@@ -1,4 +1,7 @@
-import type { AgentContext } from "../agent/index.js";
+import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+
+import type { AgentContext, Message } from "../agent/index.js";
 import { errorToMessage } from "../errorToMessage.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type {
@@ -14,15 +17,39 @@ import { fromMontyValue } from "./fromMontyValue.js";
 const MAX_WORKFLOW_AGENTS = 1_000;
 const MAX_WORKFLOW_BATCH_ITEMS = 4_096;
 
-interface WorkflowAgentOptions {
-    label?: string;
-    model?: string;
-    schema?: Record<string, unknown>;
-}
+const nonBlankString = Type.String({ minLength: 1, pattern: ".*\\S.*" });
 
-interface WorkflowAgentRequest extends WorkflowAgentOptions {
-    prompt: string;
-}
+const workflowAgentOptionsSchema = Type.Object(
+    {
+        context: Type.Optional(Type.Union([Type.Literal("parent"), Type.Literal("task")])),
+        effort: nonBlankString,
+        label: Type.Optional(Type.String()),
+        model: nonBlankString,
+        provider: Type.Optional(nonBlankString),
+        read_only: Type.Optional(Type.Boolean()),
+        schema: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        service_tier: Type.Optional(Type.Literal("priority")),
+    },
+    { additionalProperties: false },
+);
+
+const workflowAgentRequestSchema = Type.Object(
+    {
+        context: Type.Optional(Type.Union([Type.Literal("parent"), Type.Literal("task")])),
+        effort: nonBlankString,
+        label: Type.Optional(Type.String()),
+        model: nonBlankString,
+        prompt: nonBlankString,
+        provider: Type.Optional(nonBlankString),
+        read_only: Type.Optional(Type.Boolean()),
+        schema: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+        service_tier: Type.Optional(Type.Literal("priority")),
+    },
+    { additionalProperties: false },
+);
+
+type WorkflowAgentOptions = Static<typeof workflowAgentOptionsSchema>;
+type WorkflowAgentRequest = Static<typeof workflowAgentRequestSchema>;
 
 interface WorkflowRunnerOptions {
     agentContext: AgentContext;
@@ -32,6 +59,7 @@ interface WorkflowRunnerOptions {
     onCheckpoint?(checkpoint: WorkflowCheckpoint): void;
     onLog(message: string): void;
     parentToolCallId?: string;
+    parentMessages?: readonly Message[];
     resumeAgentCalls: readonly (WorkflowAgentCacheEntry | undefined)[];
     resumeCheckpoint?: WorkflowCheckpoint;
     signal: AbortSignal;
@@ -47,6 +75,7 @@ export class WorkflowScriptRunner {
     readonly #onCheckpoint: ((checkpoint: WorkflowCheckpoint) => void) | undefined;
     readonly #onLog: (message: string) => void;
     readonly #parentToolCallId: string | undefined;
+    readonly #parentMessages: readonly Message[] | undefined;
     readonly #resumeAgentCalls: readonly (WorkflowAgentCacheEntry | undefined)[];
     readonly #resumeCheckpoint: WorkflowCheckpoint | undefined;
     readonly #signal: AbortSignal;
@@ -65,6 +94,7 @@ export class WorkflowScriptRunner {
         this.#onCheckpoint = options.onCheckpoint;
         this.#onLog = options.onLog;
         this.#parentToolCallId = options.parentToolCallId;
+        this.#parentMessages = options.parentMessages;
         this.#resumeAgentCalls = options.resumeAgentCalls;
         this.#resumeCheckpoint = options.resumeCheckpoint;
         this.#signal = options.signal;
@@ -148,8 +178,16 @@ export class WorkflowScriptRunner {
                 ...(this.#parentToolCallId === undefined
                     ? {}
                     : { parentToolCallId: this.#parentToolCallId }),
-                ...(options.model === undefined ? {} : { modelId: options.model }),
+                ...(options.context === "parent" && this.#parentMessages !== undefined
+                    ? { contextMessages: this.#parentMessages }
+                    : {}),
+                contextMode: options.context ?? "task",
+                effort: options.effort,
+                modelId: options.model,
                 prompt,
+                ...(options.provider === undefined ? {} : { providerId: options.provider }),
+                ...(options.read_only === undefined ? {} : { readOnly: options.read_only }),
+                ...(options.service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
                 taskName,
                 waitForSlot: true,
             },
@@ -172,7 +210,8 @@ export class WorkflowScriptRunner {
         return Promise.all(
             requests.map(async (request, index) => {
                 try {
-                    return await this.#runAgent(request.prompt, request, callIndices[index]!);
+                    const { prompt, ...options } = request;
+                    return await this.#runAgent(prompt, options, callIndices[index]!);
                 } catch (error) {
                     if (isDatabaseFailure(error)) throw error;
                     this.#onLog(
@@ -196,8 +235,9 @@ export class WorkflowScriptRunner {
                 let result: unknown = item;
                 try {
                     for (const [stageIndex, stage] of stages.entries()) {
+                        const { prompt: stagePrompt, ...options } = stage;
                         const prompt = [
-                            stage.prompt,
+                            stagePrompt,
                             "",
                             `Original item (${index + 1}/${itemsValue.length}):`,
                             serializeWorkflowValue(item),
@@ -207,7 +247,7 @@ export class WorkflowScriptRunner {
                         ].join("\n");
                         result = await this.#runAgent(
                             prompt,
-                            stage,
+                            options,
                             callIndices[index * stages.length + stageIndex]!,
                         );
                     }
@@ -228,34 +268,12 @@ export class WorkflowScriptRunner {
     }
 
     #parseOptions(value: unknown): WorkflowAgentOptions {
-        if (value === undefined || value === null) return {};
-        if (typeof value !== "object" || Array.isArray(value)) {
-            throw new Error("Agent options must be a dictionary.");
+        if (!Value.Check(workflowAgentOptionsSchema, value)) {
+            throw new Error(
+                "Agent options must be a dictionary with non-empty model and effort values.",
+            );
         }
-        const candidate = value as Record<string, unknown>;
-        const options: WorkflowAgentOptions = {};
-        if (candidate.label !== undefined) {
-            if (typeof candidate.label !== "string")
-                throw new Error("Agent label must be a string.");
-            options.label = candidate.label;
-        }
-        if (candidate.model !== undefined) {
-            if (typeof candidate.model !== "string" || candidate.model.trim().length === 0) {
-                throw new Error("Agent model must be a non-empty model name.");
-            }
-            options.model = candidate.model.trim();
-        }
-        if (candidate.schema !== undefined) {
-            if (
-                typeof candidate.schema !== "object" ||
-                candidate.schema === null ||
-                Array.isArray(candidate.schema)
-            ) {
-                throw new Error("Agent schema must be a JSON Schema dictionary.");
-            }
-            options.schema = candidate.schema as Record<string, unknown>;
-        }
-        return options;
+        return this.#normalizeOptions(value);
     }
 
     #parseRequests(value: unknown, functionName: string): WorkflowAgentRequest[] {
@@ -264,18 +282,23 @@ export class WorkflowScriptRunner {
             throw new Error(`${functionName}() accepts at most ${MAX_WORKFLOW_BATCH_ITEMS} items.`);
         }
         return value.map((item, index) => {
-            if (typeof item === "string") return { prompt: item };
-            if (typeof item !== "object" || item === null || Array.isArray(item)) {
+            if (!Value.Check(workflowAgentRequestSchema, item)) {
                 throw new Error(
-                    `${functionName}() item ${index + 1} must be a prompt or dictionary.`,
+                    `${functionName}() item ${index + 1} must be a dictionary with prompt, model, and effort.`,
                 );
             }
-            const candidate = item as Record<string, unknown>;
-            if (typeof candidate.prompt !== "string" || candidate.prompt.trim().length === 0) {
-                throw new Error(`${functionName}() item ${index + 1} needs a prompt.`);
-            }
-            return { prompt: candidate.prompt, ...this.#parseOptions(candidate) };
+            return { ...this.#normalizeOptions(item), prompt: item.prompt.trim() };
         });
+    }
+
+    #normalizeOptions(options: WorkflowAgentOptions): WorkflowAgentOptions {
+        return {
+            ...options,
+            context: options.context ?? "task",
+            effort: options.effort.trim(),
+            model: options.model.trim(),
+            ...(options.provider === undefined ? {} : { provider: options.provider.trim() }),
+        };
     }
 
     #requireSubagents() {

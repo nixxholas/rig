@@ -42,7 +42,7 @@ describe("workflow monitor", () => {
                                     name: "live-monitor",
                                     script: [
                                         'phase("Inspect")',
-                                        'result = agent("Return MONITORED_CHILD_RESULT only.", {"label": "Monitor child"})',
+                                        'result = agent("Return MONITORED_CHILD_RESULT only.", {"label": "Monitor child", "model": "openai/gym", "effort": "off"})',
                                         '{"result": result}',
                                     ].join("\n"),
                                 },

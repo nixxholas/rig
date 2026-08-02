@@ -35,8 +35,8 @@ describe("workflow inspection", () => {
                                     script: [
                                         'phase("Review")',
                                         "results = parallel([",
-                                        '    {"prompt": "INCOMING_ALPHA_PROMPT", "label": "Alpha review"},',
-                                        '    {"prompt": "INCOMING_BETA_PROMPT", "label": "Beta review"},',
+                                        '    {"prompt": "INCOMING_ALPHA_PROMPT", "label": "Alpha review", "model": "openai/gym", "effort": "off"},',
+                                        '    {"prompt": "INCOMING_BETA_PROMPT", "label": "Beta review", "model": "openai/gym", "effort": "off"},',
                                         "])",
                                         '{"results": results}',
                                     ].join("\n"),

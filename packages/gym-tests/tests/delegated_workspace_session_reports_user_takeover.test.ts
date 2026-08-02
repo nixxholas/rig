@@ -66,7 +66,9 @@ describe("delegated workspace session", () => {
                         content: [
                             {
                                 arguments: {
+                                    model: "openai/gym",
                                     prompt: "DELEGATED_TASK: rewrite the changelog.",
+                                    reasoning_effort: "off",
                                     title: "Update the changelog",
                                     workspace_id: workspaceId,
                                 },

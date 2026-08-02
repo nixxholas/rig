@@ -210,6 +210,13 @@ describe("Codex collaboration tools", () => {
         expect(
             Value.Check(codexV1SpawnAgentTool.arguments, {
                 message: "Inspect the implementation.",
+                model: "openai/gpt-5.6-sol",
+                reasoning_effort: "medium",
+            }),
+        ).toBe(true);
+        expect(
+            Value.Check(codexV1SpawnAgentTool.arguments, {
+                message: "Inspect the implementation.",
             }),
         ).toBe(false);
     });
@@ -446,6 +453,7 @@ describe("Codex collaboration tools", () => {
                     fork_context: false,
                     message: "Inspect the Bedrock implementation.",
                     model: "openai/gpt-5.6-sol",
+                    provider: "bedrock",
                     reasoning_effort: "medium",
                     service_tier: "priority",
                 },
@@ -458,6 +466,7 @@ describe("Codex collaboration tools", () => {
                 contextMode: "task",
                 description: "worker",
                 prompt: "Inspect the Bedrock implementation.",
+                providerId: "bedrock",
                 serviceTier: "fast",
             }),
         );

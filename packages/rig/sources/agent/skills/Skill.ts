@@ -1,6 +1,4 @@
-export type SkillSource =
-    | { type: "file" }
-    | { folder: string; plugin: string; type: "plugin" };
+export type SkillSource = { type: "file" } | { folder: string; plugin: string; type: "plugin" };
 
 export interface Skill {
     name: string;

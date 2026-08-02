@@ -45,8 +45,8 @@ describe("WorkflowScriptRunner", () => {
                 'phase("Inspect")',
                 'schema = {"type": "object", "required": ["name", "ok"], "properties": {"name": {"type": "string"}, "ok": {"const": True}}}',
                 "checks = parallel([",
-                '    {"prompt": "Return ALPHA as JSON.", "label": "Alpha", "schema": schema},',
-                '    {"prompt": "Return BETA as JSON.", "label": "Beta", "schema": schema},',
+                '    {"prompt": "Return ALPHA as JSON.", "label": "Alpha", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium", "schema": schema},',
+                '    {"prompt": "Return BETA as JSON.", "label": "Beta", "model": "openai/gpt-5.6-terra", "effort": "medium", "schema": schema},',
                 "])",
                 '{"target": args["target"], "checks": checks}',
             ].join("\n"),
@@ -61,6 +61,7 @@ describe("WorkflowScriptRunner", () => {
         });
         expect(agentCount).toBe(2);
         expect(spawn).toHaveBeenCalledTimes(2);
+        expect(spawn.mock.calls[1]![0]).not.toHaveProperty("providerId");
         expect(logs).toContain("Phase: Inspect");
     });
 
@@ -76,14 +77,27 @@ describe("WorkflowScriptRunner", () => {
             workflowRunId: "parallel_database_failure",
         });
 
-        await expect(runner.run('parallel(["Inspect the database."])')).rejects.toBe(databaseError);
+        await expect(
+            runner.run(
+                'parallel([{"prompt": "Inspect the database.", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium"}])',
+            ),
+        ).rejects.toBe(databaseError);
     });
 
     it("reuses the unchanged prefix from a previous run", async () => {
         const spawn = vi.fn();
         const cached = {
             output: "cached answer",
-            signature: JSON.stringify({ options: { label: "Cached" }, prompt: "Inspect once." }),
+            signature: JSON.stringify({
+                options: {
+                    label: "Cached",
+                    provider: "codex",
+                    model: "openai/gpt-5.6-terra",
+                    effort: "medium",
+                    context: "task",
+                },
+                prompt: "Inspect once.",
+            }),
         };
         const runner = new WorkflowScriptRunner({
             agentContext: createContext(spawn),
@@ -96,7 +110,10 @@ describe("WorkflowScriptRunner", () => {
         });
 
         const result = await runner.run(
-            ['answer = agent("Inspect once.", {"label": "Cached"})', "answer"].join("\n"),
+            [
+                'answer = agent("Inspect once.", {"label": "Cached", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium"})',
+                "answer",
+            ].join("\n"),
         );
 
         expect(result.output).toBe("cached answer");
@@ -115,8 +132,8 @@ describe("WorkflowScriptRunner", () => {
         });
         const script = [
             'phase("Inspect")',
-            'first = agent("First prompt", {"label": "First"})',
-            'second = agent("Second prompt", {"label": "Second", "model": "openai/gpt-5.6"})',
+            'first = agent("First prompt", {"label": "First", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium"})',
+            'second = agent("Second prompt", {"label": "Second", "provider": "codex", "model": "openai/gpt-5.6", "effort": "high"})',
             '{"first": first, "second": second}',
         ].join("\n");
         const interrupted = new WorkflowScriptRunner({
@@ -159,8 +176,10 @@ describe("WorkflowScriptRunner", () => {
         expect(resumedSpawn).toHaveBeenCalledOnce();
         expect(resumedSpawn).toHaveBeenCalledWith(
             expect.objectContaining({
+                effort: "high",
                 modelId: "openai/gpt-5.6",
                 prompt: "Second prompt",
+                providerId: "codex",
                 taskName: "workflow_checkpoint_resumed_2",
             }),
             expect.any(AbortSignal),
@@ -187,8 +206,8 @@ describe("WorkflowScriptRunner", () => {
         });
         const script = [
             'pipeline(["alpha", "beta"], [',
-            '    {"prompt": "First stage", "label": "First"},',
-            '    {"prompt": "Second stage", "label": "Second"},',
+            '    {"prompt": "First stage", "label": "First", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium"},',
+            '    {"prompt": "Second stage", "label": "Second", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium"},',
             "]) ",
         ].join("\n");
         const first = new WorkflowScriptRunner({
@@ -240,8 +259,71 @@ describe("WorkflowScriptRunner", () => {
         });
 
         await expect(
-            runner.run('pipeline(["alpha"], [{"prompt": "Inspect the database."}])'),
+            runner.run(
+                'pipeline(["alpha"], [{"prompt": "Inspect the database.", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium"}])',
+            ),
         ).rejects.toBe(databaseError);
+    });
+
+    it("forwards complete child settings and the requested parent context", async () => {
+        const spawn = vi.fn(async (request: SpawnSubagentRequest) =>
+            completedResult(request, "complete"),
+        );
+        const parentMessage = {
+            blocks: [{ text: "Inspect this.", type: "text" as const }],
+            id: "parent-message",
+            role: "user" as const,
+        };
+        const runner = new WorkflowScriptRunner({
+            agentContext: createContext(spawn),
+            args: null,
+            onAgentCall: vi.fn(),
+            onLog: vi.fn(),
+            parentMessages: [parentMessage],
+            resumeAgentCalls: [],
+            signal: new AbortController().signal,
+            workflowRunId: "complete_settings",
+        });
+
+        await expect(
+            runner.run(
+                'agent("Review the implementation.", {"provider": "claude", "model": "anthropic/sonnet-5", "effort": "high", "service_tier": "priority", "read_only": True, "context": "parent"})',
+            ),
+        ).resolves.toMatchObject({ output: "complete" });
+
+        expect(spawn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                contextMessages: [parentMessage],
+                contextMode: "parent",
+                effort: "high",
+                modelId: "anthropic/sonnet-5",
+                providerId: "claude",
+                readOnly: true,
+                serviceTier: "fast",
+            }),
+            expect.any(AbortSignal),
+        );
+    });
+
+    it("requires complete child settings and rejects unsupported fields", async () => {
+        const runner = new WorkflowScriptRunner({
+            agentContext: createContext(vi.fn()),
+            args: null,
+            onAgentCall: vi.fn(),
+            onLog: vi.fn(),
+            resumeAgentCalls: [],
+            signal: new AbortController().signal,
+            workflowRunId: "invalid_settings",
+        });
+
+        await expect(
+            runner.run('agent("Inspect the implementation.", {"model": "openai/gpt-5.6-terra"})'),
+        ).rejects.toThrow("model and effort");
+        await expect(
+            runner.run(
+                'parallel([{"prompt": "Inspect.", "provider": "codex", "model": "openai/gpt-5.6-terra", "effort": "medium", "unexpected": True}])',
+            ),
+        ).rejects.toThrow("prompt, model, and effort");
     });
 });
 

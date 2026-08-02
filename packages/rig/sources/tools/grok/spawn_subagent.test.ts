@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 
 import { createJustBashToolHarness } from "../testing/createJustBashToolHarness.js";
 import { grokKillCommandOrSubagentTool } from "./kill_command_or_subagent.js";
@@ -6,6 +7,17 @@ import { grokSpawnSubagentTool } from "./spawn_subagent.js";
 import { grokFollowupSubagentTool } from "./followup_subagent.js";
 
 describe("grokSpawnSubagentTool", () => {
+    it("allows provider selection to be omitted", () => {
+        expect(
+            Value.Check(grokSpawnSubagentTool.arguments, {
+                description: "Inspect code",
+                effort: "medium",
+                model: "xai/grok-build",
+                prompt: "Inspect the implementation.",
+            }),
+        ).toBe(true);
+    });
+
     it("uses the human-readable task description in the transcript", () => {
         expect(
             grokSpawnSubagentTool.toUI(
@@ -20,6 +32,7 @@ describe("grokSpawnSubagentTool", () => {
                     effort: "medium",
                     model: "xai/grok-build",
                     prompt: "Investigate and fix the login bug.",
+                    provider: "grok",
                 },
             ),
         ).toBe("Started a subagent: Fix the login bug.");
@@ -38,6 +51,7 @@ describe("grokSpawnSubagentTool", () => {
                     effort: "medium",
                     model: "xai/grok-build",
                     prompt: "Handle the delegated task.",
+                    provider: "grok",
                 },
             ),
         ).toBe("Started a subagent: Delegated task.");
@@ -70,6 +84,8 @@ describe("grokSpawnSubagentTool", () => {
                 effort: "low",
                 model: "xai/grok-build",
                 prompt: "Inspect the implementation.",
+                provider: "grok",
+                service_tier: "priority",
                 subagent_type: "explore",
             },
             harness.context,
@@ -81,7 +97,9 @@ describe("grokSpawnSubagentTool", () => {
                 effort: "low",
                 modelId: "xai/grok-build",
                 parentToolCallId: "tool-1",
+                providerId: "grok",
                 readOnly: true,
+                serviceTier: "fast",
             }),
             undefined,
         );
@@ -114,11 +132,65 @@ describe("grokSpawnSubagentTool", () => {
                     effort: "medium",
                     model: "xai/grok-build",
                     prompt: "Finish without returning text.",
+                    provider: "grok",
                 },
                 harness.context,
                 {},
             ),
         ).rejects.toThrow("ran out of tokens before returning a response");
+    });
+
+    it("forwards parent context messages to the managed subagent", async () => {
+        const harness = createJustBashToolHarness();
+        const spawn = vi.fn(async () => ({
+            output: "Complete.",
+            path: "/root/inspect_code",
+            sessionId: "agent-1",
+            status: "completed" as const,
+            taskName: "inspect_code",
+        }));
+        harness.context.subagents = {
+            canSpawn: true,
+            depth: 0,
+            followUp: vi.fn(),
+            interrupt: vi.fn(),
+            list: () => [],
+            maxDepth: 3,
+            spawn,
+            wait: async () => ({ agents: [], timedOut: false }),
+        };
+        const parentMessage = {
+            blocks: [{ text: "Inspect the implementation.", type: "text" as const }],
+            id: "parent-user",
+            role: "user" as const,
+        };
+        const currentAgentMessage = {
+            blocks: [],
+            id: "parent-agent",
+            role: "agent" as const,
+        };
+
+        await grokSpawnSubagentTool.execute(
+            {
+                background: false,
+                context: "parent",
+                description: "Inspect code",
+                effort: "low",
+                model: "xai/grok-build",
+                prompt: "Inspect the implementation.",
+                provider: "grok",
+            },
+            harness.context,
+            { messages: [parentMessage, currentAgentMessage] },
+        );
+
+        expect(spawn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                contextMessages: [parentMessage],
+                contextMode: "parent",
+            }),
+            undefined,
+        );
     });
 
     it("propagates a database failure while stopping a subagent", async () => {

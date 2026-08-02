@@ -57,7 +57,9 @@ describe("workspace tools", () => {
             {
                 background: true,
                 description: "Fix parser",
+                model: "openai/gpt-5.6-sol",
                 prompt: "Repair the parser and run its tests.",
+                reasoning_effort: "medium",
                 workspace_id: "workspace-1",
             },
             harness.context,
@@ -67,11 +69,74 @@ describe("workspace tools", () => {
         expect(spawn).toHaveBeenCalledWith(
             {
                 background: true,
+                contextMode: "task",
                 description: "Fix parser",
+                effort: "medium",
+                modelId: "openai/gpt-5.6-sol",
                 parentToolCallId: "tool-1",
                 prompt: "Repair the parser and run its tests.",
                 workspaceId: "workspace-1",
             },
+            undefined,
+        );
+    });
+
+    it("passes workspace-agent overrides and parent context to the child", async () => {
+        const harness = createJustBashToolHarness();
+        const spawn = vi.fn(async () => ({
+            output: "The subagent is running in the background.",
+            path: "/root/parser",
+            sessionId: "child-1",
+            status: "running" as const,
+            taskName: "fix_parser",
+        }));
+        harness.context.workspaces = workspaceContext({ spawn });
+
+        await spawnWorkspaceAgentTool.execute(
+            {
+                context: "parent",
+                description: "Fix parser",
+                model: "openai/gpt-5.6-sol",
+                prompt: "Repair the parser and run its tests.",
+                provider: "codex",
+                read_only: true,
+                reasoning_effort: "high",
+                service_tier: "priority",
+                workspace_id: "workspace-1",
+            },
+            harness.context,
+            {
+                messages: [
+                    {
+                        blocks: [{ type: "text", text: "Prior task" }],
+                        id: "message-1",
+                        role: "user",
+                    },
+                    {
+                        blocks: [{ type: "text", text: "Current task" }],
+                        id: "message-2",
+                        role: "user",
+                    },
+                ],
+            },
+        );
+
+        expect(spawn).toHaveBeenCalledWith(
+            expect.objectContaining({
+                contextMessages: [
+                    {
+                        blocks: [{ type: "text", text: "Prior task" }],
+                        id: "message-1",
+                        role: "user",
+                    },
+                ],
+                contextMode: "parent",
+                effort: "high",
+                modelId: "openai/gpt-5.6-sol",
+                providerId: "codex",
+                readOnly: true,
+                serviceTier: "fast",
+            }),
             undefined,
         );
     });
@@ -126,12 +191,19 @@ describe("workspace tools", () => {
 
         await expect(
             delegateToWorkspaceTool.execute(
-                { prompt: "Update the changelog.", workspace_id: "workspace-2" },
+                {
+                    model: "openai/gpt-5.6-sol",
+                    prompt: "Update the changelog.",
+                    reasoning_effort: "medium",
+                    workspace_id: "workspace-2",
+                },
                 harness.context,
                 {},
             ),
         ).resolves.toMatchObject({ agentId: "agent-2", projectId: "project-1" });
         expect(delegate).toHaveBeenCalledWith({
+            effort: "medium",
+            modelId: "openai/gpt-5.6-sol",
             prompt: "Update the changelog.",
             workspaceId: "workspace-2",
         });
@@ -153,6 +225,11 @@ describe("workspace tools", () => {
             delegateToWorkspaceTool.execute(
                 {
                     prompt: "Update the changelog.",
+                    model: "openai/gpt-5.6-sol",
+                    provider: "codex",
+                    reasoning_effort: "high",
+                    read_only: true,
+                    service_tier: "priority",
                     title: "Update the changelog",
                     workspace_id: "workspace-2",
                 },
@@ -161,7 +238,12 @@ describe("workspace tools", () => {
             ),
         ).resolves.toMatchObject({ agentId: "agent-2", sessionId: "session-2" });
         expect(delegate).toHaveBeenCalledWith({
+            effort: "high",
+            modelId: "openai/gpt-5.6-sol",
             prompt: "Update the changelog.",
+            providerId: "codex",
+            readOnly: true,
+            serviceTier: "fast",
             title: "Update the changelog",
             workspaceId: "workspace-2",
         });
@@ -170,7 +252,13 @@ describe("workspace tools", () => {
     it("tells the user that delegation leaves this conversation's workspace", () => {
         expect(
             delegateToWorkspaceTool.describeAutoPermissionAction?.(
-                { prompt: "Update the changelog.", workspace_id: "workspace-2" },
+                {
+                    model: "openai/gpt-5.6-sol",
+                    prompt: "Update the changelog.",
+                    provider: "codex",
+                    reasoning_effort: "medium",
+                    workspace_id: "workspace-2",
+                },
                 createJustBashToolHarness().context,
             ),
         ).toContain("outside this conversation's own workspace");

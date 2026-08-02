@@ -1,5 +1,9 @@
 import { Type } from "@sinclair/typebox";
 
+import {
+    SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+    SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
+} from "../../agent/context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../agent/types.js";
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { WorkspaceContext } from "../../agent/context/WorkspaceContext.js";
@@ -88,6 +92,22 @@ export const spawnWorkspaceAgentTool = defineTool({
             workspace_id: Type.String({ description: "Owned, ready workspace ID." }),
             description: Type.String({ description: "Short human-readable task description." }),
             prompt: Type.String({ description: "Complete task instructions." }),
+            provider: Type.Optional(
+                Type.String({
+                    description:
+                        "Optional provider ID for the new agent. Omit to let Rig choose a compatible available account.",
+                }),
+            ),
+            model: Type.String({ description: SUBAGENT_MODEL_ARGUMENT_DESCRIPTION }),
+            reasoning_effort: Type.String({
+                description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+            }),
+            context: Type.Optional(
+                Type.Union([Type.Literal("parent"), Type.Literal("task")], {
+                    description:
+                        "Use parent to continue with this conversation's context, or task to start with only the delegated prompt. Defaults to task.",
+                }),
+            ),
             background: Type.Optional(
                 Type.Boolean({ description: "Run in the background. Defaults to true." }),
             ),
@@ -95,6 +115,12 @@ export const spawnWorkspaceAgentTool = defineTool({
                 Type.Boolean({
                     description:
                         "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+                }),
+            ),
+            service_tier: Type.Optional(
+                Type.Literal("priority", {
+                    description:
+                        "Service tier override for the new agent. Omit unless explicitly requested.",
                 }),
             ),
         },
@@ -109,16 +135,35 @@ export const spawnWorkspaceAgentTool = defineTool({
     }),
     shouldReviewInAutoMode: () => false,
     execute: (
-        { background = true, description, prompt, read_only, workspace_id },
+        {
+            background = true,
+            context: contextMode = "task",
+            description,
+            model,
+            prompt,
+            provider,
+            read_only,
+            reasoning_effort,
+            service_tier,
+            workspace_id,
+        },
         context,
         execution,
     ) =>
         requireWorkspaces(context).spawn(
             {
                 background,
+                contextMode,
                 description,
+                effort: reasoning_effort,
+                modelId: model,
                 prompt,
+                ...(provider === undefined ? {} : { providerId: provider }),
                 ...(read_only === undefined ? {} : { readOnly: read_only }),
+                ...(service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
+                ...(contextMode === "parent" && execution.messages !== undefined
+                    ? { contextMessages: execution.messages.slice(0, -1) }
+                    : {}),
                 workspaceId: workspace_id,
                 ...(execution.toolCallId === undefined
                     ? {}
@@ -259,9 +304,31 @@ export const delegateToWorkspaceTool = defineTool({
                 }),
             ),
             prompt: Type.String({ description: "Complete task instructions." }),
+            provider: Type.Optional(
+                Type.String({
+                    description:
+                        "Optional provider ID for the new agent. Omit to let Rig choose a compatible available account.",
+                }),
+            ),
+            model: Type.String({ description: SUBAGENT_MODEL_ARGUMENT_DESCRIPTION }),
+            reasoning_effort: Type.String({
+                description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
+            }),
             title: Type.Optional(
                 Type.String({
                     description: "Short human-readable title for the new conversation.",
+                }),
+            ),
+            read_only: Type.Optional(
+                Type.Boolean({
+                    description:
+                        "Run this child in Read only. Omit or set false to inherit the parent permission mode.",
+                }),
+            ),
+            service_tier: Type.Optional(
+                Type.Literal("priority", {
+                    description:
+                        "Service tier override for the new agent. Omit unless explicitly requested.",
                 }),
             ),
         },
@@ -278,11 +345,29 @@ export const delegateToWorkspaceTool = defineTool({
     shouldReviewInAutoMode: () => true,
     describeAutoPermissionAction: ({ workspace_id }) =>
         `start a user-visible agent session in workspace ${JSON.stringify(workspace_id)}, which works outside this conversation's own workspace`,
-    execute: ({ project_id, prompt, title, workspace_id }, context) =>
-        requireWorkspaces(context).delegate({
+    execute: (
+        {
+            model,
+            project_id,
             prompt,
+            provider,
+            read_only,
+            reasoning_effort,
+            service_tier,
+            title,
+            workspace_id,
+        },
+        context,
+    ) =>
+        requireWorkspaces(context).delegate({
+            effort: reasoning_effort,
+            modelId: model,
+            prompt,
+            ...(provider === undefined ? {} : { providerId: provider }),
             workspaceId: workspace_id,
             ...(project_id === undefined ? {} : { projectId: project_id }),
+            ...(read_only === undefined ? {} : { readOnly: read_only }),
+            ...(service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
             ...(title === undefined ? {} : { title }),
         }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],

@@ -141,10 +141,7 @@ describe("Happy MCP server lifecycle", () => {
         await expect.poll(() => contribution.status).toBe("closed");
         await contribution.close();
 
-        expect(requests).toEqual([
-            "POST /mcp/servers",
-            "GET /mcp/servers/registration-1/events",
-        ]);
+        expect(requests).toEqual(["POST /mcp/servers", "GET /mcp/servers/registration-1/events"]);
     });
 });
 

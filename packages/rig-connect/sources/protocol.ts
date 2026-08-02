@@ -1601,6 +1601,10 @@ export type SlotAction =
           model?: string;
           projectId?: string;
           prompt?: string;
+          provider?: string;
+          readOnly?: boolean;
+          serviceTier?: "fast";
+          title?: string;
           type: "new-chat";
           workspaceId?: string;
       };

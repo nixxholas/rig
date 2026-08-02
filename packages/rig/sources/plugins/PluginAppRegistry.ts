@@ -263,7 +263,6 @@ export class PluginAppRegistry {
             if (this.#storageQueues.get(folder) === current) this.#storageQueues.delete(folder);
         });
     }
-
 }
 
 function toContribution(

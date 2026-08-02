@@ -23,6 +23,18 @@ export const grokSpawnSubagentTool = defineTool({
         effort: Type.String({
             description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
         }),
+        provider: Type.Optional(
+            Type.String({
+                description:
+                    "Optional provider ID for the new agent. Omit to let Rig select an available provider for the model.",
+            }),
+        ),
+        context: Type.Optional(
+            Type.Union([Type.Literal("parent"), Type.Literal("task")], {
+                description:
+                    "Use parent to continue with the parent thread context, or task to start with only the delegated prompt. Defaults to task.",
+            }),
+        ),
         subagent_type: Type.Optional(
             Type.String({
                 description:
@@ -41,6 +53,12 @@ export const grokSpawnSubagentTool = defineTool({
                     "Return immediately with a subagent_id. Defaults to true; use the output tool to inspect status.",
             }),
         ),
+        service_tier: Type.Optional(
+            Type.Literal("priority", {
+                description:
+                    "Service tier override for the new agent. Omit unless explicitly requested.",
+            }),
+        ),
     }),
     returnType: Type.Object({
         subagent_id: Type.String(),
@@ -50,20 +68,37 @@ export const grokSpawnSubagentTool = defineTool({
     }),
     shouldReviewInAutoMode: () => false,
     execute: async (
-        { background = true, description, effort, model, prompt, read_only, subagent_type },
+        {
+            background = true,
+            context: contextMode = "task",
+            description,
+            effort,
+            model,
+            prompt,
+            provider,
+            read_only,
+            service_tier,
+            subagent_type,
+        },
         context,
         execution,
     ) => {
         const result = await requireSubagentContext(context).spawn(
             {
                 background,
+                contextMode,
+                ...(contextMode === "parent" && execution.messages !== undefined
+                    ? { contextMessages: execution.messages.slice(0, -1) }
+                    : {}),
                 description,
                 effort,
                 modelId: model,
+                ...(provider === undefined ? {} : { providerId: provider }),
                 prompt,
                 ...(read_only !== undefined || subagent_type === "explore"
                     ? { readOnly: read_only ?? true }
                     : {}),
+                ...(service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
                 taskName: toTaskName(description),
                 ...(execution.toolCallId === undefined
                     ? {}

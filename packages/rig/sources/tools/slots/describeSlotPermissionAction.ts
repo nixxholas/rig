@@ -110,9 +110,17 @@ function describeAction(action: SlotAction): string {
                 action.model === undefined
                     ? undefined
                     : `using model ${quoteVisibleExact(action.model)}`,
+                action.provider === undefined
+                    ? undefined
+                    : `using provider ${quoteVisibleExact(action.provider)}`,
                 action.effort === undefined
                     ? undefined
                     : `at effort ${quoteVisibleExact(action.effort)}`,
+                action.serviceTier === undefined ? undefined : "with priority service",
+                action.readOnly === true ? "in Read only" : undefined,
+                action.title === undefined
+                    ? undefined
+                    : `titled ${quoteVisibleExact(action.title)}`,
                 action.prompt === undefined
                     ? undefined
                     : `with prompt ${quoteVisibleExact(action.prompt)}`,

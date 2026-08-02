@@ -39,7 +39,7 @@ describe("Escape during a workflow-resurrected turn", () => {
                                     description: "Trigger a later notification turn",
                                     name: "resurrect-session",
                                     script: [
-                                        'result = agent("Return RESURRECT_CHILD_RESULT only.", {"label": "Resurrect child"})',
+                                        'result = agent("Return RESURRECT_CHILD_RESULT only.", {"label": "Resurrect child", "model": "openai/gym", "effort": "off"})',
                                         '{"result": result}',
                                     ].join("\n"),
                                 },

@@ -20,9 +20,9 @@ The Python script coordinates agents but has no direct filesystem, shell, enviro
 
 Available Python globals:
 - args: the JSON value passed in this tool call, or None.
-- agent(prompt, options={}): run one subagent and return its final text. Options support label, model, and schema. Model is an available model ID; when omitted, the agent inherits the parent model. With schema, the agent must return matching JSON and agent() returns the parsed value.
-- parallel(requests): run requests concurrently and return results in input order. Each request is a prompt string or {"prompt": str, "label": str, "model": str, "schema": object}. Failed items become None.
-- pipeline(items, stages): process all items concurrently through sequential stages. Each stage is a prompt string or request dictionary. The original item and previous result are appended to every stage prompt. Failed items become None.
+- agent(prompt, options): run one subagent and return its final text. Every child must explicitly set model and effort. Optional fields are provider, label, schema, service_tier="priority", read_only, and context ("task", the default, or "parent"). Omit provider to use Rig's normal account routing. With schema, the agent must return matching JSON and agent() returns the parsed value.
+- parallel(requests): run requests concurrently and return results in input order. Each request is a dictionary with prompt, model, and effort; it may also use the optional agent fields. Failed items become None.
+- pipeline(items, stages): process all items concurrently through sequential stages. Every stage is a dictionary with prompt, model, and effort; it may also use the optional agent fields. The original item and previous result are appended to every stage prompt. Failed items become None.
 - phase(title): group later agent calls under a human-readable phase.
 - log(message): include a progress note in the workflow run.
 - print(...): also records a progress note.
@@ -32,13 +32,13 @@ External calls block until their host operation completes, even though subagents
 Example:
 phase("Review")
 reviews = parallel([
-    {"prompt": "Review authentication for bugs.", "label": "Auth review"},
-    {"prompt": "Review storage for bugs.", "label": "Storage review"},
+    {"prompt": "Review authentication for bugs.", "label": "Auth review", "model": "openai/gpt-5.6-terra", "effort": "medium"},
+    {"prompt": "Review storage for bugs.", "label": "Storage review", "model": "openai/gpt-5.6-terra", "effort": "medium"},
 ])
 phase("Verify")
 verified = pipeline(
     [review for review in reviews if review is not None],
-    [{"prompt": "Adversarially verify this finding.", "label": "Verify finding"}],
+    [{"prompt": "Adversarially verify this finding.", "label": "Verify finding", "model": "openai/gpt-5.6-terra", "effort": "medium"}],
 )
 {"verified": [result for result in verified if result is not None]}
 
@@ -144,6 +144,9 @@ export function createWorkflowTool(name: "Workflow" | "workflow") {
                         ...(execution.toolCallId === undefined
                             ? {}
                             : { parentToolCallId: execution.toolCallId }),
+                        ...(execution.messages === undefined
+                            ? {}
+                            : { parentMessages: execution.messages.slice(0, -1) }),
                         resumeAgentCalls: options.resumeAgentCalls,
                         ...(options.resumeCheckpoint === undefined
                             ? {}

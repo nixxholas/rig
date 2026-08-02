@@ -38,7 +38,7 @@ describe("cancelling a workflow wait", () => {
                                     name: "surviving-workflow",
                                     script: [
                                         'phase("Survive wait cancellation")',
-                                        'result = agent("Return SURVIVING_WORKFLOW_RESULT only.", {"label": "Surviving child"})',
+                                        'result = agent("Return SURVIVING_WORKFLOW_RESULT only.", {"label": "Surviving child", "model": "openai/gym", "effort": "off"})',
                                         '{"result": result}',
                                     ].join("\n"),
                                 },

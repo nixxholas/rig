@@ -49,11 +49,13 @@ The Claude-shaped tool shows every argument that matters:
 {
     "description": "Audit retry semantics",
     "prompt": "Read the provider layer and report where retries are replayed...",
+    "provider": "claude",
     "model": "anthropic/sonnet-5",
     "effort": "medium",
     "run_in_background": true,
     "context": "task",
-    "read_only": true
+    "read_only": true,
+    "service_tier": "priority"
 }
 ```
 
@@ -80,6 +82,9 @@ result.
 **Permissions**: `read_only: true` runs the child in Read only; omitting it means
 the child inherits the parent's permission mode. The same flag on `SendMessage`
 and `agent_send` can tighten or restore a child's mode later.
+
+**Service tier**: `service_tier: "priority"` requests priority service when the
+selected provider supports it.
 
 ### Waiting for background work — do not poll
 

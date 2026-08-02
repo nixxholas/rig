@@ -41,6 +41,12 @@ export const codexV1SpawnAgentTool = defineTool({
             model: Type.String({
                 description: SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
             }),
+            provider: Type.Optional(
+                Type.String({
+                    description:
+                        "Optional provider ID for the new agent. Omit to let Rig select an available provider for the model.",
+                }),
+            ),
             reasoning_effort: Type.String({
                 description: SUBAGENT_EFFORT_ARGUMENT_DESCRIPTION,
             }),
@@ -82,6 +88,7 @@ export const codexV1SpawnAgentTool = defineTool({
                     : args.agent_type.trim(),
             effort: args.reasoning_effort,
             modelId: args.model,
+            ...(args.provider === undefined ? {} : { providerId: args.provider }),
             ...(args.read_only === undefined ? {} : { readOnly: args.read_only }),
             ...(execution.toolCallId === undefined
                 ? {}

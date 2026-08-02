@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { Value } from "@sinclair/typebox/value";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
+import { slotActionSchema } from "../../protocol/SlotProtocol.js";
 import { slotCreateTool } from "./slot_create.js";
 import { slotRemoveTool } from "./slot_remove.js";
 import { slotUpdateTool } from "./slot_update.js";
@@ -63,5 +65,45 @@ describe("slot tools", () => {
         expect(slotCreateTool.describeAutoPermissionAction?.(args, context)).toContain(
             'open the webapp "build-dashboard" at path "reports/today.html" with query parameters "theme" set to "dark", "view" set to "compact"',
         );
+    });
+
+    it("accepts complete new-chat selection and permission parameters", () => {
+        const action = {
+            effort: "high",
+            model: "openai/gpt-5.6-sol",
+            projectId: "project-1",
+            prompt: "Inspect the failing build.",
+            provider: "codex-work",
+            readOnly: true,
+            serviceTier: "fast",
+            title: "Build investigation",
+            type: "new-chat",
+            workspaceId: "workspace-1",
+        } as const;
+
+        expect(Value.Check(slotActionSchema, action)).toBe(true);
+        expect(
+            Value.Check(slotActionSchema, {
+                ...action,
+                serviceTier: "turbo",
+            }),
+        ).toBe(false);
+
+        const args = {
+            content: {
+                action,
+                label: "Investigate",
+                type: "button",
+            },
+            description: "Build investigation shortcut",
+            purpose: "Start a correctly configured investigation chat",
+            scope: "everywhere",
+            slot: "sidebar",
+        } as const;
+        const description = slotCreateTool.describeAutoPermissionAction?.(args, {} as AgentContext);
+        expect(description).toContain('using provider "codex-work"');
+        expect(description).toContain("with priority service");
+        expect(description).toContain("in Read only");
+        expect(description).toContain('titled "Build investigation"');
     });
 });

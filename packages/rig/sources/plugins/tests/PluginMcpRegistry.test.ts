@@ -4,10 +4,7 @@ import type { HappyMcpEvent, HappyMcpServerRegistration } from "happy-plugins";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { AnyDefinedTool } from "../../agent/types.js";
-import {
-    PluginMcpRegistry,
-    type PluginMcpRegistrationRetirement,
-} from "../PluginMcpRegistry.js";
+import { PluginMcpRegistry, type PluginMcpRegistrationRetirement } from "../PluginMcpRegistry.js";
 
 describe("PluginMcpRegistry", () => {
     it("reports each live registration retirement to its owning generation", () => {

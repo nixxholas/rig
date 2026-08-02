@@ -162,6 +162,8 @@ describe("agent tree usage session wiring", () => {
                 name: "Visible review",
             });
             const delegated = await rootContext.workspaces!.delegate({
+                effort: "off",
+                modelId: fixture.model.id,
                 prompt: "Review the visible workspace.",
                 title: "Visible workspace reviewer",
                 workspaceId: workspace.id,

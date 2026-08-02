@@ -117,6 +117,45 @@ describe("Agent tool", () => {
         );
     });
 
+    it("maps the requested priority service tier to fast", async () => {
+        const harness = createJustBashToolHarness();
+        const spawn = vi.fn(async () => ({
+            output: "The subagent is running in the background.",
+            path: "/root/inspect_tests",
+            sessionId: "subagent-1",
+            status: "running" as const,
+            taskName: "inspect_tests",
+        }));
+        harness.context.subagents = {
+            canSpawn: true,
+            depth: 0,
+            followUp: vi.fn(),
+            interrupt: vi.fn(),
+            list: () => [],
+            maxDepth: 3,
+            spawn,
+            wait: async () => ({ agents: [], timedOut: false }),
+        };
+
+        await claudeAgentTool.execute(
+            {
+                context: "task",
+                description: "Inspect the tests",
+                effort: "medium",
+                model: "anthropic/sonnet-5",
+                prompt: "Review the test suite.",
+                service_tier: "priority",
+            },
+            harness.context,
+            {},
+        );
+
+        expect(spawn).toHaveBeenCalledWith(
+            expect.objectContaining({ serviceTier: "fast" }),
+            undefined,
+        );
+    });
+
     it("launches an Agent in the background by default", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({

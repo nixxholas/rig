@@ -1,5 +1,7 @@
-import type { SpawnSubagentResult } from "./SubagentContext.js";
+import type { ServiceTier } from "@slopus/rig-execution";
 
+import type { Message } from "../types.js";
+import type { SpawnSubagentResult, SubagentContextMode } from "./SubagentContext.js";
 export interface AgentWorkspace {
     id: string;
     name: string;
@@ -31,17 +33,29 @@ export interface AgentWorkspaceSession {
 }
 
 export interface WorkspaceAgentRequest {
-    description: string;
-    prompt: string;
-    readOnly?: boolean;
-    workspaceId: string;
     background?: boolean;
+    contextMessages?: readonly Message[];
+    contextMode?: SubagentContextMode;
+    description: string;
+    effort: string;
+    modelId: string;
+    prompt: string;
+    providerId?: string;
+    readOnly?: boolean;
+    serviceTier?: ServiceTier;
+    taskName?: string;
+    workspaceId: string;
     parentToolCallId?: string;
 }
 
 export interface DelegatedSessionRequest {
+    effort: string;
+    modelId: string;
     projectId?: string;
     prompt: string;
+    providerId?: string;
+    readOnly?: boolean;
+    serviceTier?: ServiceTier;
     title?: string;
     workspaceId: string;
 }

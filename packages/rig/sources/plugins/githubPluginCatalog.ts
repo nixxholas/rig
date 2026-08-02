@@ -15,8 +15,7 @@ export const githubGitRefSchema = Type.String({
     description: "Git branch, tag, or commit. Defaults to the repository's default branch.",
     maxLength: 1024,
     minLength: 1,
-    pattern:
-        "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._/-]*[A-Za-z0-9._-]$",
+    pattern: "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._/-]*[A-Za-z0-9._-]$",
 });
 
 export const githubPluginNameSchema = Type.String({
