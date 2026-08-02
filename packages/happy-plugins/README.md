@@ -18,7 +18,8 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 
 The SDK is an early preview. The current surface covers projects, workspace commands and files,
 sessions, messages to agents, UI slots, generated-media publishing, provider usage, MCP tool
-contributions, managed-network interception, and local application contributions.
+contributions, managed-network interception, local application contributions, system-prompt
+middleware, and lifecycle tracing.
 
 Plugins can add persistent content to Happy's fixed UI slots. Happy validates the same content and
 slot/scope rules used by its HTTP API and agent tools, and records the plugin as the entry's author.
@@ -95,6 +96,7 @@ The manifest is intentionally small and exact:
     "version": "1.0.0",
     "main": "index.ts",
     "icon": "icon.png",
+    "systemPrompt": { "path": "SYSTEM_PROMPT.md" },
     "apps": [
         {
             "id": "overview",
@@ -107,15 +109,18 @@ The manifest is intentionally small and exact:
 }
 ```
 
-`name`, `description`, and `icon` are required. `main`, `skills`, `version`, and `apps` are
-optional, but at least a main entry point or a skills directory must be present. Extra fields are
-rejected.
+`name`, `description`, and `icon` are required. `main`, `skills`, `systemPrompt`, `version`, and
+`apps` are optional, but at least a main entry point, a skills directory, or a system-prompt
+contribution must be present. Extra fields are rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
 - `version`: a Semantic Versioning string. An omitted version is treated as `0.0.0`.
 - `main`: a relative path to a runnable JavaScript or TypeScript file inside the plugin folder.
 - `skills`: a relative path to a skills directory. When omitted, Happy uses `skills/` if present.
+- `systemPrompt`: either `{ "text": "..." }` for inline text or `{ "path": "..." }` for a
+  relative ordinary file inside the plugin folder. A contribution and the combined active-plugin
+  contribution are each capped at 256 KiB.
 - `icon`: a relative path to a PNG file inside the plugin folder.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
   sidebar metadata, and optional image icon.
@@ -314,6 +319,41 @@ import { happy } from "happy-plugins";
 ```
 
 All methods return promises. Inputs and daemon responses are validated with TypeBox at runtime.
+
+### Prompt hooks and tracing
+
+Register prompt middleware during plugin startup. Happy calls hooks by plugin folder name, gives
+each hook the previous hook's result, and waits at most two seconds for each response. Returning no
+`systemPrompt` leaves the current value unchanged. A timeout, disconnect, error, or oversized
+payload is logged and skipped without failing the agent turn. The whole middleware chain has a
+five-second budget, after which remaining hooks are skipped and logged.
+
+```ts
+const hook = await happy.hooks.onSystemPrompt(({ systemPrompt, userPrompt }) => ({
+    systemPrompt: `${systemPrompt}\n\nThe current user request is: ${userPrompt}`,
+}));
+```
+
+Lifecycle tracing is observation-only. `subscribe` receives turn, inference request, and tool-call
+start/finish events with timestamps, durations, success, and provider usage when available.
+Callbacks are processed serially so a slow plugin applies socket backpressure. Happy retains at
+most 128 queued events per plugin, drops the oldest under sustained pressure, and logs the running
+drop count. Tool calls that are interrupted before execution produce no tracing start or finish
+pair. No tracing callback can delay or fail an agent run.
+
+```ts
+const tracing = await happy.tracing.subscribe((event) => {
+    console.log(event.type, event.sessionId, event.timestamp);
+});
+
+await hook.close();
+await tracing.close();
+```
+
+Both returned registrations expose `status`, `failure`, and the current `registrationId`. If an
+attached NDJSON stream closes or contains invalid data, the daemon retires that generation and the
+SDK logs the disconnect before re-registering with bounded backoff. Calling `close()` stops
+recovery.
 
 ### Plugins
 

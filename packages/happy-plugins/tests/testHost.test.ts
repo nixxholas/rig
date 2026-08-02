@@ -17,9 +17,104 @@ const hosts: HappyPluginTestHost[] = [];
 
 afterEach(async () => {
     await Promise.all(hosts.splice(0).map((host) => host.close()));
+    vi.restoreAllMocks();
 });
 
 describe("Happy plugin test host", () => {
+    it("supports typed system-prompt hooks and non-blocking tracing subscriptions", async () => {
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        hosts.push(host);
+        const hook = await host.client.hooks.onSystemPrompt(({ systemPrompt, userPrompt }) => ({
+            systemPrompt: `${systemPrompt}\nPlugin saw: ${userPrompt}`,
+        }));
+        const traced: string[] = [];
+        let release = () => {};
+        const gate = new Promise<void>((resolve) => {
+            release = resolve;
+        });
+        const tracing = await host.client.tracing.subscribe(async (event) => {
+            traced.push(event.type);
+            await gate;
+        });
+
+        await expect(
+            host.hooks.applySystemPrompt({
+                systemPrompt: "Base",
+                userPrompt: "Ship.",
+            }),
+        ).resolves.toEqual({ systemPrompt: "Base\nPlugin saw: Ship." });
+        host.tracing.emit({
+            model: "openai/gpt-test",
+            provider: "codex",
+            sessionId: "session-1",
+            timestamp: 1,
+            type: "turn_started",
+        });
+        host.tracing.emit({
+            durationMs: 2,
+            model: "openai/gpt-test",
+            provider: "codex",
+            sessionId: "session-1",
+            stopReason: "stop",
+            success: true,
+            timestamp: 3,
+            type: "turn_finished",
+        });
+        await expect.poll(() => traced).toEqual(["turn_started"]);
+        release();
+        await expect.poll(() => traced).toEqual(["turn_started", "turn_finished"]);
+
+        await hook.close();
+        await tracing.close();
+    });
+
+    it("re-registers prompt and tracing streams after an unexpected detach", async () => {
+        const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        hosts.push(host);
+        const hook = await host.client.hooks.onSystemPrompt(({ systemPrompt }) => ({
+            systemPrompt: `${systemPrompt}\nrecovered`,
+        }));
+        const traced: string[] = [];
+        const tracing = await host.client.tracing.subscribe((event) => {
+            traced.push(event.type);
+        });
+        const firstHookRegistration = hook.registrationId;
+        const firstTracingRegistration = tracing.registrationId;
+
+        host.hooks.disconnect();
+        host.tracing.disconnect();
+
+        await expect
+            .poll(
+                () =>
+                    hook.registrationId !== firstHookRegistration &&
+                    tracing.registrationId !== firstTracingRegistration,
+            )
+            .toBe(true);
+        expect(hook.status).toBe("connected");
+        expect(tracing.status).toBe("connected");
+        await expect(
+            host.hooks.applySystemPrompt({
+                systemPrompt: "Base",
+                userPrompt: "Continue.",
+            }),
+        ).resolves.toEqual({ systemPrompt: "Base\nrecovered" });
+        host.tracing.emit({
+            model: "openai/gpt-test",
+            provider: "codex",
+            sessionId: "session-1",
+            timestamp: 1,
+            type: "turn_started",
+        });
+        await expect.poll(() => traced).toEqual(["turn_started"]);
+        expect(warning).toHaveBeenCalledWith(expect.stringContaining("will reconnect"));
+
+        await hook.close();
+        await tracing.close();
+        warning.mockRestore();
+    });
+
     it("exposes the exact stable tool identity used by ordinary agents", () => {
         expect(createHappyMcpToolName("Project Tools", "Catalog", "list projects")).toBe(
             "mcp__Project_Tools___Catalog__list_projects",

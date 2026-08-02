@@ -17,6 +17,7 @@ import { createGeneratedMediaStore } from "../../generated-media/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createPluginApiServer } from "../createPluginApiServer.js";
 import { MAX_INSTALLED_PLUGINS } from "../discoverPlugins.js";
+import { PluginHookRegistry } from "../PluginHookRegistry.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -70,6 +71,54 @@ describe("plugin API server", () => {
         await expect(unauthorizedStatus(socketPath)).resolves.toBe(401);
     });
 
+    it("returns conflict responses when hook stream registrations are stale or duplicate", async () => {
+        const directory = await createTestSocketDirectory();
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const hooks = new PluginHookRegistry().createConnection({
+            folder: "test-plugin",
+            name: "Test Plugin",
+        });
+        const server = createPluginApiServer({
+            hooks,
+            listPlugins: async () => [],
+            pluginFolder: "test-plugin",
+            pluginName: "Test Plugin",
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+
+        for (const path of [
+            "/hooks/system-prompt/stale/events",
+            "/tracing/subscriptions/stale/events",
+        ]) {
+            const response = await authorizedResponse(socketPath, path);
+            expect(response.status).toBe(409);
+            expect(response.contentType).toContain("application/json");
+            expect(response.body).toContain("not active");
+        }
+        await expect(
+            authorizedResponse(socketPath, "/hooks/system-prompt", "POST"),
+        ).resolves.toMatchObject({ status: 201 });
+        await expect(
+            authorizedResponse(socketPath, "/hooks/system-prompt", "POST"),
+        ).resolves.toMatchObject({
+            body: expect.stringContaining("already registered"),
+            status: 409,
+        });
+    });
+
     it("creates, lists, updates, and removes slot entries with plugin authorship", async () => {
         const fixture = await createPluginApiFixture();
 
@@ -101,7 +150,9 @@ describe("plugin API server", () => {
             slot: "status-line",
         });
 
-        await expect(fixture.client.slots.list({ slot: "status-line" })).resolves.toEqual([created]);
+        await expect(fixture.client.slots.list({ slot: "status-line" })).resolves.toEqual([
+            created,
+        ]);
         const updated = await fixture.client.slots.update(created.id, {
             content: {
                 action: { message: "show logs", type: "send-current-chat" },
@@ -150,9 +201,9 @@ describe("plugin API server", () => {
             message: "Plugin media paths cannot leave the plugin data folder.",
             status: 400,
         });
-        await expect(
-            fixture.client.media.publish({ path: "too-large.bin" }),
-        ).rejects.toMatchObject({ status: 413 });
+        await expect(fixture.client.media.publish({ path: "too-large.bin" })).rejects.toMatchObject(
+            { status: 413 },
+        );
     });
 
     it("executes one-shot workspace commands with captured output and a bounded timeout", async () => {
@@ -746,6 +797,39 @@ function unauthorizedStatus(socketPath: string): Promise<number> {
             (response) => {
                 response.resume();
                 response.once("end", () => resolve(response.statusCode ?? 500));
+            },
+        );
+        request.once("error", reject);
+        request.end();
+    });
+}
+
+function authorizedResponse(
+    socketPath: string,
+    path: string,
+    method = "GET",
+): Promise<{ body: string; contentType: string | undefined; status: number }> {
+    return new Promise((resolve, reject) => {
+        const request = requestHttp(
+            {
+                headers: { authorization: "Bearer private-plugin-token" },
+                method,
+                path,
+                socketPath,
+            },
+            (response) => {
+                const chunks: Buffer[] = [];
+                response.on("data", (chunk: Buffer) => chunks.push(chunk));
+                response.once("end", () =>
+                    resolve({
+                        body: Buffer.concat(chunks).toString("utf8"),
+                        contentType:
+                            typeof response.headers["content-type"] === "string"
+                                ? response.headers["content-type"]
+                                : undefined,
+                        status: response.statusCode ?? 500,
+                    }),
+                );
             },
         );
         request.once("error", reject);

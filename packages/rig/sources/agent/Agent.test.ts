@@ -1,4 +1,5 @@
 import { Type } from "@sinclair/typebox";
+import type { HappyTracingEvent } from "happy-plugins";
 import { describe, expect, it, vi } from "vitest";
 
 import { codexViewImageTool } from "./tools/codex/view_image.js";
@@ -62,6 +63,12 @@ describe("Agent", () => {
         });
         const execute = vi.fn(() => ({ applied: true }));
         const observedEvents: AgentLoopEvent[] = [];
+        const traces: { type: string }[] = [];
+        const harness = createJustBashToolHarness();
+        harness.context.plugins = {
+            loadSkills: async () => [],
+            trace: (event: HappyTracingEvent) => traces.push(event),
+        } as never;
         const tool = defineTool({
             name: "custom_patch",
             label: "Custom patch",
@@ -89,7 +96,7 @@ describe("Agent", () => {
         const agent = new Agent({
             provider,
             modelId: model.id,
-            context: createJustBashToolHarness().context,
+            context: harness.context,
             tools: [tool],
             printToConsole: false,
             onEvent: (event) => {
@@ -122,6 +129,9 @@ describe("Agent", () => {
         );
         expect(streamedMessageIds.size).toBe(2);
         expect(new Set(committedMessageIds)).toEqual(streamedMessageIds);
+        expect(traces.map((event) => event.type)).toEqual(
+            expect.arrayContaining(["tool_call_started", "tool_call_finished"]),
+        );
     });
 
     it("preserves tool results when optional debug and live observers fail", async () => {
@@ -304,10 +314,16 @@ describe("Agent", () => {
                 return streamFor(stoppedMessage(model.id));
             },
         });
+        const traces: HappyTracingEvent[] = [];
+        const harness = createJustBashToolHarness();
+        harness.context.plugins = {
+            loadSkills: async () => [],
+            trace: (event: HappyTracingEvent) => traces.push(event),
+        } as never;
         const agent = new Agent({
             provider,
             modelId: model.id,
-            context: createJustBashToolHarness().context,
+            context: harness.context,
             printToConsole: false,
             onEvent(event) {
                 if (event.type === "start") throw databaseError;
@@ -315,6 +331,12 @@ describe("Agent", () => {
         });
 
         await expect(agent.send("Answer once.")).rejects.toBe(databaseError);
+        expect(traces.map((event) => event.type)).toEqual([
+            "turn_started",
+            "inference_request_started",
+            "inference_request_finished",
+            "turn_finished",
+        ]);
     });
 
     it("propagates a database failure from tool execution", async () => {
@@ -564,6 +586,56 @@ describe("Agent", () => {
         expect(contexts[1]?.systemPrompt).toBe(
             `Base instructions.\n\n${AGENTS_MD_SPEC}\n\nYou are in Full access mode. Filesystem, shell, and network access are unrestricted.\n\nUpdated API instructions.`,
         );
+    });
+
+    it("applies dynamic plugin prompt replacement and emits turn and inference traces", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const contexts: Context[] = [];
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream(_model, context) {
+                contexts.push(context);
+                return streamFor(stoppedMessage(model.id));
+            },
+        });
+        const harness = createJustBashToolHarness();
+        const applySystemPrompt = vi.fn(async ({ systemPrompt, userPrompt }) => {
+            return `${systemPrompt}\n\nPlugin saw: ${userPrompt}`;
+        });
+        const traces: { type: string }[] = [];
+        harness.context.plugins = {
+            applySystemPrompt,
+            loadSkills: async () => [],
+            trace: (event: HappyTracingEvent) => traces.push(event),
+        } as never;
+        const agent = new Agent({
+            context: harness.context,
+            instructions: "Base instructions.",
+            modelId: model.id,
+            printToConsole: false,
+            provider,
+            traceSessionId: "session-1",
+        });
+
+        await agent.send("Replace this turn.");
+
+        expect(applySystemPrompt).toHaveBeenCalledWith({
+            systemPrompt: expect.stringContaining("Base instructions."),
+            userPrompt: "Replace this turn.",
+        });
+        expect(contexts[0]?.systemPrompt).toContain("Plugin saw: Replace this turn.");
+        expect(traces.map((event) => event.type)).toEqual([
+            "turn_started",
+            "inference_request_started",
+            "inference_request_finished",
+            "turn_finished",
+        ]);
     });
 
     it("queues steering and user messages, runs the loop, and prints messages", async () => {
@@ -1916,6 +1988,79 @@ describe("Agent", () => {
             { role: "user", content: [{ type: "text", text: "pending tool direction" }] },
             { role: "user" },
         ]);
+    });
+
+    it("does not trace a synthetic tool finish when execution never started", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamFor({
+                    role: "assistant",
+                    content: [
+                        {
+                            type: "toolCall",
+                            id: "call-never-started",
+                            name: "never-started",
+                            arguments: {},
+                        },
+                    ],
+                    api: "test",
+                    provider: "codex",
+                    model: model.id,
+                    usage: zeroUsage(),
+                    stopReason: "toolUse",
+                    timestamp: 1,
+                });
+            },
+        });
+        const execute = vi.fn(() => ({}));
+        const tool = defineTool({
+            name: "never-started",
+            label: "Never started",
+            description: "Would execute if the turn were not interrupted.",
+            arguments: Type.Object({}),
+            returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
+            execute,
+            toLLM: () => [],
+            toUI: () => "unused",
+            locks: [],
+        });
+        const controller = new AbortController();
+        const traces: HappyTracingEvent[] = [];
+        const harness = createJustBashToolHarness();
+        harness.context.plugins = {
+            loadSkills: async () => [],
+            trace: (event: HappyTracingEvent) => traces.push(event),
+        } as never;
+        const agent = new Agent({
+            context: harness.context,
+            modelId: model.id,
+            onEvent(event) {
+                if (event.type === "done") controller.abort();
+            },
+            printToConsole: false,
+            provider,
+            tools: [tool],
+        });
+
+        await expect(
+            agent.send("Stop before the tool.", { signal: controller.signal }),
+        ).resolves.toMatchObject({ stopReason: "aborted" });
+        expect(execute).not.toHaveBeenCalled();
+        expect(
+            traces.filter(
+                (event) =>
+                    event.type === "tool_call_started" || event.type === "tool_call_finished",
+            ),
+        ).toEqual([]);
     });
 
     it("preserves a tool result when aborting after execution completes", async () => {

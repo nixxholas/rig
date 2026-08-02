@@ -25,6 +25,7 @@ import {
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     happyNetworkEventSchema,
+    happySystemPromptHookCompletionSchema,
     listHappySlotEntriesInputSchema,
     happyNetworkRequestCompletionSchema,
     listWorkspacesInputSchema,
@@ -59,6 +60,7 @@ import type { SessionStore } from "../session/SessionStore.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
+import type { PluginHookConnection } from "./PluginHookRegistry.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
 import type { PluginNetworkConnection } from "./PluginNetworkRegistry.js";
 import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
@@ -73,6 +75,7 @@ export interface CreatePluginApiServerOptions {
     generatedMedia?: GeneratedMediaStore;
     listPlugins: () => Promise<readonly PluginSummary[]>;
     listProviderUsage?: () => readonly HappyProviderUsageEntry[];
+    hooks?: PluginHookConnection;
     mcp?: PluginMcpConnection;
     network?: PluginNetworkConnection;
     pluginFolder: string;
@@ -92,9 +95,15 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
         void handleRequest(request, response, options, executeWorkspaceCommand).catch(
             (error: unknown) => {
                 if (isDatabaseFailure(error)) throw error;
-                sendJson(response, classifyPluginApiRequestError(error), {
-                    error: errorToMessage(error),
-                });
+                sendJson(
+                    response,
+                    error instanceof PluginHookConflictError
+                        ? 409
+                        : classifyPluginApiRequestError(error),
+                    {
+                        error: errorToMessage(error),
+                    },
+                );
             },
         );
     });
@@ -355,6 +364,125 @@ async function handleRequest(
             "MCP server registration",
         );
         sendJson(response, 201, { registrationId: mcp.register(registration) });
+        return;
+    }
+    if (request.method === "POST" && url.pathname === "/hooks/system-prompt") {
+        const hooks = requireHooks(options);
+        sendJson(response, 201, {
+            registrationId: runHookRegistrationOperation(() => hooks.registerSystemPrompt()),
+        });
+        return;
+    }
+    if (request.method === "POST" && url.pathname === "/tracing/subscriptions") {
+        const hooks = requireHooks(options);
+        sendJson(response, 201, {
+            registrationId: runHookRegistrationOperation(() => hooks.registerTracing()),
+        });
+        return;
+    }
+    if (
+        parts.length === 4 &&
+        parts[0] === "hooks" &&
+        parts[1] === "system-prompt" &&
+        parts[2] !== undefined &&
+        parts[3] === "events" &&
+        request.method === "GET"
+    ) {
+        const hooks = requireHooks(options);
+        const registrationId = parts[2];
+        const detach = runHookRegistrationOperation(() =>
+            hooks.attachSystemPrompt(registrationId, (event) => {
+                if (response.destroyed || response.writableEnded) {
+                    throw new Error("The plugin system-prompt stream is closed.");
+                }
+                // A false return means Node buffered the event; it was still delivered. The hook's
+                // deadline, not socket backpressure, decides whether the call missed.
+                response.write(`${JSON.stringify(event)}\n`);
+            }),
+        );
+        response.once("close", detach);
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        return;
+    }
+    if (
+        parts.length === 4 &&
+        parts[0] === "tracing" &&
+        parts[1] === "subscriptions" &&
+        parts[2] !== undefined &&
+        parts[3] === "events" &&
+        request.method === "GET"
+    ) {
+        const hooks = requireHooks(options);
+        const registrationId = parts[2];
+        const detach = runHookRegistrationOperation(() =>
+            hooks.attachTracing(registrationId, (event) => {
+                if (response.destroyed || response.writableEnded) return false;
+                return response.write(`${JSON.stringify(event)}\n`);
+            }),
+        );
+        response.once("close", detach);
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        hooks.drainTracing(registrationId);
+        response.on("drain", () => {
+            try {
+                hooks.drainTracing(registrationId);
+            } catch {
+                // The subscription may have closed while buffered output was draining.
+            }
+        });
+        return;
+    }
+    if (
+        parts.length === 5 &&
+        parts[0] === "hooks" &&
+        parts[1] === "system-prompt" &&
+        parts[2] !== undefined &&
+        parts[3] === "calls" &&
+        parts[4] !== undefined &&
+        request.method === "POST"
+    ) {
+        const completion = await readJson(
+            request,
+            happySystemPromptHookCompletionSchema,
+            "System-prompt hook result",
+        );
+        const hooks = requireHooks(options);
+        const registrationId = parts[2];
+        const callId = parts[4];
+        runHookRegistrationOperation(() =>
+            hooks.completeSystemPrompt(registrationId, callId, completion),
+        );
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length === 3 &&
+        parts[0] === "hooks" &&
+        parts[1] === "system-prompt" &&
+        parts[2] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        requireHooks(options).unregisterSystemPrompt(parts[2]);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length === 3 &&
+        parts[0] === "tracing" &&
+        parts[1] === "subscriptions" &&
+        parts[2] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        requireHooks(options).unregisterTracing(parts[2]);
+        sendJson(response, 200, {});
         return;
     }
     if (
@@ -704,6 +832,13 @@ function requireMcp(options: CreatePluginApiServerOptions): PluginMcpConnection 
     return options.mcp;
 }
 
+function requireHooks(options: CreatePluginApiServerOptions): PluginHookConnection {
+    if (options.hooks === undefined) {
+        throw new PluginApiRequestError("This plugin runtime does not provide hooks.");
+    }
+    return options.hooks;
+}
+
 function requireNetwork(options: CreatePluginApiServerOptions): PluginNetworkConnection {
     if (options.network === undefined) {
         throw new PluginApiRequestError("Plugin network interception is unavailable.");
@@ -717,5 +852,15 @@ function encodeNetworkEvent(event: unknown): string | undefined {
         return Buffer.byteLength(line) <= HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES ? line : undefined;
     } catch {
         return undefined;
+    }
+}
+
+class PluginHookConflictError extends Error {}
+
+function runHookRegistrationOperation<T>(operation: () => T): T {
+    try {
+        return operation();
+    } catch (error) {
+        throw new PluginHookConflictError(errorToMessage(error));
     }
 }

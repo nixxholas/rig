@@ -17,6 +17,7 @@ import {
 } from "./createPluginApiServer.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
+import type { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import type { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import type { PluginAppRegistry } from "./PluginAppRegistry.js";
@@ -40,6 +41,7 @@ export interface StartPluginOptions {
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
     generatedMedia?: GeneratedMediaStore;
+    hookRegistry?: PluginHookRegistry;
     listPlugins: CreatePluginApiServerOptions["listPlugins"];
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     mcpRegistry?: PluginMcpRegistry;
@@ -85,6 +87,10 @@ export async function startPlugin(
         interceptDomains: plugin.manifest.interceptDomains ?? [],
         name: plugin.manifest.name,
     });
+    const hooks = options.hookRegistry?.createConnection({
+        folder: plugin.folderName,
+        name: plugin.manifest.name,
+    });
     let unregisterApps: (() => void) | undefined;
     try {
         unregisterApps =
@@ -92,6 +98,7 @@ export async function startPlugin(
                 ? undefined
                 : options.appRegistry?.register(runtime, mcp.generation, dataDirectory);
     } catch (error) {
+        hooks?.close();
         mcp?.close();
         network?.close();
         throw error;
@@ -103,6 +110,7 @@ export async function startPlugin(
             : { listProviderUsage: options.listProviderUsage }),
         listPlugins: options.listPlugins,
         ...(options.generatedMedia === undefined ? {} : { generatedMedia: options.generatedMedia }),
+        ...(hooks === undefined ? {} : { hooks }),
         ...(mcp === undefined ? {} : { mcp }),
         ...(network === undefined ? {} : { network }),
         pluginFolder: plugin.folderName,
@@ -122,6 +130,7 @@ export async function startPlugin(
         await restrictSocketAccess(socketPath);
     } catch (error) {
         unregisterApps?.();
+        hooks?.close();
         mcp?.close();
         network?.close();
         await closeServer(server);
@@ -155,6 +164,7 @@ export async function startPlugin(
         });
     } catch (error) {
         unregisterApps?.();
+        hooks?.close();
         mcp?.close();
         network?.close();
         await Promise.allSettled([closeServer(server), log.close()]);
@@ -172,6 +182,7 @@ export async function startPlugin(
             rm(socketPath, { force: true }),
         ]).then(() => {
             unregisterApps?.();
+            hooks?.close();
             mcp?.close();
             network?.close();
         }));

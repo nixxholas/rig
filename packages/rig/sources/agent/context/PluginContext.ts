@@ -5,6 +5,7 @@ import type {
     PluginSummary,
     UninstalledPluginSummary,
 } from "../../protocol/index.js";
+import type { HappySystemPromptHookInput, HappyTracingEvent } from "happy-plugins";
 import type { PluginAppResource } from "../../plugins/PluginAppRegistry.js";
 import type {
     GitHubPluginIndex,
@@ -24,6 +25,7 @@ import type { ManagedNetworkInterceptor } from "./ManagedNetworkPolicy.js";
 export interface PluginContext {
     /** Internal managed-proxy hook; absent in lightweight test/plugin-tool contexts. */
     network?: ManagedNetworkInterceptor;
+    applySystemPrompt?(input: HappySystemPromptHookInput): Promise<string>;
     discoverRepository(
         source: GitHubPluginSource,
         signal?: AbortSignal,
@@ -38,6 +40,7 @@ export interface PluginContext {
         options: { fs: FileSystemContext; signal?: AbortSignal },
     ): Promise<InstalledPluginSummary>;
     loadSkills(fs: FileSystemContext): Promise<readonly Skill[]>;
+    loadSystemPrompt?(): Promise<string | undefined>;
     list(): Promise<{
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];
@@ -69,6 +72,7 @@ export interface PluginContext {
         key: string,
         value: unknown,
     ): Promise<void>;
+    trace?(event: HappyTracingEvent): void;
     readLog(name: string): Promise<PluginLogSnapshot>;
     uninstall(options: {
         fs: FileSystemContext;

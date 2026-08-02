@@ -2,6 +2,7 @@ import { lstat, readFile } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import { HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES } from "happy-plugins";
 
 import {
     fileSystemErrorSchema,
@@ -46,8 +47,11 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
             : resolveOwnedPath(directory, manifest.main, "main entry point");
     const iconPath = resolveOwnedPath(directory, manifest.icon, "icon");
     const skillsPath = await resolveSkillsPath(directory, manifest.skills);
-    if (entryPath === undefined && skillsPath === undefined) {
-        throw new Error("The plugin must declare a main entry point or provide a skills directory.");
+    const systemPrompt = await resolveSystemPrompt(directory, manifest.systemPrompt);
+    if (entryPath === undefined && skillsPath === undefined && systemPrompt === undefined) {
+        throw new Error(
+            "The plugin must declare a main entry point, provide a skills directory, or contribute a system prompt.",
+        );
     }
     const [entryInfo, iconInfo, iconHeader] = await Promise.all([
         entryPath === undefined
@@ -79,7 +83,48 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
         manifest,
         manifestPath,
         ...(skillsPath === undefined ? {} : { skillsPath }),
+        ...(systemPrompt === undefined ? {} : { systemPrompt }),
     };
+}
+
+async function resolveSystemPrompt(
+    directory: string,
+    contribution: RegisteredPlugin["manifest"]["systemPrompt"],
+): Promise<string | undefined> {
+    if (contribution === undefined) return undefined;
+    if ("text" in contribution) {
+        if (Buffer.byteLength(contribution.text, "utf8") > HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES) {
+            throw new Error(
+                `The plugin system prompt cannot exceed ${String(HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES)} UTF-8 bytes.`,
+            );
+        }
+        return contribution.text;
+    }
+    const path = resolveOwnedPath(directory, contribution.path, "system prompt");
+    let info;
+    try {
+        info = await lstat(path);
+    } catch (error) {
+        if (Value.Check(fileSystemErrorSchema, error) && error.code === "ENOENT") {
+            throw new Error("The plugin system prompt file does not exist.");
+        }
+        throw error;
+    }
+    if (!info.isFile() || info.isSymbolicLink()) {
+        throw new Error("The plugin system prompt path must be an ordinary file.");
+    }
+    if (info.size > HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES) {
+        throw new Error(
+            `The plugin system prompt cannot exceed ${String(HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES)} UTF-8 bytes.`,
+        );
+    }
+    const text = await readFile(path, "utf8");
+    if (Buffer.byteLength(text, "utf8") > HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES) {
+        throw new Error(
+            `The plugin system prompt cannot exceed ${String(HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES)} UTF-8 bytes.`,
+        );
+    }
+    return text;
 }
 
 async function resolveSkillsPath(

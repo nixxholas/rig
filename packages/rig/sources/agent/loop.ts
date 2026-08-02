@@ -264,7 +264,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         now,
         providerId: options.provider.id,
     });
-    const providerPrompt = await createProviderPrompt({
+    let providerPrompt = await createProviderPrompt({
         ...(options.appendSystemPrompt !== undefined
             ? { appendSystemPrompt: options.appendSystemPrompt }
             : {}),
@@ -278,6 +278,22 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
         tools: options.tools,
         ...(options.durableSkills === undefined ? {} : { durableSkills: options.durableSkills }),
     });
+    const composedSystemPrompt =
+        providerPrompt.systemPromptOverride ?? providerPrompt.systemPrompt ?? "";
+    try {
+        const replacement = await options.context.plugins?.applySystemPrompt?.({
+            systemPrompt: composedSystemPrompt,
+            userPrompt: latestUserPrompt(contextTranscript),
+        });
+        if (replacement !== undefined && replacement !== composedSystemPrompt) {
+            providerPrompt =
+                providerPrompt.systemPromptOverride === undefined
+                    ? { ...providerPrompt, systemPrompt: replacement }
+                    : { ...providerPrompt, systemPromptOverride: replacement };
+        }
+    } catch {
+        // Plugin prompt middleware is optional and must never fail or stall the agent loop.
+    }
     const providerTools = options.tools.map(toExecutorTool);
     const toolsByName = new Map(
         options.tools.map((tool) => [toolDispatchKey(tool.name, tool.namespace?.name), tool]),
@@ -1365,6 +1381,16 @@ function toProviderUserContent(block: ContentBlock): ProviderUserContent {
         mimeType: block.mediaType,
         ...(block.detail !== undefined ? { detail: block.detail } : {}),
     };
+}
+
+function latestUserPrompt(messages: readonly Message[]): string {
+    const message = messages.findLast((candidate): candidate is UserMessage => {
+        return candidate.role === "user";
+    });
+    if (message === undefined) return "";
+    return message.blocks
+        .flatMap((block) => (block.type === "text" ? [block.text] : []))
+        .join("\n");
 }
 
 function toProviderToolResultContent(block: ContentBlock): ProviderToolResultContent {

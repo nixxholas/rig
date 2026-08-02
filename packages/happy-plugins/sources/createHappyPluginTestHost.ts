@@ -36,6 +36,9 @@ import type {
     HappyPluginTestSeed,
     HappyProject,
     HappySession,
+    HappySystemPromptHookInput,
+    HappySystemPromptHookResult,
+    HappyTracingEvent,
     HappyWorkspace,
 } from "./types.js";
 import {
@@ -48,6 +51,7 @@ import {
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     happyNetworkRequestCompletionSchema,
+    happySystemPromptHookCompletionSchema,
     happyPluginTestSeedSchema,
     listWorkspacesInputSchema,
     readWorkspaceFileBodySchema,
@@ -105,8 +109,21 @@ export interface HappyPluginTestHost {
         ): Promise<HappyNetworkRequestResult>;
         tunnel(tunnel: HappyNetworkTunnel): void;
     };
+    readonly hooks: {
+        applySystemPrompt(
+            input: HappySystemPromptHookInput,
+            timeoutMs?: number,
+        ): Promise<HappySystemPromptHookResult>;
+        /** Simulates an unexpected daemon stream end for recovery tests. */
+        disconnect(mode?: "close" | "end" | "error"): void;
+    };
     readonly requests: readonly HappyPluginTestRequest[];
     readonly rootDirectory: string;
+    readonly tracing: {
+        /** Simulates an unexpected daemon stream end for recovery tests. */
+        disconnect(mode?: "close" | "end" | "error"): void;
+        emit(event: HappyTracingEvent): void;
+    };
     close(): Promise<void>;
 }
 
@@ -121,6 +138,11 @@ interface TestRegistration {
     id: string;
     response?: ServerResponse;
     server: HappyMcpServerRegistration;
+}
+
+interface TestEventRegistration {
+    id: string;
+    response?: ServerResponse;
 }
 
 interface TestCall<T> {
@@ -156,6 +178,9 @@ export async function createHappyPluginTestHost(
     const plugins: HappyPlugin[] = structuredClone(seed.plugins ?? []);
     const requests: HappyPluginTestRequest[] = [];
     const registrations = new Map<string, TestRegistration>();
+    let systemPromptHook: TestEventRegistration | undefined;
+    let tracingSubscription: TestEventRegistration | undefined;
+    const systemPromptCalls = new Map<string, TestCall<HappySystemPromptHookResult>>();
     const calls = new Map<string, TestCall<HappyMcpToolResult>>();
     const networkCalls = new Map<string, TestCall<HappyNetworkRequestCompletion>>();
     const networkRegistrations = new Map<string, TestNetworkRegistration>();
@@ -176,15 +201,20 @@ export async function createHappyPluginTestHost(
                 return;
             }
             const url = new URL(request.url ?? "/", "http://happy-plugin.test");
-            const body =
-                request.method === "GET" || request.method === "DELETE"
-                    ? undefined
-                    : await readBody(
-                          request,
-                          url.pathname.endsWith("/files/write")
-                              ? 2 * MAXIMUM_BODY_BYTES
-                              : MAXIMUM_BODY_BYTES,
-                      );
+            const requestHasNoBody =
+                request.method === "GET" ||
+                request.method === "DELETE" ||
+                (request.method === "POST" &&
+                    (url.pathname === "/hooks/system-prompt" ||
+                        url.pathname === "/tracing/subscriptions"));
+            const body = requestHasNoBody
+                ? undefined
+                : await readBody(
+                      request,
+                      url.pathname.endsWith("/files/write")
+                          ? 2 * MAXIMUM_BODY_BYTES
+                          : MAXIMUM_BODY_BYTES,
+                  );
             const observedRequest = {
                 ...(body === undefined ? {} : { body: structuredClone(body) }),
                 method: request.method ?? "GET",
@@ -321,6 +351,112 @@ export async function createHappyPluginTestHost(
                 };
                 registrations.set(registration.id, registration);
                 send(response, 201, { registrationId: registration.id });
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/hooks/system-prompt") {
+                if (systemPromptHook !== undefined) {
+                    send(response, 409, { error: "A system-prompt hook is already registered." });
+                    return;
+                }
+                systemPromptHook = { id: `test-hook-${String(nextId++)}` };
+                send(response, 201, { registrationId: systemPromptHook.id });
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/tracing/subscriptions") {
+                if (tracingSubscription !== undefined) {
+                    send(response, 409, { error: "A tracing subscription is already registered." });
+                    return;
+                }
+                tracingSubscription = { id: `test-tracing-${String(nextId++)}` };
+                send(response, 201, { registrationId: tracingSubscription.id });
+                return;
+            }
+            if (
+                request.method === "GET" &&
+                parts.length === 4 &&
+                parts[0] === "hooks" &&
+                parts[1] === "system-prompt" &&
+                parts[2] === systemPromptHook?.id &&
+                parts[3] === "events"
+            ) {
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                systemPromptHook!.response = response;
+                response.once("close", () => {
+                    if (systemPromptHook?.response === response) systemPromptHook = undefined;
+                });
+                return;
+            }
+            if (
+                request.method === "GET" &&
+                parts.length === 4 &&
+                parts[0] === "tracing" &&
+                parts[1] === "subscriptions" &&
+                parts[2] === tracingSubscription?.id &&
+                parts[3] === "events"
+            ) {
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                tracingSubscription!.response = response;
+                response.once("close", () => {
+                    if (tracingSubscription?.response === response) {
+                        tracingSubscription = undefined;
+                    }
+                });
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length === 5 &&
+                parts[0] === "hooks" &&
+                parts[1] === "system-prompt" &&
+                parts[2] === systemPromptHook?.id &&
+                parts[3] === "calls" &&
+                parts[4] !== undefined
+            ) {
+                const call = systemPromptCalls.get(parts[4]);
+                if (call === undefined) {
+                    send(response, 409, { error: "That system-prompt call is no longer active." });
+                    return;
+                }
+                systemPromptCalls.delete(parts[4]);
+                const completion = decodeRequest(
+                    happySystemPromptHookCompletionSchema,
+                    body,
+                    "System-prompt hook result",
+                );
+                call.resolve(completion.result);
+                send(response, 200, {});
+                return;
+            }
+            if (
+                request.method === "DELETE" &&
+                parts.length === 3 &&
+                parts[0] === "hooks" &&
+                parts[1] === "system-prompt" &&
+                parts[2] === systemPromptHook?.id
+            ) {
+                systemPromptHook!.response?.end();
+                systemPromptHook = undefined;
+                send(response, 200, {});
+                return;
+            }
+            if (
+                request.method === "DELETE" &&
+                parts.length === 3 &&
+                parts[0] === "tracing" &&
+                parts[1] === "subscriptions" &&
+                parts[2] === tracingSubscription?.id
+            ) {
+                tracingSubscription!.response?.end();
+                tracingSubscription = undefined;
+                send(response, 200, {});
                 return;
             }
             if (
@@ -680,6 +816,53 @@ export async function createHappyPluginTestHost(
         },
         client: createHappyPluginClient({ socketPath, token }),
         environment,
+        hooks: {
+            applySystemPrompt(input, timeoutMs = CALL_TIMEOUT_MS) {
+                const registration = systemPromptHook;
+                if (registration?.response === undefined) {
+                    return Promise.reject(
+                        new Error("No system-prompt hook is attached to the fake Happy host."),
+                    );
+                }
+                const callId = `test-prompt-${String(nextId++)}`;
+                return new Promise<HappySystemPromptHookResult>((resolve, reject) => {
+                    let settled = false;
+                    const cleanup = () => clearTimeout(timer);
+                    const finishReject = (error: Error) => {
+                        if (settled) return;
+                        settled = true;
+                        cleanup();
+                        reject(error);
+                    };
+                    const finishResolve = (result: HappySystemPromptHookResult) => {
+                        if (settled) return;
+                        settled = true;
+                        cleanup();
+                        resolve(result);
+                    };
+                    const timer = setTimeout(() => {
+                        systemPromptCalls.delete(callId);
+                        finishReject(
+                            new Error(
+                                `The fake system-prompt hook timed out after ${String(timeoutMs)}ms.`,
+                            ),
+                        );
+                    }, timeoutMs);
+                    timer.unref();
+                    systemPromptCalls.set(callId, {
+                        cleanup,
+                        reject: finishReject,
+                        resolve: finishResolve,
+                    });
+                    registration.response!.write(
+                        `${JSON.stringify({ callId, input, type: "system_prompt" })}\n`,
+                    );
+                });
+            },
+            disconnect(mode = "end") {
+                disconnectResponse(systemPromptHook?.response, mode, "system-prompt");
+            },
+        },
         requests,
         rootDirectory: root,
         mcp: {
@@ -783,6 +966,14 @@ export async function createHappyPluginTestHost(
                 }
             },
         },
+        tracing: {
+            disconnect(mode = "end") {
+                disconnectResponse(tracingSubscription?.response, mode, "tracing");
+            },
+            emit(event) {
+                tracingSubscription?.response?.write(`${JSON.stringify(event)}\n`);
+            },
+        },
         async close() {
             if (closed) return;
             closed = true;
@@ -800,8 +991,17 @@ export async function createHappyPluginTestHost(
                 registration.response?.end();
             }
             networkRegistrations.clear();
+            for (const call of systemPromptCalls.values()) {
+                call.cleanup();
+                call.reject(new Error("The fake Happy host closed."));
+            }
+            systemPromptCalls.clear();
             for (const registration of registrations.values()) registration.response?.end();
             registrations.clear();
+            systemPromptHook?.response?.end();
+            tracingSubscription?.response?.end();
+            systemPromptHook = undefined;
+            tracingSubscription = undefined;
             await new Promise<void>((resolve) => {
                 server.close(() => resolve());
                 server.closeAllConnections();
@@ -872,4 +1072,18 @@ function toolVisibility(
     tool: HappyMcpServerRegistration["tools"][number],
 ): readonly ("app" | "model")[] {
     return tool._meta?.ui.visibility ?? ["model", "app"];
+}
+
+function disconnectResponse(
+    response: ServerResponse | undefined,
+    mode: "close" | "end" | "error",
+    label: string,
+): void {
+    if (mode === "error") {
+        response?.destroy(new Error(`The fake Happy ${label} stream disconnected.`));
+    } else if (mode === "close") {
+        response?.destroy();
+    } else {
+        response?.end();
+    }
 }

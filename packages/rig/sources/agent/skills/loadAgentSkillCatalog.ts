@@ -1,6 +1,7 @@
 import type { AgentContext } from "../context/AgentContext.js";
 import type { Skill } from "./Skill.js";
 import { loadSkills } from "./loadSkills.js";
+import { errorToMessage } from "../../errorToMessage.js";
 
 /**
  * Loads the one skill catalog used by prompts, slash commands, and future skill consumers.
@@ -15,7 +16,10 @@ export async function loadAgentSkillCatalog(
 
     try {
         return await context.plugins.loadSkills(context.fs);
-    } catch {
+    } catch (error) {
+        console.error(
+            `Rig could not load plugin skills; continuing without them: ${errorToMessage(error)}`,
+        );
         return loadSkills(context.fs);
     }
 }

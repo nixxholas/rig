@@ -631,6 +631,8 @@ export const HAPPY_PLUGIN_MAX_APPS = 8;
 export const HAPPY_PLUGIN_MAX_APP_RESOURCES = 64;
 export const HAPPY_PLUGIN_MAX_RESOURCE_BYTES = 256 * 1024;
 export const HAPPY_PLUGIN_MAX_APP_BYTES = 1024 * 1024;
+export const HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES = 256 * 1024;
+export const HAPPY_PLUGIN_TRACING_QUEUE_SIZE = 128;
 export const HAPPY_PLUGIN_MAX_STORAGE_KEYS = 1_024;
 export const HAPPY_PLUGIN_MAX_STORAGE_VALUE_BYTES = 64 * 1024;
 export const HAPPY_PLUGIN_MAX_STORAGE_BYTES = 5 * 1024 * 1024;
@@ -690,6 +692,24 @@ export const happyPluginVersionSchema = Type.String({
 });
 export type HappyPluginVersion = Static<typeof happyPluginVersionSchema>;
 
+export const happyPluginSystemPromptContributionSchema = Type.Union([
+    Type.Object(
+        {
+            text: Type.String({ maxLength: HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES, minLength: 1 }),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            path: Type.String({ maxLength: 4_096, minLength: 1 }),
+        },
+        exact,
+    ),
+]);
+export type HappyPluginSystemPromptContribution = Static<
+    typeof happyPluginSystemPromptContributionSchema
+>;
+
 export const happyPluginManifestSchema = Type.Object(
     {
         apps: Type.Optional(
@@ -722,6 +742,7 @@ export const happyPluginManifestSchema = Type.Object(
         ),
         name: Type.String({ minLength: 1 }),
         skills: Type.Optional(Type.String({ minLength: 1 })),
+        systemPrompt: Type.Optional(happyPluginSystemPromptContributionSchema),
         version: Type.Optional(happyPluginVersionSchema),
     },
     exact,
@@ -892,6 +913,154 @@ export const happyPluginSchema = Type.Object(
     exact,
 );
 export type HappyPlugin = Static<typeof happyPluginSchema>;
+
+export const happySystemPromptHookInputSchema = Type.Object(
+    {
+        systemPrompt: Type.String({ maxLength: HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES }),
+        userPrompt: Type.String({ maxLength: HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES }),
+    },
+    exact,
+);
+export type HappySystemPromptHookInput = Static<typeof happySystemPromptHookInputSchema>;
+
+export const happySystemPromptHookResultSchema = Type.Object(
+    {
+        systemPrompt: Type.Optional(
+            Type.String({ maxLength: HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES }),
+        ),
+    },
+    exact,
+);
+export type HappySystemPromptHookResult = Static<typeof happySystemPromptHookResultSchema>;
+
+export const happySystemPromptHookEventSchema = Type.Object(
+    {
+        callId: nonEmptyText,
+        input: happySystemPromptHookInputSchema,
+        type: Type.Literal("system_prompt"),
+    },
+    exact,
+);
+export type HappySystemPromptHookEvent = Static<typeof happySystemPromptHookEventSchema>;
+
+export const happySystemPromptHookCompletionSchema = Type.Object(
+    {
+        result: happySystemPromptHookResultSchema,
+    },
+    exact,
+);
+export type HappySystemPromptHookCompletion = Static<typeof happySystemPromptHookCompletionSchema>;
+
+export const happyTracingUsageSchema = Type.Object(
+    {
+        cacheRead: Type.Number({ minimum: 0 }),
+        cacheWrite: Type.Number({ minimum: 0 }),
+        input: Type.Number({ minimum: 0 }),
+        output: Type.Number({ minimum: 0 }),
+        reasoning: Type.Optional(Type.Number({ minimum: 0 })),
+        totalTokens: Type.Number({ minimum: 0 }),
+    },
+    exact,
+);
+export type HappyTracingUsage = Static<typeof happyTracingUsageSchema>;
+
+const happyTracingBase = {
+    sessionId: nonEmptyText,
+    timestamp: Type.Number(),
+};
+export const happyTracingEventSchema = Type.Union([
+    Type.Object(
+        {
+            ...happyTracingBase,
+            model: nonEmptyText,
+            provider: nonEmptyText,
+            type: Type.Literal("turn_started"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            ...happyTracingBase,
+            iteration: Type.Integer({ minimum: 1 }),
+            model: nonEmptyText,
+            provider: nonEmptyText,
+            type: Type.Literal("inference_request_started"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            ...happyTracingBase,
+            durationMs: Type.Number({ minimum: 0 }),
+            iteration: Type.Integer({ minimum: 1 }),
+            model: nonEmptyText,
+            provider: nonEmptyText,
+            success: Type.Boolean(),
+            type: Type.Literal("inference_request_finished"),
+            usage: Type.Optional(happyTracingUsageSchema),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            ...happyTracingBase,
+            name: nonEmptyText,
+            toolCallId: nonEmptyText,
+            type: Type.Literal("tool_call_started"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            ...happyTracingBase,
+            durationMs: Type.Number({ minimum: 0 }),
+            name: nonEmptyText,
+            success: Type.Boolean(),
+            toolCallId: nonEmptyText,
+            type: Type.Literal("tool_call_finished"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            ...happyTracingBase,
+            durationMs: Type.Number({ minimum: 0 }),
+            model: nonEmptyText,
+            provider: nonEmptyText,
+            stopReason: Type.String(),
+            success: Type.Boolean(),
+            type: Type.Literal("turn_finished"),
+        },
+        exact,
+    ),
+]);
+export type HappyTracingEvent = Static<typeof happyTracingEventSchema>;
+
+export const registerHappyPluginStreamResponseSchema = Type.Object(
+    { registrationId: nonEmptyText },
+    exact,
+);
+
+export const happyPluginStreamStatusSchema = Type.Union([
+    Type.Literal("closed"),
+    Type.Literal("connected"),
+    Type.Literal("reconnecting"),
+]);
+export type HappyPluginStreamStatus = Static<typeof happyPluginStreamStatusSchema>;
+
+export interface HappySystemPromptHook {
+    readonly failure: string | undefined;
+    readonly registrationId: string;
+    readonly status: HappyPluginStreamStatus;
+    close(): Promise<void>;
+}
+
+export interface HappyTracingSubscription {
+    readonly failure: string | undefined;
+    readonly registrationId: string;
+    readonly status: HappyPluginStreamStatus;
+    close(): Promise<void>;
+}
 
 export const listPluginsResponseSchema = Type.Object(
     {
@@ -1067,6 +1236,14 @@ export interface HappyPluginClient {
     readonly agents: {
         sendMessage(input: SendAgentMessageInput): Promise<AgentMessageDelivery>;
     };
+    /** Register middleware that may replace the composed system prompt before an agent turn. */
+    readonly hooks: {
+        onSystemPrompt(
+            handler: (
+                input: HappySystemPromptHookInput,
+            ) => HappySystemPromptHookResult | Promise<HappySystemPromptHookResult>,
+        ): Promise<HappySystemPromptHook>;
+    };
     /** Inspect projects known to the local Happy daemon. */
     readonly projects: {
         list(): Promise<readonly HappyProject[]>;
@@ -1106,6 +1283,12 @@ export interface HappyPluginClient {
         list(input?: ListHappySlotEntriesInput): Promise<readonly HappySlotEntry[]>;
         remove(id: string): Promise<HappySlotEntry>;
         update(id: string, input: UpdateHappySlotEntryInput): Promise<HappySlotEntry>;
+    };
+    /** Observe bounded, non-blocking agent lifecycle events. */
+    readonly tracing: {
+        subscribe(
+            handler: (event: HappyTracingEvent) => void | Promise<void>,
+        ): Promise<HappyTracingSubscription>;
     };
     /** Inspect and mutate Happy-managed Git workspaces. */
     readonly workspaces: {

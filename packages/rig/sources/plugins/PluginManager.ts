@@ -1,5 +1,10 @@
 import { join } from "node:path";
 
+import {
+    HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES,
+    type HappySystemPromptHookInput,
+    type HappyTracingEvent,
+} from "happy-plugins";
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { GeneratedMediaStore } from "../generated-media/index.js";
@@ -30,6 +35,7 @@ import { installPluginFromPath, type InstalledPlugin } from "./installPluginFrom
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
+import { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import { PluginAppRegistry, type PluginAppResource } from "./PluginAppRegistry.js";
@@ -44,6 +50,7 @@ export interface PluginManagerOptions {
     environment?: NodeJS.ProcessEnv;
     githubFetch?: GitHubFetch;
     generatedMedia?: GeneratedMediaStore;
+    hookRegistry?: PluginHookRegistry;
     now?: () => number;
     mcpRegistry?: PluginMcpRegistry;
     networkRegistry?: PluginNetworkRegistry;
@@ -92,6 +99,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #environment: NodeJS.ProcessEnv;
     readonly #githubFetch: GitHubFetch | undefined;
     readonly #generatedMedia: GeneratedMediaStore | undefined;
+    readonly #hookRegistry: PluginHookRegistry;
     #discovery: { promise: Promise<PluginDiscovery>; version: EventId } | undefined;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
@@ -120,6 +128,12 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#environment = options.environment ?? process.env;
         this.#githubFetch = options.githubFetch;
         this.#generatedMedia = options.generatedMedia;
+        this.#hookRegistry =
+            options.hookRegistry ??
+            new PluginHookRegistry({
+                log: (level, event, message, details) =>
+                    this.#daemonLog.record(level, event, message, details),
+            });
         this.#now = options.now ?? Date.now;
         this.#mcpRegistry = options.mcpRegistry;
         this.#networkRegistry =
@@ -356,6 +370,57 @@ export class PluginManager implements ManagedNetworkInterceptor {
         });
     }
 
+    /** Appends active static contributions in deterministic plugin-folder order. */
+    async loadSystemPrompt(): Promise<string | undefined> {
+        let discovery: PluginDiscovery;
+        try {
+            discovery = await this.#discoverCurrentPlugins();
+        } catch (error) {
+            this.#daemonLog.record(
+                "warning",
+                "plugin_system_prompts_unreadable",
+                "Rig could not read plugin system prompts; continuing without them.",
+                { error: errorToMessage(error) },
+            );
+            return undefined;
+        }
+        const contributions: string[] = [];
+        let bytes = 0;
+        for (const plugin of discovery.plugins) {
+            if (
+                this.#states.get(plugin.folderName)?.status !== "running" ||
+                plugin.systemPrompt === undefined
+            ) {
+                continue;
+            }
+            const separatorBytes = contributions.length === 0 ? 0 : 2;
+            const contributionBytes = Buffer.byteLength(plugin.systemPrompt, "utf8");
+            if (bytes + separatorBytes + contributionBytes > HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES) {
+                this.#daemonLog.record(
+                    "warning",
+                    "plugin_system_prompt_skipped",
+                    `Rig skipped the ${plugin.manifest.name} plugin's system prompt because active plugin contributions reached the size limit.`,
+                    {
+                        plugin: plugin.manifest.name,
+                        pluginFolder: plugin.folderName,
+                    },
+                );
+                continue;
+            }
+            contributions.push(plugin.systemPrompt);
+            bytes += separatorBytes + contributionBytes;
+        }
+        return contributions.length === 0 ? undefined : contributions.join("\n\n");
+    }
+
+    applySystemPrompt(input: HappySystemPromptHookInput): Promise<string> {
+        return this.#hookRegistry.applySystemPrompt(input);
+    }
+
+    trace(event: HappyTracingEvent): void {
+        this.#hookRegistry.emit(event);
+    }
+
     async #readCatalog(version: EventId): Promise<PluginCatalog> {
         const discovery = await this.#readDiscovery(version);
         return {
@@ -534,6 +599,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 ...(this.#generatedMedia === undefined
                     ? {}
                     : { generatedMedia: this.#generatedMedia }),
+                hookRegistry: this.#hookRegistry,
                 ...(this.#listProviderUsage === undefined
                     ? {}
                     : { listProviderUsage: this.#listProviderUsage }),

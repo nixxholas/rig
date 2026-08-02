@@ -58,6 +58,13 @@ export async function createSystemPrompt(
         parts.push(skillInstructions);
     }
 
+    try {
+        const pluginPrompt = await options.context.plugins?.loadSystemPrompt?.();
+        if (pluginPrompt !== undefined && pluginPrompt.length > 0) parts.push(pluginPrompt);
+    } catch {
+        // Plugin prompt contributions are optional and must never fail prompt construction.
+    }
+
     if (options.context.subagents?.canSpawn === true) {
         const availableModelsInstructions = createAvailableModelsInstructions(
             options.context.subagents.availableModels ?? [],

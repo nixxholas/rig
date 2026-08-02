@@ -8,6 +8,8 @@ import {
     startHappyNetworkRequestHandler,
     startHappyNetworkTunnelHandler,
 } from "./startHappyNetworkListener.js";
+import { startHappySystemPromptHook } from "./startHappySystemPromptHook.js";
+import { subscribeHappyTracing } from "./subscribeHappyTracing.js";
 import type { CreateHappyPluginClientOptions, HappyPluginClient } from "./types.js";
 import {
     agentMessageDeliverySchema,
@@ -90,6 +92,15 @@ export function createHappyPluginClient(
             socketPath: socketPath(),
             token: token(),
         });
+    const streamTransport = {
+        request,
+        get socketPath() {
+            return socketPath();
+        },
+        get token() {
+            return token();
+        },
+    };
 
     return {
         agents: {
@@ -103,21 +114,15 @@ export function createHappyPluginClient(
                 );
             },
         },
+        hooks: {
+            onSystemPrompt: (handler) => startHappySystemPromptHook(handler, streamTransport),
+        },
         projects: {
             list: async () =>
                 (await request("GET", "/projects", listProjectsResponseSchema)).projects,
         },
         mcp: {
-            startServer: (serverOptions) =>
-                startHappyMcpServer(serverOptions, {
-                    request,
-                    get socketPath() {
-                        return socketPath();
-                    },
-                    get token() {
-                        return token();
-                    },
-                }),
+            startServer: (serverOptions) => startHappyMcpServer(serverOptions, streamTransport),
         },
         media: {
             publish: (input) => {
@@ -214,6 +219,9 @@ export function createHappyPluginClient(
                     )
                 ).entry;
             },
+        },
+        tracing: {
+            subscribe: (handler) => subscribeHappyTracing(handler, streamTransport),
         },
         workspaces: {
             archive: async (input) => {

@@ -1,4 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
+import type { HappyTracingEvent } from "happy-plugins";
 
 import {
     compactConversation,
@@ -88,6 +89,8 @@ export interface AgentOptions {
     contextMessages?: readonly Message[];
     instructions?: string;
     systemPrompt?: string;
+    /** Stable owning session identity used by plugin lifecycle tracing. */
+    traceSessionId?: string;
     /** Omit for a tool-free agent; product runtimes compose provider tools explicitly. */
     tools?: readonly AnyDefinedTool[];
     durableSkills?: readonly DurableSkillDefinition[];
@@ -158,6 +161,7 @@ export class Agent {
     #status: AgentStatus = "idle";
     #lastRunId: string | undefined;
     #activeRunId: string | undefined;
+    readonly #traceSessionId: string;
     #resetVersion = 0;
 
     constructor(options: AgentOptions) {
@@ -188,6 +192,7 @@ export class Agent {
         this.#printToConsole = options.printToConsole ?? true;
         this.#onEvent = options.onEvent;
         this.#onMessage = options.onMessage;
+        this.#traceSessionId = options.traceSessionId ?? this.id;
         this.#messages = [...(options.messages ?? [])];
         this.#contextMessages =
             options.contextMessages === undefined ? undefined : [...options.contextMessages];
@@ -424,12 +429,20 @@ export class Agent {
         }
 
         const runId = this.#idFactory();
+        const turnStartedAt = this.#now();
         const resetVersion = this.#resetVersion;
         this.#lastRunId = runId;
         this.#activeRunId = runId;
         this.#status = "running";
         this.#steeringController = new AbortController();
         this.#drainQueueToTranscript();
+        this.#emitTrace({
+            model: this.#model.id,
+            provider: this.provider.id,
+            sessionId: this.#traceSessionId,
+            timestamp: turnStartedAt,
+            type: "turn_started",
+        });
         const provider =
             options.debug === undefined
                 ? this.provider
@@ -438,6 +451,22 @@ export class Agent {
                       runId,
                       source: "agent",
                   });
+        const inferenceStartedAt = new Map<number, number>();
+        const finishPendingInferences = (timestamp: number) => {
+            for (const [iteration, startedAt] of inferenceStartedAt) {
+                this.#emitTrace({
+                    durationMs: Math.max(0, timestamp - startedAt),
+                    iteration,
+                    model: this.#model.id,
+                    provider: this.provider.id,
+                    sessionId: this.#traceSessionId,
+                    success: false,
+                    timestamp,
+                    type: "inference_request_finished",
+                });
+            }
+            inferenceStartedAt.clear();
+        };
 
         try {
             await this.#compactContext({
@@ -473,6 +502,87 @@ export class Agent {
 
             const contextWasExplicit = this.#contextMessages !== undefined;
             let contextCompactedDuringRun = false;
+            let inferenceIteration: number | undefined;
+            const toolStartedAt = new Map<string, { name: string; timestamp: number }>();
+            const traceLoopEvent = (event: AgentLoopEvent) => {
+                const timestamp = this.#now();
+                if (event.type === "inference_iteration_start") {
+                    inferenceIteration = event.iteration;
+                    inferenceStartedAt.set(event.iteration, timestamp);
+                    this.#emitTrace({
+                        iteration: event.iteration,
+                        model: this.#model.id,
+                        provider: this.provider.id,
+                        sessionId: this.#traceSessionId,
+                        timestamp,
+                        type: "inference_request_started",
+                    });
+                    return;
+                }
+                if (
+                    (event.type === "done" || event.type === "error") &&
+                    inferenceIteration !== undefined
+                ) {
+                    const startedAt = inferenceStartedAt.get(inferenceIteration) ?? timestamp;
+                    const message = event.type === "done" ? event.message : event.error;
+                    this.#emitTrace({
+                        durationMs: Math.max(0, timestamp - startedAt),
+                        iteration: inferenceIteration,
+                        model: this.#model.id,
+                        provider: this.provider.id,
+                        sessionId: this.#traceSessionId,
+                        success: event.type === "done",
+                        timestamp,
+                        type: "inference_request_finished",
+                        ...(message.usage === undefined
+                            ? {}
+                            : {
+                                  usage: {
+                                      cacheRead: message.usage.cacheRead,
+                                      cacheWrite: message.usage.cacheWrite,
+                                      input: message.usage.input,
+                                      output: message.usage.output,
+                                      ...(message.usage.reasoning === undefined
+                                          ? {}
+                                          : { reasoning: message.usage.reasoning }),
+                                      totalTokens: message.usage.totalTokens,
+                                  },
+                              }),
+                    });
+                    inferenceStartedAt.delete(inferenceIteration);
+                    return;
+                }
+                if (event.type === "tool_execution_start") {
+                    toolStartedAt.set(event.toolCall.id, {
+                        name: event.toolCall.name,
+                        timestamp,
+                    });
+                    this.#emitTrace({
+                        name: event.toolCall.name,
+                        sessionId: this.#traceSessionId,
+                        timestamp,
+                        toolCallId: event.toolCall.id,
+                        type: "tool_call_started",
+                    });
+                    return;
+                }
+                if (event.type === "tool_execution_end") {
+                    const started = toolStartedAt.get(event.result.toolCallId);
+                    // Synthetic results for calls that never executed remain durable agent-loop
+                    // events, but are not tracing lifecycle completions because no start occurred.
+                    if (started === undefined) return;
+                    this.#emitTrace({
+                        durationMs: Math.max(0, timestamp - started.timestamp),
+                        name: started.name,
+                        sessionId: this.#traceSessionId,
+                        success: event.result.isError !== true,
+                        timestamp,
+                        toolCallId: event.result.toolCallId,
+                        type: "tool_call_finished",
+                    });
+                    toolStartedAt.delete(event.result.toolCallId);
+                }
+            };
             const loopOptions: Parameters<typeof runAgentLoop>[0] = {
                 ...(this.#allowReviewerModel ? { allowReviewerModel: true } : {}),
                 provider,
@@ -493,7 +603,10 @@ export class Agent {
                 idFactory: this.#idFactory,
                 now: this.#now,
                 context: this.context,
-                onEvent: async (event) => this.#handleEvent(event, options),
+                onEvent: async (event) => {
+                    traceLoopEvent(event);
+                    await this.#handleEvent(event, options);
+                },
                 onMessage: async (message) => this.#handleMessage(message, options),
                 onContextChanged: (messages) => {
                     if (this.#resetVersion === resetVersion) {
@@ -535,6 +648,18 @@ export class Agent {
             if (options.debug !== undefined) loopOptions.debug = options.debug;
 
             const result = await runAgentLoop(loopOptions);
+            const finishedAt = this.#now();
+            finishPendingInferences(finishedAt);
+            this.#emitTrace({
+                durationMs: Math.max(0, finishedAt - turnStartedAt),
+                model: this.#model.id,
+                provider: this.provider.id,
+                sessionId: this.#traceSessionId,
+                stopReason: result.stopReason,
+                success: result.stopReason !== "error",
+                timestamp: finishedAt,
+                type: "turn_finished",
+            });
 
             if (this.#activeRunId === runId) {
                 this.#activeRunId = undefined;
@@ -562,6 +687,18 @@ export class Agent {
                 runId,
             };
         } catch (error) {
+            const finishedAt = this.#now();
+            finishPendingInferences(finishedAt);
+            this.#emitTrace({
+                durationMs: Math.max(0, finishedAt - turnStartedAt),
+                model: this.#model.id,
+                provider: this.provider.id,
+                sessionId: this.#traceSessionId,
+                stopReason: options.signal?.aborted ? "aborted" : "error",
+                success: false,
+                timestamp: finishedAt,
+                type: "turn_finished",
+            });
             if (this.#activeRunId === runId) {
                 this.#activeRunId = undefined;
             }
@@ -780,6 +917,14 @@ export class Agent {
         this.#printEvent(event);
         await this.#onEvent?.(event);
         await options.onEvent?.(event);
+    }
+
+    #emitTrace(event: HappyTracingEvent): void {
+        try {
+            this.context.plugins?.trace?.(event);
+        } catch {
+            // Tracing is observation only and never changes the agent run.
+        }
     }
 }
 

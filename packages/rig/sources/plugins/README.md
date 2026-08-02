@@ -122,6 +122,23 @@ Only plugins in the manager's `running` state contribute skills; stopped and fai
 A plugin with an icon and skills may omit `main` entirely. Rig activates that static contribution
 without spawning a plugin process.
 
+A manifest may also contribute a bounded static system prompt with either
+`"systemPrompt": { "text": "..." }` or `"systemPrompt": { "path": "SYSTEM_PROMPT.md" }`.
+Prompt-only plugins do not need a process. Active contributions are appended in plugin folder name
+order and capped at 256 KiB in total.
+
+`PluginHookRegistry` owns process-generation-scoped prompt middleware and tracing subscriptions.
+`happy.hooks.onSystemPrompt` uses an authenticated NDJSON call stream: each hook sees the prior
+plugin's replacement, receives the composed system prompt plus current user prompt, and has a
+two-second deadline inside a five-second aggregate chain budget. Oversized, timed-out,
+disconnected, failed, or over-budget calls are logged and skipped.
+`happy.tracing.subscribe` uses the same NDJSON stream style for observation-only turn, inference,
+and tool lifecycle events. Each plugin has a 128-event drop-oldest queue; socket backpressure never
+reaches the agent run, and logged drop counts make slow subscribers visible. Closing either stream
+retires its registration generation; the SDK logs the close and reconnects with bounded backoff.
+Synthetic tool results for calls interrupted before execution are durable loop events but do not
+produce tracing lifecycle events, so every traced tool finish has a matching start.
+
 `PluginMcpRegistry` is a daemon-wide `McpToolProvider`. Each plugin process generation owns a
 connection to it through the already-authenticated plugin socket. An SDK registration becomes live
 only when its NDJSON call stream attaches; exit, disconnect, replacement, restart, or uninstall

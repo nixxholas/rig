@@ -413,6 +413,8 @@ async function runOwnedLocalProtocolServer(
         // handle rather than a captured instance.
         let pluginManager: PluginManager | undefined;
         const plugins: PluginContext = {
+            applySystemPrompt: (input) =>
+                requirePluginManager(pluginManager).applySystemPrompt(input),
             callAppTool: (...parameters) =>
                 requirePluginManager(pluginManager).callAppTool(...parameters),
             discoverRepository: (...parameters) =>
@@ -421,6 +423,7 @@ async function runOwnedLocalProtocolServer(
             installFromGitHub: (...parameters) =>
                 requirePluginManager(pluginManager).installFromGitHub(...parameters),
             loadSkills: (fs) => requirePluginManager(pluginManager).loadSkills(fs),
+            loadSystemPrompt: () => requirePluginManager(pluginManager).loadSystemPrompt(),
             list: () => requirePluginManager(pluginManager).list(),
             network: {
                 interceptHttp: (request) =>
@@ -443,6 +446,7 @@ async function runOwnedLocalProtocolServer(
                 requirePluginManager(pluginManager).storageList(...parameters),
             storageSet: (...parameters) =>
                 requirePluginManager(pluginManager).storageSet(...parameters),
+            trace: (event) => requirePluginManager(pluginManager).trace(event),
             uninstall: (request) => requirePluginManager(pluginManager).uninstall(request),
         };
         store = new PersistentSessionStore({

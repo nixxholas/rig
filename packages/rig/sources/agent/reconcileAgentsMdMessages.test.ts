@@ -117,6 +117,28 @@ describe("reconcileAgentsMdMessages", () => {
         );
     });
 
+    it("appends a plugin's static contribution to the composed system prompt", async () => {
+        const workspace = await createWorkspace();
+        const fs = createFileSystem(workspace);
+
+        const prompt = await createSystemPrompt({
+            context: {
+                fs,
+                plugins: {
+                    loadSkills: async () => [],
+                    loadSystemPrompt: async () => "Always annotate release notes with the owner.",
+                },
+            } as never,
+            instructions: "You are rig.",
+            messages: [],
+            model: { id: "test-model" } as never,
+            provider: { id: "test", type: "codex" } as never,
+        });
+
+        expect(prompt).toContain("You are rig.");
+        expect(prompt).toContain("Always annotate release notes with the owner.");
+    });
+
     it("tells every provider how to read the delivered project instructions", async () => {
         const workspace = await createWorkspace();
         const fs = createFileSystem(workspace);

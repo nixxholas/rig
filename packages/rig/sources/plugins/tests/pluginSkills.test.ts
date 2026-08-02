@@ -21,6 +21,32 @@ afterEach(async () => {
 });
 
 describe("plugin skills", () => {
+    it("loads a prompt-only plugin's bounded static contribution", async () => {
+        const harness = await createHarness();
+        const directory = join(harness.pluginsDirectory, "prompt");
+        await mkdir(directory, { recursive: true });
+        await Promise.all([
+            writeFile(
+                join(directory, "happy.plugin.json"),
+                `${JSON.stringify({
+                    description: "Release prompt.",
+                    icon: "icon.png",
+                    name: "Release prompt",
+                    systemPrompt: { path: "SYSTEM_PROMPT.md" },
+                })}\n`,
+            ),
+            writeFile(join(directory, "icon.png"), PNG_SIGNATURE),
+            writeFile(join(directory, "SYSTEM_PROMPT.md"), "Always name the release owner."),
+        ]);
+
+        await harness.manager.start();
+
+        await expect(harness.manager.loadSystemPrompt()).resolves.toBe(
+            "Always name the release owner.",
+        );
+        expect(harness.started).toEqual([]);
+    });
+
     it("merges a running plugin's declared skills with plugin provenance", async () => {
         const harness = await createHarness();
         await createPlugin(join(harness.pluginsDirectory, "release"), {

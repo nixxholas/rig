@@ -21,6 +21,11 @@ export {
     type PluginAppResource,
 } from "./PluginAppRegistry.js";
 export {
+    PluginHookRegistry,
+    type PluginHookConnection,
+    type PluginHookRegistryOptions,
+} from "./PluginHookRegistry.js";
+export {
     PluginMcpRegistry,
     type PluginMcpConnection,
     type PluginMcpRegistryOptions,

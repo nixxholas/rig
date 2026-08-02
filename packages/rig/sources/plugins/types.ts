@@ -30,6 +30,7 @@ export interface RegisteredPlugin {
     manifest: RegisteredPluginManifest;
     manifestPath: string;
     skillsPath?: string;
+    systemPrompt?: string;
 }
 
 export interface PluginAppResourceSnapshot {

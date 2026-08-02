@@ -352,6 +352,7 @@ export function createCodingAssistantAgent(
             ? { contextMessages: options.contextMessages }
             : {}),
         ...(options.startDate !== undefined ? { startDate: options.startDate } : {}),
+        traceSessionId: options.sessionId ?? agentId,
         tools,
         printToConsole: false,
     };
