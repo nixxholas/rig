@@ -49,10 +49,12 @@ describe("plugin tools", () => {
 
     it("installs from a path the session resolves and uninstalls by name", async () => {
         const install = vi.fn(async () => ({
+            classification: "fresh-install" as const,
             description: "A small clock.",
             directory: "/home/steve/.happy/rig/plugins/clock",
             folder: "clock",
             name: "Clock",
+            version: "0.0.0",
         }));
         const uninstall = vi.fn(async () => ({
             dataDirectory: "/home/steve/Happy/Plugins/clock",
@@ -89,6 +91,7 @@ describe("plugin tools", () => {
                         logAvailable: true,
                         name: "Clock",
                         status: "running",
+                        version: "0.0.0",
                     },
                 ],
                 version: "01900000-0000-7000-8000-000000000001",

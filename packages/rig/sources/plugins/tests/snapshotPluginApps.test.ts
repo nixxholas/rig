@@ -134,6 +134,7 @@ function plugin(root: string): RegisteredPlugin {
             entry: "index.ts",
             icon: "icon.png",
             name: "Usage",
+            version: "0.0.0",
         },
         manifestPath: join(root, "happy.plugin.json"),
     };

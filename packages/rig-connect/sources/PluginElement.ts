@@ -48,6 +48,7 @@ export interface LocalPlugin {
     logAvailable: boolean;
     name: string;
     status: "build_failed" | "running" | "stopped";
+    version: string;
 }
 
 export interface PluginCatalogFailure {
@@ -168,6 +169,7 @@ function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined)
         logAvailable: plugin.logAvailable,
         name: plugin.name,
         status: plugin.status,
+        version: plugin.version,
     };
 }
 
@@ -197,7 +199,8 @@ function samePlugin(left: LocalPlugin | undefined, right: LocalPlugin): boolean 
         left.id === right.id &&
         left.logAvailable === right.logAvailable &&
         left.name === right.name &&
-        left.status === right.status
+        left.status === right.status &&
+        left.version === right.version
     );
 }
 

@@ -244,6 +244,7 @@ function plugin(): BuiltPlugin {
             entry: "index.ts",
             icon: "icon.png",
             name: "Usage",
+            version: "0.0.0",
         },
         manifestPath: "/plugin/happy.plugin.json",
         runtimeDirectory: "/plugin/.build",

@@ -42,6 +42,7 @@ export type {
 } from "./PluginElement.js";
 export type {
     InstalledPluginSummary,
+    PluginInstallClassification,
     PluginManagementErrorCode,
     UninstalledPluginSummary,
 } from "./protocol.js";

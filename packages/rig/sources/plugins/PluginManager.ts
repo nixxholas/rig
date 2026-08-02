@@ -142,7 +142,7 @@ export class PluginManager {
         // Replacing an installed plugin retires the process built from the previous code.
         await this.#stopRunning(installed.folder, true);
         await this.#startRegistered(installed.folder);
-        await this.#publishChanged();
+        await this.#publishChanged({ installation: installed });
         return installed;
     }
 
@@ -226,6 +226,7 @@ export class PluginManager {
                         logAvailable: state.error !== undefined || state.logPath !== undefined,
                         name: plugin.manifest.name,
                         status: state.status,
+                        version: plugin.manifest.version,
                     };
                 }),
                 version,
@@ -433,7 +434,7 @@ export class PluginManager {
         void this.#publishChanged();
     }
 
-    async #publishChanged(): Promise<void> {
+    async #publishChanged(options: { installation?: InstalledPlugin } = {}): Promise<void> {
         const eventId = this.#createEventId();
         this.#catalogVersion = eventId;
         const publish = async () => {
@@ -453,7 +454,12 @@ export class PluginManager {
             if (this.#closed || catalog.version !== eventId) return;
             const event = {
                 createdAt: this.#now(),
-                data: catalog,
+                data: {
+                    ...catalog,
+                    ...(options.installation === undefined
+                        ? {}
+                        : { installation: options.installation }),
+                },
                 id: eventId,
                 type: "plugins_changed" as const,
             };

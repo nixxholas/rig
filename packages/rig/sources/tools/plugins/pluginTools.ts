@@ -6,6 +6,8 @@ import { resolveFileSystemPath } from "../../agent/context/resolveFileSystemPath
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
 import { getPluginsDirectory } from "../../plugins/getPluginsDirectory.js";
+import { pluginVersionSchema } from "../../plugins/types.js";
+import { pluginInstallClassificationSchema } from "../../protocol/index.js";
 
 /**
  * Plugins live in Rig's managed home rather than the workspace, so every plugin action reaches
@@ -27,10 +29,12 @@ export const pluginInstallTool = defineTool({
         { additionalProperties: false },
     ),
     returnType: Type.Object({
+        classification: pluginInstallClassificationSchema,
         description: Type.String(),
         directory: Type.String(),
         folder: Type.String(),
         name: Type.String(),
+        version: pluginVersionSchema,
     }),
     shouldReviewInAutoMode: () => true,
     shouldRunInFullAccessInAutoMode: () => true,
@@ -92,6 +96,7 @@ export const pluginListTool = defineTool({
                     Type.Literal("running"),
                     Type.Literal("stopped"),
                 ]),
+                version: pluginVersionSchema,
             }),
         ),
     }),

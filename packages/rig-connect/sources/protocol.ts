@@ -7,7 +7,7 @@
  * type-check rather than a runtime surprise.
  */
 
-import { Type } from "@sinclair/typebox";
+import { Type, type Static } from "@sinclair/typebox";
 
 export type EventId = string;
 export type MutationId = string;
@@ -1382,6 +1382,7 @@ export interface PluginSummary {
     logAvailable: boolean;
     name: string;
     status: "build_failed" | "running" | "stopped";
+    version: string;
 }
 
 export interface PluginLogSnapshot {
@@ -1406,11 +1407,21 @@ export interface PluginLogResponse {
     log: PluginLogSnapshot;
 }
 
+export const pluginInstallClassificationSchema = Type.Union([
+    Type.Literal("fresh-install"),
+    Type.Literal("upgrade"),
+    Type.Literal("downgrade"),
+    Type.Literal("reinstall"),
+]);
+export type PluginInstallClassification = Static<typeof pluginInstallClassificationSchema>;
+
 export interface InstalledPluginSummary {
+    classification: PluginInstallClassification;
     description: string;
     directory: string;
     folder: string;
     name: string;
+    version: string;
 }
 
 export interface UninstalledPluginSummary {
@@ -1543,6 +1554,11 @@ export type GlobalEvent =
           createdAt: number;
           data: {
               failures: readonly { error: string; folder: string }[];
+              /**
+               * Best-effort metadata that may be absent when another catalog change supersedes
+               * the installation event before publication.
+               */
+              installation?: InstalledPluginSummary;
               plugins: readonly PluginSummary[];
               version: string;
           };

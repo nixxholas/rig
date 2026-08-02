@@ -25,6 +25,7 @@ export type {
     ListPluginsResponse,
     PluginManagementErrorCode,
     PluginManagementErrorResponse,
+    PluginInstallClassification,
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
@@ -101,6 +102,7 @@ export type {
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
+    pluginInstallClassificationSchema,
     projectSettingsSchema,
     projectSettingsUpdateSchema,
     projectWorkspaceComputeSchema,

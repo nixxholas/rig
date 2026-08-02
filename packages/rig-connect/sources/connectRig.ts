@@ -69,6 +69,7 @@ import type {
     TimelineScope,
     UninstalledPluginSummary,
 } from "./protocol.js";
+import { pluginInstallClassificationSchema } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
 import { endpointUrl } from "./endpointUrl.js";
 
@@ -113,10 +114,12 @@ const pluginAppStorageListResponseSchema = Type.Object(
 const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
 const installedPluginSummarySchema = Type.Object(
     {
+        classification: pluginInstallClassificationSchema,
         description: Type.String(),
         directory: Type.String(),
         folder: Type.String(),
         name: Type.String(),
+        version: Type.String(),
     },
     { additionalProperties: false },
 );

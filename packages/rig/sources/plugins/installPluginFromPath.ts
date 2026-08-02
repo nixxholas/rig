@@ -1,7 +1,9 @@
 import { basename, join } from "node:path";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import type { InstalledPluginSummary, PluginInstallClassification } from "../protocol/index.js";
 import { buildPlugin } from "./buildPlugin.js";
+import { comparePluginVersions } from "./comparePluginVersions.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import { PLUGIN_MANIFEST_FILE_NAME } from "./types.js";
 
@@ -10,12 +12,7 @@ const EXCLUDED_ENTRIES = new Set([".build", ".git", ".runtime", "node_modules"])
 const MAX_SOURCE_FILES = 2_000;
 const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 
-export interface InstalledPlugin {
-    description: string;
-    directory: string;
-    folder: string;
-    name: string;
-}
+export type InstalledPlugin = InstalledPluginSummary;
 
 /**
  * Copies a plugin's sources into Rig's managed plugins folder and compiles them there.
@@ -54,18 +51,37 @@ export async function installPluginFromPath(options: {
         signal?.throwIfAborted();
 
         const directory = join(pluginsDirectory, folder);
+        const classification = await classifyInstall(fs, directory, staged.manifest.version);
         await fs.rm(directory, { force: true, recursive: true });
         await fs.move(stagingDirectory, directory);
         return {
+            classification,
             description: staged.manifest.description,
             directory,
             folder,
             name: staged.manifest.name,
+            version: staged.manifest.version,
         };
     } catch (error) {
         await fs.rm(stagingDirectory, { force: true, recursive: true }).catch(() => undefined);
         throw error;
     }
+}
+
+async function classifyInstall(
+    fs: FileSystemContext,
+    directory: string,
+    nextVersion: string,
+): Promise<PluginInstallClassification> {
+    if (!(await fs.exists(directory))) return "fresh-install";
+    // Version comparison is metadata, not a repair gate. A damaged or schema-outdated installed
+    // copy must remain replaceable after the staged replacement has already built successfully.
+    const previousVersion = await readPluginManifest(directory)
+        .then((plugin) => plugin.manifest.version)
+        .catch(() => undefined);
+    if (previousVersion === undefined) return "reinstall";
+    const comparison = comparePluginVersions(nextVersion, previousVersion);
+    return comparison === 0 ? "reinstall" : comparison > 0 ? "upgrade" : "downgrade";
 }
 
 function toFolderName(value: string): string {

@@ -39,6 +39,12 @@ plugin writes to. Every change — including a plugin that exits on its own — 
 restart. A plugin is staged in a hidden folder and compiled there, so a plugin that fails to build
 is never installed and never replaces a working one.
 
+Manifest versions use Semantic Versioning and default to `0.0.0` when omitted. Installing over an
+existing folder is classified as an upgrade, downgrade, or reinstall by comparing versions; the
+install result and its final `plugins_changed` event carry that classification. Reading the old
+version is best-effort so a damaged installation can still be repaired; when it cannot be read,
+the replacement is classified as a reinstall.
+
 `PluginMcpRegistry` is a daemon-wide `McpToolProvider`. Each plugin process generation owns a
 connection to it through the already-authenticated plugin socket. An SDK registration becomes live
 only when its NDJSON call stream attaches; exit, disconnect, replacement, restart, or uninstall
@@ -64,7 +70,9 @@ icons. Plugin-private storage is JSON-only and bounded to 1,024 safe keys, 64 Ki
 The `/plugins` snapshot and `plugins_changed` events carry the same ordered catalog version in
 addition to the global cursor. The manager assigns it synchronously when state changes and retries
 an asynchronous folder read if the version moves underneath it. `rig-connect` can therefore settle
-both directions of the stream-before-snapshot race without using arrival order.
+both directions of the stream-before-snapshot race without using arrival order. Installation
+metadata on an event is best-effort: if another catalog change supersedes that event before it is
+published, the newer whole-catalog event may omit the installation result.
 
 The manager records one authoritative state for every registered plugin: `running`, `stopped`, or
 `build_failed`. The current-run file retains the most recent 1 MiB and resets for each process

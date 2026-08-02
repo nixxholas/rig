@@ -347,6 +347,13 @@ export const happyPluginAppManifestSchema = Type.Object(
 );
 export type HappyPluginAppManifest = Static<typeof happyPluginAppManifestSchema>;
 
+export const happyPluginVersionSchema = Type.String({
+    default: "0.0.0",
+    pattern:
+        "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+});
+export type HappyPluginVersion = Static<typeof happyPluginVersionSchema>;
+
 export const happyPluginManifestSchema = Type.Object(
     {
         apps: Type.Optional(
@@ -359,6 +366,7 @@ export const happyPluginManifestSchema = Type.Object(
         entry: Type.String({ pattern: "^(?!.*\\.d\\.ts$).+\\.ts$" }),
         icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
         name: Type.String({ minLength: 1 }),
+        version: Type.Optional(happyPluginVersionSchema),
     },
     exact,
 );

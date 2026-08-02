@@ -1,4 +1,5 @@
 export { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
+export { comparePluginVersions } from "./comparePluginVersions.js";
 export {
     createPluginApiServer,
     type CreatePluginApiServerOptions,
@@ -28,9 +29,11 @@ export { startPlugin, type RunningPlugin, type StartPluginOptions } from "./star
 export {
     PLUGIN_MANIFEST_FILE_NAME,
     pluginManifestSchema,
+    pluginVersionSchema,
     type BuiltPlugin,
     type PluginDiscovery,
     type PluginManifest,
     type PluginRegistrationFailure,
+    type RegisteredPluginManifest,
     type RegisteredPlugin,
 } from "./types.js";

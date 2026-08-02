@@ -17,12 +17,21 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
         }
         throw error;
     }
-    if (!Value.Check(pluginManifestSchema, parsed)) {
-        const first = Value.Errors(pluginManifestSchema, parsed).First();
+    const normalized = Value.Default(pluginManifestSchema, parsed);
+    if (!Value.Check(pluginManifestSchema, normalized)) {
+        const first = Value.Errors(pluginManifestSchema, normalized).First();
+        if (first?.path === "/version") {
+            throw new Error(
+                `${PLUGIN_MANIFEST_FILE_NAME} is invalid. /version: Expected a semantic version such as 1.2.3.`,
+            );
+        }
         const detail = first === undefined ? "" : ` ${first.path || "value"}: ${first.message}`;
         throw new Error(`${PLUGIN_MANIFEST_FILE_NAME} is invalid.${detail}`);
     }
-    const manifest = parsed;
+    const manifest = {
+        ...normalized,
+        version: normalized.version!,
+    };
 
     const entryPath = resolveOwnedPath(directory, manifest.entry, "entry");
     const iconPath = resolveOwnedPath(directory, manifest.icon, "icon");

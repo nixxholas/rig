@@ -34,7 +34,12 @@ describe("plugin registration", () => {
             fs: harness.fs,
             sourceDirectory: join(harness.workspace, "clock"),
         });
-        expect(installed).toMatchObject({ folder: "clock", name: "Clock" });
+        expect(installed).toMatchObject({
+            classification: "fresh-install",
+            folder: "clock",
+            name: "Clock",
+            version: "0.0.0",
+        });
 
         // The plugin is registered and running by the time install resolves.
         const afterInstall = await harness.manager.list();
@@ -48,9 +53,11 @@ describe("plugin registration", () => {
                 logAvailable: true,
                 name: "Clock",
                 status: "running",
+                version: "0.0.0",
             },
         ]);
         expect(lastPlugins(harness.events)).toEqual(afterInstall.plugins);
+        expect(harness.events.at(-1)?.data.installation).toEqual(installed);
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
         await expect(harness.manager.readLog("Clock")).resolves.toMatchObject({
@@ -91,6 +98,26 @@ describe("plugin registration", () => {
             expect(event.createdAt).toEqual(expect.any(Number));
         }
         expect(new Set(harness.events.map((event) => event.id)).size).toBe(harness.events.length);
+    });
+
+    it("announces an upgrade classification with the new catalog version", async () => {
+        const harness = await createHarness();
+        await harness.manager.start();
+        const source = join(harness.workspace, "clock");
+        await createPluginSource(source, "1.0.0");
+        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        await createPluginSource(source, "2.0.0");
+
+        const installed = await harness.manager.install({
+            fs: harness.fs,
+            sourceDirectory: source,
+        });
+
+        expect(installed).toMatchObject({ classification: "upgrade", version: "2.0.0" });
+        expect(harness.events.at(-1)?.data.installation).toEqual(installed);
+        await expect(harness.manager.list()).resolves.toMatchObject({
+            plugins: [{ version: "2.0.0" }],
+        });
     });
 
     it("keeps a running plugin when a replacement fails to build", async () => {
@@ -260,7 +287,7 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
     };
 }
 
-async function createPluginSource(directory: string): Promise<void> {
+async function createPluginSource(directory: string, version?: string): Promise<void> {
     await mkdir(directory, { recursive: true });
     await Promise.all([
         writeFile(
@@ -271,6 +298,7 @@ async function createPluginSource(directory: string): Promise<void> {
                     entry: "index.ts",
                     icon: "icon.png",
                     name: "Clock",
+                    ...(version === undefined ? {} : { version }),
                 },
                 null,
                 2,

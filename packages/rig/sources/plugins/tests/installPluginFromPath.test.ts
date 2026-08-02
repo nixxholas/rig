@@ -29,10 +29,12 @@ describe("installing a plugin from a folder", () => {
         });
 
         expect(installed).toMatchObject({
+            classification: "fresh-install",
             description: "A small clock.",
             directory: join(pluginsDirectory, "clock"),
             folder: "clock",
             name: "Clock",
+            version: "0.0.0",
         });
         await expect(
             readFile(join(installed.directory, ".build", "build", "index.js"), "utf8"),
@@ -89,6 +91,47 @@ describe("installing a plugin from a folder", () => {
             readFile(join(pluginsDirectory, "clock", "index.ts"), "utf8"),
         ).resolves.toContain("ready");
     });
+
+    it("repairs a corrupted existing installation and classifies it as a reinstall", async () => {
+        const { fs, pluginsDirectory, workspace } = await createHarness();
+        const source = join(workspace, "clock");
+        await createPluginSource(source, { version: "1.0.0" });
+        await installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source });
+        await writeFile(join(pluginsDirectory, "clock", "happy.plugin.json"), "{");
+        await createPluginSource(source, { version: "2.0.0" });
+
+        await expect(
+            installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
+        ).resolves.toMatchObject({
+            classification: "reinstall",
+            version: "2.0.0",
+        });
+        await expect(
+            readFile(join(pluginsDirectory, "clock", "happy.plugin.json"), "utf8"),
+        ).resolves.toContain('"version": "2.0.0"');
+    });
+
+    it.each([
+        { classification: "upgrade", nextVersion: "2.0.0", previousVersion: "1.0.0" },
+        { classification: "downgrade", nextVersion: "1.0.0", previousVersion: "2.0.0" },
+        { classification: "reinstall", nextVersion: "1.0.0", previousVersion: "1.0.0" },
+    ] as const)(
+        "classifies an install over an existing folder as a $classification",
+        async ({ classification, nextVersion, previousVersion }) => {
+            const { fs, pluginsDirectory, workspace } = await createHarness();
+            const source = join(workspace, "clock");
+            await createPluginSource(source, { version: previousVersion });
+            await installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source });
+            await createPluginSource(source, { version: nextVersion });
+
+            await expect(
+                installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
+            ).resolves.toMatchObject({
+                classification,
+                version: nextVersion,
+            });
+        },
+    );
 
     it("refuses a folder that is not a plugin", async () => {
         const { fs, pluginsDirectory, workspace } = await createHarness();
@@ -158,7 +201,7 @@ async function createHarness(): Promise<{
 
 async function createPluginSource(
     directory: string,
-    options: { source?: string } = {},
+    options: { source?: string; version?: string } = {},
 ): Promise<void> {
     await mkdir(directory, { recursive: true });
     await Promise.all([
@@ -170,6 +213,7 @@ async function createPluginSource(
                     entry: "index.ts",
                     icon: "icon.png",
                     name: "Clock",
+                    ...(options.version === undefined ? {} : { version: options.version }),
                 },
                 null,
                 2,

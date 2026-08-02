@@ -367,6 +367,7 @@ function plugin(generation: string, withLargeResource = false): PluginSummary {
         logAvailable: false,
         name: "Usage",
         status: "running",
+        version: "1.2.3",
     };
 }
 

@@ -59,6 +59,7 @@ The manifest is intentionally small and exact:
 {
     "name": "Project Counter",
     "description": "Reports how many projects Happy knows about.",
+    "version": "1.0.0",
     "entry": "index.ts",
     "icon": "icon.png",
     "apps": [
@@ -73,10 +74,12 @@ The manifest is intentionally small and exact:
 }
 ```
 
-The first four fields are required. `apps` is optional. Extra fields are rejected.
+`name`, `description`, `entry`, and `icon` are required. `version` and `apps` are optional. Extra
+fields are rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
+- `version`: a Semantic Versioning string. An omitted version is treated as `0.0.0`.
 - `entry`: a relative path to a `.ts` file inside the plugin folder.
 - `icon`: a relative path to a PNG file inside the plugin folder.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,

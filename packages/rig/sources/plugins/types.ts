@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import {
     happyPluginManifestSchema,
+    happyPluginVersionSchema,
     type HappyPluginAppManifest,
     type HappyPluginManifest,
     type HappyPluginAppSidebar,
@@ -14,6 +15,8 @@ export const PLUGIN_MANIFEST_FILE_NAME = "happy.plugin.json";
 
 export const pluginManifestSchema = happyPluginManifestSchema;
 export type PluginManifest = HappyPluginManifest;
+export const pluginVersionSchema = happyPluginVersionSchema;
+export type RegisteredPluginManifest = PluginManifest & Required<Pick<PluginManifest, "version">>;
 
 export const fileSystemErrorSchema = Type.Object({
     code: Type.String(),
@@ -24,7 +27,7 @@ export interface RegisteredPlugin {
     entryPath: string;
     folderName: string;
     iconPath: string;
-    manifest: PluginManifest;
+    manifest: RegisteredPluginManifest;
     manifestPath: string;
 }
 

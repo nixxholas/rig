@@ -399,6 +399,8 @@ export interface PluginSummary {
     /** Whether a bounded current-run or build diagnostic is available. */
     logAvailable: boolean;
     name: string;
+    /** The manifest version, normalized to 0.0.0 when the author omitted it. */
+    version: string;
 }
 
 /** One bounded snapshot of the current plugin generation's output. */
@@ -427,11 +429,21 @@ export interface PluginLogResponse {
     log: PluginLogSnapshot;
 }
 
+export const pluginInstallClassificationSchema = Type.Union([
+    Type.Literal("fresh-install"),
+    Type.Literal("upgrade"),
+    Type.Literal("downgrade"),
+    Type.Literal("reinstall"),
+]);
+export type PluginInstallClassification = Static<typeof pluginInstallClassificationSchema>;
+
 export interface InstalledPluginSummary {
+    classification: PluginInstallClassification;
     description: string;
     directory: string;
     folder: string;
     name: string;
+    version: string;
 }
 
 export interface UninstalledPluginSummary {
@@ -476,6 +488,11 @@ export interface PluginsChangedEvent {
     createdAt: number;
     data: {
         failures: readonly { error: string; folder: string }[];
+        /**
+         * Best-effort metadata on the final catalog event for an installation. It may be absent
+         * when a concurrent catalog change supersedes that event before publication.
+         */
+        installation?: InstalledPluginSummary;
         plugins: readonly PluginSummary[];
         version: EventId;
     };

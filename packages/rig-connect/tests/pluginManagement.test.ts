@@ -17,10 +17,12 @@ describe("plugin management", () => {
                 return Response.json(
                     {
                         plugin: {
+                            classification: "fresh-install",
                             description: "Lists local projects.",
                             directory: "/managed/hello-world",
                             folder: "hello-world",
                             name: "Hello World",
+                            version: "1.0.0",
                         },
                     },
                     { status: 201 },
@@ -43,10 +45,12 @@ describe("plugin management", () => {
         await expect(
             rig.installPlugin("/Users/steve/Developer/plugins/packages/hello-world"),
         ).resolves.toEqual({
+            classification: "fresh-install",
             description: "Lists local projects.",
             directory: "/managed/hello-world",
             folder: "hello-world",
             name: "Hello World",
+            version: "1.0.0",
         });
         await expect(rig.uninstallPlugin("Hello World")).resolves.toEqual({
             dataDirectory: "/data/hello-world",

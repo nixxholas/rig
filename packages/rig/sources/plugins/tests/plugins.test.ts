@@ -86,6 +86,32 @@ describe("plugins", () => {
         expect(discovery.failures[0]?.error).toContain("happy.plugin.json is invalid");
     });
 
+    it("validates and normalizes manifest versions", async () => {
+        const root = await temporaryDirectory();
+        const versioned = join(root, "versioned");
+        const unversioned = join(root, "unversioned");
+        const invalid = join(root, "invalid");
+        await Promise.all([
+            createPluginFixture(versioned, {
+                manifest: pluginManifest({ version: "1.2.3-beta.1+build.7" }),
+            }),
+            createPluginFixture(unversioned, {}),
+            createPluginFixture(invalid, {
+                manifest: pluginManifest({ version: "1.2" }),
+            }),
+        ]);
+
+        await expect(readPluginManifest(versioned)).resolves.toMatchObject({
+            manifest: { version: "1.2.3-beta.1+build.7" },
+        });
+        await expect(readPluginManifest(unversioned)).resolves.toMatchObject({
+            manifest: { version: "0.0.0" },
+        });
+        await expect(readPluginManifest(invalid)).rejects.toThrow(
+            "Expected a semantic version such as 1.2.3.",
+        );
+    });
+
     it("rejects manifest assets that escape through symbolic links", async () => {
         const root = await temporaryDirectory();
         const directory = join(root, "linked");
@@ -206,4 +232,14 @@ async function createPluginFixture(
         writeFile(join(directory, "icon.png"), PNG_SIGNATURE),
         writeFile(join(directory, "index.ts"), options.source ?? 'console.log("ready");\n'),
     ]);
+}
+
+function pluginManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+        description: "A small clock.",
+        entry: "index.ts",
+        icon: "icon.png",
+        name: "Clock",
+        ...overrides,
+    };
 }

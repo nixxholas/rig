@@ -54,10 +54,12 @@ describe("plugin HTTP protocol", () => {
             requestJson(port, "/plugins", { sourceDirectory: "/plugins/source" }),
         ).resolves.toEqual({
             plugin: {
+                classification: "fresh-install",
                 description: "A clock.",
                 directory: "/managed/clock",
                 folder: "clock",
                 name: "Clock",
+                version: "0.0.0",
             },
         });
         expect(plugins.install).toHaveBeenCalledWith(
@@ -232,10 +234,12 @@ function context(): Pick<
             };
         },
         install: vi.fn(async () => ({
+            classification: "fresh-install" as const,
             description: "A clock.",
             directory: "/managed/clock",
             folder: "clock",
             name: "Clock",
+            version: "0.0.0",
         })),
         async list() {
             return {
@@ -250,6 +254,7 @@ function context(): Pick<
                         logAvailable: true,
                         name: "Clock",
                         status: "stopped",
+                        version: "0.0.0",
                     },
                 ],
                 version: "01900000-0000-7000-8000-000000000001",
