@@ -2,8 +2,14 @@ import { randomUUID } from "node:crypto";
 import { chmod, mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join, relative } from "node:path";
 
+import {
+    createGeneratedMediaLocation,
+    type GeneratedMediaLocation,
+} from "./GeneratedMediaLocation.js";
+
 export interface GeneratedMediaWriteResult {
     hostPath: string;
+    location: GeneratedMediaLocation;
     path: string;
 }
 
@@ -53,7 +59,11 @@ export function createGeneratedMediaStore(options: {
                 await rm(temporaryPath, { force: true }).catch(() => undefined);
                 throw error;
             }
-            return { hostPath, path: join(modelDirectory, name) };
+            return {
+                hostPath,
+                location: createGeneratedMediaLocation(name),
+                path: join(modelDirectory, name),
+            };
         },
     };
 }

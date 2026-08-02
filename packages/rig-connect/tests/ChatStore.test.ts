@@ -142,7 +142,7 @@ describe("ChatStore", () => {
                         kind: "image",
                         mediaType: "image/png",
                         name: "result.png",
-                        source: "/happy/generated/result.png",
+                        source: "generated/result.png",
                         thumbhash: "AQID",
                         width: 30,
                     },

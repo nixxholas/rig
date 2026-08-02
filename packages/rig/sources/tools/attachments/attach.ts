@@ -82,6 +82,14 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
                         ? {}
                         : {
                               downloadUrl: `/sessions/${encodeURIComponent(scope.sessionId)}/attachments/${encodeURIComponent(id)}/download`,
+                              ...(prepared.kind === "video"
+                                  ? {
+                                        preview: {
+                                            ...prepared.preview,
+                                            downloadUrl: `/sessions/${encodeURIComponent(scope.sessionId)}/attachments/${encodeURIComponent(id)}/preview`,
+                                        },
+                                    }
+                                  : {}),
                           }),
                 };
             });
@@ -135,9 +143,10 @@ async function snapshotLocalAttachmentSource(
     attachments.registerCleanup(id, () => generated.remove(written.hostPath));
     return {
         ...source,
+        hostPath: written.hostPath,
         path: written.path,
         size: bytes.byteLength,
-        source: written.hostPath,
+        source: written.location,
     };
 }
 

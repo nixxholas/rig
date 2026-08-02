@@ -1,7 +1,7 @@
 import { constants } from "node:fs";
 import { open, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { basename, isAbsolute, join, relative } from "node:path";
+import { basename, extname, isAbsolute, relative } from "node:path";
 
 import { isCuid } from "@paralleldrive/cuid2";
 import { Type } from "@sinclair/typebox";
@@ -146,7 +146,7 @@ import { resolveGitTrackedEntity } from "../git/resolveGitTrackedEntity.js";
 import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permissions/index.js";
 import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
-import { getGeneratedDirectory } from "../generated-media/index.js";
+import { getGeneratedDirectory, resolveGeneratedMediaLocation } from "../generated-media/index.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import {
     DEFAULT_CODEX_STREAM_MAX_RETRIES,
@@ -2068,7 +2068,10 @@ async function handleRequest(
         return;
     }
 
-    if (route.name === "session-attachment-download") {
+    if (
+        route.name === "session-attachment-download" ||
+        route.name === "session-attachment-preview"
+    ) {
         if (request.method !== "GET") {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
@@ -2076,14 +2079,21 @@ async function handleRequest(
         try {
             const attachment = store.attachment(sessionId, route.attachmentId);
             const file =
-                attachment === undefined ? undefined : await readSessionAttachmentFile(attachment);
+                attachment === undefined
+                    ? undefined
+                    : route.name === "session-attachment-preview"
+                      ? await readSessionAttachmentPreview(attachment)
+                      : await readSessionAttachmentFile(attachment);
             if (file === undefined) {
                 sendJson(response, 404, { error: "Attachment not found" });
                 return;
             }
             response.writeHead(200, {
                 "cache-control": "private, no-store",
-                "content-disposition": attachmentContentDisposition(file.name),
+                "content-disposition":
+                    route.name === "session-attachment-preview"
+                        ? "inline"
+                        : attachmentContentDisposition(file.name),
                 "content-length": file.data.byteLength,
                 "content-type": file.mediaType,
                 "x-content-type-options": "nosniff",
@@ -3202,7 +3212,7 @@ function matchRoute(pathname: string):
       }
     | {
           attachmentId: string;
-          name: "session-attachment-download";
+          name: "session-attachment-download" | "session-attachment-preview";
           sessionId: string;
       }
     | { name: "user-input"; requestId: string; sessionId: string }
@@ -3451,11 +3461,14 @@ function matchRoute(pathname: string):
         parts.length === 5 &&
         parts[2] === "attachments" &&
         parts[3] !== undefined &&
-        parts[4] === "download"
+        (parts[4] === "download" || parts[4] === "preview")
     ) {
         return {
             attachmentId: decodeURIComponent(parts[3]),
-            name: "session-attachment-download",
+            name:
+                parts[4] === "download"
+                    ? "session-attachment-download"
+                    : "session-attachment-preview",
             sessionId,
         };
     }
@@ -3545,20 +3558,38 @@ async function readSessionAttachmentFile(
     attachment: Attachment,
 ): Promise<{ data: Buffer; mediaType: string; name: string } | undefined> {
     if (!isDownloadableAttachment(attachment)) return undefined;
-    const hostGenerated = getGeneratedDirectory();
-    const mapped = mapAttachmentSource(attachment.source, hostGenerated, hostGenerated);
-    if (mapped === undefined) return undefined;
+    return readGeneratedMediaFile(
+        attachment.source,
+        attachment.mediaType ?? "application/octet-stream",
+        attachment.name,
+    );
+}
 
-    const root = await realpath(mapped.root);
-    const target = await realpath(mapped.path);
+async function readSessionAttachmentPreview(
+    attachment: Attachment,
+): Promise<{ data: Buffer; mediaType: string; name: string } | undefined> {
+    if (attachment.kind !== "video") return undefined;
+    return readGeneratedMediaFile(
+        attachment.preview.path,
+        attachment.preview.mediaType,
+        `${basename(attachment.name, extname(attachment.name))}-preview.png`,
+    );
+}
+
+async function readGeneratedMediaFile(
+    location: string,
+    mediaType: string,
+    name: string,
+): Promise<{ data: Buffer; mediaType: string; name: string } | undefined> {
+    const hostGenerated = getGeneratedDirectory();
+    const mapped = resolveGeneratedMediaLocation(location, hostGenerated);
+    if (mapped === undefined) return undefined;
+    const root = await realpath(hostGenerated);
+    const target = await realpath(mapped);
     if (!isPathInsideDirectory(root, target)) return undefined;
     const data = await readBoundedAttachmentFile(target);
     if (data === undefined) return undefined;
-    return {
-        data,
-        mediaType: attachment.mediaType ?? "application/octet-stream",
-        name: attachment.name,
-    };
+    return { data, mediaType, name };
 }
 
 async function readBoundedAttachmentFile(path: string): Promise<Buffer | undefined> {
@@ -3590,18 +3621,6 @@ function isDownloadableAttachment(attachment: Attachment): attachment is Downloa
         attachment.kind === "image" ||
         attachment.kind === "video"
     );
-}
-
-function mapAttachmentSource(
-    source: string,
-    modelRoot: string,
-    hostRoot: string,
-): { path: string; root: string } | undefined {
-    const pathFromRoot = relative(modelRoot, source);
-    if (pathFromRoot !== "" && (pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot))) {
-        return undefined;
-    }
-    return { path: join(hostRoot, pathFromRoot), root: hostRoot };
 }
 
 function isPathInsideDirectory(directory: string, path: string): boolean {

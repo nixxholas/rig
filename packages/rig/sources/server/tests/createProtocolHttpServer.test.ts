@@ -55,6 +55,7 @@ describe("createProtocolHttpServer", () => {
         process.env.HAPPY_GENERATED_DIRECTORY = generated;
         await mkdir(generated);
         await writeFile(join(generated, "result.txt"), "docker result\n");
+        await writeFile(join(generated, "preview.png"), "preview image\n");
         await writeFile(join(outside, "secret.txt"), "outside\n");
         await symlink(join(outside, "secret.txt"), join(generated, "link.txt"));
         const attachments = [
@@ -65,7 +66,7 @@ describe("createProtocolHttpServer", () => {
                 kind: "file" as const,
                 mediaType: "text/plain",
                 name: "result.txt",
-                source: join(generated, "result.txt"),
+                source: "generated/result.txt",
             },
             {
                 bytes: 8,
@@ -74,7 +75,27 @@ describe("createProtocolHttpServer", () => {
                 kind: "file" as const,
                 mediaType: "text/plain",
                 name: "link.txt",
-                source: join(generated, "link.txt"),
+                source: "generated/link.txt",
+            },
+            {
+                bytes: 14,
+                downloadUrl: "/sessions/goal-session/attachments/attachment-video/download",
+                duration: 1,
+                height: 720,
+                id: "attachment-video",
+                kind: "video" as const,
+                mediaType: "video/mp4",
+                name: "result.mp4",
+                preview: {
+                    downloadUrl: "/sessions/goal-session/attachments/attachment-video/preview",
+                    height: 360,
+                    mediaType: "image/png" as const,
+                    path: "generated/preview.png",
+                    thumbhash: "AQID",
+                    width: 640,
+                },
+                source: "generated/result.txt",
+                width: 1280,
             },
         ];
         const initialStore = new PersistentSessionStore({ databasePath });
@@ -144,7 +165,7 @@ describe("createProtocolHttpServer", () => {
         const store = new PersistentSessionStore({ databasePath });
         expect(store.get("goal-session")?.attachment("attachment-1")).toBeUndefined();
         expect(store.attachment("goal-session", "attachment-1")).toMatchObject({
-            source: join(generated, "result.txt"),
+            source: "generated/result.txt",
         });
         const { close, socketPath } = await startServer({ store });
         try {
@@ -160,6 +181,20 @@ describe("createProtocolHttpServer", () => {
                     "content-disposition": 'attachment; filename="result.txt"',
                     "content-type": "text/plain",
                     "x-content-type-options": "nosniff",
+                },
+                statusCode: 200,
+            });
+            await expect(
+                requestRawJson(
+                    socketPath,
+                    "/sessions/goal-session/attachments/attachment-video/preview",
+                    { body: "", method: "GET" },
+                ),
+            ).resolves.toMatchObject({
+                body: "preview image\n",
+                headers: {
+                    "content-disposition": "inline",
+                    "content-type": "image/png",
                 },
                 statusCode: 200,
             });

@@ -87,18 +87,21 @@ export interface ImageBlock {
 export type Attachment =
     | {
           bytes: number;
+          /** Session-scoped route for fetching this attachment. */
           downloadUrl?: string;
           height: number;
           id: string;
           kind: "image";
           mediaType: string;
           name: string;
+          /** Origin URL or Rig-scoped locator such as generated/file.png. */
           source: string;
           thumbhash: string;
           width: number;
       }
     | {
           bytes: number;
+          /** Session-scoped route for fetching the original video. */
           downloadUrl?: string;
           duration: number;
           height: number;
@@ -107,12 +110,16 @@ export type Attachment =
           mediaType?: string;
           name: string;
           preview: {
+              /** Session-scoped route for fetching this first-frame image. */
+              downloadUrl?: string;
               height: number;
               mediaType: "image/png";
+              /** Rig-scoped generated-media locator. */
               path: string;
               thumbhash: string;
               width: number;
           };
+          /** Rig-scoped locator such as generated/file.mp4. */
           source: string;
           width: number;
       }
@@ -124,6 +131,7 @@ export type Attachment =
           kind: "audio";
           mediaType?: string;
           name: string;
+          /** Rig-scoped locator such as generated/file.mp3. */
           source: string;
       }
     | {
@@ -133,6 +141,7 @@ export type Attachment =
           kind: "file";
           mediaType?: string;
           name: string;
+          /** Rig-scoped locator such as generated/file.zip. */
           source: string;
       }
     | {

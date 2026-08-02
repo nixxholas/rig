@@ -113,6 +113,7 @@ describe("attach tool", () => {
             remove: async () => undefined,
             write: async () => ({
                 hostPath: "/generated/result.txt",
+                location: "generated/result.txt",
                 path: "/generated/result.txt",
             }),
         };
@@ -144,6 +145,7 @@ describe("attach tool", () => {
         const remove = vi.fn(async () => undefined);
         const write = vi.fn(async () => ({
             hostPath: "/host/generated/result-copy.txt",
+            location: "generated/result-copy.txt" as const,
             path: "/happy/generated/result-copy.txt",
         }));
         harness.context.generatedMedia = {
@@ -162,7 +164,7 @@ describe("attach tool", () => {
         expect(result).toMatchObject({
             attachment: {
                 downloadUrl: "/sessions/session-1/attachments/attachment-1/download",
-                source: "/host/generated/result-copy.txt",
+                source: "generated/result-copy.txt",
             },
         });
         expect(write).toHaveBeenCalledWith(new TextEncoder().encode("done"), {
@@ -173,5 +175,57 @@ describe("attach tool", () => {
         await vi.waitFor(() =>
             expect(remove).toHaveBeenCalledWith("/host/generated/result-copy.txt"),
         );
+    });
+
+    it("gives video previews their own session-scoped URL", async () => {
+        const harness = createJustBashToolHarness({
+            files: { "/workspace/result.mp4": "video" },
+        });
+        harness.context.attachments = new AttachmentContext({
+            idFactory: () => "attachment-1",
+            scope: { projectId: "project-1", sessionId: "session-1" },
+        });
+        harness.context.generatedMedia = {
+            hostDirectory: "/host/generated",
+            modelDirectory: "/happy/generated",
+            remove: async () => undefined,
+            write: async () => ({
+                hostPath: "/host/generated/result.mp4",
+                location: "generated/result.mp4",
+                path: "/happy/generated/result.mp4",
+            }),
+        };
+
+        const result = await createAttachTool({
+            prepare: async (source, id) => ({
+                bytes: source.kind === "file" ? source.size : 0,
+                duration: 1,
+                height: 720,
+                id,
+                kind: "video" as const,
+                mediaType: "video/mp4",
+                name: "result.mp4",
+                preview: {
+                    height: 360,
+                    mediaType: "image/png" as const,
+                    path: "generated/preview.png",
+                    thumbhash: "AQID",
+                    width: 640,
+                },
+                source: source.source,
+                width: 1280,
+            }),
+        }).execute({ operation: "add", path: "/workspace/result.mp4" }, harness.context, {});
+
+        expect(result).toMatchObject({
+            attachment: {
+                downloadUrl: "/sessions/session-1/attachments/attachment-1/download",
+                preview: {
+                    downloadUrl: "/sessions/session-1/attachments/attachment-1/preview",
+                    path: "generated/preview.png",
+                },
+                source: "generated/result.mp4",
+            },
+        });
     });
 });

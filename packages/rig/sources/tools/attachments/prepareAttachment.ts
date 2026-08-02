@@ -1,12 +1,20 @@
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 
+import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { rgbaToThumbHash } from "thumbhash";
 
 import { resolveFileSystemPath } from "../../agent/context/resolveFileSystemPath.js";
 import type { AgentContext } from "../../agent/context/AgentContext.js";
-import type { BashRunOptions, BashRunResult } from "../../agent/context/BashContext.js";
 import { getImageProcessor } from "../../images/getImageProcessor.js";
 import type { Attachment, AttachmentImagePreview } from "./attachmentSchemas.js";
+import {
+    runBundledMediaCommand,
+    type MediaCommandOptions,
+    type MediaCommandResult,
+} from "./runBundledMediaCommand.js";
 
 export const MAX_ATTACHMENT_FILE_BYTES = 32 * 1024 * 1024;
 
@@ -68,6 +76,7 @@ const MEDIA_TYPES = new Map<string, string>([
 
 export type ResolvedAttachmentSource =
     | {
+          hostPath?: string;
           kind: "file";
           mediaType?: string;
           name: string;
@@ -78,7 +87,7 @@ export type ResolvedAttachmentSource =
     | { kind: "url"; source: string; url: string };
 
 export interface AttachmentPreparationDependencies {
-    runCommand?: (options: BashRunOptions) => Promise<BashRunResult>;
+    runMediaCommand?: (options: MediaCommandOptions) => Promise<MediaCommandResult>;
     signal?: AbortSignal;
 }
 
@@ -162,8 +171,14 @@ async function prepareVideoAttachment(
     context: AgentContext,
     dependencies: AttachmentPreparationDependencies,
 ): Promise<Attachment> {
-    const probe = await probeMedia(source.path, "video", context, dependencies);
-    const preview = await extractVideoPreview(source.path, id, context, dependencies);
+    if (context.generatedMedia === undefined) {
+        throw new Error(
+            "Video attachments need Rig-generated media storage, which is unavailable in this execution environment.",
+        );
+    }
+    const mediaPath = source.hostPath ?? source.path;
+    const probe = await probeMedia(mediaPath, "video", dependencies);
+    const preview = await extractVideoPreview(mediaPath, id, context, dependencies);
     return {
         bytes: source.size,
         duration: probe.duration,
@@ -184,7 +199,10 @@ async function prepareAudioAttachment(
     context: AgentContext,
     dependencies: AttachmentPreparationDependencies,
 ): Promise<Attachment> {
-    const probe = await probeMedia(source.path, "audio", context, dependencies);
+    const probe =
+        source.hostPath !== undefined || dependencies.runMediaCommand !== undefined
+            ? await probeMedia(source.hostPath ?? source.path, "audio", dependencies)
+            : await probeMediaInExecutionEnvironment(source.path, context, dependencies);
     return {
         bytes: source.size,
         duration: probe.duration,
@@ -199,21 +217,21 @@ async function prepareAudioAttachment(
 async function probeMedia(
     path: string,
     type: "audio" | "video",
-    context: AgentContext,
     dependencies: AttachmentPreparationDependencies,
 ): Promise<{ duration: number; height: number; width: number }> {
-    const result = await runMediaCommand(
-        context,
-        dependencies,
-        [
-            "ffprobe -v error",
-            type === "video" ? "-select_streams v:0 -show_entries stream=width,height" : "",
-            "-show_entries format=duration -of json --",
-            quoteShellArgument(path),
-        ]
-            .filter((part) => part.length > 0)
-            .join(" "),
-    );
+    const result = await runMediaCommand(dependencies, "ffprobe", [
+        "-v",
+        "error",
+        ...(type === "video"
+            ? ["-select_streams", "v:0", "-show_entries", "stream=width,height"]
+            : []),
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "json",
+        "--",
+        path,
+    ]);
     const parsed = parseProbeResult(result.stdout, path);
     const duration = asNonNegativeNumber(parsed.format?.duration, "duration", path);
     if (type === "audio") return { duration, height: 0, width: 0 };
@@ -222,6 +240,34 @@ async function probeMedia(
         duration,
         height: asPositiveInteger(stream?.height, "height", path),
         width: asPositiveInteger(stream?.width, "width", path),
+    };
+}
+
+async function probeMediaInExecutionEnvironment(
+    path: string,
+    context: AgentContext,
+    dependencies: AttachmentPreparationDependencies,
+): Promise<{ duration: number; height: number; width: number }> {
+    const result = await context.bash.run({
+        command: `ffprobe -v error -show_entries format=duration -of json -- ${quoteShellArgument(path)}`,
+        cwd: context.fs.cwd,
+        maxOutputBytes: 128 * 1024,
+        ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
+        timeoutMs: 15_000,
+    });
+    if (result.exitCode !== 0 || result.timedOut) {
+        const detail = result.stderr.trim();
+        throw new Error(
+            detail.length === 0
+                ? "Media metadata extraction failed."
+                : `Media metadata extraction failed: ${detail}`,
+        );
+    }
+    const parsed = parseProbeResult(result.stdout, path);
+    return {
+        duration: asNonNegativeNumber(parsed.format?.duration, "duration", path),
+        height: 0,
+        width: 0,
     };
 }
 
@@ -234,23 +280,28 @@ async function extractVideoPreview(
     if (context.generatedMedia === undefined) {
         throw new Error("Generated media storage is unavailable for this agent run.");
     }
-    const temporaryDirectory = join(context.fs.cwd, ".context", "attachment-previews");
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "rig-attachment-preview-"));
     const temporaryPath = join(temporaryDirectory, `${randomPreviewId()}.png`);
-    await context.fs.mkdir(temporaryDirectory, { recursive: true });
     try {
-        await runMediaCommand(
-            context,
-            dependencies,
-            [
-                "ffmpeg -v error -y -ss 0 -i",
-                quoteShellArgument(videoPath),
-                "-frames:v 1 -f image2",
-                quoteShellArgument(temporaryPath),
-            ].join(" "),
-        );
-        const bytes = await context.fs.readFileBuffer(temporaryPath, {
-            maxBytes: MAX_ATTACHMENT_FILE_BYTES,
-        });
+        await runMediaCommand(dependencies, "ffmpeg", [
+            "-v",
+            "error",
+            "-y",
+            "-ss",
+            "0",
+            "-i",
+            videoPath,
+            "-frames:v",
+            "1",
+            "-f",
+            "image2",
+            temporaryPath,
+        ]);
+        const details = await stat(temporaryPath);
+        if (!details.isFile() || details.size > MAX_ATTACHMENT_FILE_BYTES) {
+            throw new Error("The extracted video preview exceeds the 32 MiB size limit.");
+        }
+        const bytes = await readFile(temporaryPath);
         const image = await imageMetadata(bytes, temporaryPath);
         const written = await context.generatedMedia.write(bytes, {
             extension: "png",
@@ -262,12 +313,12 @@ async function extractVideoPreview(
         return {
             height: image.height,
             mediaType: "image/png",
-            path: written.path,
+            path: written.location,
             thumbhash: image.thumbhash,
             width: image.width,
         };
     } finally {
-        await context.fs.rm(temporaryPath, { force: true }).catch(() => undefined);
+        await rm(temporaryDirectory, { force: true, recursive: true }).catch(() => undefined);
     }
 }
 
@@ -401,13 +452,36 @@ function normalizedText(value: string | undefined): string | undefined {
     return normalized.length === 0 ? undefined : normalized.slice(0, 1_000);
 }
 
-function parseProbeResult(stdout: string, path: string): Record<string, any> {
+const probeNumberSchema = Type.Union([Type.Number(), Type.String()]);
+const probeResultSchema = Type.Object(
+    {
+        format: Type.Optional(
+            Type.Object(
+                { duration: Type.Optional(probeNumberSchema) },
+                { additionalProperties: true },
+            ),
+        ),
+        streams: Type.Optional(
+            Type.Array(
+                Type.Object(
+                    {
+                        height: Type.Optional(probeNumberSchema),
+                        width: Type.Optional(probeNumberSchema),
+                    },
+                    { additionalProperties: true },
+                ),
+            ),
+        ),
+    },
+    { additionalProperties: true },
+);
+type ProbeResult = Static<typeof probeResultSchema>;
+
+function parseProbeResult(stdout: string, path: string): ProbeResult {
     try {
         const parsed: unknown = JSON.parse(stdout);
-        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-            throw new Error("not an object");
-        }
-        return parsed as Record<string, any>;
+        if (!Value.Check(probeResultSchema, parsed)) throw new Error("invalid shape");
+        return parsed;
     } catch (error) {
         throw new Error(`ffprobe returned invalid metadata for '${path}'.`, { cause: error });
     }
@@ -430,15 +504,14 @@ function asPositiveInteger(value: unknown, field: string, path: string): number 
 }
 
 async function runMediaCommand(
-    context: AgentContext,
     dependencies: AttachmentPreparationDependencies,
-    command: string,
-): Promise<BashRunResult> {
-    const run = dependencies.runCommand ?? context.bash.run.bind(context.bash);
+    executable: "ffmpeg" | "ffprobe",
+    arguments_: readonly string[],
+): Promise<MediaCommandResult> {
+    const run = dependencies.runMediaCommand ?? runBundledMediaCommand;
     const result = await run({
-        command,
-        cwd: context.fs.cwd,
-        maxOutputBytes: 128 * 1024,
+        arguments: arguments_,
+        executable,
         ...(dependencies.signal === undefined ? {} : { signal: dependencies.signal }),
         timeoutMs: 15_000,
     });

@@ -3,14 +3,22 @@ import { Type, type Static } from "@sinclair/typebox";
 const attachmentBase = {
     downloadUrl: Type.Optional(Type.String({ minLength: 1 })),
     id: Type.String({ minLength: 1 }),
-    source: Type.String({ minLength: 1 }),
+    source: Type.String({
+        description:
+            "Origin URL or Rig-scoped local locator such as generated/file.png; never a host or execution-environment path.",
+        minLength: 1,
+    }),
 };
 
 export const AttachmentImagePreviewSchema = Type.Object(
     {
+        downloadUrl: Type.Optional(Type.String({ minLength: 1 })),
         height: Type.Integer({ minimum: 1 }),
         mediaType: Type.Literal("image/png"),
-        path: Type.String({ minLength: 1 }),
+        path: Type.String({
+            description: "Rig-scoped generated-media locator.",
+            minLength: 1,
+        }),
         thumbhash: Type.String({ minLength: 1 }),
         width: Type.Integer({ minimum: 1 }),
     },

@@ -15,6 +15,8 @@ const externalPackages = [
     "@anthropic-ai/sandbox-runtime",
     "@anthropic-ai/sdk",
     "@ff-labs/fff-node",
+    "@ffmpeg-installer/ffmpeg",
+    "@ffprobe-installer/ffprobe",
     "@lydell/node-pty",
     "@mariozechner/clipboard",
     "@modelcontextprotocol/sdk",

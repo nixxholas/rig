@@ -19,6 +19,7 @@ describe("createGeneratedMediaStore", () => {
             preferredName: "First frame",
         });
 
+        expect(result.location).toMatch(/^generated\/First-frame-[a-f0-9]{8}\.png$/u);
         expect(result.path).toMatch(/^\/happy\/generated\/First-frame-[a-f0-9]{8}\.png$/u);
         expect(await readFile(result.hostPath, "utf8")).toBe("preview");
         expect((await stat(result.hostPath)).mode & 0o777).toBe(0o644);
