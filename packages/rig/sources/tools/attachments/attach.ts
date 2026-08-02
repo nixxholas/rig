@@ -1,5 +1,8 @@
 import { extname } from "node:path";
 
+import type { Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
+
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
@@ -7,6 +10,7 @@ import { AttachmentContext } from "./AttachmentContext.js";
 import { assertShareableLocalPath } from "./assertShareableLocalPath.js";
 import {
     attachArgumentsSchema,
+    attachRuntimeArgumentsSchema,
     attachResultSchema,
     type AttachArguments,
 } from "./attachmentSchemas.js";
@@ -37,14 +41,13 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
         requiresAutoOrFullAccess: true,
         describeAutoPermissionAction: describeAttachAction,
         shouldReviewInAutoMode: async (args) => {
-            if (args.operation === "remove") return false;
-            return "url" in args;
+            return args.operation === "add" && args.url !== undefined;
         },
         shouldRunInFullAccessInAutoMode: async (args) => {
-            if (args.operation === "remove") return false;
-            return "url" in args;
+            return args.operation === "add" && args.url !== undefined;
         },
-        execute: async (args, context, execution) => {
+        execute: async (rawArguments, context, execution) => {
+            const args = parseAttachArguments(rawArguments);
             const attachments = requireAttachmentContext(context);
             if (args.operation === "remove") {
                 return {
@@ -145,17 +148,31 @@ function requireAttachmentContext(context: AgentContext): AttachmentContext {
     return context.attachments;
 }
 
-function describeAttachAction(args: AttachArguments): string {
+function describeAttachAction(args: Static<typeof attachArgumentsSchema>): string {
     if (args.operation === "remove") {
-        return `removing pending attachment ${quoteVisibleExact(args.id)}`;
+        return args.id === undefined
+            ? "removing a pending attachment"
+            : `removing pending attachment ${quoteVisibleExact(args.id)}`;
     }
-    if ("url" in args) {
+    if (args.url !== undefined) {
         return `fetching URL metadata from ${quoteVisibleExact(args.url)}, verifying the domain with Anthropic's web safety service, and preparing it as a final-message attachment. Access: external network requests`;
     }
-    if ("webapp" in args) {
+    if (args.webapp !== undefined) {
         return `preparing the imported webapp ${quoteVisibleExact(args.webapp)} as a final-message attachment`;
     }
-    return `reading ${quoteVisibleExact(args.path)} and preparing it as a final-message attachment`;
+    return args.path === undefined
+        ? "preparing a final-message attachment"
+        : `reading ${quoteVisibleExact(args.path)} and preparing it as a final-message attachment`;
+}
+
+function parseAttachArguments(args: Static<typeof attachArgumentsSchema>): AttachArguments {
+    if (Value.Check(attachRuntimeArgumentsSchema, args)) return args;
+    const first = Value.Errors(attachRuntimeArgumentsSchema, args).First();
+    throw new Error(
+        first === undefined
+            ? "Invalid attach arguments."
+            : `Invalid attach arguments: ${first.message}`,
+    );
 }
 
 function webappSourceKey(args: Extract<AttachArguments, { webapp: string }>): string {

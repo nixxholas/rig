@@ -4,11 +4,11 @@ Happy is a family of two products, built by the same authors as Rig, that put
 people in touch with the coding agents working for them. Both connect to Rig,
 and both can be the thing on the other end of a conversation you are having.
 
-- **Happy** is *end-to-end encrypted remote access to your coding agents*. A
+- **Happy** is _end-to-end encrypted remote access to your coding agents_. A
   mobile and web client lets you watch and steer agents that are running on your
   own machine, from anywhere. The relay in the middle carries only ciphertext
   and can read nothing.
-- **Happy 2** is Happy's *desktop collaborative sibling*: a self-hosted,
+- **Happy 2** is Happy's _desktop collaborative sibling_: a self-hosted,
   Slack-like workspace where people and coding agents build together —
   conversations, files, documents, workspaces, and agents in one app, started
   with a single command and keeping all of its state on the machine that runs
@@ -49,10 +49,10 @@ middle must not be able to read your work.
 
 Happy has three parts:
 
-| Part | Where it runs | What it does |
-| --- | --- | --- |
-| **Client** | Your phone or browser | Renders sessions, transcripts, and machines; sends messages, permission answers, and control commands. |
-| **Relay server** | Hosted | Stores and routes opaque encrypted blobs, delivers realtime updates and push notifications. Holds no readable content. |
+| Part             | Where it runs                      | What it does                                                                                                             |
+| ---------------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **Client**       | Your phone or browser              | Renders sessions, transcripts, and machines; sends messages, permission answers, and control commands.                   |
+| **Relay server** | Hosted                             | Stores and routes opaque encrypted blobs, delivers realtime updates and push notifications. Holds no readable content.   |
 | **CLI / daemon** | Next to the agent, on your machine | Runs or wraps the coding agent, encrypts everything before it leaves, and executes commands that arrive from the client. |
 
 On your own machine, the Happy CLI is installed globally (`npm install -g
@@ -183,14 +183,14 @@ on that machine.
 
 ## Local architecture
 
-| Piece | Role |
-| --- | --- |
-| Server | Fastify backend: authentication, SQLite persistence, files, realtime, agent execution |
-| State | Framework-independent client state; immutable snapshots plus realtime reconciliation |
-| UI | Reusable design system and component workbench |
-| App | The React product, shared by web and desktop |
-| Web | Browser entry point and production web build |
-| Desktop | Electron app that supervises child processes and hosts the Rig surface |
+| Piece   | Role                                                                                  |
+| ------- | ------------------------------------------------------------------------------------- |
+| Server  | Fastify backend: authentication, SQLite persistence, files, realtime, agent execution |
+| State   | Framework-independent client state; immutable snapshots plus realtime reconciliation  |
+| UI      | Reusable design system and component workbench                                        |
+| App     | The React product, shared by web and desktop                                          |
+| Web     | Browser entry point and production web build                                          |
+| Desktop | Electron app that supervises child processes and hosts the Rig surface                |
 
 The all-in-one executable starts the API on an ephemeral loopback port, serves
 the packaged single-page app on the configured public port, and proxies the API
@@ -208,7 +208,7 @@ them apart:
    private, bundled Rig daemon and creates one Rig session per agent
    conversation. This is how an agent that is a member of a channel actually
    thinks and works.
-2. **The desktop Rig surface.** The Electron app connects to a Rig daemon *you*
+2. **The desktop Rig surface.** The Electron app connects to a Rig daemon _you_
    already run yourself and shows its projects, sessions, transcripts, files,
    and terminals inside Happy 2.
 
@@ -227,11 +227,11 @@ What follows from the implementation:
   token.
 - Every Rig process Happy 2 starts receives `RIG_DISABLE_HAPPY_SYNC=1`, so this
   private runtime never appears as a machine in Happy's encrypted mobile sync.
-- The daemon mode defaults to *managed*: Happy 2 writes an exact internal
+- The daemon mode defaults to _managed_: Happy 2 writes an exact internal
   runtime configuration (durable global event queue on, Happy integration off),
   hashes it, checks the running daemon's version, replaces the daemon when
   either drifts, and stops it during shutdown. A separately supervised
-  deployment may instead run *attached*, in which case Happy 2 neither rewrites
+  deployment may instead run _attached_, in which case Happy 2 neither rewrites
   nor stops the daemon.
 - Happy 2 talks to the daemon over its Unix socket using the token file beside
   it, and enables the durable global event queue so it can follow one global
@@ -286,7 +286,7 @@ The Electron app also acts as a Rig client for the Rig you installed yourself:
   library to keep the transcript, session list, model catalog, inbox, provider
   usage, changed files, and terminals live.
 - This is a normal Rig daemon on your machine: your projects, your workspaces,
-  your credentials. It is *not* the private Rig runtime described above.
+  your credentials. It is _not_ the private Rig runtime described above.
 
 **Remote Rigs are in progress.** A prototype in the desktop main process
 reaches another machine over OpenSSH: it asks the machine for its default

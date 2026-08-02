@@ -18,11 +18,11 @@ full context.
 
 Subagents are limited by depth and by concurrency:
 
-| Limit | Default |
-| --- | --- |
-| Nesting depth | 3 |
-| Concurrently running subagents per tree | 8 |
-| Same, for Codex v2 collaboration models | 3 |
+| Limit                                   | Default |
+| --------------------------------------- | ------- |
+| Nesting depth                           | 3       |
+| Concurrently running subagents per tree | 8       |
+| Same, for Codex v2 collaboration models | 3       |
 
 A subagent at maximum
 depth is told to finish the task itself, and a subagent may only delegate further
@@ -34,12 +34,12 @@ tools is not permission to use them for nested delegation.
 Each provider keeps its own tool names and schemas; the behavior underneath is
 the same.
 
-| Provider | Spawn | Follow-up | Wait / read | Stop |
-| --- | --- | --- | --- | --- |
-| Claude | `Agent` | `SendMessage` | `TaskOutput` | `TaskStop` |
-| Codex (v2 models) | `spawn_agent` | `followup_task`, `send_message` | `wait_agent`, `list_agents` | `interrupt_agent` |
-| Codex (v1 models) | `spawn_agent` | `resume_agent`, `send_input` | `wait_agent` | `close_agent` |
-| Grok | `spawn_subagent` | `followup_subagent` | `wait_commands_or_subagents`, `get_command_or_subagent_output` | `kill_command_or_subagent` |
+| Provider          | Spawn            | Follow-up                       | Wait / read                                                    | Stop                       |
+| ----------------- | ---------------- | ------------------------------- | -------------------------------------------------------------- | -------------------------- |
+| Claude            | `Agent`          | `SendMessage`                   | `TaskOutput`                                                   | `TaskStop`                 |
+| Codex (v2 models) | `spawn_agent`    | `followup_task`, `send_message` | `wait_agent`, `list_agents`                                    | `interrupt_agent`          |
+| Codex (v1 models) | `spawn_agent`    | `resume_agent`, `send_input`    | `wait_agent`                                                   | `close_agent`              |
+| Grok              | `spawn_subagent` | `followup_subagent`             | `wait_commands_or_subagents`, `get_command_or_subagent_output` | `kill_command_or_subagent` |
 
 Which Codex set a model gets is decided per model.
 
@@ -47,18 +47,18 @@ The Claude-shaped tool shows every argument that matters:
 
 ```json
 {
-  "description": "Audit retry semantics",
-  "prompt": "Read the provider layer and report where retries are replayed...",
-  "model": "anthropic/sonnet-5",
-  "effort": "medium",
-  "run_in_background": true,
-  "context": "task",
-  "read_only": true
+    "description": "Audit retry semantics",
+    "prompt": "Read the provider layer and report where retries are replayed...",
+    "model": "anthropic/sonnet-5",
+    "effort": "medium",
+    "run_in_background": true,
+    "context": "task",
+    "read_only": true
 }
 ```
 
 **Model and effort are required, and are never inherited.** Write the model ID
-exactly as it appears in the *Available models* section of the system prompt, and
+exactly as it appears in the _Available models_ section of the system prompt, and
 pick an effort from that model's allowed levels. Use the model's default effort,
 or lower, for research, review, and other bounded work; reserve `xhigh`, `max`,
 and `ultra` for work the user asked to run that way. `provider` is optional and
@@ -103,10 +103,10 @@ preserved:
 
 ```json
 {
-  "to": "audit-retry-semantics",
-  "message": "Now check the Grok provider too and update your report.",
-  "summary": "Extend the audit",
-  "effort": "high"
+    "to": "audit-retry-semantics",
+    "message": "Now check the Grok provider too and update your report.",
+    "summary": "Extend the audit",
+    "effort": "high"
 }
 ```
 
@@ -116,7 +116,7 @@ Codex uses `followup_task` and Grok uses `followup_subagent` for the same thing.
 
 ## Talking to any agent: `agent_me`, `agent_info`, `agent_send`
 
-Subagent tools only reach your own children. To reach *any* agent in the system —
+Subagent tools only reach your own children. To reach _any_ agent in the system —
 a delegated workspace session, another primary conversation, an agent on another
 machine — Rig uses agent IDs.
 
@@ -129,26 +129,26 @@ The handshake is three steps:
 1. **`agent_me`** — your own ID and title. Show it to the human so they can hand
    it to another agent.
 
-   ```json
-   {}
-   ```
+    ```json
+    {}
+    ```
 
-2. **`agent_info`** — inspect an exact, already-known ID. This *cannot* search or
+2. **`agent_info`** — inspect an exact, already-known ID. This _cannot_ search or
    list. It answers with the target's title and either `diskShared: true` plus a
    `path` you can actually use, or `diskShared: false` with a notice that you
    cannot reach its folder.
 
-   ```json
-   { "agent_id": "agt_..." }
-   ```
+    ```json
+    { "agent_id": "agt_..." }
+    ```
 
 3. **`agent_send`** — deliver a steering message. Calling `agent_info` for that
    exact ID first is enforced: without it, the send is rejected with "Call
    agent_info with this agent ID before sending it a message."
 
-   ```json
-   { "agent_id": "agt_...", "message": "Please rebase on origin/main and re-run the suite." }
-   ```
+    ```json
+    { "agent_id": "agt_...", "message": "Please rebase on origin/main and re-run the suite." }
+    ```
 
 The receiver is told who sent the message — the sender's agent ID and title, and
 the sender's folder when the disks are shared — so it can answer through the same
@@ -200,12 +200,12 @@ wait early. The result says what actually happened:
 
 ```json
 {
-  "started_at": "...",
-  "due_at": "...",
-  "ended_at": "...",
-  "elapsed_seconds": 412,
-  "interrupted": true,
-  "reason": "message_received"
+    "started_at": "...",
+    "due_at": "...",
+    "ended_at": "...",
+    "elapsed_seconds": 412,
+    "interrupted": true,
+    "reason": "message_received"
 }
 ```
 
@@ -219,9 +219,9 @@ agent ID you know, including yourself:
 
 ```json
 {
-  "agent_id": "agt_...",
-  "message": "Check whether the nightly build went green and summarize it.",
-  "hours": 8
+    "agent_id": "agt_...",
+    "message": "Check whether the nightly build went green and summarize it.",
+    "hours": 8
 }
 ```
 
@@ -238,7 +238,7 @@ without holding a session open.
 
 The Inbox is the durable place where agents reach the human. When a model asks a
 question — `AskUserQuestion` for Claude, `request_user_input` for Codex — the
-question appears in the chat *and* in the Inbox as one shared state. Answering it
+question appears in the chat _and_ in the Inbox as one shared state. Answering it
 in either place closes it in both; a question answered in the terminal still shows
 in the Inbox, as answered.
 
@@ -262,10 +262,10 @@ judgement, or withdraw it:
 Presence tells every agent whether the human can be reached and what to do when
 they cannot.
 
-| State | `answerWaitMs` | Meaning |
-| --- | --- | --- |
-| Online 🟢 | `null` | The user is at the keyboard; a question may wait indefinitely. |
-| Away 🌙 | `0` | The user cannot be reached; never wait. Decide with your best judgement, keep working, and record anything they should look at later. |
+| State     | `answerWaitMs` | Meaning                                                                                                                               |
+| --------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Online 🟢 | `null`         | The user is at the keyboard; a question may wait indefinitely.                                                                        |
+| Away 🌙   | `0`            | The user cannot be reached; never wait. Decide with your best judgement, keep working, and record anything they should look at later. |
 
 The user can define custom states in configuration. A state carries a title, an
 emoji, a model-facing prompt, and a wait budget that may be unlimited (`null`),

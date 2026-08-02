@@ -7,6 +7,7 @@ import {
     type SessionOptions,
     type SessionRunRequest,
 } from "@slopus/rig-providers";
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
 import { Executor } from "@/Executor.js";
@@ -168,6 +169,51 @@ describe("Executor", () => {
                 model: "openai/terra",
             },
         ]);
+    });
+
+    it("provides only tools with provider-compatible input schemas", async () => {
+        const native = new RecordingProvider();
+        const executor = new Executor(
+            [
+                {
+                    id: "codex",
+                    native,
+                    profiles: [profile("codex", "codex", "openai/sol", "Sol")],
+                },
+            ],
+            { environment: TEST_ENVIRONMENT },
+        );
+
+        await collect(
+            executor.run({
+                context: { messages: [] },
+                selection: { modelId: "openai/sol", providerId: "codex" },
+                tools: [
+                    {
+                        ...tool("root-union"),
+                        parameters: Type.Union([
+                            Type.Object({ path: Type.String() }),
+                            Type.Object({ url: Type.String() }),
+                        ]),
+                    },
+                    {
+                        ...tool("object"),
+                        parameters: Type.Object({ path: Type.String() }),
+                    },
+                    tool("parameterless"),
+                ],
+            }),
+        );
+
+        expect(native.options[0]?.tools?.map((candidate) => candidate.name)).toEqual([
+            "object",
+            "parameterless",
+        ]);
+        expect(
+            native.options[0]?.modelConfigurations?.["openai/sol"]?.tools?.map(
+                (candidate) => candidate.name,
+            ),
+        ).toEqual(["object", "parameterless"]);
     });
 
     it("starts a fresh native session when context instructions change", async () => {

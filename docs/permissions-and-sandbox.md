@@ -24,14 +24,14 @@ Two consequences matter in practice:
 
 The relevant fields on a tool definition are:
 
-| Field | Meaning |
-| --- | --- |
-| `shouldReviewInAutoMode` | Required. Whether this exact invocation must be reviewed in Auto. |
+| Field                             | Meaning                                                                                                     |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `shouldReviewInAutoMode`          | Required. Whether this exact invocation must be reviewed in Auto.                                           |
 | `shouldRunInFullAccessInAutoMode` | Whether an allowed review also grants this one execution Full access. Review alone never implies elevation. |
-| `requiresAutoOrFullAccess` | The tool acts outside Rig's local sandbox and cannot run at all in Read only or Workspace write. |
-| `describeAutoPermissionAction` | Human-readable description of the exact reviewed boundary. Required whenever a review can happen. |
-| `autoPermissionInstructions` | Provider-specific Auto guidance injected into the system prompt only while the tool is active. |
-| `availableToPermissionReviewer` | Whether the read-only reviewer agent may call the tool while investigating. |
+| `requiresAutoOrFullAccess`        | The tool acts outside Rig's local sandbox and cannot run at all in Read only or Workspace write.            |
+| `describeAutoPermissionAction`    | Human-readable description of the exact reviewed boundary. Required whenever a review can happen.           |
+| `autoPermissionInstructions`      | Provider-specific Auto guidance injected into the system prompt only while the tool is active.              |
+| `availableToPermissionReviewer`   | Whether the read-only reviewer agent may call the tool while investigating.                                 |
 
 ## The four permission modes
 
@@ -157,11 +157,11 @@ The escalation field is provider-shaped, but every one of them requests the same
 runtime behavior: in Auto, review the action first; if allowed, scope only that
 one tool execution to `full_access`, then restore Auto immediately.
 
-| Provider tool | Field | Where the reason goes |
-| --- | --- | --- |
-| Codex `exec_command` | `sandbox_permissions: "require_escalated"` | `justification` |
-| Claude `Bash` | `dangerouslyDisableSandbox: true` | `description` |
-| Grok `run_terminal_command` | `sandbox_permissions: "require_escalated"` | `description` |
+| Provider tool               | Field                                      | Where the reason goes |
+| --------------------------- | ------------------------------------------ | --------------------- |
+| Codex `exec_command`        | `sandbox_permissions: "require_escalated"` | `justification`       |
+| Claude `Bash`               | `dangerouslyDisableSandbox: true`          | `description`         |
+| Grok `run_terminal_command` | `sandbox_permissions: "require_escalated"` | `description`         |
 
 A Pi `bash` tool with `sandbox_permissions: "require_escalated"` and a
 `justification` is sometimes described alongside these. Rig currently ships the
@@ -253,7 +253,7 @@ the next command.
 
 A shell command starts with a wait, not a life expectancy.
 
-- The wait is a timeout on *you*, not on the command. When it expires the
+- The wait is a timeout on _you_, not on the command. When it expires the
   command is not killed: it moves to the background and you get its output so
   far plus a session ID to come back to.
 - Claude `Bash`: `timeout` in milliseconds, default 120000, max 600000.

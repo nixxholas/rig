@@ -1,3 +1,5 @@
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
 import { NativeProcessManager } from "../processes/index.js";
@@ -161,6 +163,86 @@ describe("createCodingAssistantAgent", () => {
             "agent_info",
             "agent_send",
         ]);
+    });
+
+    it.each([
+        ["Codex v2", modelOpenaiGpt56Sol.id, {}],
+        ["Codex v1", modelOpenaiGpt56Luna.id, {}],
+        ["Claude", modelAnthropicFable5.id, {}],
+        ["Grok", modelXaiGrokBuild.id, { XAI_API_KEY: "xai-test-key" }],
+    ])("gives every %s tool a provider-compatible input schema", (_name, modelId, env) => {
+        const runtime = createCodingAssistantAgent({
+            chatHistory: {
+                read: () => {
+                    throw new Error("unused");
+                },
+            },
+            cwd: "/tmp/rig-tool-schema-test",
+            env: { ...env, GEMINI_API_KEY: "gemini-key" },
+            goals: {
+                create: () => {
+                    throw new Error("unused");
+                },
+                get: () => undefined,
+                update: () => {
+                    throw new Error("unused");
+                },
+            },
+            modelId,
+            subagents: {
+                canSpawn: true,
+                depth: 0,
+                followUp: () => {
+                    throw new Error("unused");
+                },
+                interrupt: () => {
+                    throw new Error("unused");
+                },
+                list: () => [],
+                maxDepth: 2,
+                spawn: async () => {
+                    throw new Error("unused");
+                },
+                wait: async () => ({ agents: [], timedOut: true }),
+            },
+            workflows: {
+                get: () => undefined,
+                launch: () => {
+                    throw new Error("unused");
+                },
+                stop: () => undefined,
+                wait: async () => undefined,
+            },
+            workspaces: {
+                archive: async () => {
+                    throw new Error("unused");
+                },
+                create: async () => {
+                    throw new Error("unused");
+                },
+                crossWorkspace: true,
+                delegate: async () => {
+                    throw new Error("unused");
+                },
+                listProjects: () => [],
+                listSessions: () => [],
+                listWorkspaces: () => [],
+                spawn: async () => {
+                    throw new Error("unused");
+                },
+            },
+        });
+        const providerInputSchema = Type.Object(
+            { type: Type.Literal("object") },
+            { additionalProperties: true },
+        );
+        const invalidTools = runtime.agent.tools.flatMap((tool) => {
+            const definition = toExecutorTool(tool);
+            if (definition.kind === "custom") return [];
+            return Value.Check(providerInputSchema, definition.parameters) ? [] : [definition.name];
+        });
+
+        expect(invalidTools).toEqual([]);
     });
 
     it("creates a Claude SDK agent for Opus 5", () => {

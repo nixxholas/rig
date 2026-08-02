@@ -6,13 +6,13 @@ something is planned rather than implemented, it says so explicitly.
 
 There are five extension surfaces, ordered by how much they let you change:
 
-| Surface | What it adds | Who writes it |
-| --- | --- | --- |
-| **Plugins** | A TypeScript process that talks to Rig, contributes MCP tools and local UI applications | You, inside Rig |
-| **Skills** | Instructions a model loads on demand from a `SKILL.md` file | You or the user |
-| **MCP servers** | Tools, resources, and prompts from an external process or HTTP service | The user, in config |
-| **Rig Connect / integrations** | External apps that read Rig's live state and drive it | An application author |
-| **Subagents and workflows** | Extra agents and deterministic multi-agent scripts, at runtime | You, per task |
+| Surface                        | What it adds                                                                            | Who writes it         |
+| ------------------------------ | --------------------------------------------------------------------------------------- | --------------------- |
+| **Plugins**                    | A TypeScript process that talks to Rig, contributes MCP tools and local UI applications | You, inside Rig       |
+| **Skills**                     | Instructions a model loads on demand from a `SKILL.md` file                             | You or the user       |
+| **MCP servers**                | Tools, resources, and prompts from an external process or HTTP service                  | The user, in config   |
+| **Rig Connect / integrations** | External apps that read Rig's live state and drive it                                   | An application author |
+| **Subagents and workflows**    | Extra agents and deterministic multi-agent scripts, at runtime                          | You, per task         |
 
 ---
 
@@ -49,12 +49,12 @@ fields, all required, and **extra fields are rejected**:
 }
 ```
 
-| Field | Rule |
-| --- | --- |
-| `name` | Non-empty string. Human-readable; also used to derive the agent-facing MCP tool name. |
-| `description` | Non-empty string explaining what the plugin does. |
-| `entry` | Relative path ending in `.ts`, and not `.d.ts`. |
-| `icon` | Relative path ending in `.png` (any capitalization of the extension). |
+| Field         | Rule                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------- |
+| `name`        | Non-empty string. Human-readable; also used to derive the agent-facing MCP tool name. |
+| `description` | Non-empty string explaining what the plugin does.                                     |
+| `entry`       | Relative path ending in `.ts`, and not `.d.ts`.                                       |
+| `icon`        | Relative path ending in `.png` (any capitalization of the extension).                 |
 
 Additional rules Rig enforces when it reads the manifest:
 
@@ -210,20 +210,20 @@ runs of unsupported characters replaced by `-`.
 
 Overrides, all requiring absolute paths:
 
-| Variable | Effect |
-| --- | --- |
-| `RIG_HOME` | Moves Rig's managed home (default `~/.happy/rig`). |
-| `HAPPY_PLUGINS_DIRECTORY` | Moves the installed-plugin root. |
-| `HAPPY_PLUGIN_DATA_DIRECTORY` | Moves the writable plugin-data root. |
+| Variable                      | Effect                                             |
+| ----------------------------- | -------------------------------------------------- |
+| `RIG_HOME`                    | Moves Rig's managed home (default `~/.happy/rig`). |
+| `HAPPY_PLUGINS_DIRECTORY`     | Moves the installed-plugin root.                   |
+| `HAPPY_PLUGIN_DATA_DIRECTORY` | Moves the writable plugin-data root.               |
 
 The plugin process runs with its writable folder as the working directory, under
 Rig's existing command sandbox confined to that folder. Rig injects:
 
-| Variable | Meaning |
-| --- | --- |
-| `HAPPY_PLUGIN_DIRECTORY` | Absolute path to the plugin's writable folder. |
-| `HAPPY_PLUGIN_SOCKET_PATH` | Private Unix socket used by the SDK. |
-| `HAPPY_PLUGIN_TOKEN` | Per-process bearer token used by the SDK. |
+| Variable                   | Meaning                                        |
+| -------------------------- | ---------------------------------------------- |
+| `HAPPY_PLUGIN_DIRECTORY`   | Absolute path to the plugin's writable folder. |
+| `HAPPY_PLUGIN_SOCKET_PATH` | Private Unix socket used by the SDK.           |
+| `HAPPY_PLUGIN_TOKEN`       | Per-process bearer token used by the SDK.      |
 
 Write state in `HAPPY_PLUGIN_DIRECTORY` and nowhere else.
 
@@ -231,12 +231,12 @@ Write state in `HAPPY_PLUGIN_DIRECTORY` and nowhere else.
 
 Four agent tools drive the lifecycle:
 
-| Tool | Arguments | What it does |
-| --- | --- | --- |
-| `plugin_install` | `path` — folder containing `happy.plugin.json` | Copies the sources into the managed plugins folder, compiles them, and starts the plugin before returning. |
-| `plugin_list` | none | Returns every installed plugin with `status`, `directory`, `dataDirectory`, `logAvailable`, plus registration `failures`. |
-| `plugin_logs` | `name` — plugin name or folder name | Returns the newest bounded log snapshot with `status`, `source` (`current_run` or `build`), and `truncated`. |
-| `plugin_uninstall` | `name` | Stops the plugin, removes its installed code, and keeps its writable folder. |
+| Tool               | Arguments                                      | What it does                                                                                                              |
+| ------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `plugin_install`   | `path` — folder containing `happy.plugin.json` | Copies the sources into the managed plugins folder, compiles them, and starts the plugin before returning.                |
+| `plugin_list`      | none                                           | Returns every installed plugin with `status`, `directory`, `dataDirectory`, `logAvailable`, plus registration `failures`. |
+| `plugin_logs`      | `name` — plugin name or folder name            | Returns the newest bounded log snapshot with `status`, `source` (`current_run` or `build`), and `truncated`.              |
+| `plugin_uninstall` | `name`                                         | Stops the plugin, removes its installed code, and keeps its writable folder.                                              |
 
 Plugins live outside the workspace, so all four are reviewed in Auto mode;
 `plugin_install` and `plugin_uninstall` additionally run with a temporary Full
@@ -297,7 +297,7 @@ tool reaches an active session.
 ### Trust
 
 Rig does not implement a permission model for plugins. Plugin code is relatively
-trusted and is not restricted by per-capability checks. What *is* enforced is the
+trusted and is not restricted by per-capability checks. What _is_ enforced is the
 process sandbox, the writable-folder confinement, the authenticated socket, and
 the ordinary MCP review path for tools a plugin contributes to a session.
 
@@ -339,7 +339,7 @@ description: Use when the user asks to draft release notes from merged pull requ
 
 1. Collect merged PRs since the last tag.
 2. Group them by area.
-...
+   ...
 ```
 
 Only three frontmatter keys are read:
@@ -389,11 +389,11 @@ not installed.
 
 Config layers, resolved in this order:
 
-| Source | File |
-| --- | --- |
-| `global` | `happy.toml` in Rig's config directory — `~/Happy/Config` on macOS, `~/happy/config` on Linux, or `RIG_CONFIGURATION_DIRECTORY` |
-| `runtime` | `~/.happy/rig/runtime.toml` |
-| `project` | `rig.toml` (or `happy.toml`) in the project |
+| Source    | File                                                                                                                            |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `global`  | `happy.toml` in Rig's config directory — `~/Happy/Config` on macOS, `~/happy/config` on Linux, or `RIG_CONFIGURATION_DIRECTORY` |
+| `runtime` | `~/.happy/rig/runtime.toml`                                                                                                     |
+| `project` | `rig.toml` (or `happy.toml`) in the project                                                                                     |
 
 Global and runtime are trusted layers. Project entries are separate: a project
 server with the same name as a trusted one does not override it — the trusted one

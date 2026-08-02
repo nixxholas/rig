@@ -1,7 +1,7 @@
 # Rig and Happy documentation
 
 Welcome. If you are a coding agent reading this, you are almost certainly
-*running inside the system these pages describe*. This folder ships with Rig
+_running inside the system these pages describe_. This folder ships with Rig
 itself and is exposed read-only to agents: on the local host at the installed
 package's `dist/docs` folder, and inside managed Docker containers at
 `/happy/docs`. Its purpose is simple: give you enough understanding of Rig and
@@ -11,7 +11,7 @@ Happy that you can work well inside them — and, when asked, **extend them**.
 
 Rig is an open-source coding-agent harness that recreates the best of Codex,
 Claude Code, and Grok Build in one consistent local runtime. Each model gets its
-*native* prompts and tools — GPT models see a Codex-shaped world, Claude models
+_native_ prompts and tools — GPT models see a Codex-shaped world, Claude models
 see a Claude Code-shaped world, Grok sees Grok Build — while everything around
 inference is shared: one permission model, one sandbox, one persistence layer,
 one terminal interface, one way to spawn and talk to agents.
@@ -51,14 +51,14 @@ When you are driven through either of them rather than a terminal,
 
 Read these in whatever order your task demands; each page stands alone.
 
-| Page | What it tells you |
-| --- | --- |
-| [architecture.md](architecture.md) | How Rig is put together: daemon and TUI, the protocol between them, sessions and durability, providers and model catalogs, inference and compaction, persistence, and how the codebase is organized into packages. |
-| [workspaces.md](workspaces.md) | What a workspace is (a Git worktree on its own branch), how to create, delegate into, and archive one, where they live on disk, and when making one is actually the right call. |
-| [agents-and-collaboration.md](agents-and-collaboration.md) | Subagents, follow-up messages, the `agent_me` / `agent_info` / `agent_send` handshake, scheduling, durable waits, presence, and the concurrency model. |
-| [permissions-and-sandbox.md](permissions-and-sandbox.md) | The four permission modes, the single cross-provider sandbox, how Auto review works, escalation syntax per provider, and why a denied action must never be retried by another route. |
-| [extending.md](extending.md) | How to extend Rig from inside: plugins (TypeScript processes with MCP tools and UI), skills, MCP servers, Rig Connect integrations, and subagents as a runtime extension mechanism. |
-| [happy.md](happy.md) | The Happy family: encrypted remote access to agents with Happy, the collaborative desktop workspace of Happy 2, how each connects to Rig, and what an agent should know when driven through them. |
+| Page                                                       | What it tells you                                                                                                                                                                                                  |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [architecture.md](architecture.md)                         | How Rig is put together: daemon and TUI, the protocol between them, sessions and durability, providers and model catalogs, inference and compaction, persistence, and how the codebase is organized into packages. |
+| [workspaces.md](workspaces.md)                             | What a workspace is (a Git worktree on its own branch), how to create, delegate into, and archive one, where they live on disk, and when making one is actually the right call.                                    |
+| [agents-and-collaboration.md](agents-and-collaboration.md) | Subagents, follow-up messages, the `agent_me` / `agent_info` / `agent_send` handshake, scheduling, durable waits, presence, and the concurrency model.                                                             |
+| [permissions-and-sandbox.md](permissions-and-sandbox.md)   | The four permission modes, the single cross-provider sandbox, how Auto review works, escalation syntax per provider, and why a denied action must never be retried by another route.                               |
+| [extending.md](extending.md)                               | How to extend Rig from inside: plugins (TypeScript processes with MCP tools and UI), skills, MCP servers, Rig Connect integrations, and subagents as a runtime extension mechanism.                                |
+| [happy.md](happy.md)                                       | The Happy family: encrypted remote access to agents with Happy, the collaborative desktop workspace of Happy 2, how each connects to Rig, and what an agent should know when driven through them.                  |
 
 ## If you want to extend yourself
 

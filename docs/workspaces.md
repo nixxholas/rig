@@ -11,7 +11,7 @@ call.
 
 ## What a workspace is
 
-Rig knows about *projects* and *workspaces*:
+Rig knows about _projects_ and _workspaces_:
 
 - A **project** is a folder Rig has been pointed at. It has an ID, a name, and a
   storage key derived from the name.
@@ -38,11 +38,11 @@ Workspaces are created under a managed root, one directory per project:
 
 The root depends on the platform:
 
-| Platform | Root |
-| --- | --- |
-| macOS | `~/Happy/Workspaces` |
-| Linux | `~/happy/workspaces` |
-| Any | `RIG_WORKSPACES_DIRECTORY` (absolute path) overrides both |
+| Platform | Root                                                      |
+| -------- | --------------------------------------------------------- |
+| macOS    | `~/Happy/Workspaces`                                      |
+| Linux    | `~/happy/workspaces`                                      |
+| Any      | `RIG_WORKSPACES_DIRECTORY` (absolute path) overrides both |
 
 Storage keys are slugs of the display name (lowercase, ASCII, dashes, at most 48
 characters). A collision gets a numeric suffix: `workspace`, `workspace-2`,
@@ -74,7 +74,7 @@ What happens, in order:
    and the workspace is published as `initializing`. The tool returns at this
    point.
 3. **The worktree is materialized in the background**: `git worktree add -b
-   worktree/<storage key> <path> <commit>`, then Git's answer is verified — the
+worktree/<storage key> <path> <commit>`, then Git's answer is verified — the
    worktree must be at exactly the requested path and belong to the expected
    repository.
 4. **Setup commands run** — `workspace.setup_commands` from the configuration
@@ -122,7 +122,7 @@ workspace and says its managed worktree will be removed.
 
 ## Working inside a workspace
 
-Work in a workspace runs *from inside* it. There are two ways to start it, and
+Work in a workspace runs _from inside_ it. There are two ways to start it, and
 they differ in whether the user sees a conversation.
 
 ### `spawn_workspace_agent` — hidden subagent
@@ -133,10 +133,10 @@ and reports its result back to you.
 
 ```json
 {
-  "workspace_id": "ws_...",
-  "description": "Port the retry policy",
-  "prompt": "Full instructions...",
-  "background": true
+    "workspace_id": "ws_...",
+    "description": "Port the retry policy",
+    "prompt": "Full instructions...",
+    "background": true
 }
 ```
 
@@ -145,7 +145,7 @@ the default; read their output with `TaskOutput` (or your provider's equivalent)
 stop them with `TaskStop`, and send follow-up work with `SendMessage`. `read_only:
 true` restricts the child to Read only instead of inheriting your permission mode.
 
-Use this when the workspace's work is *your* work, delegated for isolation, and
+Use this when the workspace's work is _your_ work, delegated for isolation, and
 the user only needs your final answer.
 
 ### `delegate_to_workspace` — visible session
@@ -156,9 +156,9 @@ afterwards through `agent_info` + `agent_send` with the returned `agentId`.
 
 ```json
 {
-  "workspace_id": "ws_...",
-  "title": "Retry policy rewrite",
-  "prompt": "Full instructions..."
+    "workspace_id": "ws_...",
+    "title": "Retry policy rewrite",
+    "prompt": "Full instructions..."
 }
 ```
 
@@ -180,7 +180,7 @@ working in.
 
 Never start an agent in your own directory and have it reach into another
 workspace's folder by path. An agent whose working directory is one workspace
-must not edit files in another. Start it *in* the workspace with
+must not edit files in another. Start it _in_ the workspace with
 `spawn_workspace_agent` or `delegate_to_workspace`.
 
 ## Inspecting what exists

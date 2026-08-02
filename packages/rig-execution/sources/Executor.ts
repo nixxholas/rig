@@ -25,6 +25,7 @@ import {
     createExecutorInferenceStream,
     toRigProviderSessionTools,
 } from "@/createExecutorInferenceStream.js";
+import { filterProviderCompatibleSessionTools } from "@/filterProviderCompatibleSessionTools.js";
 import { reviewerModelForProvider } from "@/reviewerModelForProvider.js";
 import { runProviderAuxiliaryText } from "@/runProviderAuxiliaryText.js";
 import { toSessionMessages } from "@/toSessionMessages.js";
@@ -247,7 +248,6 @@ export class Executor {
                 }
 
                 const tools = request.tools ?? [];
-                const toolsKey = JSON.stringify(tools);
                 const instructions = assembleSystemPrompt({
                     ...(request.contextInstructions === undefined
                         ? {}
@@ -267,7 +267,6 @@ export class Executor {
                     request.contextInstructions,
                     request.systemPrompt,
                     tools,
-                    toolsKey,
                 );
                 active.context = context;
                 return active;
@@ -320,7 +319,6 @@ export class Executor {
                     lockCodexCollaboration:
                         profile.providerType === "codex" && profile.id.startsWith("openai/"),
                 });
-                const toolsKey = JSON.stringify(tools);
                 const instructions = assembleSystemPrompt({
                     contextInstructions,
                     environment: this.environment,
@@ -339,7 +337,6 @@ export class Executor {
                     contextInstructions,
                     systemPrompt,
                     tools,
-                    toolsKey,
                 );
                 resolved.context = context;
                 return resolved;
@@ -403,8 +400,9 @@ export class Executor {
         contextInstructions: string | undefined,
         systemPrompt: string | undefined,
         tools: readonly import("@slopus/rig-providers").SessionTool[],
-        toolsKey: string,
     ) {
+        const providerTools = filterProviderCompatibleSessionTools(tools);
+        const toolsKey = JSON.stringify(providerTools);
         const provider = this.providersById.get(profile.providerId)!;
         if (
             this.active !== undefined &&
@@ -432,7 +430,7 @@ export class Executor {
             });
             // Sessions receive configuration only. The conversation history is owned by the
             // caller and arrives complete with every run, never at session creation.
-            modelConfigurations[candidate.id] = { instructions, tools };
+            modelConfigurations[candidate.id] = { instructions, tools: providerTools };
         }
         const sequence = ++this.sessionSequence;
         const sessionId =
@@ -445,7 +443,7 @@ export class Executor {
         const session = await native.session(sessionId, {
             instructions: context.instructions,
             modelConfigurations,
-            tools,
+            tools: providerTools,
         });
         return (this.active = {
             context,
