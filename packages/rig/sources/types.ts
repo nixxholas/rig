@@ -36,7 +36,9 @@ export type {
 export type { ProjectScope, TrimGlobalEventsRequest } from "./protocol/ProjectProtocol.js";
 export type {
     FileSearchResult,
+    ListProjectFilePathsResponse,
     ReadProjectFileResponse,
+    ReadProjectFileRevisionResponse,
     SearchFilesResponse,
     WriteProjectFileRequest,
     WriteProjectFileResponse,

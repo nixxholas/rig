@@ -26,6 +26,8 @@ values. It holds no database code and no HTTP code.
    |                    readGitCommonDir                           |
    |                    readGitWorktreeIdentity                    |
    |                    resolveGitCommit                           |
+   |                    listGitWorkingTreeFiles every file there is|
+   |                    readGitFileAtRevision  a file as it was    |
    |                    detectGitDefaultBranch the trunk to fork   |
    |                    selectGitRemoteUrl                         |
    |                    probeGitRepository   presence + facts      |
@@ -81,6 +83,12 @@ worktree be created from it, which branch and commit is it on. A probe is
 enrichment, so every Git failure becomes "not a usable repository" rather than an
 error.
 
+`listGitWorkingTreeFiles` answers what a checkout contains — everything tracked plus
+everything Git would offer to add — so ignore rules are Git's rather than Rig's, and
+a folder that is not a repository simply contains no files. `readGitFileAtRevision`
+reads one file as it was at a revision, which is the old side of a diff; a revision
+that never held the path is an answer rather than a failure.
+
 `selectGitRemoteUrl` picks the remote that best describes the repository, in a
 stable order: the remote the current branch tracks, then `origin`, then the rest
 in Git's own order. `remoteProjectName` and `parseHostingRepository` turn that URL
@@ -132,6 +140,8 @@ git/
     readGitCommonDir.ts          shared control directory
     readGitWorktreeIdentity.ts   both of the above together
     isGitWorktreeAt.ts           is this the worktree we recorded
+    listGitWorkingTreeFiles.ts   every file a checkout holds
+    readGitFileAtRevision.ts     one file's bytes at a revision
     resolveGitCommit.ts          reference to immutable commit
     selectGitRemoteUrl.ts        which remote describes this repository
     probeGitRepository.ts        presence, worktree capability, facts

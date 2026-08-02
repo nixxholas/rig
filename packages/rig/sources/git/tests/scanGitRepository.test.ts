@@ -265,6 +265,35 @@ describe("scanGitRepository", () => {
         expect(snapshot.files).toEqual([]);
         expect(snapshot.facts.branch).toBe("main");
     });
+
+    it("identifies each file's content so only an edited file has to be read again", async () => {
+        const repository = await createRepository();
+        await write(repository, "a.txt", "a\n");
+        await write(repository, "b.txt", "b\n");
+        await write(repository, "gone.txt", "gone\n");
+        await commitAll(repository);
+        await write(repository, "a.txt", "a1\n");
+        await write(repository, "b.txt", "b1\n");
+        await write(repository, "new.txt", "n1\n");
+        await rm(join(repository, "gone.txt"));
+
+        const first = await scanGitRepository({ path: repository });
+        const again = await scanGitRepository({ path: repository });
+        await write(repository, "a.txt", "a1\na2\na3\n");
+        const edited = await scanGitRepository({ path: repository });
+
+        expect(typeof file(first, "a.txt").contentToken).toBe("string");
+        // Scanning a tree nobody touched says the same thing about every file in it.
+        expect(again.files.map((change) => change.contentToken)).toEqual(
+            first.files.map((change) => change.contentToken),
+        );
+        expect(file(edited, "a.txt").contentToken).not.toBe(file(first, "a.txt").contentToken);
+        expect(file(edited, "b.txt").contentToken).toBe(file(first, "b.txt").contentToken);
+        expect(file(edited, "new.txt").contentToken).toBe(file(first, "new.txt").contentToken);
+        // A deleted file has no content, and answers the same way every time.
+        expect(file(edited, "gone.txt").status).toBe("deleted");
+        expect(file(edited, "gone.txt").contentToken).toBe(file(first, "gone.txt").contentToken);
+    });
 });
 
 function file(snapshot: Awaited<ReturnType<typeof scanGitRepository>>, path: string) {

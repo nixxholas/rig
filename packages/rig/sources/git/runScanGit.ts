@@ -49,6 +49,8 @@ const SAFE_CONFIGURATION = [
 
 export interface ScanGitResult {
     stdout: string;
+    /** The same output as raw bytes, for a caller whose content is a file rather than text. */
+    stdoutBytes: Buffer;
     /** True when Git produced more output than the scan is willing to hold. */
     truncated: boolean;
 }
@@ -92,13 +94,17 @@ export async function runScanGit(options: {
             timeout: SCAN_TIMEOUT_MS,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
-        return { stdout: result.stdout.toString("utf8"), truncated: false };
+        return {
+            stdout: result.stdout.toString("utf8"),
+            stdoutBytes: result.stdout,
+            truncated: false,
+        };
     } catch (error) {
         // Exceeding maxBuffer is a bound working as intended, not a repository problem: report the
         // partial output and let the caller mark its counts inexact.
         if (isMaxBufferError(error)) {
-            const stdout = (error as { stdout?: Buffer }).stdout;
-            return { stdout: stdout?.toString("utf8") ?? "", truncated: true };
+            const stdout = (error as { stdout?: Buffer }).stdout ?? Buffer.alloc(0);
+            return { stdout: stdout.toString("utf8"), stdoutBytes: stdout, truncated: true };
         }
         throw error;
     }

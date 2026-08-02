@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 
 import { isPathInsideWorkspace } from "../agent/context/isPathInsideWorkspace.js";
+import { readGitFileAtRevision } from "../git/readGitFileAtRevision.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
 import type {
     ReadProjectFileResponse,
+    ReadProjectFileRevisionResponse,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
 } from "../protocol/index.js";
@@ -20,6 +23,37 @@ export async function readProjectFile(
         content: Buffer.from(content).toString("base64"),
         hash: sha256(content),
     };
+}
+
+/**
+ * Reads a file as it was at a Git revision, so a client can show the old side of a diff without
+ * running Git itself. A revision that has no such file answers with no content rather than failing.
+ */
+export async function readProjectFileAtRevision(
+    fileSystem: FileSystemContext,
+    request: { path: string; revision: string },
+): Promise<ReadProjectFileRevisionResponse> {
+    await assertProjectPath(fileSystem, request.path);
+    const target = isAbsolute(request.path) ? request.path : resolve(fileSystem.cwd, request.path);
+    const relativePath = relative(fileSystem.cwd, target);
+    if (relativePath.length === 0) throw new Error("A Git revision read needs a file path.");
+    // The scope check above canonicalizes symbolic links, so a path naming the same folder by
+    // another route can still come back climbing out of it. Git resolves `..` inside a revision
+    // path against the repository, which would read past the folder this request is scoped to.
+    if (relativePath === ".." || relativePath.startsWith(`..${sep}`)) {
+        throw new ProjectFileOutsideScopeError();
+    }
+    const file = await readGitFileAtRevision({
+        // One byte of headroom is what makes an oversized file observable: Git streams a blob
+        // without announcing its size, so content longer than the limit is the only signal.
+        maximumBytes: MAX_FILE_BYTES + 1,
+        path: fileSystem.cwd,
+        relativePath: relativePath.split(sep).join("/"),
+        revision: request.revision,
+    });
+    if (!file.found) return { content: null, hash: null };
+    if (file.content.byteLength > MAX_FILE_BYTES) throw new ProjectFileTooLargeError();
+    return { content: file.content.toString("base64"), hash: sha256(file.content) };
 }
 
 export async function writeProjectFile(

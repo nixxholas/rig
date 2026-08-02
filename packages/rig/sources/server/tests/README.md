@@ -11,6 +11,7 @@ tests
  +-- createProtocolHttpServer.*  HTTP routes and failures
  +-- globalEventStream / gitStateHttp
  |                              protocol streaming behavior
+ +-- projectFileHttp             file listing, reading, and revisions
  +-- remoteTerminalHttp / httpProxyApi
  |                              external protocol boundaries
  +-- runLocalProtocolServer.*    daemon lifecycle and logging

@@ -53,6 +53,24 @@ export type GitFileChangeStatus =
 
 export interface GitFileChange {
     binary: boolean;
+    /**
+     * Opaque identity of this file's content, to be compared for equality against the one carried
+     * by an earlier snapshot. The same value means the bytes a client already fetched are still
+     * current; a different value means it should read the file again. It is the only per-file
+     * re-fetch signal there is: the snapshot's own version changes whenever anything in the
+     * repository does, and the line counts stay put across an edit that leaves them equal.
+     *
+     * It is never to be parsed, ordered, or read as a hash, a size, or a time — its shape is not
+     * part of this contract. A file the branch deleted has no content, which is itself an identity,
+     * and it holds steady until the file comes back.
+     *
+     * It describes what the scan can observe about a file rather than its bytes, so it cannot see a
+     * write that replaces a file with content of the same size within the same clock tick.
+     *
+     * Absent when the file could not be examined at all, which is not a claim that it is unchanged:
+     * a client that finds no identity should read the file again rather than keep what it holds.
+     */
+    contentToken?: string;
     /** Absent for binary files, submodule pointers, and files a cap left uncounted. */
     deletions?: number;
     insertions?: number;

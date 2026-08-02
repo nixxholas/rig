@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 
 import type {
@@ -15,6 +16,8 @@ import { resolveGitComparisonBase } from "./resolveGitComparisonBase.js";
 import { runScanGit } from "./runScanGit.js";
 
 const FILE_LIST_LIMIT = 1000;
+/** The content identity of a file that has no content, which every deleted file shares. */
+const DELETED_CONTENT_TOKEN = "deleted";
 const UNTRACKED_COUNT_LIMIT = 200;
 const UNTRACKED_BYTE_LIMIT = 1024 * 1024;
 /**
@@ -201,11 +204,49 @@ async function scanOnce(
         deletions,
         facts,
         // Truncating the list never changes the totals above, which are summed over every change.
-        files: changes.slice(0, FILE_LIST_LIMIT),
+        files: await withContentTokens(options.path, changes.slice(0, FILE_LIST_LIMIT)),
         filesTruncated: changes.length > FILE_LIST_LIMIT,
         insertions,
         scannedAt: now(),
     };
+}
+
+/**
+ * Gives every reported file the identity a client compares to decide whether to read it again.
+ *
+ * It is taken from the file's own metadata rather than its bytes: a changed-file list is a hot path
+ * while an agent writes, and hashing a working tree on every scan would cost far more than the scan
+ * itself. The price is a write that replaces a file with content of the same size within the same
+ * clock tick, which this cannot see. Only the files actually reported are examined, so the work is
+ * bounded by the list cap rather than by the size of the repository.
+ */
+async function withContentTokens(
+    root: string,
+    changes: readonly GitFileChange[],
+): Promise<GitFileChange[]> {
+    return await Promise.all(
+        changes.map(async (change) => {
+            const contentToken = await fileContentToken(join(root, change.path));
+            return contentToken === undefined ? change : { ...change, contentToken };
+        }),
+    );
+}
+
+async function fileContentToken(path: string): Promise<string | undefined> {
+    try {
+        // `lstat`, so a symbolic link is identified by the link Git stores rather than by whatever
+        // it points at, which may be outside the repository or missing entirely.
+        const details = await lstat(path);
+        return `${String(details.mtimeMs)}-${String(details.size)}`;
+    } catch (error) {
+        // A deleted file has no working-tree content, and that absence is a perfectly stable
+        // identity: it stays this value until the file returns and gets a real one.
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") return DELETED_CONTENT_TOKEN;
+        // Anything else means the file could not be examined, so the record carries no identity at
+        // all rather than one that would read as "unchanged".
+        return undefined;
+    }
 }
 
 function trackedChange(change: GitDiffChange, staging: GitStatusEntry | undefined): GitFileChange {

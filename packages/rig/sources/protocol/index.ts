@@ -71,7 +71,9 @@ export type {
 export {
     writeProjectFileRequestSchema,
     type FileSearchResult,
+    type ListProjectFilePathsResponse,
     type ReadProjectFileResponse,
+    type ReadProjectFileRevisionResponse,
     type SearchFilesResponse,
     type WriteProjectFileRequest,
     type WriteProjectFileResponse,

@@ -10,6 +10,7 @@ export { countUntrackedFileLines, type UntrackedFileCount } from "./countUntrack
 export { createGitWorktree } from "./createGitWorktree.js";
 export { detectGitDefaultBranch } from "./detectGitDefaultBranch.js";
 export { isGitWorktreeAt } from "./isGitWorktreeAt.js";
+export { listGitWorkingTreeFiles, type GitWorkingTreeFiles } from "./listGitWorkingTreeFiles.js";
 export { markGitStateFromSessionEvent } from "./markGitStateFromSessionEvent.js";
 export {
     parseGitRawNumstat,
@@ -21,6 +22,7 @@ export { parseHostingRepository, type HostingRepository } from "./parseHostingRe
 export { probeGitRepository, type GitRepositoryProbe } from "./probeGitRepository.js";
 export { publishGitLiveEvent } from "./publishGitLiveEvent.js";
 export { readGitCommonDir } from "./readGitCommonDir.js";
+export { readGitFileAtRevision, type GitRevisionFile } from "./readGitFileAtRevision.js";
 export { readGitTopLevel } from "./readGitTopLevel.js";
 export { readGitWorktreeIdentity, type GitWorktreeIdentity } from "./readGitWorktreeIdentity.js";
 export { remoteProjectName } from "./remoteProjectName.js";

@@ -41,6 +41,7 @@ import type {
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
     ListModelsResponse,
+    ListProjectFilePathsResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
     ListSecretsResponse,
@@ -57,6 +58,7 @@ import type {
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
     ReadProjectFileResponse,
+    ReadProjectFileRevisionResponse,
     ResolveExternalToolCallRequest,
     ResolveExternalToolCallResponse,
     RewindSessionResponse,
@@ -684,10 +686,26 @@ export class ProtocolHttpClient {
         );
     }
 
+    listFilePaths(scope: ProjectScope): Promise<ListProjectFilePathsResponse> {
+        return this.#requestJson("GET", `${this.#projectScopePath(scope)}/file-paths`);
+    }
+
     readFile(scope: ProjectScope, path: string): Promise<ReadProjectFileResponse> {
         return this.#requestJson(
             "GET",
             `${this.#projectScopePath(scope)}/file?path=${encodeURIComponent(path)}`,
+        );
+    }
+
+    readFileAtRevision(
+        scope: ProjectScope,
+        path: string,
+        revision: string,
+    ): Promise<ReadProjectFileRevisionResponse> {
+        const parameters = new URLSearchParams({ path, revision });
+        return this.#requestJson(
+            "GET",
+            `${this.#projectScopePath(scope)}/file-revision?${parameters.toString()}`,
         );
     }
 

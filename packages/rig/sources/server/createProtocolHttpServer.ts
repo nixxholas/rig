@@ -46,6 +46,7 @@ import type {
     GitWatchResponse,
     GoalSessionResponse,
     ListModelsResponse,
+    ListProjectFilePathsResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
     ListSessionsResponse,
@@ -60,6 +61,7 @@ import type {
     RecordSessionActivityResponse,
     ReadBackgroundProcessResponse,
     ReadProjectFileResponse,
+    ReadProjectFileRevisionResponse,
     RunShellCommandRequest,
     RunShellCommandResponse,
     ResolveExternalToolCallRequest,
@@ -197,8 +199,10 @@ import {
     ProjectFileOutsideScopeError,
     ProjectFileTooLargeError,
     readProjectFile,
+    readProjectFileAtRevision,
     writeProjectFile,
 } from "./projectFileApi.js";
+import { listGitWorkingTreeFiles } from "../git/listGitWorkingTreeFiles.js";
 import { createNodeFileSystemContext } from "../agent/context/createNodeFileSystemContext.js";
 
 export interface ProtocolHttpServerOptions {
@@ -964,10 +968,32 @@ async function handleRequest(
         return;
     }
 
-    if (route.name === "project-file" || route.name === "project-files") {
+    if (
+        route.name === "project-file" ||
+        route.name === "project-file-paths" ||
+        route.name === "project-file-revision" ||
+        route.name === "project-files"
+    ) {
         const directory = resolveProjectScopeDirectory(store, route);
         if (!directory.ok) {
             sendJson(response, 404, { error: directory.error });
+            return;
+        }
+        if (route.name === "project-file-paths") {
+            if (request.method !== "GET") {
+                sendJson(response, 405, { error: "Method not allowed" });
+                return;
+            }
+            try {
+                sendJson<ListProjectFilePathsResponse>(
+                    response,
+                    200,
+                    await listGitWorkingTreeFiles({ path: directory.path }),
+                );
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                sendJson(response, 400, { error: errorToMessage(error) });
+            }
             return;
         }
         if (route.name === "project-files") {
@@ -984,7 +1010,10 @@ async function handleRequest(
             sendJson<SearchFilesResponse>(response, 200, { files });
             return;
         }
-        if (request.method !== "GET" && request.method !== "PUT") {
+        // Both remaining routes read; only the working-tree file can also be written. They share the
+        // scope check and the error mapping below, which a revision read needs just as much.
+        const writable = route.name === "project-file" && request.method === "PUT";
+        if (request.method !== "GET" && !writable) {
             sendJson(response, 405, { error: "Method not allowed" });
             return;
         }
@@ -992,6 +1021,24 @@ async function handleRequest(
             permissionMode: () => "workspace_write",
         });
         try {
+            if (route.name === "project-file-revision") {
+                const path = url.searchParams.get("path");
+                const revision = url.searchParams.get("revision");
+                if (path === null || path.length === 0) {
+                    sendJson(response, 400, { error: "A file path is required." });
+                    return;
+                }
+                if (revision === null || revision.length === 0) {
+                    sendJson(response, 400, { error: "A Git revision is required." });
+                    return;
+                }
+                sendJson<ReadProjectFileRevisionResponse>(
+                    response,
+                    200,
+                    await readProjectFileAtRevision(fileSystem, { path, revision }),
+                );
+                return;
+            }
             if (request.method === "GET") {
                 const path = url.searchParams.get("path");
                 if (path === null || path.length === 0) {
@@ -3095,7 +3142,7 @@ function matchRoute(pathname: string):
           workspaceId: string;
       }
     | {
-          name: "project-file" | "project-files";
+          name: "project-file" | "project-file-paths" | "project-file-revision" | "project-files";
           projectId: string;
           sessionId?: undefined;
           workspaceId?: string;
@@ -3277,6 +3324,12 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "file") {
             return { name: "project-file", projectId };
         }
+        if (globalParts.length === 3 && globalParts[2] === "file-paths") {
+            return { name: "project-file-paths", projectId };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "file-revision") {
+            return { name: "project-file-revision", projectId };
+        }
         if (globalParts.length === 3 && globalParts[2] === "files") {
             return { name: "project-files", projectId };
         }
@@ -3323,6 +3376,12 @@ function matchRoute(pathname: string):
             }
             if (globalParts.length === 5 && globalParts[4] === "file") {
                 return { name: "project-file", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "file-paths") {
+                return { name: "project-file-paths", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "file-revision") {
+                return { name: "project-file-revision", projectId, workspaceId };
             }
             if (globalParts.length === 5 && globalParts[4] === "files") {
                 return { name: "project-files", projectId, workspaceId };
@@ -3727,6 +3786,8 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
             "project-archive",
             "project-avatar",
             "project-file",
+            "project-file-paths",
+            "project-file-revision",
             "project-files",
             "project-refresh",
             "project-reorder",

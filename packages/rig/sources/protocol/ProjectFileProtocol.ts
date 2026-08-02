@@ -9,11 +9,25 @@ export interface SearchFilesResponse {
     files: readonly FileSearchResult[];
 }
 
+export interface ListProjectFilePathsResponse {
+    /** Every file in the checkout, relative to it, with POSIX separators, sorted. */
+    paths: readonly string[];
+    /** True when the checkout holds more files than `paths` carries, so a client can say so. */
+    truncated: boolean;
+}
+
 export interface ReadProjectFileResponse {
     /** Base64-encoded file bytes. */
     content: string;
     /** SHA-256 of the returned bytes, used to guard a later write. */
     hash: string;
+}
+
+export interface ReadProjectFileRevisionResponse {
+    /** Base64-encoded file bytes at that revision, or `null` when the revision has no such file. */
+    content: string | null;
+    /** SHA-256 of the returned bytes, or `null` when the revision has no such file. */
+    hash: string | null;
 }
 
 export const writeProjectFileRequestSchema = Type.Object(
