@@ -171,6 +171,9 @@ export class AnthropicBedrockSession extends BaseSession {
             model,
             ...(effort === undefined ? {} : { effort }),
             ...(request.abort === undefined ? {} : { signal: request.abort }),
+            ...(request.structuredOutput === undefined
+                ? {}
+                : { structuredOutput: request.structuredOutput }),
         })) {
             if (event.type === "text_delta") assistantText += event.delta;
             if (event.type === "encrypted_reasoning") encryptedReasoning = event.content;
@@ -222,6 +225,7 @@ export class AnthropicBedrockSession extends BaseSession {
         effort?: SessionReasoningEffort;
         model: string;
         signal?: AbortSignal;
+        structuredOutput?: SessionRunRequest["structuredOutput"];
         tools?: readonly SessionTool[];
     }): AsyncGenerator<SessionEvent> {
         let blockStarted = false;
@@ -283,6 +287,7 @@ export class AnthropicBedrockSession extends BaseSession {
         context: SessionContext;
         effort?: SessionReasoningEffort;
         model: string;
+        structuredOutput?: SessionRunRequest["structuredOutput"];
         tools?: readonly SessionTool[];
     }) {
         const modelConfiguration = this.modelConfigurations?.[options.model];
@@ -297,6 +302,9 @@ export class AnthropicBedrockSession extends BaseSession {
         return createAnthropicRequest({
             context,
             model: resolveAnthropicBedrockModelId(options.model, this.region, this.transport),
+            ...(options.structuredOutput === undefined
+                ? {}
+                : { structuredOutput: options.structuredOutput }),
             tools,
             ...(options.compactionInstructions === undefined
                 ? {}

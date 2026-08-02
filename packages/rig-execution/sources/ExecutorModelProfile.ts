@@ -3,6 +3,7 @@ import type {
     SessionMessage,
     SessionReasoningEffort,
     SessionServiceTier,
+    SessionStructuredOutput,
     SessionTool,
 } from "@slopus/rig-providers";
 import type { Model } from "@/types.js";
@@ -34,6 +35,7 @@ export interface ExecutorRunRequest {
     tools?: readonly SessionTool[];
     selection: ExecutorSelection;
     serviceTier?: SessionServiceTier;
+    structuredOutput?: SessionStructuredOutput;
     contextInstructions?: string;
     systemPrompt?: string;
 }

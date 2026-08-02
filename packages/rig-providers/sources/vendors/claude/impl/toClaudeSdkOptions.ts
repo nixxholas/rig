@@ -8,7 +8,7 @@ import {
 import { Type } from "@sinclair/typebox";
 
 import type { SessionContext } from "@/core/SessionContext.js";
-import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
+import type { SessionReasoningEffort, SessionStructuredOutput } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import type { ClaudeCredential } from "@/vendors/VendorCredential.js";
 import { CLAUDE_SDK_PRIVACY_ENVIRONMENT } from "@/vendors/claude/claudeSdkPrivacyEnvironment.js";
@@ -24,6 +24,7 @@ export function toClaudeSdkOptions(options: {
     model: string;
     pathToClaudeCodeExecutable?: string;
     sessionId: string;
+    structuredOutput?: SessionStructuredOutput;
     systemPrompt: string;
     tools: readonly SessionTool[];
     userAgent?: string;
@@ -60,6 +61,14 @@ export function toClaudeSdkOptions(options: {
         includePartialMessages: true,
         permissionMode: "dontAsk",
         persistSession: false,
+        ...(options.structuredOutput === undefined
+            ? {}
+            : {
+                  outputFormat: {
+                      type: "json_schema" as const,
+                      schema: options.structuredOutput.schema,
+                  },
+              }),
         sessionId: options.sessionId,
         settingSources: [],
         settings: { env: CLAUDE_SDK_PRIVACY_ENVIRONMENT },

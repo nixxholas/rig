@@ -283,6 +283,9 @@ export class Executor {
                 ...(request.effort === undefined ? {} : { effort: request.effort }),
                 model: profile.id,
                 ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
+                ...(request.structuredOutput === undefined
+                    ? {}
+                    : { structuredOutput: request.structuredOutput }),
             });
         } finally {
             releaseInference();

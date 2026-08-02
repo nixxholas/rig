@@ -179,6 +179,9 @@ export class ResponsesSession extends BaseSession {
                 createOpenAIResponseRequest({
                     context,
                     model,
+                    ...(request.structuredOutput === undefined
+                        ? {}
+                        : { structuredOutput: request.structuredOutput }),
                     tools: this.tools,
                     capabilities: this.capabilities,
                     ...(request.effort === undefined ? {} : { effort: request.effort }),

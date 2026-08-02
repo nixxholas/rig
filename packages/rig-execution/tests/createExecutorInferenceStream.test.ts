@@ -1,3 +1,4 @@
+import { Type } from "@sinclair/typebox";
 import { describe, expect, it } from "vitest";
 
 import type { Executor } from "@/Executor.js";
@@ -5,6 +6,39 @@ import { createExecutorInferenceStream } from "@/createExecutorInferenceStream.j
 import { defineModel } from "@/types.js";
 
 describe("createExecutorInferenceStream", () => {
+    it("forwards structured output to the provider run request", async () => {
+        let received: unknown;
+        const schema = Type.Object({ result: Type.String() });
+        const executor = {
+            run: async function* (request: unknown) {
+                received = request;
+                yield { type: "done", state: "normal" } as const;
+            },
+        } as unknown as Executor;
+        const stream = createExecutorInferenceStream({
+            context: { messages: [] },
+            executor,
+            model: defineModel({
+                id: "openai/test",
+                name: "Test",
+                thinkingLevels: ["off"],
+                defaultThinkingLevel: "off",
+            }),
+            providerId: "codex",
+            streamOptions: {
+                structuredOutput: { name: "test_output", schema },
+            },
+        });
+
+        for await (const _event of stream) {
+            // Consume the stream so the executor request is created.
+        }
+
+        expect(received).toMatchObject({
+            structuredOutput: { name: "test_output", schema },
+        });
+    });
+
     it("preserves encrypted collaboration input as a provider agent message", async () => {
         let received: unknown;
         const executor = {

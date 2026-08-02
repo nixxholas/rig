@@ -1,5 +1,9 @@
 import type { SessionContext } from "@/core/SessionContext.js";
-import type { SessionReasoningEffort, SessionServiceTier } from "@/core/SessionRunRequest.js";
+import type {
+    SessionReasoningEffort,
+    SessionServiceTier,
+    SessionStructuredOutput,
+} from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { createOpenAIResponseRequest } from "@/protocol/responses/createOpenAIResponseRequest.js";
 import { createResponsesLiteRequest } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
@@ -15,6 +19,7 @@ export function createCodexCliRequest(options: {
     parallelToolCalls?: boolean;
     promptCacheKey: string;
     serviceTier?: SessionServiceTier;
+    structuredOutput?: SessionStructuredOutput;
     tools: readonly SessionTool[];
 }): CodexResponseRequest {
     const request: CodexResponseRequest = createOpenAIResponseRequest(options);

@@ -85,6 +85,18 @@ describe("parseSessionMetadata", () => {
         expect(observedOptions).toMatchObject({
             sessionId: "session-1:title",
             startDate: "2024-01-02",
+            structuredOutput: {
+                name: "session_metadata",
+                schema: {
+                    additionalProperties: false,
+                    properties: {
+                        recap: { type: "string" },
+                        title: { type: "string" },
+                    },
+                    required: ["title", "recap"],
+                    type: "object",
+                },
+            },
         });
     });
 

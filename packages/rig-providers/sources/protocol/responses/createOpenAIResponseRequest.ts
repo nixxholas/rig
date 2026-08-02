@@ -1,7 +1,7 @@
 import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
 
 import type { SessionContext } from "@/core/SessionContext.js";
-import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
+import type { SessionReasoningEffort, SessionStructuredOutput } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import {
     OPENAI_RESPONSES_CAPABILITIES,
@@ -16,6 +16,7 @@ export function createOpenAIResponseRequest(options: {
     effort?: SessionReasoningEffort;
     model: string;
     promptCacheKey?: string;
+    structuredOutput?: SessionStructuredOutput;
     tools?: readonly SessionTool[];
     capabilities?: ResponsesCapabilities;
 }): ResponseCreateParamsStreaming {
@@ -30,7 +31,23 @@ export function createOpenAIResponseRequest(options: {
         stream: true,
         store: false,
         ...(capabilities.parallelToolCalls ? { parallel_tool_calls: true } : {}),
-        ...(capabilities.textVerbosity ? { text: { verbosity: "low" as const } } : {}),
+        ...(capabilities.textVerbosity || options.structuredOutput !== undefined
+            ? {
+                  text: {
+                      ...(capabilities.textVerbosity ? { verbosity: "low" as const } : {}),
+                      ...(options.structuredOutput === undefined
+                          ? {}
+                          : {
+                                format: {
+                                    type: "json_schema" as const,
+                                    name: options.structuredOutput.name,
+                                    schema: options.structuredOutput.schema,
+                                    strict: true,
+                                },
+                            }),
+                  },
+              }
+            : {}),
         instructions: options.context.instructions,
         ...(options.tools === undefined
             ? {}

@@ -1,24 +1,27 @@
+import { Type, type Static } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import type { Model, Provider, StreamOptions } from "@slopus/rig-execution";
 import { providerModelFamily } from "@slopus/rig-providers";
 import { toLocalDate } from "../executor/toLocalDate.js";
 
 const METADATA_PROMPT = `Create concise session metadata from the visible conversation.
 
-Return exactly one JSON object with exactly these string fields:
-{"title":"...","recap":"..."}
-
 Rules:
 - title is 2 to 6 words and at most 80 characters
 - recap is at most 2 sentences and 600 characters
 - recap states the user's goal and the useful outcome or current state
 - preserve the current title exactly unless the conversation clearly makes it misleading
-- use only the supplied visible conversation; do not infer from hidden tool calls or reasoning
-- return strict JSON with no markdown or commentary`;
+- use only the supplied visible conversation; do not infer from hidden tool calls or reasoning`;
 
-export interface GeneratedSessionMetadata {
-    recap: string;
-    title: string;
-}
+export const SESSION_METADATA_SCHEMA = Type.Object(
+    {
+        title: Type.String(),
+        recap: Type.String(),
+    },
+    { additionalProperties: false },
+);
+
+export type GeneratedSessionMetadata = Static<typeof SESSION_METADATA_SCHEMA>;
 
 export async function generateSessionMetadata(options: {
     currentTitle?: string;
@@ -40,6 +43,10 @@ export async function generateSessionMetadata(options: {
     const streamOptions: StreamOptions = {
         sessionId: `${options.sessionId}:title`,
         startDate: options.startDate ?? toLocalDate(timestamp),
+        structuredOutput: {
+            name: "session_metadata",
+            schema: SESSION_METADATA_SCHEMA,
+        },
         thinking: "off",
         ...(options.signal === undefined ? {} : { signal: options.signal }),
     };
@@ -93,25 +100,17 @@ export function parseSessionMetadata(text: string): GeneratedSessionMetadata {
     } catch {
         throw new Error("Session metadata model returned invalid JSON.");
     }
-    if (value === null || typeof value !== "object" || Array.isArray(value)) {
-        throw new Error("Session metadata model did not return an object.");
-    }
-    const record = value as Record<string, unknown>;
-    if (
-        Object.keys(record).sort().join(",") !== "recap,title" ||
-        typeof record.title !== "string" ||
-        typeof record.recap !== "string"
-    ) {
+    if (!Value.Check(SESSION_METADATA_SCHEMA, value)) {
         throw new Error("Session metadata must contain only string title and recap fields.");
     }
 
-    const title = normalizeLine(record.title);
+    const title = normalizeLine(value.title);
     const titleWords = title.split(/\s+/u).filter(Boolean);
     if (title.length > 80 || titleWords.length < 2 || titleWords.length > 6) {
         throw new Error("Session metadata title must contain 2 to 6 words.");
     }
 
-    const recap = normalizeLine(record.recap);
+    const recap = normalizeLine(value.recap);
     const sentences = recap.split(/(?<=[.!?])\s+/u).filter(Boolean);
     if (recap.length === 0 || recap.length > 600 || sentences.length > 2) {
         throw new Error(

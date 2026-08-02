@@ -58,7 +58,11 @@ export type {
 } from "@/core/SessionEvent.js";
 export { isSessionDoneEvent, isSessionErrorDone } from "@/core/SessionEvent.js";
 export { committedSessionEvents } from "@/core/committedSessionEvents.js";
-export type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
+export type {
+    SessionReasoningEffort,
+    SessionRunRequest,
+    SessionStructuredOutput,
+} from "@/core/SessionRunRequest.js";
 export type { SessionServiceTier } from "@/core/SessionRunRequest.js";
 export {
     areProviderModelsCompatible,

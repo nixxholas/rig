@@ -490,6 +490,7 @@ export class CodexSession extends BaseSession {
             model,
             effort,
             request.serviceTier,
+            request.structuredOutput,
         );
         let useSse = this.transport === "sse" || (this.transport === "auto" && this.forceSse);
         let transportRetries = 0;
@@ -680,6 +681,7 @@ export class CodexSession extends BaseSession {
         model: string,
         effort: SessionReasoningEffort,
         serviceTier?: SessionRunRequest["serviceTier"],
+        structuredOutput?: SessionRunRequest["structuredOutput"],
     ): CodexResponseRequest {
         return createCodexCliRequest({
             clientMetadata: createCodexClientMetadata({
@@ -697,6 +699,7 @@ export class CodexSession extends BaseSession {
                 : { parallelToolCalls: this.parallelToolCalls }),
             promptCacheKey: this.id,
             ...(serviceTier === undefined ? {} : { serviceTier }),
+            ...(structuredOutput === undefined ? {} : { structuredOutput }),
             tools: configuration.tools ?? [],
         });
     }

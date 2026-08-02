@@ -42,6 +42,7 @@ export class GrokConnection {
         context: SessionContext;
         effort?: SessionRunRequest["effort"];
         model: string;
+        structuredOutput?: SessionRunRequest["structuredOutput"];
         tools?: readonly SessionTool[];
         turnIndex?: number;
     }): Promise<AsyncGenerator<SessionEvent, OpenAIResponseRunResult>> {
@@ -52,6 +53,9 @@ export class GrokConnection {
                 apiModelId: options.model,
                 context: options.context,
                 ...(options.effort === undefined ? {} : { effort: options.effort }),
+                ...(options.structuredOutput === undefined
+                    ? {}
+                    : { structuredOutput: options.structuredOutput }),
                 tools: options.tools ?? this.options.tools,
                 ...(options.compaction === undefined ? {} : { compaction: options.compaction }),
             }),

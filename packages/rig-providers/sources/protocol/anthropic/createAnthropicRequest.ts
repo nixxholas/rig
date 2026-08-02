@@ -1,7 +1,7 @@
 import type { MessageCreateParamsStreaming } from "@anthropic-ai/sdk/resources/beta/messages/messages";
 
 import type { SessionContext } from "@/core/SessionContext.js";
-import type { SessionReasoningEffort } from "@/core/SessionRunRequest.js";
+import type { SessionReasoningEffort, SessionStructuredOutput } from "@/core/SessionRunRequest.js";
 import type { SessionTool } from "@/core/SessionTool.js";
 import { toAnthropicMessages } from "@/protocol/anthropic/toAnthropicMessages.js";
 import { toAnthropicSystem } from "@/protocol/anthropic/toAnthropicSystem.js";
@@ -16,6 +16,7 @@ export function createAnthropicRequest(options: {
     context: SessionContext;
     effort?: SessionReasoningEffort;
     model: string;
+    structuredOutput?: SessionStructuredOutput;
     tools: readonly SessionTool[];
 }): AnthropicRequest {
     const effort = resolveEffort(options.effort);
@@ -25,6 +26,7 @@ export function createAnthropicRequest(options: {
     const usesCompaction = options.compaction !== undefined || hasCompaction;
     const betas = ["context-1m-2025-08-07", "interleaved-thinking-2025-05-14"];
     if (usesCompaction) betas.push("compact-2026-01-12");
+    if (options.structuredOutput !== undefined) betas.push("structured-outputs-2025-12-15");
     return {
         betas,
         ...(!usesCompaction
@@ -49,7 +51,21 @@ export function createAnthropicRequest(options: {
         stream: true,
         ...(system.length === 0 ? {} : { system }),
         thinking: options.effort === "off" ? { type: "disabled" } : { type: "adaptive" },
-        ...(options.effort === "off" ? {} : { output_config: { effort } }),
+        ...(options.effort === "off" && options.structuredOutput === undefined
+            ? {}
+            : {
+                  output_config: {
+                      ...(options.effort === "off" ? {} : { effort }),
+                      ...(options.structuredOutput === undefined
+                          ? {}
+                          : {
+                                format: {
+                                    type: "json_schema" as const,
+                                    schema: options.structuredOutput.schema,
+                                },
+                            }),
+                  },
+              }),
         ...(tools.length === 0 ? {} : { tools }),
     };
 }

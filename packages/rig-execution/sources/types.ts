@@ -287,6 +287,11 @@ export interface StreamOptions<TThinkingLevel extends string = string> {
     serviceTier?: ServiceTier;
     /** Local calendar date when the inference session began, formatted as YYYY-MM-DD. */
     startDate?: string;
+    /** Require the final assistant text to be JSON matching this schema. */
+    structuredOutput?: {
+        name: string;
+        schema: TSchema;
+    };
     thinking?: TThinkingLevel;
 }
 

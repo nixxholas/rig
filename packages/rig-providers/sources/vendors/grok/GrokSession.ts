@@ -268,6 +268,9 @@ export class GrokSession extends BaseSession {
             tools: configured.tools,
             ...(effort === undefined ? {} : { effort }),
             ...(abort === undefined ? {} : { abort }),
+            ...(request.structuredOutput === undefined
+                ? {}
+                : { structuredOutput: request.structuredOutput }),
             turnIndex: this.turnIndex,
         });
         let result: OpenAIResponseRunResult | undefined;
@@ -398,6 +401,7 @@ export class GrokSession extends BaseSession {
         turnIndex?: number;
         compaction?: boolean;
         retryAfterContent?: boolean;
+        structuredOutput?: SessionRunRequest["structuredOutput"];
     }): AsyncGenerator<SessionEvent, OpenAIResponseRunResult | undefined> {
         const { abort } = options;
         await this.refreshCredentialIfExpiring();
@@ -420,6 +424,9 @@ export class GrokSession extends BaseSession {
                     context: requestContext,
                     ...(options.effort === undefined ? {} : { effort: options.effort }),
                     model: options.model,
+                    ...(options.structuredOutput === undefined
+                        ? {}
+                        : { structuredOutput: options.structuredOutput }),
                     ...(options.tools === undefined ? {} : { tools: options.tools }),
                     ...(options.turnIndex === undefined ? {} : { turnIndex: options.turnIndex }),
                 });

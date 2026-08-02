@@ -71,6 +71,9 @@ async function* streamExecutorInference(options: {
                 ...(options.streamOptions?.serviceTier === "fast"
                     ? { serviceTier: "priority" }
                     : {}),
+                ...(options.streamOptions?.structuredOutput === undefined
+                    ? {}
+                    : { structuredOutput: options.streamOptions.structuredOutput }),
                 contextInstructions: options.context.systemPrompt ?? "",
                 ...(options.context.systemPromptOverride === undefined
                     ? {}

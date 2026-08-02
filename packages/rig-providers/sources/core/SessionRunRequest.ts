@@ -1,4 +1,5 @@
 import type { SessionMessage } from "@/core/SessionContext.js";
+import type { TSchema } from "@sinclair/typebox";
 
 export type SessionReasoningEffort =
     | "off"
@@ -11,6 +12,11 @@ export type SessionReasoningEffort =
 
 export type SessionServiceTier = "priority";
 
+export interface SessionStructuredOutput {
+    name: string;
+    schema: TSchema;
+}
+
 export interface SessionRunRequest {
     /** Complete rebuilt conversation context for this inference turn. */
     context: {
@@ -20,4 +26,5 @@ export interface SessionRunRequest {
     model?: string;
     effort?: SessionReasoningEffort;
     serviceTier?: SessionServiceTier;
+    structuredOutput?: SessionStructuredOutput;
 }

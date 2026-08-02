@@ -231,6 +231,9 @@ export class ClaudeSession extends BaseSession {
             model,
             ...(effort === undefined ? {} : { effort }),
             ...(request.abort === undefined ? {} : { abort: request.abort }),
+            ...(request.structuredOutput === undefined
+                ? {}
+                : { structuredOutput: request.structuredOutput }),
         })) {
             if (event.type === "text_delta") assistantText += event.delta;
             if (event.type === "reasoning_delta") reasoningText += event.delta;
@@ -271,6 +274,7 @@ export class ClaudeSession extends BaseSession {
         context: SessionContext;
         effort?: SessionReasoningEffort;
         model: string;
+        structuredOutput?: SessionRunRequest["structuredOutput"];
     }): AsyncGenerator<SessionEvent> {
         yield { type: "block_start" };
         const modelConfiguration = this.modelConfigurations?.[options.model];
@@ -287,6 +291,9 @@ export class ClaudeSession extends BaseSession {
             compaction: options.compaction === true,
             effort: options.effort,
             model: options.model,
+            ...(options.structuredOutput === undefined
+                ? {}
+                : { structuredOutput: options.structuredOutput }),
             systemPrompt,
             tools,
         });
@@ -301,7 +308,11 @@ export class ClaudeSession extends BaseSession {
             this.activeQueryKey === queryKey &&
             !interruptedAfterToolBatch;
         if (!continuingQuery) this.closeActiveQuery();
-        const { abort: _abort, ...sdkRequestOptions } = options;
+        const {
+            abort: _abort,
+            structuredOutput: _structuredOutput,
+            ...sdkRequestOptions
+        } = options;
         const replay = createClaudeSessionReplay({
             context: configuredContext,
             model: options.model,
@@ -359,6 +370,9 @@ export class ClaudeSession extends BaseSession {
                         : { pathToClaudeCodeExecutable: this.pathToClaudeCodeExecutable }),
                     sessionId: this.sdkSessionId,
                     systemPrompt,
+                    ...(options.structuredOutput === undefined
+                        ? {}
+                        : { structuredOutput: options.structuredOutput }),
                     tools,
                     ...(this.userAgent === undefined ? {} : { userAgent: this.userAgent }),
                     callTool: (name) => toolBridge.execute(name),
@@ -468,7 +482,10 @@ export class ClaudeSession extends BaseSession {
                         continue;
                     }
                     if (event.type === "content_block_delta") {
-                        if (event.delta.type === "text_delta") {
+                        if (
+                            event.delta.type === "text_delta" &&
+                            options.structuredOutput === undefined
+                        ) {
                             sawText = true;
                             yield { type: "text_delta", delta: event.delta.text };
                         } else if (event.delta.type === "thinking_delta") {
@@ -548,7 +565,21 @@ export class ClaudeSession extends BaseSession {
                 // It is only a valid fallback for the query's first inference. Continued
                 // inferences must use their message_delta usage or remain unreported.
                 if (!sawInferenceUsage && !continuingQuery) usage = toUsage(result.usage);
-                if (!sawText && result.subtype === "success" && result.result.length > 0) {
+                if (
+                    options.structuredOutput !== undefined &&
+                    result.subtype === "success" &&
+                    !result.is_error
+                ) {
+                    if (result.structured_output === undefined) {
+                        throw new Error(
+                            "Claude completed structured output without returning a value.",
+                        );
+                    }
+                    yield {
+                        type: "text_delta",
+                        delta: JSON.stringify(result.structured_output),
+                    };
+                } else if (!sawText && result.subtype === "success" && result.result.length > 0) {
                     yield { type: "text_delta", delta: result.result };
                 }
                 if (result.subtype !== "success" || result.is_error) {
