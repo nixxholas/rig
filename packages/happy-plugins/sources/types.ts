@@ -100,6 +100,123 @@ export const listWorkspacesInputSchema = Type.Object(
 );
 export type ListWorkspacesInput = Static<typeof listWorkspacesInputSchema>;
 
+export const HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
+export const HAPPY_PLUGIN_MAX_COMMAND_TIMEOUT_MS = 5 * 60_000;
+export const HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
+export const HAPPY_PLUGIN_MAX_FILE_BYTES = 1024 * 1024;
+
+const workspaceIdSchema = nonEmptyText;
+const workspaceRelativePathSchema = Type.String({ maxLength: 4_096, minLength: 1 });
+const fileBytesBase64Schema = Type.String({
+    maxLength: Math.ceil(HAPPY_PLUGIN_MAX_FILE_BYTES / 3) * 4,
+    pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+});
+const commandOutputBytesBase64Schema = Type.String({
+    maxLength: Math.ceil(HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES / 3) * 4,
+    pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+});
+
+export const executeWorkspaceCommandInputSchema = Type.Object(
+    {
+        command: Type.String({ maxLength: 64 * 1024, minLength: 1 }),
+        timeoutMs: Type.Optional(
+            Type.Integer({
+                default: HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
+                maximum: HAPPY_PLUGIN_MAX_COMMAND_TIMEOUT_MS,
+                minimum: 1,
+            }),
+        ),
+        workspaceId: workspaceIdSchema,
+    },
+    exact,
+);
+export type ExecuteWorkspaceCommandInput = Static<typeof executeWorkspaceCommandInputSchema>;
+
+export const executeWorkspaceCommandBodySchema = Type.Omit(executeWorkspaceCommandInputSchema, [
+    "workspaceId",
+]);
+
+export const executeWorkspaceCommandResultSchema = Type.Object(
+    {
+        exitCode: Type.Union([Type.Integer(), Type.Null()]),
+        stderr: Type.String({ maxLength: HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES }),
+        stderrTruncated: Type.Boolean(),
+        stdout: Type.String({ maxLength: HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES }),
+        stdoutTruncated: Type.Boolean(),
+        timedOut: Type.Boolean(),
+    },
+    exact,
+);
+export type ExecuteWorkspaceCommandResult = Static<typeof executeWorkspaceCommandResultSchema>;
+
+export const executeWorkspaceCommandResponseSchema = Type.Object(
+    {
+        exitCode: Type.Union([Type.Integer(), Type.Null()]),
+        stderrBase64: commandOutputBytesBase64Schema,
+        stderrTruncated: Type.Boolean(),
+        stdoutBase64: commandOutputBytesBase64Schema,
+        stdoutTruncated: Type.Boolean(),
+        timedOut: Type.Boolean(),
+    },
+    exact,
+);
+export type ExecuteWorkspaceCommandResponse = Static<typeof executeWorkspaceCommandResponseSchema>;
+
+export const readWorkspaceFileInputSchema = Type.Object(
+    {
+        path: workspaceRelativePathSchema,
+        workspaceId: workspaceIdSchema,
+    },
+    exact,
+);
+export type ReadWorkspaceFileInput = Static<typeof readWorkspaceFileInputSchema>;
+
+export const readWorkspaceFileBodySchema = Type.Omit(readWorkspaceFileInputSchema, ["workspaceId"]);
+
+export const readWorkspaceFileResultSchema = Type.Object(
+    {
+        bytes: Type.Integer({ maximum: HAPPY_PLUGIN_MAX_FILE_BYTES, minimum: 0 }),
+        content: Type.String(),
+    },
+    exact,
+);
+export type ReadWorkspaceFileResult = Static<typeof readWorkspaceFileResultSchema>;
+
+export const readWorkspaceFileResponseSchema = Type.Object(
+    {
+        bytes: Type.Integer({ maximum: HAPPY_PLUGIN_MAX_FILE_BYTES, minimum: 0 }),
+        contentBase64: fileBytesBase64Schema,
+    },
+    exact,
+);
+export type ReadWorkspaceFileResponse = Static<typeof readWorkspaceFileResponseSchema>;
+
+export const writeWorkspaceFileInputSchema = Type.Object(
+    {
+        content: Type.String({ maxLength: HAPPY_PLUGIN_MAX_FILE_BYTES }),
+        path: workspaceRelativePathSchema,
+        workspaceId: workspaceIdSchema,
+    },
+    exact,
+);
+export type WriteWorkspaceFileInput = Static<typeof writeWorkspaceFileInputSchema>;
+
+export const writeWorkspaceFileBodySchema = Type.Object(
+    {
+        contentBase64: fileBytesBase64Schema,
+        path: workspaceRelativePathSchema,
+    },
+    exact,
+);
+
+export const writeWorkspaceFileResultSchema = Type.Object(
+    {
+        bytesWritten: Type.Integer({ maximum: HAPPY_PLUGIN_MAX_FILE_BYTES, minimum: 0 }),
+    },
+    exact,
+);
+export type WriteWorkspaceFileResult = Static<typeof writeWorkspaceFileResultSchema>;
+
 export const createSessionInputSchema = Type.Object(
     {
         appendSystemPrompt: Type.Optional(Type.String()),
@@ -593,6 +710,11 @@ export interface HappyPluginClient {
     readonly workspaces: {
         archive(input: ArchiveWorkspaceInput): Promise<HappyWorkspace>;
         create(input: CreateWorkspaceInput): Promise<HappyWorkspace>;
+        exec(input: ExecuteWorkspaceCommandInput): Promise<ExecuteWorkspaceCommandResult>;
+        readonly files: {
+            read(input: ReadWorkspaceFileInput): Promise<ReadWorkspaceFileResult>;
+            write(input: WriteWorkspaceFileInput): Promise<WriteWorkspaceFileResult>;
+        };
         list(input?: ListWorkspacesInput): Promise<readonly HappyWorkspace[]>;
         rename(input: RenameWorkspaceInput): Promise<HappyWorkspace>;
     };

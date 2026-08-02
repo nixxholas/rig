@@ -4,17 +4,25 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { createHappyPluginClient } from "./createHappyPluginClient.js";
 import { normalizeHappyMcpName } from "./createHappyMcpToolName.js";
+import { createPluginWorkspaceCommandExecutor } from "./createPluginWorkspaceCommandExecutor.js";
 import { happyMcpCompletionToResult } from "./happyMcpCompletionToResult.js";
+import {
+    classifyPluginApiRequestError,
+    PluginApiRequestError,
+    PluginApiRequestTooLargeError,
+} from "./pluginApiRequestErrors.js";
 import {
     assertHappyPluginStorageKey,
     assertHappyPluginStorageQuota,
     decodeHappyPluginStorageValue,
     encodeHappyPluginStorageValue,
 } from "./pluginAppStorage.js";
+import { readPluginWorkspaceFile } from "./readPluginWorkspaceFile.js";
 import type {
     HappyMcpServerRegistration,
     HappyMcpToolResult,
@@ -28,16 +36,21 @@ import type {
 } from "./types.js";
 import {
     HAPPY_PLUGIN_MAX_STORAGE_KEYS,
+    HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
+    executeWorkspaceCommandBodySchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     happyPluginTestSeedSchema,
     listWorkspacesInputSchema,
+    readWorkspaceFileBodySchema,
     renameWorkspaceBodySchema,
     sendAgentMessageBodySchema,
+    writeWorkspaceFileBodySchema,
 } from "./types.js";
+import { writePluginWorkspaceFile } from "./writePluginWorkspaceFile.js";
 
 const CALL_TIMEOUT_MS = 10_000;
 const MAXIMUM_BODY_BYTES = 1024 * 1024;
@@ -127,6 +140,7 @@ export async function createHappyPluginTestHost(
     const registrations = new Map<string, TestRegistration>();
     const calls = new Map<string, TestCall<HappyMcpToolResult>>();
     const appStorage = new Map<string, string>();
+    const executeWorkspaceCommand = createPluginWorkspaceCommandExecutor();
     let nextId = 1;
     let closed = false;
     const toolWaiters = new Set<() => void>();
@@ -145,7 +159,12 @@ export async function createHappyPluginTestHost(
             const body =
                 request.method === "GET" || request.method === "DELETE"
                     ? undefined
-                    : await readBody(request);
+                    : await readBody(
+                          request,
+                          url.pathname.endsWith("/files/write")
+                              ? 2 * MAXIMUM_BODY_BYTES
+                              : MAXIMUM_BODY_BYTES,
+                      );
             const observedRequest = {
                 ...(body === undefined ? {} : { body: structuredClone(body) }),
                 method: request.method ?? "GET",
@@ -153,17 +172,19 @@ export async function createHappyPluginTestHost(
             };
             requests.push(observedRequest);
             options.onRequest?.(structuredClone(observedRequest));
+            const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
 
             if (request.method === "GET" && url.pathname === "/projects") {
                 send(response, 200, { projects });
                 return;
             }
             if (request.method === "GET" && url.pathname === "/workspaces") {
-                const input = Value.Decode(
+                const input = decodeRequest(
                     listWorkspacesInputSchema,
                     url.searchParams.has("projectId")
                         ? { projectId: url.searchParams.get("projectId") }
                         : {},
+                    "Workspace list settings",
                 );
                 send(response, 200, {
                     workspaces:
@@ -187,8 +208,63 @@ export async function createHappyPluginTestHost(
                 send(response, 200, { plugins });
                 return;
             }
+            if (
+                request.method === "POST" &&
+                parts.length >= 3 &&
+                parts[0] === "workspaces" &&
+                parts[1] !== undefined
+            ) {
+                const workspace = workspaces.find((candidate) => candidate.id === parts[1]);
+                if (workspace === undefined) {
+                    send(response, 404, { error: "Workspace not found." });
+                    return;
+                }
+                if (parts.length === 3 && parts[2] === "exec") {
+                    const input = decodeRequest(
+                        executeWorkspaceCommandBodySchema,
+                        body,
+                        "Workspace command settings",
+                    );
+                    send(
+                        response,
+                        200,
+                        await executeWorkspaceCommand(
+                            workspace.path,
+                            input.command,
+                            input.timeoutMs ?? HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
+                        ),
+                    );
+                    return;
+                }
+                if (parts.length === 4 && parts[2] === "files" && parts[3] === "read") {
+                    const input = decodeRequest(
+                        readWorkspaceFileBodySchema,
+                        body,
+                        "Workspace file read settings",
+                    );
+                    send(response, 200, await readPluginWorkspaceFile(workspace.path, input.path));
+                    return;
+                }
+                if (parts.length === 4 && parts[2] === "files" && parts[3] === "write") {
+                    const input = decodeRequest(
+                        writeWorkspaceFileBodySchema,
+                        body,
+                        "Workspace file write settings",
+                    );
+                    send(
+                        response,
+                        200,
+                        await writePluginWorkspaceFile(
+                            workspace.path,
+                            input.path,
+                            Buffer.from(input.contentBase64, "base64"),
+                        ),
+                    );
+                    return;
+                }
+            }
             if (request.method === "POST" && url.pathname === "/sessions") {
-                const input = Value.Decode(createSessionInputSchema, body);
+                const input = decodeRequest(createSessionInputSchema, body, "Session settings");
                 const session: HappySession = {
                     agentId: `test-agent-${String(nextId)}`,
                     archived: false,
@@ -203,7 +279,11 @@ export async function createHappyPluginTestHost(
                 return;
             }
             if (request.method === "POST" && url.pathname === "/mcp/servers") {
-                const registeredServer = Value.Decode(happyMcpServerRegistrationSchema, body);
+                const registeredServer = decodeRequest(
+                    happyMcpServerRegistrationSchema,
+                    body,
+                    "MCP server registration",
+                );
                 if (
                     [...registrations.values()].some(
                         (registration) =>
@@ -223,7 +303,6 @@ export async function createHappyPluginTestHost(
                 send(response, 201, { registrationId: registration.id });
                 return;
             }
-            const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
             if (
                 request.method === "GET" &&
                 parts.length === 4 &&
@@ -265,7 +344,11 @@ export async function createHappyPluginTestHost(
                     return;
                 }
                 calls.delete(parts[4]);
-                const completion = Value.Decode(happyMcpCallCompletionSchema, body);
+                const completion = decodeRequest(
+                    happyMcpCallCompletionSchema,
+                    body,
+                    "MCP tool result",
+                );
                 call.resolve(happyMcpCompletionToResult(completion));
                 send(response, 200, {});
                 return;
@@ -289,7 +372,7 @@ export async function createHappyPluginTestHost(
                 parts[1] !== undefined &&
                 parts[2] === "messages"
             ) {
-                Value.Decode(sendAgentMessageBodySchema, body);
+                decodeRequest(sendAgentMessageBodySchema, body, "Agent message");
                 send(response, 202, {
                     delivered: true,
                     runId: `test-run-${String(nextId++)}`,
@@ -307,7 +390,11 @@ export async function createHappyPluginTestHost(
             ) {
                 const projectId = parts[1];
                 if (request.method === "POST" && parts.length === 3) {
-                    const input = Value.Decode(createWorkspaceBodySchema, body);
+                    const input = decodeRequest(
+                        createWorkspaceBodySchema,
+                        body,
+                        "Workspace settings",
+                    );
                     const workspace: HappyWorkspace = {
                         id: `test-workspace-${String(nextId++)}`,
                         name: input.name,
@@ -329,7 +416,11 @@ export async function createHappyPluginTestHost(
                     return;
                 }
                 if (request.method === "PATCH" && parts.length === 4) {
-                    const input = Value.Decode(renameWorkspaceBodySchema, body);
+                    const input = decodeRequest(
+                        renameWorkspaceBodySchema,
+                        body,
+                        "Workspace rename settings",
+                    );
                     Object.assign(workspace, {
                         name: input.name,
                         version: workspace.version + 1,
@@ -338,7 +429,7 @@ export async function createHappyPluginTestHost(
                     return;
                 }
                 if (request.method === "POST" && parts[4] === "archive") {
-                    Value.Decode(archiveWorkspaceBodySchema, body);
+                    decodeRequest(archiveWorkspaceBodySchema, body, "Workspace archive settings");
                     Object.assign(workspace, {
                         archivedAt: Date.now(),
                         status: "archived",
@@ -350,7 +441,9 @@ export async function createHappyPluginTestHost(
             }
             send(response, 404, { error: "This fake Happy host action does not exist." });
         })().catch((error: unknown) => {
-            send(response, 400, { error: error instanceof Error ? error.message : String(error) });
+            send(response, classifyPluginApiRequestError(error), {
+                error: error instanceof Error ? error.message : String(error),
+            });
         });
     });
 
@@ -558,17 +651,37 @@ export async function createHappyPluginTestHost(
     return host;
 }
 
-async function readBody(request: IncomingMessage): Promise<unknown> {
+async function readBody(request: IncomingMessage, maximumBytes: number): Promise<unknown> {
     const chunks: Buffer[] = [];
     let bytes = 0;
     for await (const chunk of request) {
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         bytes += buffer.length;
-        if (bytes > MAXIMUM_BODY_BYTES) throw new Error("The fake host request is too large.");
+        if (bytes > maximumBytes) {
+            throw new PluginApiRequestTooLargeError("The plugin request is too large.");
+        }
         chunks.push(buffer);
     }
     const text = Buffer.concat(chunks).toString("utf8");
-    return text.length === 0 ? {} : (JSON.parse(text) as unknown);
+    try {
+        return JSON.parse(text) as unknown;
+    } catch {
+        throw new PluginApiRequestError("The plugin request is not valid JSON.");
+    }
+}
+
+function decodeRequest<TSchema_ extends TSchema>(
+    schema: TSchema_,
+    value: unknown,
+    subject: string,
+): Static<TSchema_> {
+    try {
+        return Value.Decode(schema, value);
+    } catch {
+        const first = Value.Errors(schema, value).First();
+        const detail = first === undefined ? "" : ` ${first.path || "value"}: ${first.message}`;
+        throw new PluginApiRequestError(`${subject} are invalid.${detail}`);
+    }
 }
 
 function send(response: ServerResponse, status: number, value: unknown): void {

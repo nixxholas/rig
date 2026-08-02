@@ -1,14 +1,15 @@
 import { request as requestHttp } from "node:http";
-import { rm } from "node:fs/promises";
+import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
     createHappyPluginClient,
     defineMcpTool,
+    HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES,
     HAPPY_PLUGIN_MAX_LIST_ITEMS,
     Type,
 } from "happy-plugins";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -65,6 +66,141 @@ describe("plugin API server", () => {
             }).projects.list(),
         ).resolves.toEqual([]);
         await expect(unauthorizedStatus(socketPath)).resolves.toBe(401);
+    });
+
+    it("executes one-shot workspace commands with captured output and a bounded timeout", async () => {
+        const fixture = await createWorkspaceApiFixture();
+
+        await expect(
+            fixture.client.workspaces.exec({
+                command: "printf 'captured stdout'; printf 'captured stderr' >&2; pwd",
+                workspaceId: fixture.workspaceId,
+            }),
+        ).resolves.toEqual({
+            exitCode: 0,
+            stderr: "captured stderr",
+            stderrTruncated: false,
+            stdout: `captured stdout${fixture.workspacePath}\n`,
+            stdoutTruncated: false,
+            timedOut: false,
+        });
+
+        await expect(
+            fixture.client.workspaces.exec({
+                command: "sleep 2",
+                timeoutMs: 25,
+                workspaceId: fixture.workspaceId,
+            }),
+        ).resolves.toMatchObject({
+            exitCode: null,
+            stderrTruncated: false,
+            stdoutTruncated: false,
+            timedOut: true,
+        });
+    });
+
+    it("reads and writes bounded workspace files while rejecting traversal and symlink escapes", async () => {
+        const fixture = await createWorkspaceApiFixture();
+        const outside = join(fixture.directory, "outside");
+        await mkdir(outside);
+        await symlink(outside, join(fixture.workspacePath, "escape"));
+
+        await expect(
+            fixture.client.workspaces.files.write({
+                content: "plugin file\n",
+                path: "nested/report.txt",
+                workspaceId: fixture.workspaceId,
+            }),
+        ).resolves.toEqual({ bytesWritten: 12 });
+        await expect(
+            fixture.client.workspaces.files.read({
+                path: "nested/report.txt",
+                workspaceId: fixture.workspaceId,
+            }),
+        ).resolves.toEqual({ bytes: 12, content: "plugin file\n" });
+        await expect(
+            fixture.client.workspaces.files.write({
+                content: "outside",
+                path: "../outside.txt",
+                workspaceId: fixture.workspaceId,
+            }),
+        ).rejects.toMatchObject({ status: 400 });
+        await expect(
+            fixture.client.workspaces.files.write({
+                content: "outside",
+                path: "escape/outside.txt",
+                workspaceId: fixture.workspaceId,
+            }),
+        ).rejects.toMatchObject({ status: 400 });
+    });
+
+    it("caps each command output stream and reports truncation independently", async () => {
+        const fixture = await createWorkspaceApiFixture();
+        const script = [
+            `process.stdout.write("x".repeat(${String(HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES + 1)}))`,
+            'process.stderr.write("kept stderr")',
+        ].join(";");
+        const result = await fixture.client.workspaces.exec({
+            command: `${JSON.stringify(process.execPath)} -e ${JSON.stringify(script)}`,
+            workspaceId: fixture.workspaceId,
+        });
+
+        expect(Buffer.byteLength(result.stdout)).toBe(HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES);
+        expect(result).toMatchObject({
+            exitCode: 0,
+            stderr: "kept stderr",
+            stderrTruncated: false,
+            stdoutTruncated: true,
+            timedOut: false,
+        });
+    });
+
+    it("returns sanitized workspace operation failures instead of raw host paths", async () => {
+        const fixture = await createWorkspaceApiFixture();
+        const missingFile = fixture.client.workspaces.files.read({
+            path: "missing.txt",
+            workspaceId: fixture.workspaceId,
+        });
+        await expect(missingFile).rejects.toMatchObject({
+            message: "The requested workspace file does not exist.",
+            status: 404,
+        });
+        await expect(missingFile).rejects.not.toThrow(fixture.workspacePath);
+
+        await mkdir(join(fixture.workspacePath, "directory"));
+        const directoryWrite = fixture.client.workspaces.files.write({
+            content: "not a directory",
+            path: "directory",
+            workspaceId: fixture.workspaceId,
+        });
+        await expect(directoryWrite).rejects.toMatchObject({
+            message: "The workspace file could not be written because its path is a directory.",
+            status: 400,
+        });
+        await expect(directoryWrite).rejects.not.toThrow(fixture.workspacePath);
+
+        await writeFile(join(fixture.workspacePath, "file-parent"), "file");
+        const invalidParentWrite = fixture.client.workspaces.files.write({
+            content: "not reachable",
+            path: "file-parent/child.txt",
+            workspaceId: fixture.workspaceId,
+        });
+        await expect(invalidParentWrite).rejects.toMatchObject({
+            message: "The workspace file path is invalid because part of it is not a directory.",
+            status: 400,
+        });
+        await expect(invalidParentWrite).rejects.not.toThrow(fixture.workspacePath);
+
+        await rm(fixture.workspacePath, { force: true, recursive: true });
+        const missingWorkspace = fixture.client.workspaces.exec({
+            command: "printf unreachable",
+            workspaceId: fixture.workspaceId,
+        });
+        await expect(missingWorkspace).rejects.toMatchObject({
+            message: "The workspace directory is unavailable.",
+            status: 404,
+        });
+        await expect(missingWorkspace).rejects.not.toThrow(fixture.workspacePath);
     });
 
     it("lists the manager snapshot with plugin states and the caller marked by folder", async () => {
@@ -423,6 +559,59 @@ function closeServer(server: ReturnType<typeof createPluginApiServer>): Promise<
         server.close(() => resolve());
         server.closeAllConnections();
     });
+}
+
+async function createWorkspaceApiFixture() {
+    const directory = await createTestSocketDirectory();
+    cleanup.push(() => rm(directory, { force: true, recursive: true }));
+    const workspacePath = join(directory, "workspace");
+    await mkdir(workspacePath);
+    const socketPath = join(directory, "api.sock");
+    const store = new InMemorySessionStore({
+        modelCatalog: {
+            defaultModelId: "",
+            defaultProviderId: "",
+            models: [],
+            providers: [],
+        },
+    });
+    cleanup.push(() => store.close());
+    const workspaceId = "workspace-1";
+    vi.spyOn(store, "listWorkspaces").mockReturnValue([
+        {
+            createdAt: 1,
+            gitCommonDir: workspacePath,
+            id: workspaceId,
+            kind: "git_worktree",
+            name: "Plugin work",
+            orderKey: "a0",
+            path: workspacePath,
+            presence: "present",
+            projectId: "project-1",
+            status: "ready",
+            storageKey: workspaceId,
+            updatedAt: 1,
+            version: 0,
+        },
+    ]);
+    const server = createPluginApiServer({
+        listPlugins: async () => [],
+        pluginFolder: "test-plugin",
+        pluginName: "Test Plugin",
+        store,
+        token: "private-plugin-token",
+    });
+    cleanup.push(() => closeServer(server));
+    await listen(server, socketPath);
+    return {
+        client: createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        }),
+        directory,
+        workspaceId,
+        workspacePath,
+    };
 }
 
 function unauthorizedStatus(socketPath: string): Promise<number> {

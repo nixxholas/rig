@@ -4,7 +4,11 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createHappyPluginClient, HappyPluginApiError } from "../sources/index.js";
+import {
+    createHappyPluginClient,
+    HappyPluginApiError,
+    HAPPY_PLUGIN_MAX_FILE_BYTES,
+} from "../sources/index.js";
 
 const temporaryDirectories: string[] = [];
 const servers: Server[] = [];
@@ -121,6 +125,22 @@ describe("happy-plugins client", () => {
         await expect(
             createHappyPluginClient({ socketPath: "", token: "" }).projects.list(),
         ).rejects.toThrow("HAPPY_PLUGIN_SOCKET_PATH");
+    });
+
+    it("rejects workspace file content over the UTF-8 byte limit before sending", async () => {
+        const client = createHappyPluginClient({
+            socketPath: "/unused/plugin.sock",
+            token: "plugin-token",
+        });
+        await expect(
+            client.workspaces.files.write({
+                content: "€".repeat(Math.floor(HAPPY_PLUGIN_MAX_FILE_BYTES / 2)),
+                path: "report.txt",
+                workspaceId: "workspace-1",
+            }),
+        ).rejects.toThrow(
+            `Workspace file content cannot exceed ${String(HAPPY_PLUGIN_MAX_FILE_BYTES)} UTF-8 bytes.`,
+        );
     });
 
     it("does not retain finite connections across clients or daemon restarts", async () => {

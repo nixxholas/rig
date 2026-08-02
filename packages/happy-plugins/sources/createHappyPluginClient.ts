@@ -11,16 +11,25 @@ import {
     createHappyPluginClientOptionsSchema,
     createSessionInputSchema,
     createWorkspaceInputSchema,
+    executeWorkspaceCommandInputSchema,
+    executeWorkspaceCommandResponseSchema,
+    executeWorkspaceCommandResultSchema,
     listProjectsResponseSchema,
     listHappyProviderUsageResponseSchema,
     listPluginsResponseSchema,
     listSessionsResponseSchema,
     listWorkspacesInputSchema,
     listWorkspacesResponseSchema,
+    readWorkspaceFileInputSchema,
+    readWorkspaceFileResponseSchema,
+    readWorkspaceFileResultSchema,
     renameWorkspaceInputSchema,
     sendAgentMessageInputSchema,
     sessionResponseSchema,
     workspaceResponseSchema,
+    HAPPY_PLUGIN_MAX_FILE_BYTES,
+    writeWorkspaceFileInputSchema,
+    writeWorkspaceFileResultSchema,
 } from "./types.js";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
@@ -139,6 +148,59 @@ export function createHappyPluginClient(
                         },
                     )
                 ).workspace;
+            },
+            exec: async (input) => {
+                Value.Assert(executeWorkspaceCommandInputSchema, input);
+                const response = await request(
+                    "POST",
+                    `/workspaces/${encodeURIComponent(input.workspaceId)}/exec`,
+                    executeWorkspaceCommandResponseSchema,
+                    {
+                        command: input.command,
+                        ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
+                    },
+                );
+                return Value.Decode(executeWorkspaceCommandResultSchema, {
+                    exitCode: response.exitCode,
+                    stderr: Buffer.from(response.stderrBase64, "base64").toString("utf8"),
+                    stderrTruncated: response.stderrTruncated,
+                    stdout: Buffer.from(response.stdoutBase64, "base64").toString("utf8"),
+                    stdoutTruncated: response.stdoutTruncated,
+                    timedOut: response.timedOut,
+                });
+            },
+            files: {
+                read: async (input) => {
+                    Value.Assert(readWorkspaceFileInputSchema, input);
+                    const response = await request(
+                        "POST",
+                        `/workspaces/${encodeURIComponent(input.workspaceId)}/files/read`,
+                        readWorkspaceFileResponseSchema,
+                        { path: input.path },
+                    );
+                    return Value.Decode(readWorkspaceFileResultSchema, {
+                        bytes: response.bytes,
+                        content: Buffer.from(response.contentBase64, "base64").toString("utf8"),
+                    });
+                },
+                write: async (input) => {
+                    Value.Assert(writeWorkspaceFileInputSchema, input);
+                    const contentBytes = Buffer.byteLength(input.content, "utf8");
+                    if (contentBytes > HAPPY_PLUGIN_MAX_FILE_BYTES) {
+                        throw new Error(
+                            `Workspace file content cannot exceed ${String(HAPPY_PLUGIN_MAX_FILE_BYTES)} UTF-8 bytes.`,
+                        );
+                    }
+                    return request(
+                        "POST",
+                        `/workspaces/${encodeURIComponent(input.workspaceId)}/files/write`,
+                        writeWorkspaceFileResultSchema,
+                        {
+                            contentBase64: Buffer.from(input.content, "utf8").toString("base64"),
+                            path: input.path,
+                        },
+                    );
+                },
             },
             list: async (input = {}) => {
                 Value.Assert(listWorkspacesInputSchema, input);

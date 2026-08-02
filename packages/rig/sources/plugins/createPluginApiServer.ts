@@ -11,15 +11,27 @@ import type {
     HappyWorkspace,
 } from "happy-plugins";
 import {
+    HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
     archiveWorkspaceBodySchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
+    executeWorkspaceCommandBodySchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     listWorkspacesInputSchema,
+    readWorkspaceFileBodySchema,
     renameWorkspaceBodySchema,
     sendAgentMessageBodySchema,
+    writeWorkspaceFileBodySchema,
 } from "happy-plugins";
+import {
+    classifyPluginApiRequestError,
+    createPluginWorkspaceCommandExecutor,
+    PluginApiRequestError,
+    PluginApiRequestTooLargeError,
+    readPluginWorkspaceFile,
+    writePluginWorkspaceFile,
+} from "happy-plugins/internal";
 
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
@@ -38,6 +50,7 @@ import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
 import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
+const MAX_WORKSPACE_FILE_REQUEST_BYTES = 2 * 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
     defaultDocker?: DockerExecutionConfig;
@@ -51,25 +64,20 @@ export interface CreatePluginApiServerOptions {
 }
 
 export function createPluginApiServer(options: CreatePluginApiServerOptions): Server {
+    const executeWorkspaceCommand = createPluginWorkspaceCommandExecutor();
     return createServer((request, response) => {
         if (!isAuthorizedProtocolRequest(request, options.token)) {
             sendJson(response, 401, { error: "This plugin connection is not authorized." });
             return;
         }
-        void handleRequest(request, response, options).catch((error: unknown) => {
-            if (isDatabaseFailure(error)) throw error;
-            sendJson(
-                response,
-                error instanceof PluginApiRequestTooLargeError
-                    ? 413
-                    : error instanceof PluginApiRequestError
-                      ? 400
-                      : 500,
-                {
+        void handleRequest(request, response, options, executeWorkspaceCommand).catch(
+            (error: unknown) => {
+                if (isDatabaseFailure(error)) throw error;
+                sendJson(response, classifyPluginApiRequestError(error), {
                     error: errorToMessage(error),
-                },
-            );
-        });
+                });
+            },
+        );
     });
 }
 
@@ -77,6 +85,7 @@ async function handleRequest(
     request: IncomingMessage,
     response: ServerResponse,
     options: CreatePluginApiServerOptions,
+    executeWorkspaceCommand: ReturnType<typeof createPluginWorkspaceCommandExecutor>,
 ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://rig-plugin.local");
     if (request.method === "GET" && url.pathname === "/projects") {
@@ -143,6 +152,64 @@ async function handleRequest(
     }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (
+        request.method === "POST" &&
+        parts.length >= 3 &&
+        parts[0] === "workspaces" &&
+        parts[1] !== undefined
+    ) {
+        const workspace = options.store
+            .listWorkspaces()
+            .find((candidate) => candidate.id === parts[1]);
+        if (workspace === undefined) {
+            sendJson(response, 404, { error: "Workspace not found." });
+            return;
+        }
+        if (parts.length === 3 && parts[2] === "exec") {
+            const body = await readJson(
+                request,
+                executeWorkspaceCommandBodySchema,
+                "Workspace command settings",
+            );
+            sendJson(
+                response,
+                200,
+                await executeWorkspaceCommand(
+                    workspace.path,
+                    body.command,
+                    body.timeoutMs ?? HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
+                ),
+            );
+            return;
+        }
+        if (parts.length === 4 && parts[2] === "files" && parts[3] === "read") {
+            const body = await readJson(
+                request,
+                readWorkspaceFileBodySchema,
+                "Workspace file read settings",
+            );
+            sendJson(response, 200, await readPluginWorkspaceFile(workspace.path, body.path));
+            return;
+        }
+        if (parts.length === 4 && parts[2] === "files" && parts[3] === "write") {
+            const body = await readJson(
+                request,
+                writeWorkspaceFileBodySchema,
+                "Workspace file write settings",
+                MAX_WORKSPACE_FILE_REQUEST_BYTES,
+            );
+            sendJson(
+                response,
+                200,
+                await writePluginWorkspaceFile(
+                    workspace.path,
+                    body.path,
+                    Buffer.from(body.contentBase64, "base64"),
+                ),
+            );
+            return;
+        }
+    }
     if (request.method === "POST" && url.pathname === "/mcp/servers") {
         const mcp = requireMcp(options);
         const registration = await readJson(
@@ -401,20 +468,6 @@ function parseValue<TSchema_ extends TSchema>(
         const first = Value.Errors(schema, value).First();
         const detail = first === undefined ? "" : ` ${first.path || "value"}: ${first.message}`;
         throw new PluginApiRequestError(`${subject} are invalid.${detail}`);
-    }
-}
-
-class PluginApiRequestError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = "PluginApiRequestError";
-    }
-}
-
-class PluginApiRequestTooLargeError extends PluginApiRequestError {
-    constructor(message: string) {
-        super(message);
-        this.name = "PluginApiRequestTooLargeError";
     }
 }
 

@@ -28,6 +28,16 @@ The plugin process runs with its writable folder as the working directory and re
 `HAPPY_PLUGIN_DIRECTORY`. The socket sits there too, because the sandbox that confines the plugin
 allows writes only inside that folder.
 
+The authenticated socket also resolves workspace IDs to daemon-owned paths for trusted, one-shot
+Bash commands and bounded file reads and writes. Commands always run non-interactively with a
+timeout (30 seconds by default, at most 5 minutes), retain at most 1 MiB from each output stream,
+and report each stream's truncation independently. Workspace files are limited to 1 MiB; paths
+must be relative, and Rig's canonical workspace-boundary check rejects traversal and symlink
+escapes. Exec and file routes use `/workspaces/:workspaceId/...` because these operations need only
+the SDK's globally unique workspace ID; project-scoped create, rename, and archive routes keep
+their project context. Workspace exec runs as a daemon-side child process outside the plugin's own
+process sandbox. This is intentional under Rig's plugin trust model.
+
 `PluginManager` is the daemon lifecycle boundary. Registration and compilation are separate
 functions so a bad plugin can be reported without preventing other plugins or the daemon
 from starting.

@@ -16,8 +16,9 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 
 ## Status
 
-The SDK is an early preview. The current surface covers projects, workspaces, sessions, messages
-to agents, provider usage, MCP tool contributions, and local application contributions.
+The SDK is an early preview. The current surface covers projects, workspace commands and files,
+sessions, messages to agents, provider usage, MCP tool contributions, and local application
+contributions.
 
 ## How authoring and runtime versions work
 
@@ -297,6 +298,34 @@ await happy.workspaces.archive({
 });
 ```
 
+Run a non-interactive Bash command in a workspace, or read and write UTF-8 files relative to its
+root:
+
+```ts
+const result = await happy.workspaces.exec({
+    workspaceId: workspace.id,
+    command: "pnpm test",
+    timeoutMs: 60_000,
+});
+
+await happy.workspaces.files.write({
+    workspaceId: workspace.id,
+    path: "reports/plugin.txt",
+    content: result.stdout,
+});
+
+const report = await happy.workspaces.files.read({
+    workspaceId: workspace.id,
+    path: "reports/plugin.txt",
+});
+```
+
+Commands default to a 30-second timeout, are capped at 5 minutes, and return `exitCode`, `stdout`,
+`stderr`, `timedOut`, `stdoutTruncated`, and `stderrTruncated`. Standard output and standard error
+each have an independent 1 MiB cap, so each truncation flag reports only bytes dropped from that
+stream. File contents are capped at 1 MiB, and traversal or symlink escapes outside the selected
+workspace are rejected.
+
 Signatures:
 
 ```ts
@@ -322,6 +351,23 @@ happy.workspaces.archive(input: {
     workspaceId: string;
     version: number;
 }): Promise<HappyWorkspace>
+
+happy.workspaces.exec(input: {
+    workspaceId: string;
+    command: string;
+    timeoutMs?: number;
+}): Promise<ExecuteWorkspaceCommandResult>
+
+happy.workspaces.files.read(input: {
+    workspaceId: string;
+    path: string;
+}): Promise<{ content: string; bytes: number }>
+
+happy.workspaces.files.write(input: {
+    workspaceId: string;
+    path: string;
+    content: string;
+}): Promise<{ bytesWritten: number }>
 ```
 
 Workspace mutations use optimistic versions. Pass the `version` from the most recently returned

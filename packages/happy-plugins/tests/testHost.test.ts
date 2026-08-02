@@ -1,4 +1,5 @@
-import { access, readFile, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { request as requestHttp } from "node:http";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -159,6 +160,156 @@ describe("Happy plugin test host", () => {
 
         await host.close();
         await expect(access(host.rootDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("mirrors workspace command and file APIs for plugin authoring", async () => {
+        const workspace = await mkdtemp(join(process.cwd(), ".workspace-"));
+        try {
+            const host = await createHappyPluginTestHost(
+                {
+                    workspaces: [
+                        {
+                            id: "workspace-1",
+                            name: "Authoring workspace",
+                            path: workspace,
+                            projectId: "project-1",
+                            status: "ready",
+                            version: 0,
+                        },
+                    ],
+                },
+                { temporaryDirectory: process.cwd() },
+            );
+            hosts.push(host);
+
+            await expect(
+                host.client.workspaces.files.write({
+                    content: "from the fake host\n",
+                    path: "nested/file.txt",
+                    workspaceId: "workspace-1",
+                }),
+            ).resolves.toEqual({ bytesWritten: 19 });
+            await expect(
+                host.client.workspaces.files.read({
+                    path: "nested/file.txt",
+                    workspaceId: "workspace-1",
+                }),
+            ).resolves.toEqual({ bytes: 19, content: "from the fake host\n" });
+            await expect(
+                host.client.workspaces.files.read({
+                    path: "missing.txt",
+                    workspaceId: "workspace-1",
+                }),
+            ).rejects.toMatchObject({
+                message: "The requested workspace file does not exist.",
+                status: 404,
+            });
+            await expect(
+                host.client.workspaces.exec({
+                    command: "printf 'ready'",
+                    workspaceId: "workspace-1",
+                }),
+            ).resolves.toMatchObject({
+                exitCode: 0,
+                stdout: "ready",
+                timedOut: false,
+            });
+        } finally {
+            await rm(workspace, { force: true, recursive: true });
+        }
+    });
+
+    it("mirrors production request-error status codes", async () => {
+        const host = await createHappyPluginTestHost(
+            {
+                workspaces: [
+                    {
+                        id: "workspace-1",
+                        name: "Authoring workspace",
+                        path: process.cwd(),
+                        projectId: "project-1",
+                        status: "ready",
+                        version: 0,
+                    },
+                ],
+            },
+            { temporaryDirectory: process.cwd() },
+        );
+        hosts.push(host);
+
+        await expect(
+            rawHostRequestStatus(host, "/sessions", JSON.stringify({ cwd: 42 })),
+        ).resolves.toBe(400);
+        await expect(
+            rawHostRequestStatus(
+                host,
+                "/projects/project-1/workspaces/workspace-1",
+                JSON.stringify({}),
+                "PATCH",
+            ),
+        ).resolves.toBe(400);
+        await expect(rawHostRequestStatus(host, "/mcp/servers", JSON.stringify({}))).resolves.toBe(
+            400,
+        );
+        await expect(rawHostRequestStatus(host, "/sessions", "{")).resolves.toBe(400);
+        await expect(
+            rawHostRequestStatus(
+                host,
+                "/sessions",
+                JSON.stringify({ cwd: "x".repeat(1024 * 1024) }),
+            ),
+        ).resolves.toBe(413);
+    });
+
+    it("limits each plugin to eight concurrent workspace commands", async () => {
+        const workspace = await mkdtemp(join(process.cwd(), ".workspace-cap-"));
+        const commands: Promise<unknown>[] = [];
+        try {
+            const host = await createHappyPluginTestHost(
+                {
+                    workspaces: [
+                        {
+                            id: "workspace-1",
+                            name: "Authoring workspace",
+                            path: workspace,
+                            projectId: "project-1",
+                            status: "ready",
+                            version: 0,
+                        },
+                    ],
+                },
+                { temporaryDirectory: process.cwd() },
+            );
+            hosts.push(host);
+
+            for (let index = 0; index < 8; index += 1) {
+                commands.push(
+                    host.client.workspaces.exec({
+                        command: `touch started-${String(index)}; while [ ! -e release ]; do sleep 0.01; done`,
+                        workspaceId: "workspace-1",
+                    }),
+                );
+            }
+            await expect
+                .poll(async () =>
+                    (await readdir(workspace)).filter((name) => name.startsWith("started-")),
+                )
+                .toHaveLength(8);
+
+            await expect(
+                host.client.workspaces.exec({
+                    command: "printf 'too many'",
+                    workspaceId: "workspace-1",
+                }),
+            ).rejects.toMatchObject({
+                message: "A plugin can run at most 8 workspace commands at once.",
+                status: 400,
+            });
+        } finally {
+            await writeFile(join(workspace, "release"), "");
+            await Promise.allSettled(commands);
+            await rm(workspace, { force: true, recursive: true });
+        }
     });
 
     it("mirrors provider usage plus app tool and storage access", async () => {
@@ -328,3 +479,31 @@ describe("Happy plugin test host", () => {
         },
     );
 });
+
+function rawHostRequestStatus(
+    host: HappyPluginTestHost,
+    path: string,
+    body: string,
+    method = "POST",
+): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+        const request = requestHttp(
+            {
+                headers: {
+                    authorization: `Bearer ${host.environment.HAPPY_PLUGIN_TOKEN}`,
+                    "content-length": Buffer.byteLength(body),
+                    "content-type": "application/json",
+                },
+                method,
+                path,
+                socketPath: host.environment.HAPPY_PLUGIN_SOCKET_PATH,
+            },
+            (response) => {
+                response.resume();
+                response.once("end", () => resolve(response.statusCode ?? 500));
+            },
+        );
+        request.once("error", reject);
+        request.end(body);
+    });
+}
