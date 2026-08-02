@@ -40,5 +40,13 @@ Vary the metaphor and dominant hue so plugins remain distinguishable.
 6. Verify the file has the PNG signature and square dimensions. Do not substitute a renamed JPEG,
    SVG, placeholder byte string, or remote URL.
 
+Prefer the available image-generation tool and use the PNG it returns directly.
+Only when image generation is unavailable, create the icon another way with sandbox-compatible
+image tooling.
+Programmatic drawing or an SVG intermediary is acceptable as a fallback, but the finished asset
+must still be a polished, original PNG rather than a placeholder. Do not use `qlmanage` inside Rig's
+restricted shell: it tries to initialize a nested macOS sandbox, which macOS refuses. Choose another
+converter or rendering method and keep going until the required PNG exists.
+
 Do not edit or install anything in the user's global skill directories. This skill is bundled with
 Rig and the generated PNG belongs only to the plugin source folder.

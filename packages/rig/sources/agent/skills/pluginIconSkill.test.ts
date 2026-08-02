@@ -34,6 +34,11 @@ describe("bundled local plugin icon skill", () => {
         expect(body).toContain("Jobs-era iPhone icons");
         expect(body).toContain("original");
         expect(body).toContain("PNG signature");
+        expect(body).toContain("Prefer the available image-generation tool");
+        expect(body).toContain("Only when image generation is unavailable");
+        expect(body).toContain("create the icon another way");
+        expect(body).toContain("Do not use `qlmanage`");
+        expect(body).toContain("nested macOS sandbox");
         await expect(
             readFile(join(home, ".agents", "skills", "local-plugin-icon", "SKILL.md")),
         ).rejects.toMatchObject({ code: "ENOENT" });

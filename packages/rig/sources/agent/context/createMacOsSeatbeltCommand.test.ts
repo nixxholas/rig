@@ -100,6 +100,7 @@ describe("createMacOsSeatbeltCommand", () => {
         const socketRoots = definedPaths(result.args, "PROJECT_SOCKET_ROOT");
         expect(socketRoots).toEqual([await realpath(cwd)]);
         expect(socketRoots).not.toContain(await realpath(tmpdir()));
+        expect(result.args[1]).toContain("(allow system-socket (socket-domain AF_UNIX))");
         expect(result.args[1]).toContain(
             '(allow network-bind (local unix-socket (subpath (param "PROJECT_SOCKET_ROOT_0"))))',
         );
@@ -178,6 +179,7 @@ describe("createMacOsSeatbeltCommand", () => {
             shell: "/bin/sh",
         });
         expect(definedPaths(readOnly.args, "PROJECT_SOCKET_ROOT")).toEqual([]);
+        expect(readOnly.args[1]).not.toContain("(allow system-socket (socket-domain AF_UNIX))");
         expect(readOnly.args[1]).not.toContain("(allow network-bind (local unix-socket");
 
         const writable = await createMacOsSeatbeltCommand({

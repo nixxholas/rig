@@ -111,6 +111,9 @@ export async function createMacOsSeatbeltCommand(options: {
         ...(options.networkAllowedLoopbackPorts ?? []).map(
             (port) => `(allow network-outbound (remote ip "localhost:${String(port)}"))`,
         ),
+        ...(projectSocketRules.length === 0
+            ? []
+            : ["(allow system-socket (socket-domain AF_UNIX))"]),
         ...projectSocketRules,
         fileWritePolicy,
         ...protectedRules,
