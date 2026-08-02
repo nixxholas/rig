@@ -235,6 +235,7 @@ function createContext(plugins: Partial<PluginContext> = {}): AgentContext {
             install: async () => {
                 throw new Error("unexpected install");
             },
+            loadSkills: async () => [],
             list: async () => ({ failures: [], plugins: [] }),
             readLog: async () => {
                 throw new Error("unexpected log read");

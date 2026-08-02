@@ -49,6 +49,9 @@ export async function startPlugin(
     plugin: RegisteredPlugin,
     options: StartPluginOptions,
 ): Promise<RunningPlugin> {
+    if (plugin.entryPath === undefined) {
+        throw new Error("A plugin without a main entry point has no process to start.");
+    }
     const runtime = {
         ...plugin,
         apps: await snapshotPluginApps(plugin),

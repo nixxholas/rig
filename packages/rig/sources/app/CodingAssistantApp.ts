@@ -23,9 +23,10 @@ import {
     type ToolResultBlock,
     type UserMessage,
     formatSkillInvocation,
-    loadSkills,
 } from "../agent/index.js";
 import type { BashSessionActivity, BashSessionSnapshot } from "../agent/context/BashContext.js";
+import { loadAgentSkillCatalog } from "../agent/skills/loadAgentSkillCatalog.js";
+import { MAXIMUM_SKILL_FILE_BYTES } from "../agent/skills/loadSkillFromFile.js";
 import { parseSkillFrontmatter } from "../agent/skills/parseSkillFrontmatter.js";
 import type { FileDiff } from "../agent/ToolResultPresentation.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -1915,7 +1916,15 @@ export class CodingAssistantApp implements Component, Focusable {
 
         let content: string;
         try {
-            content = await this.#agent.context.fs.readFile(skill.filePath);
+            content =
+                skill.source.type === "plugin"
+                    ? Buffer.from(
+                          await this.#agent.context.fs.readFileBuffer(skill.filePath, {
+                              maxBytes: MAXIMUM_SKILL_FILE_BYTES,
+                              noFollow: true,
+                          }),
+                      ).toString("utf8")
+                    : await this.#agent.context.fs.readFile(skill.filePath);
         } catch (error) {
             this.#appendEntry({
                 role: "error",
@@ -6334,7 +6343,7 @@ export class CodingAssistantApp implements Component, Focusable {
             return this.#skillCommandsRefresh ?? Promise.resolve();
         }
 
-        const refresh = loadSkills(this.#agent.context.fs)
+        const refresh = loadAgentSkillCatalog(this.#agent.context)
             .then((skills) => {
                 this.#skillsByName = new Map(skills.map((skill) => [skill.name, skill]));
                 this.#skillCommands = skills.map((skill) => ({

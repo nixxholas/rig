@@ -423,6 +423,7 @@ async function runOwnedLocalProtocolServer(
             install: (request) => requirePluginManager(pluginManager).install(request),
             installFromGitHub: (...parameters) =>
                 requirePluginManager(pluginManager).installFromGitHub(...parameters),
+            loadSkills: (fs) => requirePluginManager(pluginManager).loadSkills(fs),
             list: () => requirePluginManager(pluginManager).list(),
             readAppResource: (...parameters) =>
                 requirePluginManager(pluginManager).readAppResource(...parameters),

@@ -692,10 +692,14 @@ export const happyPluginManifestSchema = Type.Object(
         ),
         description: Type.String({ minLength: 1 }),
         icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
-        main: Type.String({
-            pattern: "^(?!.*\\.[dD]\\.[cCmM]?[tT][sS]$).+\\.(?:[cCmM]?[jJ][sS]|[cCmM]?[tT][sS])$",
-        }),
+        main: Type.Optional(
+            Type.String({
+                pattern:
+                    "^(?!.*\\.[dD]\\.[cCmM]?[tT][sS]$).+\\.(?:[cCmM]?[jJ][sS]|[cCmM]?[tT][sS])$",
+            }),
+        ),
         name: Type.String({ minLength: 1 }),
+        skills: Type.Optional(Type.String({ minLength: 1 })),
         version: Type.Optional(happyPluginVersionSchema),
     },
     exact,

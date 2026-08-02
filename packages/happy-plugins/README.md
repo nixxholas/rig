@@ -61,7 +61,8 @@ need a runtime SDK dependency and cannot accidentally import a different SDK ver
 not use `NODE_PATH`, which does not resolve ESM imports.
 
 Happy itself does not require a plugin to have a `package.json` or its own SDK installation. A
-TypeScript entry file, manifest, and PNG icon are enough.
+TypeScript entry file, manifest, and PNG icon are enough for a process plugin. A plugin may instead
+contain only a manifest, PNG icon, and skills.
 
 Happy provides only `happy-plugins` at runtime. Bundle every other third-party dependency into the
 plugin's own files; Happy does not copy `node_modules` when it installs a plugin.
@@ -106,13 +107,15 @@ The manifest is intentionally small and exact:
 }
 ```
 
-`name`, `description`, `main`, and `icon` are required. `version` and `apps` are optional. Extra
-fields are rejected.
+`name`, `description`, and `icon` are required. `main`, `skills`, `version`, and `apps` are
+optional, but at least a main entry point or a skills directory must be present. Extra fields are
+rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
 - `version`: a Semantic Versioning string. An omitted version is treated as `0.0.0`.
 - `main`: a relative path to a runnable JavaScript or TypeScript file inside the plugin folder.
+- `skills`: a relative path to a skills directory. When omitted, Happy uses `skills/` if present.
 - `icon`: a relative path to a PNG file inside the plugin folder.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
   sidebar metadata, and optional image icon.

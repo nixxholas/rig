@@ -11,6 +11,8 @@ import {
 } from "./types.js";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const CONVENTIONAL_SKILLS_DIRECTORY = "skills";
+
 export async function readPluginManifest(directory: string): Promise<RegisteredPlugin> {
     const manifestPath = resolve(directory, PLUGIN_MANIFEST_FILE_NAME);
     let parsed: unknown;
@@ -38,21 +40,32 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
         version: normalized.version!,
     };
 
-    const entryPath = resolveOwnedPath(directory, manifest.main, "main entry point");
+    const entryPath =
+        manifest.main === undefined
+            ? undefined
+            : resolveOwnedPath(directory, manifest.main, "main entry point");
     const iconPath = resolveOwnedPath(directory, manifest.icon, "icon");
+    const skillsPath = await resolveSkillsPath(directory, manifest.skills);
+    if (entryPath === undefined && skillsPath === undefined) {
+        throw new Error("The plugin must declare a main entry point or provide a skills directory.");
+    }
     const [entryInfo, iconInfo, iconHeader] = await Promise.all([
-        lstat(entryPath).catch((error: unknown) => {
-            if (Value.Check(fileSystemErrorSchema, error) && error.code === "ENOENT") {
-                throw new Error(
-                    `The plugin main entry point ${JSON.stringify(manifest.main)} does not exist.`,
-                );
-            }
-            throw error;
-        }),
+        entryPath === undefined
+            ? undefined
+            : lstat(entryPath).catch((error: unknown) => {
+                  if (Value.Check(fileSystemErrorSchema, error) && error.code === "ENOENT") {
+                      throw new Error(
+                          `The plugin main entry point ${JSON.stringify(manifest.main)} does not exist.`,
+                      );
+                  }
+                  throw error;
+              }),
         lstat(iconPath),
         readFile(iconPath).then((bytes) => bytes.subarray(0, PNG_SIGNATURE.length)),
     ]);
-    if (!entryInfo.isFile()) throw new Error("The plugin main entry point must be a file.");
+    if (entryInfo !== undefined && !entryInfo.isFile()) {
+        throw new Error("The plugin main entry point must be a file.");
+    }
     if (!iconInfo.isFile()) throw new Error("The plugin icon must be a file.");
     if (!iconHeader.equals(PNG_SIGNATURE)) {
         throw new Error("The plugin icon is not a valid PNG image.");
@@ -60,12 +73,39 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
 
     return {
         directory: resolve(directory),
-        entryPath,
+        ...(entryPath === undefined ? {} : { entryPath }),
         folderName: directory.split(/[\\/]/u).at(-1) ?? directory,
         iconPath,
         manifest,
         manifestPath,
+        ...(skillsPath === undefined ? {} : { skillsPath }),
     };
+}
+
+async function resolveSkillsPath(
+    directory: string,
+    declaredPath: string | undefined,
+): Promise<string | undefined> {
+    const path = resolveOwnedPath(
+        directory,
+        declaredPath ?? CONVENTIONAL_SKILLS_DIRECTORY,
+        "skills directory",
+    );
+    let info;
+    try {
+        info = await lstat(path);
+    } catch (error) {
+        if (Value.Check(fileSystemErrorSchema, error) && error.code === "ENOENT") {
+            if (declaredPath === undefined) return undefined;
+            throw new Error("The plugin skills directory does not exist.");
+        }
+        throw error;
+    }
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+        if (declaredPath === undefined) return undefined;
+        throw new Error("The plugin skills path must be an ordinary directory.");
+    }
+    return path;
 }
 
 function resolveOwnedPath(directory: string, value: string, field: string): string {

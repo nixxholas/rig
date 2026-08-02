@@ -24,11 +24,12 @@ export const fileSystemErrorSchema = Type.Object({
 
 export interface RegisteredPlugin {
     directory: string;
-    entryPath: string;
+    entryPath?: string;
     folderName: string;
     iconPath: string;
     manifest: RegisteredPluginManifest;
     manifestPath: string;
+    skillsPath?: string;
 }
 
 export interface PluginAppResourceSnapshot {

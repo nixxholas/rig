@@ -8,6 +8,8 @@ import type { EventId, PluginLogSnapshot, PluginSummary } from "../protocol/inde
 import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import type { Skill } from "../agent/skills/Skill.js";
+import { loadSkills } from "../agent/skills/loadSkills.js";
 import { discoverPlugins } from "./discoverPlugins.js";
 import { discoverGitHubPlugins } from "./discoverGitHubPlugins.js";
 import type { GitHubFetch } from "./fetchBoundedGitHubResource.js";
@@ -22,7 +24,7 @@ import { installGitHubPlugin } from "./installGitHubPlugin.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
-import type { RegisteredPlugin } from "./types.js";
+import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import { PluginAppRegistry, type PluginAppResource } from "./PluginAppRegistry.js";
 import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
@@ -83,6 +85,7 @@ export class PluginManager {
     readonly #environment: NodeJS.ProcessEnv;
     readonly #githubFetch: GitHubFetch | undefined;
     readonly #generatedMedia: GeneratedMediaStore | undefined;
+    #discovery: { promise: Promise<PluginDiscovery>; version: EventId } | undefined;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
@@ -272,8 +275,69 @@ export class PluginManager {
         }
     }
 
+    /** Loads the normal skill catalog with contributions from active plugins. */
+    async loadSkills(fs: FileSystemContext): Promise<readonly Skill[]> {
+        let discovery: PluginDiscovery;
+        try {
+            discovery = await this.#discoverCurrentPlugins();
+        } catch (error) {
+            this.#daemonLog.record(
+                "warning",
+                "plugin_skills_unreadable",
+                "Rig could not read plugin skills; continuing with file skills.",
+                { error: errorToMessage(error) },
+            );
+            return loadSkills(fs);
+        }
+        return loadSkills(fs, {
+            additionalRoots: discovery.plugins.flatMap((plugin) =>
+                this.#states.get(plugin.folderName)?.status === "running" &&
+                plugin.skillsPath !== undefined
+                    ? [
+                          {
+                              path: plugin.skillsPath,
+                              source: {
+                                  folder: plugin.folderName,
+                                  plugin: plugin.manifest.name,
+                                  type: "plugin" as const,
+                              },
+                          },
+                      ]
+                    : [],
+            ),
+            onInvalidSkill: (filePath, root) => {
+                if (root.source.type !== "plugin") return;
+                this.#daemonLog.record(
+                    "warning",
+                    "plugin_skill_skipped",
+                    `Rig skipped an invalid skill from the ${root.source.plugin} plugin.`,
+                    {
+                        plugin: root.source.plugin,
+                        pluginFolder: root.source.folder,
+                        skillPath: filePath,
+                    },
+                );
+            },
+            onSkillCollision: ({ kept, skipped }) => {
+                if (skipped.source.type !== "plugin") return;
+                this.#daemonLog.record(
+                    "warning",
+                    "plugin_skill_name_collision",
+                    `Rig skipped the ${skipped.source.plugin} plugin's ${skipped.name} skill because another skill has the same name.`,
+                    {
+                        keptSource:
+                            kept.source.type === "file" ? "file" : `plugin: ${kept.source.plugin}`,
+                        plugin: skipped.source.plugin,
+                        pluginFolder: skipped.source.folder,
+                        skill: skipped.name,
+                    },
+                );
+            },
+        });
+    }
+
     async #readCatalog(version: EventId): Promise<PluginCatalog> {
-        const discovery = await discoverPlugins(this.directory);
+        const discovery = await this.#readDiscovery(version);
         return {
             failures: discovery.failures.map((failure) => ({
                 error: failure.error,
@@ -300,6 +364,31 @@ export class PluginManager {
             }),
             version,
         };
+    }
+
+    async #discoverCurrentPlugins(): Promise<PluginDiscovery> {
+        for (;;) {
+            const version = this.#catalogVersion;
+            const discovery = await this.#readDiscovery(version);
+            if (version === this.#catalogVersion) return discovery;
+        }
+    }
+
+    async #readDiscovery(version: EventId): Promise<PluginDiscovery> {
+        const cached =
+            this.#discovery?.version === version
+                ? this.#discovery
+                : {
+                      promise: discoverPlugins(this.directory),
+                      version,
+                  };
+        this.#discovery = cached;
+        try {
+            return await cached.promise;
+        } catch (error) {
+            if (this.#discovery === cached) this.#discovery = undefined;
+            throw error;
+        }
     }
 
     /** Reads at most the current plugin log's fixed retention bound. */
@@ -388,6 +477,17 @@ export class PluginManager {
         try {
             const plugin = await readPluginManifest(directory);
             name = plugin.manifest.name;
+            if (plugin.entryPath === undefined) {
+                this.#states.set(folderName, {
+                    status: "running",
+                    updatedAt: this.#now(),
+                });
+                this.#daemonLog.record("info", "plugin_started", `The ${name} plugin started.`, {
+                    plugin: name,
+                    pluginDirectory: directory,
+                });
+                return;
+            }
             const running = await this.#start(plugin, {
                 appRegistry: this.#appRegistry,
                 ...(this.#defaultDocker === undefined
@@ -476,7 +576,15 @@ export class PluginManager {
 
     async #stopRunning(folderName: string, publishStopped = false): Promise<void> {
         const running = this.#running.get(folderName);
-        if (running === undefined) return;
+        if (running === undefined) {
+            if (this.#states.get(folderName)?.status !== "running") return;
+            this.#states.set(folderName, {
+                status: "stopped",
+                updatedAt: this.#now(),
+            });
+            if (publishStopped) await this.#publishChanged();
+            return;
+        }
         this.#running.delete(folderName);
         await running.close();
         this.#states.set(folderName, {

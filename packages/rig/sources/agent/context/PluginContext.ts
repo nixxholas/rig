@@ -12,6 +12,7 @@ import type {
     GitHubPluginSource,
 } from "../../plugins/githubPluginCatalog.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
+import type { Skill } from "../skills/Skill.js";
 
 /**
  * Managing the plugins installed on this machine.
@@ -33,6 +34,7 @@ export interface PluginContext {
         source: GitHubPluginInstallSource,
         options: { fs: FileSystemContext; signal?: AbortSignal },
     ): Promise<InstalledPluginSummary>;
+    loadSkills(fs: FileSystemContext): Promise<readonly Skill[]>;
     list(): Promise<{
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];

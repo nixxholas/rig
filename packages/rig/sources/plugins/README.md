@@ -12,7 +12,10 @@ home, out of the way. Everything the plugin writes while it runs goes to a folde
   |
   +-- happy.plugin.json
   +-- icon.png
-  +-- index.ts
+  +-- index.ts                            optional for a skills-only plugin
+  +-- skills/                             conventional skill root
+  |    +-- release-check/
+  |         +-- SKILL.md
   +-- plugin.log                          bounded current-run output
 
 ~/Happy/Plugins/<folder>                  the plugin's writable folder
@@ -21,12 +24,13 @@ home, out of the way. Everything the plugin writes while it runs goes to a folde
   +-- whatever the plugin keeps
 ```
 
-The manifest's required `main` field names a JavaScript or TypeScript file inside the installed
-folder. Rig launches it with `process.execPath`, the same Node executable that is running Rig. The
-supported Node runtime strips erasable TypeScript syntax natively, so `.ts`, `.mts`, and `.cts`
-entry points need no compiler or loader flag. TypeScript constructs that require JavaScript
-generation rather than type stripping are not supported. JavaScript entry points run according to
-normal Node module rules; use `.mjs` or a local `"type": "module"` package declaration for ESM.
+The manifest's `main` field names a JavaScript or TypeScript file inside the installed folder. It is
+required unless the plugin provides a skills directory. Rig launches it with `process.execPath`,
+the same Node executable that is running Rig. The supported Node runtime strips erasable TypeScript
+syntax natively, so `.ts`, `.mts`, and `.cts` entry points need no compiler or loader flag.
+TypeScript constructs that require JavaScript generation rather than type stripping are not
+supported. JavaScript entry points run according to normal Node module rules; use `.mjs` or a local
+`"type": "module"` package declaration for ESM.
 
 Rig ships the built `happy-plugins` SDK under its own `plugin-sdk` distribution folder. Startup
 passes one `--import` module to Node. That module registers a synchronous ESM resolution hook which
@@ -79,6 +83,13 @@ existing folder is classified as an upgrade, downgrade, or reinstall by comparin
 install result and its final `plugins_changed` event carry that classification. Reading the old
 version is best-effort so a damaged installation can still be repaired; when it cannot be read,
 the replacement is classified as a reinstall.
+
+A manifest may set `"skills": "some/folder/"` relative to the plugin folder. When the field is
+omitted, Rig uses `skills/` if that directory exists. Each subfolder containing a `SKILL.md` is
+loaded through the general filesystem skill catalog and identifies the plugin that supplied it.
+Only plugins in the manager's `running` state contribute skills; stopped and failed plugins do not.
+A plugin with an icon and skills may omit `main` entirely. Rig activates that static contribution
+without spawning a plugin process.
 
 `PluginMcpRegistry` is a daemon-wide `McpToolProvider`. Each plugin process generation owns a
 connection to it through the already-authenticated plugin socket. An SDK registration becomes live

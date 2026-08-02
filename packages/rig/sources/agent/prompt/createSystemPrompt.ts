@@ -9,6 +9,7 @@ import {
     RIG_AGENT_TOOL_INSTRUCTIONS,
 } from "./instructions.js";
 import type { AgentContext } from "../context/AgentContext.js";
+import { loadAgentSkillCatalog } from "../skills/loadAgentSkillCatalog.js";
 import { loadSkillInstructions } from "../skills/loadSkillInstructions.js";
 import type { AnyDefinedTool, Message } from "../types.js";
 import type { Model, PreambleMessage, Provider } from "@slopus/rig-execution";
@@ -47,9 +48,11 @@ export async function createSystemPrompt(
     // gains or loses an AGENTS.md file mid-session.
     parts.push(AGENTS_MD_SPEC);
 
+    const loadedSkills = await loadAgentSkillCatalog(options.context);
     const skillInstructions = await loadSkillInstructions(
         options.context.fs,
         options.durableSkills ?? [],
+        loadedSkills,
     );
     if (skillInstructions !== undefined) {
         parts.push(skillInstructions);

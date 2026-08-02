@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { AGENTS_MD_PROJECT_DOC_MAX_BYTES } from "./agentsMdProjectDocMaxBytes.js";
 import { AGENTS_MD_REMOVAL_NOTICE, AGENTS_MD_REPLACEMENT_NOTICE } from "./agentsMdNotices.js";
@@ -17,6 +17,7 @@ import type { Message, UserMessage } from "./types.js";
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
+    vi.restoreAllMocks();
     await Promise.all(
         temporaryDirectories.splice(0).map((path) => rm(path, { force: true, recursive: true })),
     );
@@ -88,6 +89,32 @@ describe("reconcileAgentsMdMessages", () => {
 
         expect(prompt).not.toContain("Always run the linter.");
         expect(prompt).not.toContain("# AGENTS.md instructions");
+    });
+
+    it("keeps building the system prompt when the plugin skill catalog fails", async () => {
+        const workspace = await createWorkspace();
+        const fs = createFileSystem(workspace);
+        const log = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        const prompt = await createSystemPrompt({
+            context: {
+                fs,
+                plugins: {
+                    loadSkills: async () => {
+                        throw new Error("plugins directory unavailable");
+                    },
+                },
+            } as never,
+            instructions: "You are rig.",
+            messages: [],
+            model: { id: "test-model" } as never,
+            provider: { id: "test", type: "codex" } as never,
+        });
+
+        expect(prompt).toContain("You are rig.");
+        expect(log).toHaveBeenCalledWith(
+            "Rig could not load plugin skills; continuing without them: plugins directory unavailable",
+        );
     });
 
     it("tells every provider how to read the delivered project instructions", async () => {

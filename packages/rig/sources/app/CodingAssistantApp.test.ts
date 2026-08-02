@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { Agent } from "../agent/Agent.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import type { AgentLoopEvent } from "../agent/loop.js";
+import type { Skill } from "../agent/skills/Skill.js";
+import { MAXIMUM_SKILL_FILE_BYTES } from "../agent/skills/loadSkillFromFile.js";
 import type { ProtocolHttpClient } from "../client/ProtocolHttpClient.js";
 import { RemoteAgent } from "../client/RemoteAgent.js";
 import { createJustBashToolHarness } from "../tools/testing/createJustBashToolHarness.js";
@@ -3255,6 +3257,9 @@ describe("CodingAssistantApp", () => {
             async installFromGitHub() {
                 throw new Error("Unused in this test.");
             },
+            async loadSkills() {
+                return [];
+            },
             async list() {
                 return {
                     failures: [],
@@ -3300,11 +3305,13 @@ describe("CodingAssistantApp", () => {
         );
 
         submit(app, "/plugins Complete plugin");
-        await vi.waitFor(() =>
-            expect(stripAnsi(app.render(100).join("\n"))).toContain("COMPLETE_LOG_OUTPUT"),
-        );
-        const complete = stripAnsi(app.render(100).join("\n"));
-        const completeEntry = complete.slice(complete.lastIndexOf("Complete plugin · stopped"));
+        let complete = "";
+        await vi.waitFor(() => {
+            const rendered = stripAnsi(app.render(100).join("\n"));
+            expect(rendered).toContain("COMPLETE_LOG_OUTPUT");
+            complete = rendered;
+        });
+        const completeEntry = complete.slice(complete.lastIndexOf("Complete plugin · Stopped"));
         expect(completeEntry).toContain("COMPLETE_LOG_OUTPUT");
         expect(completeEntry).not.toContain("[Earlier plugin output omitted.]");
         expect(complete.match(/\[Earlier plugin output omitted\.\]/gu)).toHaveLength(1);
@@ -4035,6 +4042,62 @@ describe("CodingAssistantApp", () => {
         expect(rendered).toContain("Review changes carefully.");
     });
 
+    it("shows plugin skills from the shared catalog as slash command autocomplete items", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamText("unused");
+            },
+        });
+        const filePath = "/plugins/release/skills/release-check/SKILL.md";
+        const harness = createJustBashToolHarness({
+            files: {
+                [filePath]:
+                    "---\nname: release-check\ndescription: Check releases.\n---\n\n# Release\n",
+            },
+        });
+        const pluginSkill: Skill = {
+            baseDir: "/plugins/release/skills/release-check",
+            description: "Check releases.",
+            filePath,
+            name: "release-check",
+            source: { folder: "release", plugin: "Release", type: "plugin" },
+        };
+        const loadSkills = vi.fn(async () => [pluginSkill]);
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: {
+                ...harness.context,
+                plugins: createPluginContext({ loadSkills }),
+            },
+            printToConsole: false,
+        });
+        const app = new CodingAssistantApp({
+            agent,
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            tui: fakeTui(),
+        });
+
+        app.focused = true;
+        await delay(30);
+        app.handleInput("/skill:");
+        await delay(30);
+
+        const rendered = stripAnsi(app.render(100).join("\n"));
+        expect(rendered).toContain("/skill:release-check");
+        expect(rendered).toContain("Check releases.");
+        expect(loadSkills).toHaveBeenCalledWith(harness.context.fs);
+    });
+
     it("limits visible skill slash command autocomplete rows", async () => {
         const model = defineModel({
             id: "openai/gpt-test",
@@ -4359,6 +4422,69 @@ describe("CodingAssistantApp", () => {
         expect(rendered.match(/› \/skill:review inspect this diff/gu)).toHaveLength(1);
         expect(rendered).toContain("• skill used");
         expect(rendered).not.toContain("Use the word cobalt.");
+    });
+
+    it("uses a bounded no-follow read when invoking a plugin skill", async () => {
+        const model = defineModel({
+            id: "openai/gpt-test",
+            name: "GPT Test",
+            thinkingLevels: ["off"],
+            defaultThinkingLevel: "off",
+        });
+        const provider = defineProvider({
+            id: "codex",
+            models: [model],
+            stream() {
+                return streamText("skill used");
+            },
+        });
+        const filePath = "/plugins/release/skills/release-check/SKILL.md";
+        const harness = createJustBashToolHarness({
+            files: {
+                [filePath]:
+                    "---\nname: release-check\ndescription: Check releases.\n---\n\n# Release\n",
+            },
+        });
+        const readFile = vi.fn(harness.context.fs.readFile);
+        const readFileBuffer = vi.fn(harness.context.fs.readFileBuffer);
+        const pluginSkill: Skill = {
+            baseDir: "/plugins/release/skills/release-check",
+            description: "Check releases.",
+            filePath,
+            name: "release-check",
+            source: { folder: "release", plugin: "Release", type: "plugin" },
+        };
+        const agent = new Agent({
+            provider,
+            modelId: model.id,
+            context: {
+                ...harness.context,
+                fs: {
+                    ...harness.context.fs,
+                    readFile,
+                    readFileBuffer,
+                },
+                plugins: createPluginContext({
+                    loadSkills: async () => [pluginSkill],
+                }),
+            },
+            printToConsole: false,
+        });
+        const app = new CodingAssistantApp({
+            agent,
+            cwd: harness.context.fs.cwd,
+            processManager: new NativeProcessManager(),
+            tui: fakeTui(),
+        });
+
+        submit(app, "/skill:release-check");
+        await app.waitForIdle();
+
+        expect(readFileBuffer).toHaveBeenCalledWith(filePath, {
+            maxBytes: MAXIMUM_SKILL_FILE_BYTES,
+            noFollow: true,
+        });
+        expect(readFile).not.toHaveBeenCalledWith(filePath);
     });
 
     it("restores transcript entries from session events", () => {
@@ -10083,6 +10209,51 @@ function zeroUsage(): Usage {
             cacheWrite: 0,
             total: 0,
         },
+    };
+}
+
+function createPluginContext(overrides: Partial<PluginContext> = {}): PluginContext {
+    return {
+        async callAppTool() {
+            throw new Error("Unused in this test.");
+        },
+        async discoverRepository() {
+            throw new Error("Unused in this test.");
+        },
+        async install() {
+            throw new Error("Unused in this test.");
+        },
+        async installFromGitHub() {
+            throw new Error("Unused in this test.");
+        },
+        async list() {
+            return {
+                failures: [],
+                plugins: [],
+                version: "01900000-0000-7000-8000-000000000001",
+            };
+        },
+        async loadSkills() {
+            return [];
+        },
+        readAppResource() {
+            throw new Error("Unused in this test.");
+        },
+        async readLog() {
+            throw new Error("Unused in this test.");
+        },
+        async storageDelete() {},
+        async storageGet() {
+            return undefined;
+        },
+        async storageList() {
+            return [];
+        },
+        async storageSet() {},
+        async uninstall() {
+            throw new Error("Unused in this test.");
+        },
+        ...overrides,
     };
 }
 
