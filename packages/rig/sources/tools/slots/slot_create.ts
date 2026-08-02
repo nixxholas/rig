@@ -7,6 +7,7 @@ import {
     slotNameSchema,
     slotScopeSchema,
 } from "../../protocol/SlotProtocol.js";
+import { describeSlotCreatePermissionAction } from "./describeSlotPermissionAction.js";
 import { requireSlots } from "./requireSlots.js";
 
 export const slotCreateTool = defineTool({
@@ -32,5 +33,6 @@ export const slotCreateTool = defineTool({
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Added a ${result.content.type} entry to the ${result.slot} slot.`,
     shouldReviewInAutoMode: () => true,
+    describeAutoPermissionAction: describeSlotCreatePermissionAction,
     locks: ["slots"],
 });

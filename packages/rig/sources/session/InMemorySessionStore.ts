@@ -427,6 +427,10 @@ export class InMemorySessionStore implements SessionStore {
         return this.#sessions.get(sessionId);
     }
 
+    attachment(sessionId: string, attachmentId: string) {
+        return this.get(sessionId)?.attachment(attachmentId);
+    }
+
     findByAgentId(agentId: string): InMemorySession | undefined {
         const matches = [...this.#sessions.values()].filter(
             (session) => session.agentIdentity().agentId === agentId,

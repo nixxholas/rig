@@ -29,13 +29,29 @@ export const attachArgumentsSchema = Type.Union(
         ),
         Type.Object(
             {
+                operation: Type.Literal("add"),
+                path: Type.Optional(Type.String({ minLength: 1 })),
+                query: Type.Optional(
+                    Type.Record(Type.String({ minLength: 1 }), Type.String(), {
+                        description: "Query values forwarded when the webapp opens.",
+                    }),
+                ),
+                webapp: Type.String({ minLength: 1 }),
+            },
+            { additionalProperties: false },
+        ),
+        Type.Object(
+            {
                 id: Type.String({ minLength: 1 }),
                 operation: Type.Literal("remove"),
             },
             { additionalProperties: false },
         ),
     ],
-    { description: "Add a local file or HTTP(S) URL attachment, or remove a pending attachment." },
+    {
+        description:
+            "Add a local file, HTTP(S) URL, or imported webapp attachment, or remove a pending attachment.",
+    },
 );
 
 export type AttachArguments = Static<typeof attachArgumentsSchema>;

@@ -1,14 +1,17 @@
+import { extname } from "node:path";
+
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
-import { shouldReviewPathInAutoMode } from "../../permissions/shouldReviewPathInAutoMode.js";
 import { AttachmentContext } from "./AttachmentContext.js";
+import { assertShareableLocalPath } from "./assertShareableLocalPath.js";
 import {
     attachArgumentsSchema,
     attachResultSchema,
     type AttachArguments,
 } from "./attachmentSchemas.js";
 import {
+    MAX_ATTACHMENT_FILE_BYTES,
     prepareAttachment,
     resolveAttachmentSource,
     type AttachmentPreparationDependencies,
@@ -24,28 +27,22 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
     const prepare = dependencies.prepare ?? prepareAttachment;
     return defineTool({
         name: "attach",
-        label: "Attach file or link",
+        label: "Attach file, webapp, or link",
         description:
-            "Prepare a local file or HTTP(S) link for the application to show with your final answer. Adding returns an attachment id; use operation remove with that id if you decide not to show it. Attachments remain pending until this turn finishes normally, and are not visible if the turn is aborted or fails.",
+            "Prepare a local file, imported webapp, or HTTP(S) link for the application to show with your final answer. Local files must be inside the active workspace or Rig's generated-media directory; paths elsewhere are rejected in every permission mode. In managed Docker sessions, generated media is mounted read-only at /happy/generated and only Rig tools write its host-side files. Adding returns an attachment id; use operation remove with that id if you decide not to show it. Attachments remain pending until this turn finishes normally, and are not visible if the turn is aborted or fails.",
         arguments: attachArgumentsSchema,
         returnType: attachResultSchema,
         steerable: true,
         interruptionMessage: "Attachment preparation was interrupted by new input.",
         requiresAutoOrFullAccess: true,
         describeAutoPermissionAction: describeAttachAction,
-        shouldReviewInAutoMode: async (args, context) => {
+        shouldReviewInAutoMode: async (args) => {
             if (args.operation === "remove") return false;
-            return (
-                "url" in args ||
-                (await shouldReviewPathInAutoMode(args.path, context, { write: false }))
-            );
+            return "url" in args;
         },
-        shouldRunInFullAccessInAutoMode: async (args, context) => {
+        shouldRunInFullAccessInAutoMode: async (args) => {
             if (args.operation === "remove") return false;
-            return (
-                "url" in args ||
-                (await shouldReviewPathInAutoMode(args.path, context, { write: false }))
-            );
+            return "url" in args;
         },
         execute: async (args, context, execution) => {
             const attachments = requireAttachmentContext(context);
@@ -56,13 +53,35 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
                     removed: attachments.remove(args.id),
                 };
             }
+            if ("webapp" in args) {
+                const attachment = await attachments.add(webappSourceKey(args), (id) =>
+                    prepareWebappAttachment(args, id, context),
+                );
+                return { attachment, id: attachment.id, operation: "add" as const };
+            }
+            if (!("url" in args)) await assertShareableLocalPath(args.path, context);
             const source = await resolve(args, context);
-            const attachment = await attachments.add(source.source, (id) =>
-                prepare(source, id, context, {
+            if (source.kind === "file") await assertShareableLocalPath(source.path, context);
+            const attachment = await attachments.add(source.source, async (id) => {
+                const preparedSource =
+                    source.kind === "file"
+                        ? await snapshotLocalAttachmentSource(source, id, context, attachments)
+                        : source;
+                const prepared = await prepare(preparedSource, id, context, {
                     ...dependencies,
                     ...(execution.signal === undefined ? {} : { signal: execution.signal }),
-                }),
-            );
+                });
+                if (preparedSource.kind !== "file") return prepared;
+                const scope = attachments.scope();
+                return {
+                    ...prepared,
+                    ...(scope === undefined
+                        ? {}
+                        : {
+                              downloadUrl: `/sessions/${encodeURIComponent(scope.sessionId)}/attachments/${encodeURIComponent(id)}/download`,
+                          }),
+                };
+            });
             return { attachment, id: attachment.id, operation: "add" as const };
         },
         toLLM: (result) => [
@@ -88,6 +107,37 @@ export function createAttachTool(dependencies: AttachToolDependencies = {}) {
 
 export const attachTool = createAttachTool();
 
+async function snapshotLocalAttachmentSource(
+    source: Extract<
+        Awaited<ReturnType<typeof resolveAttachmentSource>>,
+        {
+            kind: "file";
+        }
+    >,
+    id: string,
+    context: AgentContext,
+    attachments: AttachmentContext,
+): Promise<Extract<Awaited<ReturnType<typeof resolveAttachmentSource>>, { kind: "file" }>> {
+    const generated = context.generatedMedia;
+    if (generated === undefined) return source;
+    const bytes = await context.fs.readFileBuffer(source.path, {
+        maxBytes: MAX_ATTACHMENT_FILE_BYTES,
+        noFollow: true,
+    });
+    const sourceExtension = extname(source.name);
+    const written = await generated.write(bytes, {
+        extension: /^\.[A-Za-z0-9]{1,10}$/u.test(sourceExtension) ? sourceExtension : ".bin",
+        preferredName: source.name,
+    });
+    attachments.registerCleanup(id, () => generated.remove(written.hostPath));
+    return {
+        ...source,
+        path: written.path,
+        size: bytes.byteLength,
+        source: written.hostPath,
+    };
+}
+
 function requireAttachmentContext(context: AgentContext): AttachmentContext {
     if (context.attachments === undefined) {
         throw new Error("Attachments are unavailable for this agent run.");
@@ -102,5 +152,34 @@ function describeAttachAction(args: AttachArguments): string {
     if ("url" in args) {
         return `fetching URL metadata from ${quoteVisibleExact(args.url)}, verifying the domain with Anthropic's web safety service, and preparing it as a final-message attachment. Access: external network requests`;
     }
+    if ("webapp" in args) {
+        return `preparing the imported webapp ${quoteVisibleExact(args.webapp)} as a final-message attachment`;
+    }
     return `reading ${quoteVisibleExact(args.path)} and preparing it as a final-message attachment`;
+}
+
+function webappSourceKey(args: Extract<AttachArguments, { webapp: string }>): string {
+    return `webapp\u0000${args.webapp}\u0000${args.path ?? ""}\u0000${JSON.stringify(args.query ?? {})}`;
+}
+
+async function prepareWebappAttachment(
+    args: Extract<AttachArguments, { webapp: string }>,
+    id: string,
+    context: AgentContext,
+) {
+    const webapp = context.slots?.listWebapps().find((candidate) => candidate.name === args.webapp);
+    if (webapp === undefined) {
+        throw new Error(`No webapp named ${JSON.stringify(args.webapp)} exists.`);
+    }
+    return {
+        description: webapp.description,
+        id,
+        image: webapp.iconUrl,
+        kind: "webapp" as const,
+        name: webapp.name,
+        ...(args.path === undefined ? {} : { path: args.path }),
+        ...(args.query === undefined ? {} : { query: args.query }),
+        thumbhash: webapp.iconThumbhash,
+        webapp: webapp.name,
+    };
 }

@@ -1,11 +1,14 @@
+import { constants } from "node:fs";
+import { open, realpath } from "node:fs/promises";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { isAbsolute } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 
 import { isCuid } from "@paralleldrive/cuid2";
 import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import type {
+    Attachment,
     AbortRunResponse,
     BroadcastMessageRequest,
     BroadcastMessageResponse,
@@ -140,6 +143,7 @@ import { resolveGitTrackedEntity } from "../git/resolveGitTrackedEntity.js";
 import { INVALID_PERMISSION_MODE_MESSAGE, isPermissionMode } from "../permissions/index.js";
 import { isGoalStatus } from "../goals/index.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
+import { getGeneratedDirectory } from "../generated-media/index.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import {
     DEFAULT_CODEX_STREAM_MAX_RETRIES,
@@ -168,6 +172,7 @@ import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginAppError, PluginNotFoundError } from "../plugins/index.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import { readWebappFile, WebappInvalidError, WebappNotFoundError } from "../webapps/index.js";
+import { MAX_ATTACHMENT_FILE_BYTES } from "../tools/attachments/prepareAttachment.js";
 import { createWebappRequestSchema, slotNameSchema } from "../protocol/index.js";
 import type {
     CreateSlotEntryRequest,
@@ -767,7 +772,7 @@ async function handleRequest(
                     response,
                     400,
                     "invalid_request",
-                    "A webapp import needs a kebab-case name, description, purpose, author session, and source folder path.",
+                    "A webapp import needs a kebab-case name, description, purpose, author session, source folder path, and 512 by 512 PNG icon path.",
                 );
                 return;
             }
@@ -816,6 +821,34 @@ async function handleRequest(
             }
             throw error;
         }
+        return;
+    }
+    if (route.name === "webapp-icon") {
+        if (request.method !== "GET") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        if (store.webapps.get(route.webappName) === undefined) {
+            sendWebappManagementError(
+                response,
+                404,
+                "webapp_not_found",
+                `No webapp named ${JSON.stringify(route.webappName)} exists.`,
+            );
+            return;
+        }
+        const icon = await store.webapps.readIcon(route.webappName, route.format);
+        if (icon.type !== "file") {
+            sendWebappManagementError(response, 404, "webapp_not_found", "Webapp icon not found.");
+            return;
+        }
+        response.writeHead(200, {
+            "cache-control": "private, max-age=31536000, immutable",
+            "content-length": icon.data.byteLength,
+            "content-type": icon.contentType,
+            "x-content-type-options": "nosniff",
+        });
+        response.end(icon.data);
         return;
     }
     if (route.name === "webapp-file") {
@@ -1927,6 +1960,33 @@ async function handleRequest(
         return;
     }
 
+    if (route.name === "session-attachment-download") {
+        if (request.method !== "GET") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        try {
+            const attachment = store.attachment(sessionId, route.attachmentId);
+            const file =
+                attachment === undefined ? undefined : await readSessionAttachmentFile(attachment);
+            if (file === undefined) {
+                sendJson(response, 404, { error: "Attachment not found" });
+                return;
+            }
+            response.writeHead(200, {
+                "cache-control": "private, no-store",
+                "content-disposition": attachmentContentDisposition(file.name),
+                "content-length": file.data.byteLength,
+                "content-type": file.mediaType,
+                "x-content-type-options": "nosniff",
+            });
+            response.end(file.data);
+        } catch {
+            sendJson(response, 404, { error: "Attachment not found" });
+        }
+        return;
+    }
+
     if (route.name === "terminal-connection") {
         if (session.isSubagent()) {
             sendJson(response, 409, {
@@ -2924,6 +2984,12 @@ function matchRoute(pathname: string):
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
     | { name: "webapp-revert" | "webapp-versions"; sessionId?: undefined; webappName: string }
+    | {
+          format: "ico" | "png";
+          name: "webapp-icon";
+          sessionId?: undefined;
+          webappName: string;
+      }
     | { name: "webapp-file"; sessionId?: undefined; webappFilePath: string; webappName: string }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | {
@@ -3025,6 +3091,11 @@ function matchRoute(pathname: string):
           name: "terminal-connection";
           sessionId: string;
       }
+    | {
+          attachmentId: string;
+          name: "session-attachment-download";
+          sessionId: string;
+      }
     | { name: "user-input"; requestId: string; sessionId: string }
     | { name: "external-tool-call"; externalToolCallId: string; sessionId: string }
     | { name: "scheduled-message-cancel"; scheduledMessageId: string; sessionId: string }
@@ -3058,6 +3129,16 @@ function matchRoute(pathname: string):
     if (pathname === "/slots") return { name: "slots" };
     if (pathname === "/webapps") return { name: "webapps" };
 
+    const webappIcon = /^\/webapps\/([^/]+)\/favicon\.(ico|png)$/u.exec(pathname);
+    if (webappIcon !== null) {
+        const webappName = decodeUrlComponent(webappIcon[1]);
+        if (webappName === undefined) return undefined;
+        return {
+            format: webappIcon[2] as "ico" | "png",
+            name: "webapp-icon",
+            webappName,
+        };
+    }
     const webappFile = /^\/webapps\/([^/]+)\/files(?:\/(.*))?$/u.exec(pathname);
     if (webappFile !== null) {
         const webappName = decodeUrlComponent(webappFile[1]);
@@ -3244,6 +3325,18 @@ function matchRoute(pathname: string):
     }
     if (
         parts.length === 5 &&
+        parts[2] === "attachments" &&
+        parts[3] !== undefined &&
+        parts[4] === "download"
+    ) {
+        return {
+            attachmentId: decodeURIComponent(parts[3]),
+            name: "session-attachment-download",
+            sessionId,
+        };
+    }
+    if (
+        parts.length === 5 &&
         parts[2] === "scheduled-messages" &&
         parts[3] !== undefined &&
         parts[4] === "cancel"
@@ -3320,6 +3413,84 @@ function decodeUrlComponent(value: string | undefined): string | undefined {
     } catch {
         return undefined;
     }
+}
+
+type DownloadableAttachment = Extract<Attachment, { kind: "audio" | "file" | "image" | "video" }>;
+
+async function readSessionAttachmentFile(
+    attachment: Attachment,
+): Promise<{ data: Buffer; mediaType: string; name: string } | undefined> {
+    if (!isDownloadableAttachment(attachment)) return undefined;
+    const hostGenerated = getGeneratedDirectory();
+    const mapped = mapAttachmentSource(attachment.source, hostGenerated, hostGenerated);
+    if (mapped === undefined) return undefined;
+
+    const root = await realpath(mapped.root);
+    const target = await realpath(mapped.path);
+    if (!isPathInsideDirectory(root, target)) return undefined;
+    const data = await readBoundedAttachmentFile(target);
+    if (data === undefined) return undefined;
+    return {
+        data,
+        mediaType: attachment.mediaType ?? "application/octet-stream",
+        name: attachment.name,
+    };
+}
+
+async function readBoundedAttachmentFile(path: string): Promise<Buffer | undefined> {
+    const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const chunks: Buffer[] = [];
+    let length = 0;
+    try {
+        const details = await file.stat();
+        if (!details.isFile() || details.size > MAX_ATTACHMENT_FILE_BYTES) return undefined;
+        while (length <= MAX_ATTACHMENT_FILE_BYTES) {
+            const chunk = Buffer.allocUnsafe(
+                Math.min(64 * 1024, MAX_ATTACHMENT_FILE_BYTES + 1 - length),
+            );
+            const { bytesRead } = await file.read(chunk, 0, chunk.length, null);
+            if (bytesRead === 0) return Buffer.concat(chunks, length);
+            chunks.push(chunk.subarray(0, bytesRead));
+            length += bytesRead;
+        }
+        return undefined;
+    } finally {
+        await file.close();
+    }
+}
+
+function isDownloadableAttachment(attachment: Attachment): attachment is DownloadableAttachment {
+    return (
+        attachment.kind === "audio" ||
+        attachment.kind === "file" ||
+        attachment.kind === "image" ||
+        attachment.kind === "video"
+    );
+}
+
+function mapAttachmentSource(
+    source: string,
+    modelRoot: string,
+    hostRoot: string,
+): { path: string; root: string } | undefined {
+    const pathFromRoot = relative(modelRoot, source);
+    if (pathFromRoot !== "" && (pathFromRoot.startsWith("..") || isAbsolute(pathFromRoot))) {
+        return undefined;
+    }
+    return { path: join(hostRoot, pathFromRoot), root: hostRoot };
+}
+
+function isPathInsideDirectory(directory: string, path: string): boolean {
+    const pathFromDirectory = relative(directory, path);
+    return (
+        pathFromDirectory === "" ||
+        (!pathFromDirectory.startsWith("..") && !isAbsolute(pathFromDirectory))
+    );
+}
+
+function attachmentContentDisposition(name: string): string {
+    const safeName = basename(name).replaceAll("\\", "_").replaceAll('"', "_");
+    return `attachment; filename="${safeName || "attachment"}"`;
 }
 
 function sendPluginAppError(response: ServerResponse, error: unknown): void {

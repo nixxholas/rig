@@ -59,6 +59,77 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
+    it("discards only pre-icon webapps when adding the required icon metadata", () => {
+        const opened = openTestDatabase();
+        opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
+        opened.database.run(sql.raw("PRAGMA user_version = 9"));
+        opened.database.run(sql.raw("CREATE TABLE unrelated_data (value TEXT NOT NULL)"));
+        opened.database.run(sql.raw("INSERT INTO unrelated_data (value) VALUES ('keep me')"));
+        opened.database.run(
+            sql.raw(`
+                CREATE TABLE webapps (
+                    name TEXT NOT NULL PRIMARY KEY,
+                    description TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    author_session_id TEXT NOT NULL,
+                    source_description TEXT,
+                    current_version INTEGER NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                )
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                CREATE TABLE webapp_versions (
+                    webapp_name TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    change_description TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    PRIMARY KEY (webapp_name, version)
+                )
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO webapps (
+                    name,
+                    description,
+                    purpose,
+                    author_session_id,
+                    current_version,
+                    created_at_ms,
+                    updated_at_ms
+                ) VALUES ('old-dashboard', 'Old', 'Old', 'session-1', 1, 1, 1)
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO webapp_versions (
+                    webapp_name,
+                    version,
+                    change_description,
+                    created_at_ms
+                ) VALUES ('old-dashboard', 1, 'Initial import', 1)
+            `),
+        );
+
+        migrateSessionDatabase(opened.database);
+
+        expect(opened.database.all(sql.raw("SELECT * FROM webapps"))).toEqual([]);
+        expect(opened.database.all(sql.raw("SELECT * FROM webapp_versions"))).toEqual([]);
+        expect(opened.database.get(sql.raw("SELECT value FROM unrelated_data"))).toEqual({
+            value: "keep me",
+        });
+        expect(
+            opened.database
+                .all<{ name: string }>(sql.raw("PRAGMA table_info(webapps)"))
+                .map((column) => column.name),
+        ).toContain("icon_thumbhash");
+
+        opened.client.close();
+    });
+
     it("atomically replaces a database from the previous migration generation", () => {
         const opened = openTestDatabase();
         opened.database.run(sql.raw("CREATE TABLE legacy_data (value TEXT NOT NULL)"));

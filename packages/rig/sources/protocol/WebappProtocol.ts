@@ -23,6 +23,14 @@ export const webappSchema = Type.Object(
         name: Type.String({ description: "Human-readable kebab-case webapp name." }),
         description: Type.String({ description: "What the webapp is." }),
         purpose: Type.String({ description: "Why the webapp exists." }),
+        iconThumbhash: Type.String({
+            description: "ThumbHash for the webapp's persisted 512 by 512 icon.",
+            minLength: 1,
+        }),
+        iconUrl: Type.String({
+            description: "Rig HTTP path that serves the webapp's persisted icon.",
+            minLength: 1,
+        }),
         authorSessionId: Type.String({
             description: "The session of the agent that created the webapp.",
         }),
@@ -48,6 +56,9 @@ export const createWebappRequestSchema = Type.Object(
         purpose: Type.String({ description: "Why the webapp exists." }),
         authorSessionId: Type.String(),
         path: Type.String({ description: "Absolute path of the source folder to import." }),
+        iconPath: Type.String({
+            description: "Absolute path of the required 512 by 512 PNG webapp icon.",
+        }),
         sourceDescription: Type.Optional(
             Type.String({
                 description: "Where the sources live, such as the project and folder.",

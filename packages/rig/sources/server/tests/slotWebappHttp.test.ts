@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import sharp from "sharp";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
@@ -84,6 +85,41 @@ describe("slot HTTP protocol", () => {
             error: { code: "invalid_entry" },
         });
 
+        const webappButton = await request(port, {
+            body: JSON.stringify({
+                authorSessionId: "session-1",
+                content: {
+                    action: {
+                        path: "/reports/daily",
+                        query: { range: "7d", team: "platform" },
+                        type: "open-webapp",
+                        webapp: "usage-dashboard",
+                    },
+                    label: "Open usage",
+                    type: "button",
+                },
+                description: "Usage shortcut",
+                purpose: "Open the requested report",
+                scope: "everywhere",
+                slot: "sidebar",
+            }),
+            method: "POST",
+            path: "/slots",
+        });
+        expect(webappButton.status).toBe(201);
+        expect(JSON.parse(webappButton.body)).toMatchObject({
+            entry: {
+                content: {
+                    action: {
+                        path: "/reports/daily",
+                        query: { range: "7d", team: "platform" },
+                        type: "open-webapp",
+                        webapp: "usage-dashboard",
+                    },
+                },
+            },
+        });
+
         const listed = await request(port, { path: "/slots?slot=status-line" });
         expect(listed.status).toBe(200);
         expect(JSON.parse(listed.body)).toMatchObject({
@@ -125,11 +161,14 @@ describe("webapp HTTP protocol", () => {
         await writeFile(join(sourceV1, ".env"), "SECRET=1");
         await writeFile(join(sources, "outside.txt"), "outside");
         await symlink(join(sources, "outside.txt"), join(sourceV1, "escape.txt"));
+        const iconPath = join(sources, "icon.png");
+        const iconBytes = await createIcon(iconPath, 512);
 
         const badName = await request(port, {
             body: JSON.stringify({
                 authorSessionId: "session-1",
                 description: "d",
+                iconPath,
                 name: "Not Kebab",
                 path: sourceV1,
                 purpose: "p",
@@ -140,10 +179,48 @@ describe("webapp HTTP protocol", () => {
         expect(badName.status).toBe(400);
         expect(JSON.parse(badName.body)).toMatchObject({ error: { code: "invalid_webapp" } });
 
+        const invalidIconPath = join(sources, "small-icon.png");
+        await createIcon(invalidIconPath, 256);
+        const invalidIcon = await request(port, {
+            body: JSON.stringify({
+                authorSessionId: "session-1",
+                description: "Usage dashboard",
+                iconPath: invalidIconPath,
+                name: "usage-dashboard",
+                path: sourceV1,
+                purpose: "Track spend",
+            }),
+            method: "POST",
+            path: "/webapps",
+        });
+        expect(invalidIcon.status).toBe(400);
+        expect(JSON.parse(invalidIcon.body)).toMatchObject({
+            error: { code: "invalid_webapp" },
+        });
+
+        const symlinkedSource = await request(port, {
+            body: JSON.stringify({
+                authorSessionId: "session-1",
+                description: "Symlinked dashboard",
+                iconPath,
+                name: "symlinked-dashboard",
+                path: sourceV1,
+                purpose: "Verify safe imports",
+            }),
+            method: "POST",
+            path: "/webapps",
+        });
+        expect(symlinkedSource.status).toBe(400);
+        expect(JSON.parse(symlinkedSource.body)).toMatchObject({
+            error: { code: "invalid_webapp" },
+        });
+        await rm(join(sourceV1, "escape.txt"));
+
         const created = await request(port, {
             body: JSON.stringify({
                 authorSessionId: "session-1",
                 description: "Usage dashboard",
+                iconPath,
                 name: "usage-dashboard",
                 path: sourceV1,
                 purpose: "Track spend",
@@ -156,10 +233,26 @@ describe("webapp HTTP protocol", () => {
         expect(JSON.parse(created.body)).toMatchObject({
             webapp: {
                 currentVersion: 1,
+                iconThumbhash: expect.any(String),
+                iconUrl: "/webapps/usage-dashboard/favicon.png",
                 name: "usage-dashboard",
                 versions: [{ changeDescription: "Initial import", version: 1 }],
             },
         });
+
+        const favicon = await request(port, {
+            path: "/webapps/usage-dashboard/favicon.png",
+        });
+        expect(favicon.status).toBe(200);
+        expect(favicon.headers["content-type"]).toBe("image/png");
+        expect(favicon.raw).toEqual(iconBytes);
+
+        const ico = await request(port, {
+            path: "/webapps/usage-dashboard/favicon.ico",
+        });
+        expect(ico.status).toBe(200);
+        expect(ico.headers["content-type"]).toBe("image/x-icon");
+        expect(ico.raw.subarray(0, 6)).toEqual(Buffer.from([0, 0, 1, 0, 6, 0]));
 
         const index = await request(port, { path: "/webapps/usage-dashboard/files/" });
         expect(index.status).toBe(200);
@@ -180,6 +273,10 @@ describe("webapp HTTP protocol", () => {
             path: "/webapps/usage-dashboard/files/assets/%2e%2e/index.html",
         });
         expect(traversal.body).toBe("<h1>one</h1>");
+        await symlink(
+            join(sources, "outside.txt"),
+            join(process.env.HAPPY_WEBAPPS_DIRECTORY!, "usage-dashboard", "v1", "escape.txt"),
+        );
         const symlinked = await request(port, {
             path: "/webapps/usage-dashboard/files/escape.txt",
         });
@@ -256,12 +353,28 @@ async function createTempDirectory(prefix: string): Promise<string> {
     return directory;
 }
 
+async function createIcon(path: string, size: number): Promise<Buffer> {
+    const bytes = await sharp({
+        create: {
+            background: { alpha: 1, b: 180, g: 100, r: 40 },
+            channels: 4,
+            height: size,
+            width: size,
+        },
+    })
+        .png()
+        .toBuffer();
+    await writeFile(path, bytes);
+    return bytes;
+}
+
 function request(
     port: number,
     options: { body?: string; method?: string; path: string; token?: string },
 ): Promise<{
     body: string;
     headers: Record<string, string | string[] | undefined>;
+    raw: Buffer;
     status: number;
 }> {
     return new Promise((resolve, reject) => {
@@ -283,6 +396,7 @@ function request(
                     resolve({
                         body: Buffer.concat(chunks).toString("utf8"),
                         headers: response.headers,
+                        raw: Buffer.concat(chunks),
                         status: response.statusCode ?? 0,
                     }),
                 );

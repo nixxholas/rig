@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import type { Webapp, WebappVersion } from "../../protocol/WebappProtocol.js";
 import type { TX } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
+import { webappIconUrl } from "../../webapps/readWebappIcon.js";
 
 /** Lists every webapp with its complete version history, alphabetically by name. */
 export function queryWebapps(tx: TX): readonly Webapp[] {
@@ -33,6 +34,8 @@ export function readWebappRow(
         name: readString(row, "name"),
         description: readString(row, "description"),
         purpose: readString(row, "purpose"),
+        iconThumbhash: readString(row, "icon_thumbhash"),
+        iconUrl: webappIconUrl(readString(row, "name")),
         authorSessionId: readString(row, "author_session_id"),
         ...(sourceDescription === undefined ? {} : { sourceDescription }),
         currentVersion: readNumber(row, "current_version"),

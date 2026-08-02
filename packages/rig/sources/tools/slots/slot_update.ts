@@ -2,6 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../../agent/types.js";
 import { slotContentSchema, slotEntrySchema, slotNameSchema } from "../../protocol/SlotProtocol.js";
+import { describeSlotUpdatePermissionAction } from "./describeSlotPermissionAction.js";
 import { requireSlots } from "./requireSlots.js";
 
 export const slotUpdateTool = defineTool({
@@ -24,5 +25,7 @@ export const slotUpdateTool = defineTool({
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Updated the ${result.content.type} entry in the ${result.slot} slot.`,
     shouldReviewInAutoMode: () => true,
+    describeAutoPermissionAction: ({ id, ...request }) =>
+        describeSlotUpdatePermissionAction(id, request),
     locks: ["slots"],
 });

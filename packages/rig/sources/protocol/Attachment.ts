@@ -1,6 +1,7 @@
 import { Type, type Static } from "@sinclair/typebox";
 
 const attachmentBase = {
+    downloadUrl: Type.Optional(Type.String({ minLength: 1 })),
     id: Type.String({ minLength: 1 }),
     source: Type.String({ minLength: 1 }),
 };
@@ -73,6 +74,24 @@ export const AttachmentSchema = Type.Union([
             kind: Type.Literal("file"),
             mediaType: Type.Optional(Type.String({ minLength: 1 })),
             name: Type.String({ minLength: 1 }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            description: Type.String({ minLength: 1 }),
+            id: Type.String({ minLength: 1 }),
+            image: Type.String({ minLength: 1 }),
+            kind: Type.Literal("webapp"),
+            name: Type.String({ minLength: 1 }),
+            path: Type.Optional(Type.String({ minLength: 1 })),
+            query: Type.Optional(
+                Type.Record(Type.String({ minLength: 1 }), Type.String(), {
+                    description: "Query values forwarded when the webapp opens.",
+                }),
+            ),
+            thumbhash: Type.String({ minLength: 1 }),
+            webapp: Type.String({ minLength: 1 }),
         },
         { additionalProperties: false },
     ),

@@ -39,6 +39,12 @@ export function createJustBashFileSystemContext(bash: Bash, cwd: string): FileSy
             return bash.fs.readFile(path);
         },
         async readFileBuffer(path, options) {
+            if (options?.noFollow === true) {
+                const facts = toFileSystemStat(await bash.fs.lstat(path));
+                if (facts.isSymbolicLink) {
+                    throw new Error(`Could not read '${path}' because it is a symbolic link.`);
+                }
+            }
             const bytes = await bash.fs.readFileBuffer(path);
             if (options?.maxBytes !== undefined && bytes.byteLength > options.maxBytes) {
                 throw new Error(

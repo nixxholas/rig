@@ -2,6 +2,12 @@ import { randomUUID } from "node:crypto";
 
 import type { Attachment } from "./attachmentSchemas.js";
 
+export interface AttachmentScope {
+    projectId: string;
+    sessionId: string;
+    workspaceId?: string;
+}
+
 /**
  * Pending attachment intent for one agent run.
  *
@@ -11,13 +17,17 @@ import type { Attachment } from "./attachmentSchemas.js";
 export class AttachmentContext {
     readonly #attachmentsById = new Map<string, Attachment>();
     readonly #attachmentsBySource = new Map<string, Attachment>();
+    readonly #sourceById = new Map<string, string>();
     readonly #preparingBySource = new Map<string, Promise<Attachment>>();
-    readonly #cleanupById = new Map<string, () => void | Promise<void>>();
+    readonly #cleanupById = new Map<string, (() => void | Promise<void>)[]>();
     readonly #idFactory: () => string;
     #generation = 0;
 
-    constructor(options: { idFactory?: () => string } = {}) {
+    readonly #scope: AttachmentScope | undefined;
+
+    constructor(options: { idFactory?: () => string; scope?: AttachmentScope } = {}) {
         this.#idFactory = options.idFactory ?? randomUUID;
+        this.#scope = options.scope;
     }
 
     async add(source: string, prepare: (id: string) => Promise<Attachment>): Promise<Attachment> {
@@ -29,13 +39,20 @@ export class AttachmentContext {
         const generation = this.#generation;
         const operation = (async () => {
             const id = this.#idFactory();
-            const attachment = await prepare(id);
+            let attachment;
+            try {
+                attachment = await prepare(id);
+            } catch (error) {
+                this.#runCleanup(id);
+                throw error;
+            }
             if (this.#generation !== generation) {
                 this.#runCleanup(id);
                 return attachment;
             }
             this.#attachmentsById.set(attachment.id, attachment);
             this.#attachmentsBySource.set(source, attachment);
+            this.#sourceById.set(attachment.id, source);
             return attachment;
         })();
         this.#preparingBySource.set(source, operation);
@@ -52,17 +69,25 @@ export class AttachmentContext {
         const attachment = this.#attachmentsById.get(id);
         if (attachment === undefined) return false;
         this.#attachmentsById.delete(id);
-        this.#attachmentsBySource.delete(attachment.source);
+        const source = this.#sourceById.get(id);
+        if (source !== undefined) this.#attachmentsBySource.delete(source);
+        this.#sourceById.delete(id);
         this.#runCleanup(id);
         return true;
     }
 
     registerCleanup(id: string, cleanup: () => void | Promise<void>): void {
-        this.#cleanupById.set(id, cleanup);
+        const cleanups = this.#cleanupById.get(id) ?? [];
+        cleanups.push(cleanup);
+        this.#cleanupById.set(id, cleanups);
     }
 
     pending(): readonly Attachment[] {
         return [...this.#attachmentsById.values()];
+    }
+
+    scope(): AttachmentScope | undefined {
+        return this.#scope;
     }
 
     takePending(): readonly Attachment[] {
@@ -70,6 +95,7 @@ export class AttachmentContext {
         this.#generation += 1;
         this.#attachmentsById.clear();
         this.#attachmentsBySource.clear();
+        this.#sourceById.clear();
         this.#preparingBySource.clear();
         this.#cleanupById.clear();
         return attachments;
@@ -80,12 +106,15 @@ export class AttachmentContext {
         for (const id of this.#cleanupById.keys()) this.#runCleanup(id);
         this.#attachmentsById.clear();
         this.#attachmentsBySource.clear();
+        this.#sourceById.clear();
         this.#preparingBySource.clear();
     }
 
     #runCleanup(id: string): void {
-        const cleanup = this.#cleanupById.get(id);
+        const cleanups = this.#cleanupById.get(id);
         this.#cleanupById.delete(id);
-        if (cleanup !== undefined) void Promise.resolve(cleanup()).catch(() => undefined);
+        for (const cleanup of cleanups ?? []) {
+            void Promise.resolve(cleanup()).catch(() => undefined);
+        }
     }
 }

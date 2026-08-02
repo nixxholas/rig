@@ -22,7 +22,16 @@ describe("slot entry store", () => {
         cleanups.push(() => store.close());
         const entry = store.slots.create({
             authorSessionId: "session-1",
-            content: { markdown: "**Build passing**", type: "text" },
+            content: {
+                action: {
+                    path: "reports/today.html",
+                    query: { theme: "dark", view: "compact" },
+                    type: "open-webapp",
+                    webapp: "build-dashboard",
+                },
+                label: "View build",
+                type: "button",
+            },
             description: "Build status line",
             purpose: "Shows CI health at a glance",
             scope: "everywhere",
@@ -36,7 +45,16 @@ describe("slot entry store", () => {
         expect(restored).toHaveLength(1);
         expect(restored[0]).toMatchObject({
             authorSessionId: "session-1",
-            content: { markdown: "**Build passing**", type: "text" },
+            content: {
+                action: {
+                    path: "reports/today.html",
+                    query: { theme: "dark", view: "compact" },
+                    type: "open-webapp",
+                    webapp: "build-dashboard",
+                },
+                label: "View build",
+                type: "button",
+            },
             description: "Build status line",
             id: entry.id,
             purpose: "Shows CI health at a glance",
@@ -71,6 +89,20 @@ describe("slot entry store", () => {
                 content: {
                     action: { type: "send-current-chat" },
                     label: "Go",
+                    type: "button",
+                } as never,
+            }),
+        ).toThrow(SlotEntryInvalidError);
+        expect(() =>
+            store.slots.create({
+                ...valid,
+                content: {
+                    action: {
+                        query: { report: 1 },
+                        type: "open-webapp",
+                        webapp: "build-dashboard",
+                    },
+                    label: "View build",
                     type: "button",
                 } as never,
             }),

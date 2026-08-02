@@ -57,9 +57,10 @@ import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 import type { ImageGenerationProvider } from "../tools/imageGeneration/createImageGenerationTool.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { CONTAINER_GENERATED_PATH } from "../execution/index.js";
-import { AttachmentContext } from "../tools/attachments/AttachmentContext.js";
+import { AttachmentContext, type AttachmentScope } from "../tools/attachments/AttachmentContext.js";
 
 export interface CreateCodingAssistantAgentOptions {
+    attachmentScope?: AttachmentScope;
     appendSystemPrompt?: string;
     agentCommunication?: AgentCommunicationContext;
     agentTreeUsage?: AgentTreeUsageContext;
@@ -134,7 +135,9 @@ export function createCodingAssistantAgent(
                     sessionId: options.sessionId ?? options.agentId ?? "standalone",
                 });
     const runtimeCwd = context.fs.cwd;
-    context.attachments = new AttachmentContext();
+    context.attachments = new AttachmentContext(
+        options.attachmentScope === undefined ? {} : { scope: options.attachmentScope },
+    );
     if (
         process.env.RIG_GYM_RUNTIME !== "just-bash" &&
         (options.docker === undefined || options.docker.container === undefined)

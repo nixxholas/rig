@@ -42,6 +42,20 @@ describe("createNodeFileSystemContext", () => {
         );
     });
 
+    it("atomically refuses a symbolic link when requested", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-fs-no-follow-"));
+        temporaryDirectories.push(root);
+        const workspace = join(root, "workspace");
+        await mkdir(workspace);
+        await writeFile(join(workspace, "target.txt"), "private");
+        await symlink(join(workspace, "target.txt"), join(workspace, "link.txt"));
+        const context = createNodeFileSystemContext(workspace);
+
+        await expect(
+            context.readFileBuffer("link.txt", { maxBytes: 64, noFollow: true }),
+        ).rejects.toMatchObject({ code: "ELOOP" });
+    });
+
     it("uses Codex-style host reads without allowing outside writes on Linux", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-fs-user-skills-"));
         temporaryDirectories.push(root);

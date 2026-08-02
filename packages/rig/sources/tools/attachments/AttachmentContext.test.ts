@@ -60,4 +60,23 @@ describe("AttachmentContext", () => {
 
         expect(context.pending()).toEqual([]);
     });
+
+    it("runs every registered cleanup when preparation rejects", async () => {
+        const context = new AttachmentContext({ idFactory: () => "failed" });
+        const first = vi.fn();
+        const second = vi.fn();
+
+        await expect(
+            context.add("failed-source", async (id) => {
+                context.registerCleanup(id, first);
+                context.registerCleanup(id, second);
+                throw new Error("preparation failed");
+            }),
+        ).rejects.toThrow("preparation failed");
+
+        await vi.waitFor(() => {
+            expect(first).toHaveBeenCalledOnce();
+            expect(second).toHaveBeenCalledOnce();
+        });
+    });
 });

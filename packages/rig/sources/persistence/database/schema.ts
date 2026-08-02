@@ -466,6 +466,7 @@ export const webapps = sqliteTable("webapps", {
     currentVersion: integer("current_version").notNull(),
     createdAtMs: integer("created_at_ms").notNull(),
     updatedAtMs: integer("updated_at_ms").notNull(),
+    iconThumbhash: text("icon_thumbhash").notNull(),
 });
 
 export const webappVersions = sqliteTable(

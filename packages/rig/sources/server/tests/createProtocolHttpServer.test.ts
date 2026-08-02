@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
-import { request as httpRequest } from "node:http";
+import { mkdir, mkdtemp, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { request as httpRequest, type IncomingHttpHeaders } from "node:http";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -45,6 +45,156 @@ const removeFixtureOptions = {
 } as const;
 
 describe("createProtocolHttpServer", () => {
+    it("downloads committed attachments only from their host-visible generated snapshot", async () => {
+        const workspace = await mkdtemp(join(tmpdir(), "rig-attachment-workspace-"));
+        const outside = await mkdtemp(join(tmpdir(), "rig-attachment-outside-"));
+        const stateDirectory = await mkdtemp(join(tmpdir(), "rig-attachment-state-"));
+        const databasePath = join(stateDirectory, "sessions.sqlite");
+        const generated = join(workspace, "generated");
+        const originalGenerated = process.env.HAPPY_GENERATED_DIRECTORY;
+        process.env.HAPPY_GENERATED_DIRECTORY = generated;
+        await mkdir(generated);
+        await writeFile(join(generated, "result.txt"), "docker result\n");
+        await writeFile(join(outside, "secret.txt"), "outside\n");
+        await symlink(join(outside, "secret.txt"), join(generated, "link.txt"));
+        const attachments = [
+            {
+                bytes: 14,
+                downloadUrl: "/sessions/goal-session/attachments/attachment-1/download",
+                id: "attachment-1",
+                kind: "file" as const,
+                mediaType: "text/plain",
+                name: "result.txt",
+                source: join(generated, "result.txt"),
+            },
+            {
+                bytes: 8,
+                downloadUrl: "/sessions/goal-session/attachments/attachment-link/download",
+                id: "attachment-link",
+                kind: "file" as const,
+                mediaType: "text/plain",
+                name: "link.txt",
+                source: join(generated, "link.txt"),
+            },
+        ];
+        const initialStore = new PersistentSessionStore({ databasePath });
+        initialStore.saveSession({
+            ...pausedGoalState(),
+            cwd: workspace,
+            docker: { image: "example.test/rig", workingDirectory: "/workspace" },
+            messages: [],
+        });
+        initialStore.upsertMessage("goal-session", {
+            isPartial: false,
+            message: {
+                blocks: [{ text: "Show the result.", type: "text" }],
+                id: "user-message",
+                role: "user",
+            },
+            position: 0,
+            runId: "run-1",
+        });
+        initialStore.upsertMessage("goal-session", {
+            isPartial: false,
+            message: {
+                attachments,
+                blocks: [{ text: "Done.", type: "text" }],
+                id: "agent-message",
+                role: "agent",
+            },
+            position: 1,
+            runId: "run-1",
+        });
+        for (let turn = 2; turn <= 82; turn += 1) {
+            const runId = `run-${String(turn)}`;
+            initialStore.upsertMessage("goal-session", {
+                isPartial: false,
+                message: {
+                    blocks: [{ text: `Question ${String(turn)}`, type: "text" }],
+                    id: `user-message-${String(turn)}`,
+                    role: "user",
+                },
+                position: turn * 2 - 2,
+                runId,
+            });
+            initialStore.upsertMessage("goal-session", {
+                isPartial: false,
+                message: {
+                    blocks: [{ text: `Answer ${String(turn)}`, type: "text" }],
+                    id: `agent-message-${String(turn)}`,
+                    role: "agent",
+                },
+                position: turn * 2 - 1,
+                runId,
+            });
+        }
+        initialStore.upsertMessage("goal-session", {
+            isPartial: false,
+            message: {
+                attachments: [{ ...attachments[0]!, id: "internal-attachment" }],
+                blocks: [{ text: "Private context.", type: "text" }],
+                id: "internal-agent-message",
+                internal: true,
+                role: "agent",
+            },
+            position: 164,
+            runId: "run-83",
+        });
+        initialStore.close();
+        const store = new PersistentSessionStore({ databasePath });
+        expect(store.get("goal-session")?.attachment("attachment-1")).toBeUndefined();
+        expect(store.attachment("goal-session", "attachment-1")).toMatchObject({
+            source: join(generated, "result.txt"),
+        });
+        const { close, socketPath } = await startServer({ store });
+        try {
+            const response = await requestRawJson(
+                socketPath,
+                "/sessions/goal-session/attachments/attachment-1/download",
+                { body: "", method: "GET" },
+            );
+            expect(response).toMatchObject({
+                body: "docker result\n",
+                headers: {
+                    "cache-control": "private, no-store",
+                    "content-disposition": 'attachment; filename="result.txt"',
+                    "content-type": "text/plain",
+                    "x-content-type-options": "nosniff",
+                },
+                statusCode: 200,
+            });
+            await expect(
+                requestRawJson(
+                    socketPath,
+                    "/sessions/goal-session/attachments/attachment-link/download",
+                    { body: "", method: "GET" },
+                ),
+            ).resolves.toMatchObject({ statusCode: 404 });
+            await expect(
+                requestRawJson(
+                    socketPath,
+                    "/sessions/goal-session/attachments/not-committed/download",
+                    { body: "", method: "GET" },
+                ),
+            ).resolves.toMatchObject({ statusCode: 404 });
+            await expect(
+                requestRawJson(
+                    socketPath,
+                    "/sessions/goal-session/attachments/internal-attachment/download",
+                    { body: "", method: "GET" },
+                ),
+            ).resolves.toMatchObject({ statusCode: 404 });
+        } finally {
+            await close();
+            store.close();
+            await rm(workspace, removeFixtureOptions);
+            await rm(outside, removeFixtureOptions);
+            await rm(stateDirectory, removeFixtureOptions);
+            if (originalGenerated === undefined) delete process.env.HAPPY_GENERATED_DIRECTORY;
+            else process.env.HAPPY_GENERATED_DIRECTORY = originalGenerated;
+        }
+    });
+
     it("keeps private model context out of a bounded session state response", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         const privateMarker = "private-model-context:";
@@ -2939,7 +3089,7 @@ async function requestRawJson(
     socketPath: string,
     path: string,
     options: { body: string; headers?: Record<string, string>; method: string },
-): Promise<{ body: string; statusCode: number | undefined }> {
+): Promise<{ body: string; headers: IncomingHttpHeaders; statusCode: number | undefined }> {
     return new Promise((resolve, reject) => {
         const request = httpRequest(
             {
@@ -2958,6 +3108,7 @@ async function requestRawJson(
                 response.on("end", () => {
                     resolve({
                         body: Buffer.concat(chunks).toString("utf8"),
+                        headers: response.headers,
                         statusCode: response.statusCode,
                     });
                 });

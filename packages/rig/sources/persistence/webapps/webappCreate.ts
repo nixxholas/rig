@@ -7,6 +7,7 @@ export interface WebappCreateRecord {
     changeDescription: string;
     createdAt: number;
     description: string;
+    iconThumbhash: string;
     name: string;
     purpose: string;
     sourceDescription?: string;
@@ -22,6 +23,7 @@ export function webappCreate(tx: TX, record: WebappCreateRecord): void {
                 createdAtMs: record.createdAt,
                 currentVersion: 1,
                 description: record.description,
+                iconThumbhash: record.iconThumbhash,
                 name: record.name,
                 purpose: record.purpose,
                 sourceDescription: record.sourceDescription ?? null,

@@ -12,6 +12,7 @@ import {
     utimes,
     writeFile,
 } from "node:fs/promises";
+import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, resolve } from "node:path";
 
@@ -96,9 +97,14 @@ export function createNodeFileSystemContext(
         async readFileBuffer(path, readOptions) {
             const target = resolvePath(path);
             await assertCanReadPath(cwd, target, permissionMode(), readPathOptions);
-            return readOptions?.maxBytes === undefined
-                ? readFile(target)
-                : readFileBufferWithLimit(target, readOptions.maxBytes);
+            return readOptions?.noFollow === true
+                ? readFileBufferWithoutFollowing(
+                      target,
+                      readOptions.maxBytes ?? Number.MAX_SAFE_INTEGER,
+                  )
+                : readOptions?.maxBytes === undefined
+                  ? readFile(target)
+                  : readFileBufferWithLimit(target, readOptions.maxBytes);
         },
         async readdir(path) {
             const target = resolvePath(path);
@@ -133,10 +139,22 @@ export function createNodeFileSystemContext(
 }
 
 async function readFileBufferWithLimit(path: string, maxBytes: number): Promise<Buffer> {
+    return readOpenedFileWithLimit(path, maxBytes, "r");
+}
+
+async function readFileBufferWithoutFollowing(path: string, maxBytes: number): Promise<Buffer> {
+    return readOpenedFileWithLimit(path, maxBytes, constants.O_RDONLY | constants.O_NOFOLLOW);
+}
+
+async function readOpenedFileWithLimit(
+    path: string,
+    maxBytes: number,
+    flags: number | string,
+): Promise<Buffer> {
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 0) {
         throw new Error("The file read limit must be a non-negative safe integer.");
     }
-    const file = await open(path, "r");
+    const file = await open(path, flags);
     const chunks: Buffer[] = [];
     let length = 0;
     try {

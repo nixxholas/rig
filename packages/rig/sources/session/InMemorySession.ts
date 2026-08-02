@@ -46,6 +46,7 @@ import type {
     ChangeEffortRequest,
     AnswerUserInputRequest,
     AbortRunResponse,
+    Attachment,
     ChangeModelRequest,
     ChangePermissionModeRequest,
     ChangeServiceTierRequest,
@@ -3281,6 +3282,19 @@ export class InMemorySession {
         };
     }
 
+    attachment(id: string): Attachment | undefined {
+        const message = this.#messages.findLast(
+            (entry) =>
+                !entry.isPartial &&
+                entry.message.role === "agent" &&
+                entry.message.internal !== true &&
+                entry.message.attachments?.some((attachment) => attachment.id === id) === true,
+        )?.message;
+        if (message?.role !== "agent") return undefined;
+        const attachment = message.attachments?.find((candidate) => candidate.id === id);
+        return attachment === undefined ? undefined : structuredClone(attachment);
+    }
+
     externalControlContext(): AgentContext {
         return this.#ensureRuntime().context;
     }
@@ -5820,14 +5834,15 @@ export class InMemorySession {
         return {
             createEntry: (request) =>
                 stores.entries.create({ ...request, authorSessionId: this.id }),
-            createWebapp: (request) =>
-                stores.webapps.create({ ...request, authorSessionId: this.id }),
+            createWebapp: (request, sourceFileSystem) =>
+                stores.webapps.create({ ...request, authorSessionId: this.id }, sourceFileSystem),
             listEntries: (filter) => stores.entries.list(filter),
             listWebapps: () => stores.webapps.list(),
             removeEntry: (id) => stores.entries.remove(id),
             revertWebapp: (name, request) => stores.webapps.revert(name, request),
             updateEntry: (id, request) => stores.entries.update(id, request),
-            updateWebapp: (name, request) => stores.webapps.update(name, request),
+            updateWebapp: (name, request, sourceFileSystem) =>
+                stores.webapps.update(name, request, sourceFileSystem),
         };
     }
 
@@ -5876,6 +5891,11 @@ export class InMemorySession {
             .join("\n\n");
         const options: CreateCodingAssistantAgentOptions = {
             agentId: this.#agentId,
+            attachmentScope: {
+                projectId: this.#projectId,
+                sessionId: this.id,
+                ...(this.#workspaceId === undefined ? {} : { workspaceId: this.#workspaceId }),
+            },
             ...(agentManager === undefined
                 ? {}
                 : {

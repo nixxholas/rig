@@ -42,6 +42,16 @@ export const slotActionSchema = Type.Union([
         {
             type: Type.Literal("open-webapp"),
             webapp: Type.String({ description: "Kebab-case name of the webapp to open." }),
+            path: Type.Optional(
+                Type.String({
+                    description: "Optional relative path within the webapp to open.",
+                }),
+            ),
+            query: Type.Optional(
+                Type.Record(Type.String(), Type.String(), {
+                    description: "Optional query parameters forwarded when opening the webapp.",
+                }),
+            ),
         },
         { additionalProperties: false },
     ),

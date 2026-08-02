@@ -1,6 +1,8 @@
 import { posix } from "node:path";
 
-import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import { extract as extractTar } from "tar-stream";
+
+import type { FileSystemContext, FileSystemStat } from "../agent/context/FileSystemContext.js";
 import type { PermissionContext } from "../permissions/index.js";
 import { assertDockerReadPath } from "./assertDockerReadPath.js";
 import { assertDockerWritePath } from "./assertDockerWritePath.js";
@@ -45,7 +47,16 @@ export function createDockerFileSystemContext(
             return result.exitCode === 0;
         },
         async lstat(path) {
-            return this.stat(path);
+            const target = assertDockerReadPath(cwd, path);
+            const result = await runDockerExec(await environment.container(), [
+                "/bin/sh",
+                "-c",
+                'kind=other; if [ -L "$1" ]; then kind=symlink; elif [ -d "$1" ]; then kind=directory; elif [ -f "$1" ]; then kind=file; fi; printf "%s\\n" "$kind" && stat -c "%s" -- "$1" && stat -c "%Y" -- "$1" && stat -c "%a" -- "$1"',
+                "rig",
+                target,
+            ]);
+            if (result.exitCode !== 0) throw dockerCommandError("inspect", target, result.stderr);
+            return parseDockerLstat(result.stdout, target);
         },
         async mkdir(path, options) {
             const target = await assertDockerWritePath(cwd, path, permissions.mode, resolvePath);
@@ -84,6 +95,13 @@ export function createDockerFileSystemContext(
                 options?.maxBytes ?? MAX_FILE_READ_BYTES,
                 MAX_FILE_READ_BYTES,
             );
+            if (options?.noFollow === true) {
+                return readDockerFileWithoutFollowing(
+                    await environment.container(),
+                    target,
+                    maxBytes,
+                );
+            }
             const details = await this.stat(path);
             if (details.size > maxBytes) throw fileReadLimitError(target, maxBytes);
             const result = await runDockerExec(
@@ -163,6 +181,99 @@ export function createDockerFileSystemContext(
                 stdin: content,
             });
         },
+    };
+}
+
+async function readDockerFileWithoutFollowing(
+    container: Awaited<ReturnType<DockerEnvironment["container"]>>,
+    path: string,
+    maxBytes: number,
+): Promise<Buffer> {
+    const archive = await container.getArchive({ path });
+    const destroyArchive = (error: Error) =>
+        (archive as NodeJS.ReadableStream & { destroy?: (error?: Error) => void }).destroy?.(error);
+    const tar = extractTar();
+    return new Promise<Buffer>((resolve, reject) => {
+        let bytes: Buffer | undefined;
+        let settled = false;
+        const fail = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            destroyArchive(error);
+            tar.destroy(error);
+            reject(error);
+        };
+        archive.once("error", (error) => fail(error));
+        tar.once("error", (error) => fail(error));
+        tar.on("entry", (header, stream, next) => {
+            if (
+                bytes !== undefined ||
+                header.type !== "file" ||
+                (header.size ?? Number.POSITIVE_INFINITY) > maxBytes
+            ) {
+                stream.resume();
+                fail(
+                    header.type === "symlink" || header.type === "link"
+                        ? new Error(`Could not read '${path}' because it is a symbolic link.`)
+                        : fileReadLimitError(path, maxBytes),
+                );
+                return;
+            }
+            const chunks: Buffer[] = [];
+            let length = 0;
+            stream.on("data", (chunk: Buffer) => {
+                length += chunk.byteLength;
+                if (length > maxBytes) {
+                    fail(fileReadLimitError(path, maxBytes));
+                    return;
+                }
+                chunks.push(chunk);
+            });
+            stream.once("error", (error) => fail(error));
+            stream.once("end", () => {
+                if (settled) return;
+                bytes = Buffer.concat(chunks, length);
+                next();
+            });
+        });
+        tar.once("finish", () => {
+            if (settled) return;
+            settled = true;
+            if (bytes === undefined) {
+                reject(new Error(`Could not read '${path}' because it is not a regular file.`));
+                return;
+            }
+            resolve(bytes);
+        });
+        archive.pipe(tar);
+    });
+}
+
+function parseDockerLstat(output: Buffer, path: string): FileSystemStat {
+    const [kind, rawSize, rawMtime, rawMode, ...extra] = output
+        .toString("utf8")
+        .trimEnd()
+        .split("\n");
+    const size = Number(rawSize);
+    const mtimeSeconds = Number(rawMtime);
+    const mode = Number.parseInt(rawMode ?? "", 8);
+    if (
+        !["directory", "file", "other", "symlink"].includes(kind ?? "") ||
+        !Number.isSafeInteger(size) ||
+        size < 0 ||
+        !Number.isFinite(mtimeSeconds) ||
+        !Number.isSafeInteger(mode) ||
+        extra.length > 0
+    ) {
+        throw new Error(`Docker returned invalid link metadata for '${path}'.`);
+    }
+    return {
+        isDirectory: kind === "directory",
+        isFile: kind === "file",
+        isSymbolicLink: kind === "symlink",
+        mode,
+        mtimeMs: mtimeSeconds * 1000,
+        size,
     };
 }
 

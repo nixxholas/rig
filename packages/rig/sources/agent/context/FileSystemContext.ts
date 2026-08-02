@@ -10,6 +10,8 @@ export interface FileSystemStat {
 export interface FileSystemReadOptions {
     /** Refuse the read after this many bytes without buffering the rest of the file. */
     maxBytes?: number;
+    /** Refuse a symbolic link at the final path component when opening the file. */
+    noFollow?: boolean;
 }
 
 export interface FileSystemContext {

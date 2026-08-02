@@ -1,4 +1,5 @@
 import type {
+    Attachment,
     ChangeEffortRequest,
     ChangeModelRequest,
     ChangeServiceTierRequest,
@@ -45,6 +46,7 @@ export interface SessionStore {
         scope: SecretAttachmentScope,
         mutationId?: string,
     ): InMemorySession | undefined;
+    attachment(sessionId: string, attachmentId: string): Attachment | undefined;
     changeEffort(sessionId: string, request: ChangeEffortRequest): InMemorySession | undefined;
     changeModel(sessionId: string, request: ChangeModelRequest): InMemorySession | undefined;
     changeServiceTier(

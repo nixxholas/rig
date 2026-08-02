@@ -119,6 +119,7 @@ import { querySessionRestore } from "../persistence/session/querySessionRestore.
 import { querySessionSummaries } from "../persistence/session/querySessionSummaries.js";
 import { querySessionTranscriptEvents } from "../persistence/session/querySessionTranscriptEvents.js";
 import { querySessionTranscriptPage } from "../persistence/session/querySessionTranscriptPage.js";
+import { querySessionAttachment } from "../persistence/session/querySessionAttachment.js";
 import { querySessionTranscriptSince } from "../persistence/session/querySessionTranscriptSince.js";
 import { querySubagentSessionIdsByRoot } from "../persistence/session/querySubagentSessionIdsByRoot.js";
 import { querySubagentSummaries } from "../persistence/session/querySubagentSummaries.js";
@@ -628,6 +629,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             this.#notifySessionAccess(session);
         }
         return session;
+    }
+
+    attachment(sessionId: string, attachmentId: string) {
+        return (
+            this.get(sessionId)?.attachment(attachmentId) ??
+            querySessionAttachment(this.#tx(), sessionId, attachmentId)
+        );
     }
 
     findByAgentId(agentId: string): InMemorySession | undefined {

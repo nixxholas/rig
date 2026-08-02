@@ -87,6 +87,7 @@ export interface ImageBlock {
 export type Attachment =
     | {
           bytes: number;
+          downloadUrl?: string;
           height: number;
           id: string;
           kind: "image";
@@ -98,6 +99,7 @@ export type Attachment =
       }
     | {
           bytes: number;
+          downloadUrl?: string;
           duration: number;
           height: number;
           id: string;
@@ -116,6 +118,7 @@ export type Attachment =
       }
     | {
           bytes: number;
+          downloadUrl?: string;
           duration: number;
           id: string;
           kind: "audio";
@@ -125,6 +128,7 @@ export type Attachment =
       }
     | {
           bytes: number;
+          downloadUrl?: string;
           id: string;
           kind: "file";
           mediaType?: string;
@@ -139,6 +143,17 @@ export type Attachment =
           siteName?: string;
           source: string;
           title: string;
+      }
+    | {
+          description: string;
+          id: string;
+          image: string;
+          kind: "webapp";
+          name: string;
+          path?: string;
+          query?: Record<string, string>;
+          thumbhash: string;
+          webapp: string;
       };
 
 export type ContentBlock = TextBlock | ImageBlock;
@@ -1541,7 +1556,12 @@ export type SlotScope = "everywhere" | "project" | "session" | "workspace";
 
 export type SlotAction =
     | { message: string; type: "send-current-chat" }
-    | { type: "open-webapp"; webapp: string }
+    | {
+          path?: string;
+          query?: Record<string, string>;
+          type: "open-webapp";
+          webapp: string;
+      }
     | { message: string; sessionId: string; type: "send-chat" }
     | { message: string; sessionId: string; type: "draft-chat" }
     | {
@@ -1583,6 +1603,8 @@ export interface Webapp {
     createdAt: number;
     currentVersion: number;
     description: string;
+    iconThumbhash: string;
+    iconUrl: string;
     name: string;
     purpose: string;
     sourceDescription?: string;
