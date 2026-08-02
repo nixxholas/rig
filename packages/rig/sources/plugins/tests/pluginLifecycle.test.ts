@@ -11,6 +11,7 @@ import type { PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { PluginManager } from "../PluginManager.js";
+import { PluginComputeRegistry } from "../PluginComputeRegistry.js";
 import { PluginMcpRegistry, type PluginMcpRegistrationRetirement } from "../PluginMcpRegistry.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS, PluginStartupState } from "../PluginStartupState.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
@@ -141,6 +142,85 @@ describe("plugin registration", () => {
             expect(event.createdAt).toEqual(expect.any(Number));
         }
         expect(new Set(harness.events.map((event) => event.id)).size).toBe(harness.events.length);
+    });
+
+    it("announces compute provider health and disappearance through plugins_changed", async () => {
+        const computeRegistry = new PluginComputeRegistry();
+        const harness = await createHarness({ computeRegistry });
+        await harness.manager.start();
+        await createPluginSource(
+            join(harness.workspace, "cloud"),
+            undefined,
+            "Cloud",
+            undefined,
+            "cloud",
+        );
+        await harness.manager.install({
+            fs: harness.fs,
+            sourceDirectory: join(harness.workspace, "cloud"),
+        });
+        const provider = computeRegistry.createConnection({
+            compute: { name: "cloud" },
+            folder: "cloud",
+            name: "Cloud",
+        });
+        const consumer = computeRegistry.createConnection({
+            folder: "consumer",
+            name: "Consumer",
+        });
+        const registrationId = provider.register();
+        const detach = provider.attach(registrationId, (event) => {
+            if (event.type === "call" && event.operation === "start") {
+                provider.complete(registrationId, event.callId, {
+                    error: {
+                        code: "invalid_response",
+                        message: "Cloud refused the sandbox.",
+                        retryable: false,
+                    },
+                });
+            }
+            return true;
+        });
+        await vi.waitFor(() =>
+            expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
+                health: "healthy",
+                name: "cloud",
+            }),
+        );
+
+        for (let failure = 0; failure < 2; failure += 1) {
+            await expect(
+                computeRegistry.start(
+                    {
+                        provider: "cloud",
+                        workspaceSource: {
+                            path: "/source",
+                            type: "local_directory",
+                        },
+                    },
+                    consumer.generation,
+                ),
+            ).rejects.toMatchObject({ code: "invalid_response" });
+        }
+        await vi.waitFor(() =>
+            expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
+                health: "degraded",
+                name: "cloud",
+            }),
+        );
+
+        detach();
+        await vi.waitFor(() =>
+            expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
+                health: "failed",
+                name: "cloud",
+            }),
+        );
+        provider.close();
+        await vi.waitFor(() =>
+            expect(harness.events.at(-1)?.data.plugins[0]?.compute).toBeUndefined(),
+        );
+        consumer.close();
     });
 
     it("completes install and uninstall when Docker housekeeping fails", async () => {
@@ -493,6 +573,7 @@ function lastPlugins(events: readonly PluginsChangedEvent[]): unknown {
 async function createHarness(
     options: {
         beforeStart?: (plugin: RegisteredPlugin, attempt: number) => Promise<void>;
+        computeRegistry?: PluginComputeRegistry;
         docker?: Dockerode;
         dockerCleanupTimeoutMs?: number;
         startError?: Error | ((plugin: RegisteredPlugin, attempt: number) => Error | undefined);
@@ -544,6 +625,9 @@ async function createHarness(
     const startAttempts = new Map<string, number>();
     const manager = new PluginManager({
         daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
+        ...(options.computeRegistry === undefined
+            ? {}
+            : { computeRegistry: options.computeRegistry }),
         directory: join(root, "plugins"),
         ...(options.docker === undefined ? {} : { docker: options.docker }),
         ...(options.dockerCleanupTimeoutMs === undefined
@@ -643,6 +727,7 @@ async function createPluginSource(
     version?: string,
     name = "Clock",
     docker?: true | { image: string },
+    computeName?: string,
 ): Promise<void> {
     await mkdir(directory, { recursive: true });
     await Promise.all([
@@ -651,6 +736,7 @@ async function createPluginSource(
             `${JSON.stringify(
                 {
                     description: "A small clock.",
+                    ...(computeName === undefined ? {} : { compute: { name: computeName } }),
                     ...(docker === undefined ? {} : { docker }),
                     icon: "icon.png",
                     main: "index.ts",

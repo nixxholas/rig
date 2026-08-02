@@ -1,4 +1,5 @@
 export { createPluginWorkspaceCommandExecutor } from "./createPluginWorkspaceCommandExecutor.js";
+export { happyComputeErrorStatus, normalizeHappyComputeError } from "./computeErrorSemantics.js";
 export {
     emptyHappyComputeResponseSchema,
     execHappyComputeBodySchema,
@@ -6,6 +7,7 @@ export {
     execHappyComputeInputSchema,
     execHappyComputeResponseSchema,
     happyComputeCallCompletionSchema,
+    happyComputeErrorSchema,
     happyComputeErrorCodeSchema,
     happyComputeEventSchema,
     happyComputeExecResultSchema,

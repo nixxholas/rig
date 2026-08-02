@@ -7,6 +7,7 @@ import {
     emptyHappyComputeResponseSchema,
     execHappyComputeInputSchema,
     execHappyComputeResponseSchema,
+    happyComputeErrorSchema,
     type HappyComputeErrorCode,
     happyComputeExecResultSchema,
     listHappyComputeProvidersResponseSchema,
@@ -76,12 +77,19 @@ const requiredSettingSchema = Type.String({ minLength: 1, pattern: "\\S" });
 /** An HTTP error returned by the owning Happy daemon for an otherwise valid SDK request. */
 export class HappyPluginApiError extends Error {
     readonly code: HappyComputeErrorCode | (string & {}) | undefined;
+    readonly retryable: boolean;
     readonly status: number;
 
-    constructor(status: number, message: string, code?: HappyComputeErrorCode | (string & {})) {
+    constructor(
+        status: number,
+        message: string,
+        code?: HappyComputeErrorCode | (string & {}),
+        retryable = false,
+    ) {
         super(message);
         this.name = "HappyPluginApiError";
         this.code = code;
+        this.retryable = retryable;
         this.status = status;
     }
 }
@@ -485,6 +493,17 @@ function requestJson<TSchema_ extends TSchema>(options: {
                         const payload = text.length === 0 ? {} : (JSON.parse(text) as unknown);
                         const status = response.statusCode ?? 500;
                         if (status < 200 || status >= 300) {
+                            if (Value.Check(happyComputeErrorSchema, payload)) {
+                                reject(
+                                    new HappyPluginApiError(
+                                        status,
+                                        payload.message,
+                                        payload.code,
+                                        payload.retryable,
+                                    ),
+                                );
+                                return;
+                            }
                             const message = Value.Check(errorResponseSchema, payload)
                                 ? payload.error
                                 : `Happy rejected the plugin request with HTTP ${String(status)}.`;

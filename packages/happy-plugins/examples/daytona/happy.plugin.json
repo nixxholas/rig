@@ -1,0 +1,11 @@
+{
+    "name": "Daytona Compute",
+    "description": "Creates Daytona cloud sandboxes, uploads a source folder, and provides bounded command and file access.",
+    "version": "1.0.0",
+    "main": "index.ts",
+    "icon": "icon.png",
+    "interceptDomains": ["app.daytona.io", "proxy.app.daytona.io"],
+    "compute": {
+        "name": "daytona"
+    }
+}

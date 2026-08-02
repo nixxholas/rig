@@ -1,5 +1,6 @@
 export { createHappyPluginClient, HappyPluginApiError } from "./createHappyPluginClient.js";
 export { createHappyPluginClient as connectHappy } from "./createHappyPluginClient.js";
+export { HappyComputeProviderError } from "./HappyComputeProviderError.js";
 export {
     HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
     HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
@@ -9,12 +10,15 @@ export {
 export type {
     ExecHappyComputeHandlerInput,
     ExecHappyComputeInput,
+    HappyComputeError,
     HappyComputeErrorCode,
     HappyComputeExecResult,
     HappyComputeHandlerContext,
     HappyComputeInstance,
     HappyComputeProvider,
+    HappyComputeProviderContribution,
     HappyComputeProviderHandlers,
+    HappyComputeProviderHealth,
     HappyComputeProviderManifest,
     HappyComputeProviderName,
     HappyComputeRegistration,

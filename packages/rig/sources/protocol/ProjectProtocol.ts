@@ -1,4 +1,4 @@
-import type { HappyComputeProviderManifest, HappyPluginAppContribution } from "happy-plugins";
+import type { HappyComputeProviderContribution, HappyPluginAppContribution } from "happy-plugins";
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { EventId } from "./EventId.js";
@@ -387,7 +387,7 @@ export interface PluginSummary {
     /** Running local MCP Apps, ordered exactly as a navigation host should present them. */
     apps: readonly HappyPluginAppContribution[];
     /** The live compute contribution from this plugin process, when attached. */
-    compute?: HappyComputeProviderManifest;
+    compute?: HappyComputeProviderContribution;
     /** The folder the plugin writes to, which the user can open. */
     dataDirectory: string;
     description: string;

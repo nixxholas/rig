@@ -425,7 +425,22 @@ await happy.compute.register(handlers);
 await happy.ready("Ready.");
 ```
 
-Consumers use the same namespace:
+Handlers can classify expected failures without making Rig treat every exception as provider
+misbehavior:
+
+```ts
+import { HappyComputeProviderError } from "happy-plugins";
+
+throw new HappyComputeProviderError("invalid_request", "The requested file does not exist.");
+```
+
+All nine compute error codes remain valid provider completions. Rig preserves the code and derives
+`retryable` itself. `invalid_request`, `instance_not_found`, `provider_not_found`, and
+`capacity_exhausted` are consumer-attributable and do not affect provider health. Untyped handler
+exceptions become provider-attributable `invalid_response` failures.
+
+Consumers use the same namespace. Provider catalog entries include
+`health: "healthy" | "degraded" | "failed"`:
 
 ```ts
 await happy.compute.list();
@@ -460,18 +475,31 @@ changing instance operations.
 Every operation is a blocking, TypeBox-validated socket round trip with a deadline. Reads and
 writes are capped at 1 MiB, command timeout is at most five minutes, and stdout and stderr are each
 capped at 1 MiB. Exec results report `timedOut`, `stdoutTruncated`, and `stderrTruncated`
-independently. A missed operation deadline terminally fails only that instance; sibling instances
-and the provider registration remain usable. Provider stream loss, plugin stop, or restart retires
-the whole provider generation and makes all of its instance IDs stale.
+independently.
+
+Each provider generation moves through `registered -> healthy -> degraded -> failed`. Deadline,
+transport, malformed response, and typed provider-side failures count consecutively: two degrade
+the provider and three fail it terminally. A success resets the count and recovers a degraded
+provider. Consumer-attributable errors reported either before dispatch or by a provider do not
+count. Stream loss fails the generation immediately, rejects pending calls with `provider_lost`,
+and terminally fails all its instances. New starts then return `provider_unhealthy` until the
+plugin restarts with a new generation.
 
 Each instance is leased to the consumer plugin process generation that started it. When that
-consumer generation ends, Rig releases its instances and asks the provider to stop them. Calling
-`stop` also releases a failed instance and makes a best-effort provider cleanup call, so failed
-instances cannot permanently consume the daemon's bounded instance budget.
+consumer generation ends, Rig releases its instances and asks the provider to stop them. Provider
+notification is always best-effort: `stop` releases the public ID even if the handler throws, times
+out, or is gone. Concurrent consumer stop, reaping, and shutdown share one stopping transition and
+do not double-notify. Rig also reaps instances after two hours of total lifetime or 30 minutes
+without a call touching them, and best-effort-stops live instances during daemon shutdown.
 
-The working example is
+The local reference is
 [`examples/local-bash`](examples/local-bash): it copies the source below the plugin's writable
-folder, uses direct bounded file I/O, runs `/bin/bash`, and removes the instance on stop.
+folder, uses direct bounded file I/O, runs `/bin/bash`, and implements idempotent provider stop.
+[`examples/daytona`](examples/daytona) uses Daytona's REST API directly: it creates an
+`ubuntu:24.04` sandbox, uploads at most 32 MiB of source files while skipping individual files over
+1 MiB, bounds command and file output, and treats delete 404 as success. It reads
+`DAYTONA_API_KEY` at startup. A missing key does not prevent plugin readiness; `start()` reports a
+clear configuration error until the key is set.
 
 Compute is not yet connected to agent session execution. Plugins can provide and consume computes
 today; choosing a compute for an agent session is a later product step.
@@ -917,11 +945,22 @@ try {
     });
 } catch (error) {
     if (error instanceof HappyPluginApiError) {
-        console.error(`Happy returned HTTP ${error.status}: ${error.message}`);
+        console.error(
+            `Happy returned HTTP ${error.status}: ${error.message} (${String(error.code)})`,
+        );
+        if (error.retryable) {
+            // Retry later with normal backoff.
+        }
     }
     throw error;
 }
 ```
+
+Compute errors always set `code` and `retryable` and use one shape across provider completions and
+daemon HTTP responses. Codes are `provider_not_found`, `provider_unhealthy`, `provider_lost`,
+`instance_not_found`, `instance_failed`, `deadline_exceeded`, `capacity_exhausted`,
+`invalid_response`, and `invalid_request`. `retryable` is true only for `capacity_exhausted` and a
+`deadline_exceeded` error produced while the provider is still healthy.
 
 ## Testing outside Happy
 

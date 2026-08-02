@@ -4,7 +4,11 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createLocalBashComputeProvider } from "../examples/local-bash/localBashCompute.ts";
-import { createHappyPluginTestHost, type HappyPluginTestHost } from "../sources/index.js";
+import {
+    createHappyPluginTestHost,
+    HappyComputeProviderError,
+    type HappyPluginTestHost,
+} from "../sources/index.js";
 
 const hosts: HappyPluginTestHost[] = [];
 
@@ -31,6 +35,7 @@ describe("Happy compute lifecycle", () => {
 
         await expect(host.client.compute.list()).resolves.toEqual([
             {
+                health: "healthy",
                 name: "local-bash",
                 pluginFolder: "test-plugin",
                 pluginName: "Test Plugin",
@@ -77,6 +82,121 @@ describe("Happy compute lifecycle", () => {
 
         await registration.close();
         await localBash.close();
+    });
+
+    it("keeps the local-bash provider stop handler idempotent", async () => {
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        hosts.push(host);
+        const source = join(host.rootDirectory, "source");
+        const instanceParent = join(host.environment.HAPPY_PLUGIN_DIRECTORY, "instances");
+        await mkdir(source);
+        await writeFile(join(source, "message.txt"), "hello");
+        const localBash = createLocalBashComputeProvider(instanceParent);
+        const context = { signal: new AbortController().signal };
+        const instanceId = await localBash.handlers.start(
+            { workspaceSource: { path: source, type: "local_directory" } },
+            context,
+        );
+
+        await expect(
+            Promise.resolve(localBash.handlers.read({ instanceId, path: "missing.txt" }, context)),
+        ).rejects.toMatchObject({
+            code: "invalid_request",
+            message: expect.stringContaining("requested local Bash compute file is unavailable"),
+        });
+        await localBash.handlers.stop({ instanceId }, context);
+        await expect(
+            Promise.resolve(localBash.handlers.stop({ instanceId }, context)),
+        ).resolves.toBeUndefined();
+        await expect(
+            Promise.resolve(localBash.handlers.read({ instanceId, path: "message.txt" }, context)),
+        ).rejects.toMatchObject({
+            code: "instance_not_found",
+            message: "The local Bash compute instance was not found.",
+        });
+        await localBash.close();
+    });
+
+    it("matches daemon status and retryability for typed provider errors", async () => {
+        const host = await createHappyPluginTestHost(
+            { computeProvider: { name: "test-compute" } },
+            { temporaryDirectory: process.cwd() },
+        );
+        hosts.push(host);
+        const registration = await host.client.compute.register({
+            exec: () => ({
+                exitCode: 0,
+                stderr: "",
+                stderrTruncated: false,
+                stdout: "",
+                stdoutTruncated: false,
+                timedOut: false,
+            }),
+            read: ({ path }) => {
+                switch (path) {
+                    case "invalid":
+                        throw new HappyComputeProviderError("invalid_request", "Invalid path.");
+                    case "missing":
+                        throw new HappyComputeProviderError(
+                            "instance_not_found",
+                            "Missing instance.",
+                        );
+                    case "capacity":
+                        throw new HappyComputeProviderError("capacity_exhausted", "No capacity.");
+                    case "unhealthy":
+                        throw new HappyComputeProviderError(
+                            "provider_unhealthy",
+                            "Provider unhealthy.",
+                        );
+                    case "deadline":
+                        throw new HappyComputeProviderError(
+                            "deadline_exceeded",
+                            "Provider deadline.",
+                        );
+                    default:
+                        return Buffer.alloc(0);
+                }
+            },
+            start: () => "provider-instance",
+            stop: () => undefined,
+            write: () => undefined,
+        });
+        await host.compute.waitForProvider();
+        const instance = await host.client.compute.start({
+            provider: "test-compute",
+            workspaceSource: { path: host.rootDirectory, type: "local_directory" },
+        });
+        const read = (path: string) =>
+            host.client.compute.files.read({ instanceId: instance.instanceId, path });
+
+        await expect(read("invalid")).rejects.toMatchObject({
+            code: "invalid_request",
+            retryable: false,
+            status: 400,
+        });
+        await expect(read("missing")).rejects.toMatchObject({
+            code: "instance_not_found",
+            retryable: false,
+            status: 404,
+        });
+        await expect(read("capacity")).rejects.toMatchObject({
+            code: "capacity_exhausted",
+            retryable: true,
+            status: 429,
+        });
+        await expect(read("unhealthy")).rejects.toMatchObject({
+            code: "provider_unhealthy",
+            retryable: false,
+            status: 503,
+        });
+        await expect(read("deadline")).rejects.toMatchObject({
+            code: "deadline_exceeded",
+            retryable: true,
+            status: 504,
+        });
+
+        await host.client.compute.stop({ instanceId: instance.instanceId });
+        await registration.close();
     });
 
     it("releases a failed instance when it is stopped", async () => {

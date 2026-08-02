@@ -11,6 +11,7 @@ import {
     type HappyComputeProviderHandlers,
     type HappyComputeRegistration,
 } from "./computeTypes.js";
+import { HappyComputeProviderError } from "./HappyComputeProviderError.js";
 import { startHappyPluginEventRegistration } from "./startHappyPluginEventRegistration.js";
 import type { HappyMcpTransport } from "./startHappyMcpServer.js";
 
@@ -178,9 +179,23 @@ async function executeComputeCall(
         return Value.Decode(happyComputeCallCompletionSchema, completion);
     } catch (error) {
         return Value.Decode(happyComputeCallCompletionSchema, {
-            error: errorToMessage(error),
+            error: handlerErrorToCompletion(error),
         });
     }
+}
+
+function handlerErrorToCompletion(error: unknown) {
+    if (!(error instanceof HappyComputeProviderError)) {
+        return {
+            code: "invalid_response" as const,
+            message: errorToMessage(error),
+            retryable: false as const,
+        };
+    }
+    if (error.code === "capacity_exhausted") {
+        return { code: error.code, message: error.message, retryable: true as const };
+    }
+    return { code: error.code, message: error.message, retryable: false as const };
 }
 
 function truncateUtf8(value: ProviderExecResult["stdout"]): {

@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { lstat, realpath } from "node:fs/promises";
 import { basename, extname, isAbsolute } from "node:path";
 
-import type { Static, TSchema } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type {
     AgentMessageDelivery,
@@ -46,7 +46,7 @@ import {
     classifyPluginApiRequestError,
     createPluginWorkspaceCommandExecutor,
     execHappyComputeBodySchema,
-    happyComputeCallCompletionSchema,
+    happyComputeErrorStatus,
     PluginApiRequestError,
     PluginApiRequestTooLargeError,
     readHappyComputeBodySchema,
@@ -117,12 +117,31 @@ export function createPluginApiServer(options: CreatePluginApiServerOptions): Se
         void handleRequest(request, response, options, executeWorkspaceCommand).catch(
             (error: unknown) => {
                 if (isDatabaseFailure(error)) throw error;
+                if ((request.url ?? "").startsWith("/compute/")) {
+                    const computeError =
+                        error instanceof PluginComputeError
+                            ? error
+                            : new PluginComputeError({
+                                  code:
+                                      error instanceof PluginApiRequestError
+                                          ? "invalid_request"
+                                          : "invalid_response",
+                                  message: errorToMessage(error),
+                                  retryable: false,
+                              });
+                    sendJson(response, happyComputeErrorStatus(computeError.code), {
+                        code: computeError.code,
+                        message: computeError.message,
+                        retryable: computeError.retryable,
+                    });
+                    return;
+                }
                 sendJson(
                     response,
                     error instanceof PluginHookConflictError
                         ? 409
                         : error instanceof PluginComputeError
-                          ? computeErrorStatus(error)
+                          ? happyComputeErrorStatus(error.code)
                           : classifyPluginApiRequestError(error),
                     {
                         ...(error instanceof PluginComputeError ? { code: error.code } : {}),
@@ -344,6 +363,8 @@ async function handleRequest(
         const compute = requireCompute(options);
         const detach = compute.attach(parts[2], (event) => {
             if (response.destroyed || response.writableEnded) return false;
+            // Node accepting the write into its bounded socket buffer still means the event was
+            // delivered. Stream closure, rather than temporary backpressure, retires a provider.
             response.write(`${JSON.stringify(event)}\n`);
             return true;
         });
@@ -366,7 +387,7 @@ async function handleRequest(
     ) {
         const completion = await readJson(
             request,
-            happyComputeCallCompletionSchema,
+            Type.Unknown(),
             "Compute provider result",
             MAX_COMPUTE_COMPLETION_REQUEST_BYTES,
         );
@@ -970,23 +991,6 @@ async function canonicalizeComputeSource(
         throw new PluginApiRequestError("The local compute source directory is unavailable.");
     }
     return { path, type: "local_directory" };
-}
-
-function computeErrorStatus(error: PluginComputeError): 404 | 409 | 422 | 504 {
-    switch (error.code) {
-        case "provider_not_found":
-        case "instance_not_found":
-            return 404;
-        case "deadline_missed":
-            return 504;
-        case "operation_failed":
-        case "provider_failed":
-            return 422;
-        case "instance_failed":
-        case "registration_conflict":
-        case "stale_generation":
-            return 409;
-    }
 }
 
 function requirePluginDataDirectory(options: CreatePluginApiServerOptions): string {

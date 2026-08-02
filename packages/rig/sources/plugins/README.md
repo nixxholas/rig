@@ -230,13 +230,36 @@ declared at startup. That retirement publishes the changed plugin catalog immedi
 `PluginComputeRegistry` owns manifest-declared filesystem-and-command compute providers. A plugin
 declares one stable provider name and attaches one generation-scoped NDJSON call stream with
 `happy.compute.register`. Other plugins list and drive live providers through the same authenticated
-socket. Each operation is a blocking TypeBox-validated round trip with a deadline; a missed
-deadline terminally fails only the instance whose operation missed while leaving sibling instances
-and the provider registration usable. Stream loss, process exit, replacement, or restart retires
-the provider generation and fails all instances backed by it. Instances are leased to the consumer
-plugin process generation that started them; consumer retirement releases those IDs and sends
-best-effort stop calls. Explicit stop likewise works for failed instances. Failed instance records
-have bounded retention so precise terminal errors do not become an unbounded store.
+socket. Each provider generation has one explicit `registered -> healthy -> degraded -> failed`
+state machine. A deadline miss, transport failure, malformed/TypeBox-invalid completion, or typed
+provider-side failure increments its consecutive-failure count. Two consecutive failures degrade
+it; three fail it terminally. A successful call resets the count and restores a degraded provider
+to healthy. Provider-returned `invalid_request`, `instance_not_found`, `provider_not_found`, and
+`capacity_exhausted` errors are consumer-attributable and never affect provider health. The daemon
+preserves provider error codes but derives retryability from the code and post-transition health;
+it never trusts the provider's retryable field.
+
+Stream loss fails a generation immediately and rejects all pending calls with `provider_lost`
+instead of waiting for their deadlines. Failure makes every backed instance terminally failed and
+rejects new starts with `provider_unhealthy`; only a new plugin process generation can recover.
+Provider appearance, health changes, and disappearance invalidate the plugin catalog and publish
+the same whole-catalog `plugins_changed` event used for plugin lifecycle changes. Both
+`GET /compute/providers` and the `/plugins` compute contribution include `healthy`, `degraded`, or
+`failed` health.
+
+Instances are leased to the consumer plugin process generation that started them. Stop first moves
+an instance into one shared stopping state, so explicit stop, consumer cleanup, reaping, and daemon
+shutdown join one notification attempt. The provider's stop call is best-effort and deadline-bound;
+the registry release is unconditional even when that call throws, times out, or cannot be sent.
+One registry reaper enforces a two-hour maximum lifetime and 30-minute idle timeout, logs the expiry
+reason, and avoids per-instance timers. Daemon shutdown drains best-effort stops while provider
+streams are still available.
+
+Every compute failure that crosses the socket uses the TypeBox-validated
+`{ code, message, retryable }` shape. The public codes are `provider_not_found`,
+`provider_unhealthy`, `provider_lost`, `instance_not_found`, `instance_failed`,
+`deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and `invalid_request`. Only capacity
+exhaustion and a deadline exceeded while the provider remains healthy are retryable.
 
 The first `workspaceSource` form is a canonical absolute local directory path. The daemon verifies
 and canonicalizes it, and the provider owns materialization by copy or checkout. This deliberately

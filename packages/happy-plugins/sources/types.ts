@@ -12,7 +12,10 @@ import type {
     StopHappyComputeInput,
     WriteHappyComputeInput,
 } from "./computeTypes.js";
-import { happyComputeProviderManifestSchema } from "./computeTypes.js";
+import {
+    happyComputeProviderContributionSchema,
+    happyComputeProviderManifestSchema,
+} from "./computeTypes.js";
 
 const exact = { additionalProperties: false } as const;
 const nonEmptyText = Type.String({ minLength: 1 });
@@ -946,7 +949,7 @@ export type HappyPluginStatus = Static<typeof happyPluginStatusSchema>;
 
 export const happyPluginSchema = Type.Object(
     {
-        compute: Type.Optional(happyComputeProviderManifestSchema),
+        compute: Type.Optional(happyComputeProviderContributionSchema),
         folder: Type.String({ maxLength: 255, minLength: 1 }),
         isSelf: Type.Boolean(),
         name: nonEmptyText,

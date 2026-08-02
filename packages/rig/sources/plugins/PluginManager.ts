@@ -138,6 +138,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     ) => Promise<RunningPlugin>;
     readonly #store: SessionStore;
     readonly #startupTimeoutMs: number;
+    readonly #unsubscribeCompute: () => void;
     #statusPublication: StatusPublicationState = { status: "idle" };
     #closed = false;
     #publication = Promise.resolve();
@@ -148,8 +149,16 @@ export class PluginManager implements ManagedNetworkInterceptor {
             throw new Error("PluginManager requires the shared MCP registry.");
         }
         this.#appRegistry = options.appRegistry ?? new PluginAppRegistry(options.mcpRegistry!);
-        this.#computeRegistry = options.computeRegistry ?? new PluginComputeRegistry();
         this.#daemonLog = options.daemonLog;
+        this.#computeRegistry =
+            options.computeRegistry ??
+            new PluginComputeRegistry({
+                log: (level, event, message, details) =>
+                    this.#daemonLog.record(level, event, message, details),
+            });
+        this.#unsubscribeCompute = this.#computeRegistry.subscribe(() => {
+            if (this.#started) void this.#publishChanged();
+        });
         this.#defaultDocker = options.defaultDocker;
         this.#docker = options.docker ?? createPluginDockerClient(options.defaultDocker);
         this.#dockerCleanupTimeoutMs = options.dockerCleanupTimeoutMs;
@@ -511,7 +520,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 return {
                     apps:
                         state.status === "running" ? this.#appRegistry.list(plugin.folderName) : [],
-                    ...(compute === undefined ? {} : { compute: { name: compute.name } }),
+                    ...(compute === undefined
+                        ? {}
+                        : { compute: { health: compute.health, name: compute.name } }),
                     dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
                     description: plugin.manifest.description,
                     directory: plugin.directory,
@@ -646,6 +657,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
         this.#statusPublication = { status: "idle" };
         this.#startupGenerations.clear();
+        this.#unsubscribeCompute();
+        await this.#computeRegistry.close();
         await Promise.all(
             [...this.#running.values()].map((plugin) =>
                 plugin.close().catch((error: unknown) => {
@@ -659,7 +672,6 @@ export class PluginManager implements ManagedNetworkInterceptor {
             ),
         );
         this.#running.clear();
-        this.#computeRegistry.close();
         this.#networkRegistry.close();
     }
 

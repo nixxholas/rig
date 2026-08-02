@@ -8,6 +8,7 @@ import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { createHappyPluginClient } from "./createHappyPluginClient.js";
+import { happyComputeErrorStatus, normalizeHappyComputeError } from "./computeErrorSemantics.js";
 import {
     HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
     execHappyComputeBodySchema,
@@ -16,6 +17,7 @@ import {
     startHappyComputeBodySchema,
     writeHappyComputeBodySchema,
     type HappyComputeCallCompletion,
+    type HappyComputeError,
     type HappyComputeEvent,
 } from "./computeTypes.js";
 import { normalizeHappyMcpName } from "./createHappyMcpToolName.js";
@@ -345,6 +347,7 @@ export async function createHappyPluginTestHost(
                             ? []
                             : [
                                   {
+                                      health: "healthy",
                                       name: declaredCompute.name,
                                       pluginFolder: "test-plugin",
                                       pluginName: "Test Plugin",
@@ -361,13 +364,17 @@ export async function createHappyPluginTestHost(
                 }
                 if (declaredCompute === undefined) {
                     send(response, 400, {
-                        error: "The test host has no manifest-declared compute provider.",
+                        code: "invalid_request",
+                        message: "The test host has no manifest-declared compute provider.",
+                        retryable: false,
                     });
                     return;
                 }
                 if (computeRegistration !== undefined) {
-                    send(response, 409, {
-                        error: "The test compute provider is already registered.",
+                    send(response, 400, {
+                        code: "invalid_request",
+                        message: "The test compute provider is already registered.",
+                        retryable: false,
                     });
                     return;
                 }
@@ -421,7 +428,11 @@ export async function createHappyPluginTestHost(
             ) {
                 const call = computeCalls.get(parts[4]);
                 if (call === undefined) {
-                    send(response, 409, { error: "That compute call is no longer active." });
+                    send(response, 400, {
+                        code: "invalid_request",
+                        message: "That compute call is no longer active.",
+                        retryable: false,
+                    });
                     return;
                 }
                 const completion = decodeRequest(
@@ -430,8 +441,10 @@ export async function createHappyPluginTestHost(
                     "Compute provider result",
                 );
                 if ("operation" in completion && completion.operation !== call.operation) {
-                    send(response, 409, {
-                        error: `The provider completed a ${call.operation} compute call with a ${completion.operation} result.`,
+                    send(response, 502, {
+                        code: "invalid_response",
+                        message: `The provider completed a ${call.operation} compute call with a ${completion.operation} result.`,
+                        retryable: false,
                     });
                     return;
                 }
@@ -471,20 +484,26 @@ export async function createHappyPluginTestHost(
                     computeRegistration?.response === undefined
                 ) {
                     send(response, 404, {
-                        error: `No running compute provider is named "${input.provider}".`,
+                        code: "provider_not_found",
+                        message: `No running compute provider is named "${input.provider}".`,
+                        retryable: false,
                     });
                     return;
                 }
                 if (!isAbsolute(input.workspaceSource.path)) {
                     send(response, 400, {
-                        error: "A local compute source must be an absolute directory path.",
+                        code: "invalid_request",
+                        message: "A local compute source must be an absolute directory path.",
+                        retryable: false,
                     });
                     return;
                 }
                 const sourcePath = await realpath(input.workspaceSource.path);
                 if (!(await lstat(sourcePath)).isDirectory()) {
                     send(response, 400, {
-                        error: "A local compute source must be a directory.",
+                        code: "invalid_request",
+                        message: "A local compute source must be a directory.",
+                        retryable: false,
                     });
                     return;
                 }
@@ -497,7 +516,10 @@ export async function createHappyPluginTestHost(
                         workspaceSource: { path: sourcePath, type: "local_directory" },
                     },
                 );
-                if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                if ("error" in completion) {
+                    sendTestComputeError(response, completion.error);
+                    return;
+                }
                 if (completion.operation !== "start") {
                     throw new PluginApiRequestError(
                         "The test compute provider returned the wrong operation result.",
@@ -521,7 +543,11 @@ export async function createHappyPluginTestHost(
             ) {
                 const instance = computeInstances.get(parts[2]);
                 if (instance === undefined) {
-                    send(response, 404, { error: "That compute instance was not found." });
+                    send(response, 404, {
+                        code: "instance_not_found",
+                        message: "That compute instance was not found.",
+                        retryable: false,
+                    });
                     return;
                 }
                 const registration = computeRegistration;
@@ -531,18 +557,12 @@ export async function createHappyPluginTestHost(
                             registration?.response !== undefined &&
                             registration.id === instance.registrationId
                         ) {
-                            const completion = await invokeTestCompute(
-                                registration,
-                                computeCalls,
-                                nextComputeCallId,
-                                {
-                                    instanceId: instance.providerInstanceId,
-                                    operation: "stop",
-                                },
-                            );
-                            if ("error" in completion) {
-                                throw new PluginApiRequestError(completion.error);
-                            }
+                            await invokeTestCompute(registration, computeCalls, nextComputeCallId, {
+                                instanceId: instance.providerInstanceId,
+                                operation: "stop",
+                            }).catch(() => undefined);
+                            // Provider notification is best-effort. The registry release below is
+                            // unconditional even when the handler reports an error.
                         }
                     } finally {
                         computeInstances.delete(instance.id);
@@ -551,7 +571,11 @@ export async function createHappyPluginTestHost(
                     return;
                 }
                 if (instance.failed !== undefined) {
-                    send(response, 409, { error: instance.failed });
+                    send(response, 409, {
+                        code: "instance_failed",
+                        message: instance.failed,
+                        retryable: false,
+                    });
                     return;
                 }
                 if (
@@ -559,7 +583,11 @@ export async function createHappyPluginTestHost(
                     registration.id !== instance.registrationId
                 ) {
                     instance.failed = "That compute instance belongs to a stale generation.";
-                    send(response, 409, { error: instance.failed });
+                    send(response, 409, {
+                        code: "instance_failed",
+                        message: instance.failed,
+                        retryable: false,
+                    });
                     return;
                 }
                 if (parts.length === 5 && parts[3] === "files" && parts[4] === "read") {
@@ -578,7 +606,10 @@ export async function createHappyPluginTestHost(
                             path: input.path,
                         },
                     );
-                    if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                    if ("error" in completion) {
+                        sendTestComputeError(response, completion.error);
+                        return;
+                    }
                     send(response, 200, completion.result);
                     return;
                 }
@@ -599,7 +630,10 @@ export async function createHappyPluginTestHost(
                             path: input.path,
                         },
                     );
-                    if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                    if ("error" in completion) {
+                        sendTestComputeError(response, completion.error);
+                        return;
+                    }
                     send(response, 200, {});
                     return;
                 }
@@ -621,7 +655,10 @@ export async function createHappyPluginTestHost(
                         },
                         (input.timeoutMs ?? HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS) + 2_000,
                     );
-                    if ("error" in completion) throw new PluginApiRequestError(completion.error);
+                    if ("error" in completion) {
+                        sendTestComputeError(response, completion.error);
+                        return;
+                    }
                     send(response, 200, completion.result);
                     return;
                 }
@@ -1076,6 +1113,14 @@ export async function createHappyPluginTestHost(
             }
             send(response, 404, { error: "This fake Happy host action does not exist." });
         })().catch((error: unknown) => {
+            if ((request.url ?? "").startsWith("/compute/")) {
+                send(response, 400, {
+                    code: "invalid_request",
+                    message: error instanceof Error ? error.message : String(error),
+                    retryable: false,
+                });
+                return;
+            }
             send(response, classifyPluginApiRequestError(error), {
                 error: error instanceof Error ? error.message : String(error),
             });
@@ -1566,6 +1611,11 @@ function send(response: ServerResponse, status: number, value: unknown): void {
         "content-type": "application/json",
     });
     response.end(body);
+}
+
+function sendTestComputeError(response: ServerResponse, error: HappyComputeError): void {
+    const normalized = normalizeHappyComputeError(error, "healthy");
+    send(response, happyComputeErrorStatus(normalized.code), normalized);
 }
 
 function toolVisibility(

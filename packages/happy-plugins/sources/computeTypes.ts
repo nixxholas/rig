@@ -22,8 +22,27 @@ export const happyComputeProviderManifestSchema = Type.Object(
 );
 export type HappyComputeProviderManifest = Static<typeof happyComputeProviderManifestSchema>;
 
+export const happyComputeProviderHealthSchema = Type.Union([
+    Type.Literal("healthy"),
+    Type.Literal("degraded"),
+    Type.Literal("failed"),
+]);
+export type HappyComputeProviderHealth = Static<typeof happyComputeProviderHealthSchema>;
+
+export const happyComputeProviderContributionSchema = Type.Object(
+    {
+        health: happyComputeProviderHealthSchema,
+        name: happyComputeProviderNameSchema,
+    },
+    exact,
+);
+export type HappyComputeProviderContribution = Static<
+    typeof happyComputeProviderContributionSchema
+>;
+
 export const happyComputeProviderSchema = Type.Object(
     {
+        health: happyComputeProviderHealthSchema,
         name: happyComputeProviderNameSchema,
         pluginFolder: Type.String({ maxLength: 255, minLength: 1 }),
         pluginName: nonEmptyText,
@@ -231,8 +250,58 @@ export const happyComputeEventSchema = Type.Union([
 ]);
 export type HappyComputeEvent = Static<typeof happyComputeEventSchema>;
 
+export const happyComputeErrorCodeSchema = Type.Union([
+    Type.Literal("capacity_exhausted"),
+    Type.Literal("deadline_exceeded"),
+    Type.Literal("invalid_request"),
+    Type.Literal("invalid_response"),
+    Type.Literal("instance_failed"),
+    Type.Literal("instance_not_found"),
+    Type.Literal("provider_lost"),
+    Type.Literal("provider_not_found"),
+    Type.Literal("provider_unhealthy"),
+]);
+export type HappyComputeErrorCode = Static<typeof happyComputeErrorCodeSchema>;
+
+const nonRetryableComputeErrorCodeSchema = Type.Union([
+    Type.Literal("invalid_request"),
+    Type.Literal("invalid_response"),
+    Type.Literal("instance_failed"),
+    Type.Literal("instance_not_found"),
+    Type.Literal("provider_lost"),
+    Type.Literal("provider_not_found"),
+    Type.Literal("provider_unhealthy"),
+]);
+export const happyComputeErrorSchema = Type.Union([
+    Type.Object(
+        {
+            code: Type.Literal("capacity_exhausted"),
+            message: nonEmptyText,
+            retryable: Type.Literal(true),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            code: Type.Literal("deadline_exceeded"),
+            message: nonEmptyText,
+            retryable: Type.Boolean(),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            code: nonRetryableComputeErrorCodeSchema,
+            message: nonEmptyText,
+            retryable: Type.Literal(false),
+        },
+        exact,
+    ),
+]);
+export type HappyComputeError = Static<typeof happyComputeErrorSchema>;
+
 export const happyComputeCallCompletionSchema = Type.Union([
-    Type.Object({ error: nonEmptyText }, exact),
+    Type.Object({ error: happyComputeErrorSchema }, exact),
     Type.Object(
         {
             operation: Type.Literal("start"),
@@ -272,18 +341,6 @@ export const registerHappyComputeProviderResponseSchema = Type.Object(
     { registrationId: nonEmptyText },
     exact,
 );
-
-export const happyComputeErrorCodeSchema = Type.Union([
-    Type.Literal("deadline_missed"),
-    Type.Literal("instance_failed"),
-    Type.Literal("instance_not_found"),
-    Type.Literal("operation_failed"),
-    Type.Literal("provider_failed"),
-    Type.Literal("provider_not_found"),
-    Type.Literal("registration_conflict"),
-    Type.Literal("stale_generation"),
-]);
-export type HappyComputeErrorCode = Static<typeof happyComputeErrorCodeSchema>;
 
 export interface HappyComputeHandlerContext {
     /** Aborted when the caller deadline expires or the provider generation is retired. */

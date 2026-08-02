@@ -3,11 +3,18 @@ import { randomUUID } from "node:crypto";
 import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
+import { Type } from "@sinclair/typebox";
+import { Value } from "@sinclair/typebox/value";
 import {
     HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES,
     HAPPY_COMPUTE_MAX_FILE_BYTES,
+    HappyComputeProviderError,
     type HappyComputeProviderHandlers,
 } from "happy-plugins";
+
+const missingFileSystemPathSchema = Type.Object({
+    code: Type.Union([Type.Literal("ENOENT"), Type.Literal("ENOTDIR")]),
+});
 
 type LocalBashInstance = {
     root: string;
@@ -26,21 +33,44 @@ export function createLocalBashComputeProvider(
     let closed = false;
     const requireInstance = (instanceId: string) => {
         const instance = instances.get(instanceId);
-        if (instance === undefined)
-            throw new Error("The local Bash compute instance was not found.");
+        if (instance === undefined) {
+            throw new HappyComputeProviderError(
+                "instance_not_found",
+                "The local Bash compute instance was not found.",
+            );
+        }
         return instance;
     };
 
     return {
         handlers: {
             async start({ workspaceSource: source }) {
-                if (closed) throw new Error("The local Bash compute provider is stopping.");
-                if (source.type !== "local_directory") {
-                    throw new Error("Local Bash compute requires a local directory source.");
+                if (closed) {
+                    throw new HappyComputeProviderError(
+                        "provider_unhealthy",
+                        "The local Bash compute provider is stopping.",
+                    );
                 }
-                const sourcePath = await realpath(source.path);
+                if (source.type !== "local_directory") {
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
+                        "Local Bash compute requires a local directory source.",
+                    );
+                }
+                let sourcePath: string;
+                try {
+                    sourcePath = await realpath(source.path);
+                } catch {
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
+                        "The local Bash compute source directory is unavailable.",
+                    );
+                }
                 if (!(await lstat(sourcePath)).isDirectory()) {
-                    throw new Error("The local Bash compute source must be a directory.");
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
+                        "The local Bash compute source must be a directory.",
+                    );
                 }
                 await mkdir(instanceParent, { recursive: true });
                 const root = await mkdtemp(join(instanceParent, "local-bash-"));
@@ -62,17 +92,42 @@ export function createLocalBashComputeProvider(
             },
             async read({ instanceId, path }) {
                 const instance = requireInstance(instanceId);
-                const target = await resolveReadablePath(instance.workspace, path);
-                const info = await lstat(target);
-                if (!info.isFile()) throw new Error("The local Bash compute path is not a file.");
+                let target: string;
+                try {
+                    target = await resolveReadablePath(instance.workspace, path);
+                } catch (error) {
+                    throwIfMissingLocalBashPath(error);
+                    throw error;
+                }
+                let info;
+                try {
+                    info = await lstat(target);
+                } catch (error) {
+                    throwIfMissingLocalBashPath(error);
+                    throw error;
+                }
+                if (!info.isFile()) {
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
+                        "The local Bash compute path is not a file.",
+                    );
+                }
                 if (info.size > HAPPY_COMPUTE_MAX_FILE_BYTES) {
-                    throw new Error(
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
                         `Compute file reads cannot exceed ${String(HAPPY_COMPUTE_MAX_FILE_BYTES)} bytes.`,
                     );
                 }
-                const bytes = await readFile(target);
+                let bytes: Buffer;
+                try {
+                    bytes = await readFile(target);
+                } catch (error) {
+                    throwIfMissingLocalBashPath(error);
+                    throw error;
+                }
                 if (bytes.byteLength > HAPPY_COMPUTE_MAX_FILE_BYTES) {
-                    throw new Error(
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
                         `Compute file reads cannot exceed ${String(HAPPY_COMPUTE_MAX_FILE_BYTES)} bytes.`,
                     );
                 }
@@ -80,12 +135,18 @@ export function createLocalBashComputeProvider(
             },
             async write({ bytes, instanceId, path }) {
                 if (bytes.byteLength > HAPPY_COMPUTE_MAX_FILE_BYTES) {
-                    throw new Error(
+                    throw new HappyComputeProviderError(
+                        "invalid_request",
                         `Compute file writes cannot exceed ${String(HAPPY_COMPUTE_MAX_FILE_BYTES)} bytes.`,
                     );
                 }
                 const instance = requireInstance(instanceId);
-                const target = await resolveWritablePath(instance.workspace, path);
+                let target: string;
+                try {
+                    target = await resolveWritablePath(instance.workspace, path);
+                } catch (error) {
+                    throw new HappyComputeProviderError("invalid_request", errorToMessage(error));
+                }
                 await writeFile(target, bytes);
             },
             exec({ command, instanceId, timeoutMs }, context) {
@@ -97,7 +158,8 @@ export function createLocalBashComputeProvider(
                 );
             },
             async stop({ instanceId }) {
-                const instance = requireInstance(instanceId);
+                const instance = instances.get(instanceId);
+                if (instance === undefined) return;
                 instances.delete(instanceId);
                 await rm(instance.root, { force: true, recursive: true });
             },
@@ -147,7 +209,10 @@ async function resolveWritablePath(workspace: string, path: string): Promise<str
 
 function resolveRelativePath(workspace: string, path: string): string {
     if (isAbsolute(path) || path.includes("\\") || path.split("/").some((part) => part === "..")) {
-        throw new Error("Compute file paths must stay inside the instance.");
+        throw new HappyComputeProviderError(
+            "invalid_request",
+            "Compute file paths must stay inside the instance.",
+        );
     }
     const target = resolve(workspace, path);
     assertInside(workspace, target);
@@ -157,8 +222,19 @@ function resolveRelativePath(workspace: string, path: string): string {
 function assertInside(workspace: string, target: string): void {
     const fromWorkspace = relative(workspace, target);
     if (fromWorkspace === "" || fromWorkspace.startsWith("..") || isAbsolute(fromWorkspace)) {
-        throw new Error("Compute file paths must stay inside the instance.");
+        throw new HappyComputeProviderError(
+            "invalid_request",
+            "Compute file paths must stay inside the instance.",
+        );
     }
+}
+
+function throwIfMissingLocalBashPath(error: unknown): void {
+    if (!Value.Check(missingFileSystemPathSchema, error)) return;
+    throw new HappyComputeProviderError(
+        "invalid_request",
+        "The requested local Bash compute file is unavailable.",
+    );
 }
 
 function runBoundedBash(
@@ -266,4 +342,8 @@ function requiredPluginDirectory(): string {
         throw new Error("Happy did not provide HAPPY_PLUGIN_DIRECTORY to this plugin.");
     }
     return directory;
+}
+
+function errorToMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
 }

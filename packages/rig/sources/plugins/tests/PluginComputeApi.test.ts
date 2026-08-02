@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { createHappyPluginClient } from "happy-plugins";
+import { createHappyPluginClient, HappyComputeProviderError } from "happy-plugins";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
@@ -77,7 +77,9 @@ describe("plugin compute API", () => {
             },
             read({ path }) {
                 const bytes = files.get(path);
-                if (bytes === undefined) throw new Error("Missing compute file.");
+                if (bytes === undefined) {
+                    throw new HappyComputeProviderError("invalid_request", "Missing compute file.");
+                }
                 return bytes;
             },
             start() {
@@ -92,13 +94,15 @@ describe("plugin compute API", () => {
         } satisfies Parameters<typeof client.compute.register>[0];
         const registration = await client.compute.register(handlers);
         await expect(client.compute.register(handlers)).rejects.toMatchObject({
-            code: "registration_conflict",
-            status: 409,
+            code: "invalid_request",
+            retryable: false,
+            status: 400,
         });
         await client.ready("Ready.");
 
         await expect(client.compute.list()).resolves.toEqual([
             {
+                health: "healthy",
                 name: "memory-compute",
                 pluginFolder: "memory-compute",
                 pluginName: "Memory Compute",
@@ -119,12 +123,26 @@ describe("plugin compute API", () => {
                 path: "written.txt",
             }),
         ).resolves.toEqual(Buffer.from("written"));
-        await expect(
-            client.compute.files.read({
-                instanceId: instance.instanceId,
-                path: "missing.txt",
-            }),
-        ).rejects.toMatchObject({ code: "operation_failed", status: 422 });
+        for (let failure = 0; failure < 3; failure += 1) {
+            await expect(
+                client.compute.files.read({
+                    instanceId: instance.instanceId,
+                    path: "missing.txt",
+                }),
+            ).rejects.toMatchObject({
+                code: "invalid_request",
+                retryable: false,
+                status: 400,
+            });
+        }
+        await expect(client.compute.list()).resolves.toEqual([
+            {
+                health: "healthy",
+                name: "memory-compute",
+                pluginFolder: "memory-compute",
+                pluginName: "Memory Compute",
+            },
+        ]);
         await expect(
             client.compute.exec({
                 command: "printf changed",
