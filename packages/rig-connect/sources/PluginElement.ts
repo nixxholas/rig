@@ -48,6 +48,7 @@ export interface LocalPlugin {
     logAvailable: boolean;
     name: string;
     status: "failed" | "running" | "stopped";
+    statusMessage?: string;
     version: string;
 }
 
@@ -169,6 +170,7 @@ function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined)
         logAvailable: plugin.logAvailable,
         name: plugin.name,
         status: plugin.status,
+        ...(plugin.statusMessage === undefined ? {} : { statusMessage: plugin.statusMessage }),
         version: plugin.version,
     };
 }
@@ -200,6 +202,7 @@ function samePlugin(left: LocalPlugin | undefined, right: LocalPlugin): boolean 
         left.logAvailable === right.logAvailable &&
         left.name === right.name &&
         left.status === right.status &&
+        left.statusMessage === right.statusMessage &&
         left.version === right.version
     );
 }

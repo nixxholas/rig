@@ -97,6 +97,36 @@ describe("PluginHookRegistry", () => {
         );
     });
 
+    it("classifies required hook retirement like an MCP contribution", () => {
+        const retired: {
+            reason: string;
+            status: "failed" | "stopped";
+        }[] = [];
+        const registry = new PluginHookRegistry();
+        const connection = registry.createConnection(
+            { folder: "required", name: "Required" },
+            { onRequiredRegistrationRetired: (retirement) => retired.push(retirement) },
+        );
+        const disconnectedId = connection.registerSystemPrompt();
+        const detach = connection.attachSystemPrompt(disconnectedId, () => {});
+
+        detach();
+
+        const unregisteredId = connection.registerSystemPrompt();
+        connection.attachSystemPrompt(unregisteredId, () => {});
+        connection.unregisterSystemPrompt(unregisteredId);
+        expect(retired).toEqual([
+            {
+                reason: "The plugin system-prompt hook connection closed.",
+                status: "failed",
+            },
+            {
+                reason: "The plugin unregistered its system-prompt hook.",
+                status: "stopped",
+            },
+        ]);
+    });
+
     it("supersedes an old process generation before its close callback finishes", async () => {
         const registry = new PluginHookRegistry();
         const old = registry.createConnection({ folder: "same", name: "Old" });

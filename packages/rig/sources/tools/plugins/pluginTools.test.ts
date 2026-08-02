@@ -186,6 +186,7 @@ describe("plugin tools", () => {
                         logAvailable: true,
                         name: "Clock",
                         status: "running",
+                        statusMessage: "Waiting for the next tick.",
                         version: "0.0.0",
                     },
                 ],
@@ -194,7 +195,13 @@ describe("plugin tools", () => {
         });
 
         const result = await pluginListTool.execute({}, context, {});
-        expect(result.plugins).toMatchObject([{ name: "Clock", status: "running" }]);
+        expect(result.plugins).toMatchObject([
+            {
+                name: "Clock",
+                status: "running",
+                statusMessage: "Waiting for the next tick.",
+            },
+        ]);
         expect(result.failures).toEqual([
             { error: "happy.plugin.json is invalid.", folder: "broken" },
         ]);

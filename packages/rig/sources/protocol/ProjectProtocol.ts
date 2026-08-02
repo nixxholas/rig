@@ -394,6 +394,8 @@ export interface PluginSummary {
     folder: string;
     /** Why the current plugin generation is or is not available. */
     status: "failed" | "running" | "stopped";
+    /** The plugin's own human-readable description of its current state. */
+    statusMessage?: string;
     /** Present for a startup or process failure. */
     error?: string;
     /** Whether a bounded current-run log or startup diagnostic is available. */

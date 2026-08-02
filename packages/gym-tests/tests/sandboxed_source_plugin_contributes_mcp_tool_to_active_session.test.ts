@@ -53,6 +53,7 @@ const PLUGIN_SOURCE = [
     "        }),",
     "    ],",
     "});",
+    'await happy.ready("Ready.");',
     'console.log("Plugin MCP ready");',
     "await new Promise<void>(() => {});",
     "",

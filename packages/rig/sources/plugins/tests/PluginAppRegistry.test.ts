@@ -12,15 +12,14 @@ const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true }))));
 
 describe("PluginAppRegistry", () => {
-    it("publishes static apps immediately and updates their tools when MCP later attaches", async () => {
+    it("publishes static apps with every MCP tool attached during startup", async () => {
         const root = await temporaryRoot();
         const mcp = new PluginMcpRegistry();
         const registry = new PluginAppRegistry(mcp);
         const connection = mcp.createConnection({ folder: "usage", name: "Usage" });
-        registry.register(plugin(), connection.generation, root);
-        expect(registry.list()).toMatchObject([{ appId: "usage", tools: [] }]);
         const registration = connection.register({ name: "Usage", tools: [tool("read", ["app"])] });
         connection.attach(registration, () => true);
+        registry.register(plugin(), connection.generation, root);
         expect(registry.list()).toMatchObject([
             { appId: "usage", tools: [{ name: "read", server: "Usage" }] },
         ]);

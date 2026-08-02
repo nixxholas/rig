@@ -537,6 +537,7 @@ async function runOwnedLocalProtocolServer(
             await startedPluginManager.close();
             await pluginsStarted;
         });
+        await pluginsStarted;
         if (stopping) return;
         if (happyModule !== undefined && happyConfiguration !== undefined) {
             try {

@@ -19,6 +19,8 @@ import { createPluginApiServer } from "../createPluginApiServer.js";
 import { MAX_INSTALLED_PLUGINS } from "../discoverPlugins.js";
 import { PluginHookRegistry } from "../PluginHookRegistry.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
+import { PluginNetworkRegistry } from "../PluginNetworkRegistry.js";
+import { PluginStartupState } from "../PluginStartupState.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
 
@@ -44,6 +46,7 @@ describe("plugin API server", () => {
             listPlugins: async () => [],
             pluginFolder: "test-plugin",
             pluginName: "Test Plugin",
+            startup: new PluginStartupState(),
             store,
             token: "private-plugin-token",
         });
@@ -88,11 +91,13 @@ describe("plugin API server", () => {
             folder: "test-plugin",
             name: "Test Plugin",
         });
+        const startup = new PluginStartupState();
         const server = createPluginApiServer({
             hooks,
             listPlugins: async () => [],
             pluginFolder: "test-plugin",
             pluginName: "Test Plugin",
+            startup,
             store,
             token: "private-plugin-token",
         });
@@ -117,6 +122,106 @@ describe("plugin API server", () => {
             body: expect.stringContaining("already registered"),
             status: 409,
         });
+    });
+
+    it("keeps hooks in the startup window while tracing remains dynamic", async () => {
+        const directory = await createTestSocketDirectory();
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const hooks = new PluginHookRegistry().createConnection({
+            folder: "test-plugin",
+            name: "Test Plugin",
+        });
+        const startup = new PluginStartupState();
+        const server = createPluginApiServer({
+            hooks,
+            listPlugins: async () => [],
+            pluginFolder: "test-plugin",
+            pluginName: "Test Plugin",
+            startup,
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+        const client = createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        });
+
+        const hook = await client.hooks.onSystemPrompt(() => ({}));
+        await client.ready("Ready.");
+        const tracing = await client.tracing.subscribe(() => {});
+        expect(tracing.status).toBe("connected");
+
+        await hook.close();
+        await expect(client.hooks.onSystemPrompt(() => ({}))).rejects.toThrow(
+            "must be declared before the plugin reports ready",
+        );
+        await tracing.close();
+    });
+
+    it("rejects hook and tracing registrations for a failed generation", async () => {
+        const directory = await createTestSocketDirectory();
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const hooks = new PluginHookRegistry().createConnection({
+            folder: "test-plugin",
+            name: "Test Plugin",
+        });
+        const hookRegistrationId = hooks.registerSystemPrompt();
+        const tracingRegistrationId = hooks.registerTracing();
+        const startup = new PluginStartupState();
+        startup.fail("The plugin did not report ready within 10 seconds.");
+        const server = createPluginApiServer({
+            hooks,
+            listPlugins: async () => [],
+            pluginFolder: "test-plugin",
+            pluginName: "Test Plugin",
+            startup,
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+
+        for (const path of ["/hooks/system-prompt", "/tracing/subscriptions"]) {
+            const response = await authorizedResponse(socketPath, path, "POST");
+            expect(response.status).toBe(400);
+            expect(response.body).toContain("arrived after this plugin generation failed to start");
+        }
+        await expect(
+            requestStatus(
+                socketPath,
+                "private-plugin-token",
+                `/hooks/system-prompt/${hookRegistrationId}/events`,
+            ),
+        ).resolves.toBe(400);
+        await expect(
+            requestStatus(
+                socketPath,
+                "private-plugin-token",
+                `/tracing/subscriptions/${tracingRegistrationId}/events`,
+            ),
+        ).resolves.toBe(400);
     });
 
     it("creates, lists, updates, and removes slot entries with plugin authorship", async () => {
@@ -400,11 +505,13 @@ describe("plugin API server", () => {
                     logAvailable: true,
                     name: "Clock",
                     status: "running",
+                    statusMessage: "Keeping time.",
                     version: "1.2.3",
                 },
             ],
             pluginFolder: "clock",
             pluginName: "Clock",
+            startup: new PluginStartupState(),
             store,
             token: "private-plugin-token",
         });
@@ -437,6 +544,7 @@ describe("plugin API server", () => {
             isSelf: true,
             name: "Clock",
             state: "running",
+            status: "Keeping time.",
             version: "1.2.3",
         });
     });
@@ -457,11 +565,15 @@ describe("plugin API server", () => {
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const mcp = registry.createConnection({ folder: "projects", name: "Projects" });
-        let server = createPluginApiServer({
+        const startup = new PluginStartupState();
+        const statuses: string[] = [];
+        const server = createPluginApiServer({
             listPlugins: async () => [],
             mcp,
+            onStatus: (status) => statuses.push(status),
             pluginFolder: "projects",
             pluginName: "Projects",
+            startup,
             store,
             token: "private-plugin-token",
         });
@@ -501,7 +613,12 @@ describe("plugin API server", () => {
                 }),
             ],
         });
-        const firstRegistrationId = contribution.registrationId;
+        await client.ready("Ready.");
+        await expect(client.ready("Ready again.")).rejects.toThrow(
+            "Plugin readiness was already reported for this plugin generation.",
+        );
+        await client.status.set("Serving project tools.");
+        expect(statuses).toEqual(["Ready.", "Serving project tools."]);
 
         const tools = (await registry.load("/workspace", "auto")).tools;
         const tool = tools.find((candidate) => candidate.name.endsWith("__list_projects"))!;
@@ -513,29 +630,123 @@ describe("plugin API server", () => {
             content: [{ text: expect.stringContaining("request is too large"), type: "text" }],
             isError: true,
         });
-        await closeServer(server);
-        await rm(socketPath, { force: true });
-        await expect.poll(() => contribution.status, { timeout: 2_000 }).toBe("reconnecting");
-        expect((await registry.load("/workspace", "auto")).tools).toEqual([]);
-        await expect.poll(() => contribution.failure, { timeout: 2_000 }).toContain("ENOENT");
-
-        server = createPluginApiServer({
-            listPlugins: async () => [],
-            mcp,
-            pluginFolder: "projects",
-            pluginName: "Projects",
-            store,
-            token: "private-plugin-token",
-        });
-        await listen(server, socketPath);
-        await expect.poll(() => contribution.status, { timeout: 2_000 }).toBe("connected");
-        expect(contribution.registrationId).not.toBe(firstRegistrationId);
-        expect((await registry.load("/workspace", "auto")).tools).toHaveLength(2);
+        await expect(
+            client.mcp.startServer({
+                name: "Late catalog",
+                tools: [
+                    defineMcpTool({
+                        description: "Arrives after readiness.",
+                        inputSchema: Type.Object({}),
+                        name: "late",
+                        execute: () => ({ content: [{ text: "late", type: "text" }] }),
+                    }),
+                ],
+            }),
+        ).rejects.toThrow("must be declared before the plugin reports ready");
 
         await contribution.close();
         await expect
             .poll(async () => (await registry.load("/workspace", "auto")).tools)
             .toEqual([]);
+    });
+
+    it("rejects an MCP stream that attaches after its plugin generation timed out", async () => {
+        const directory = await createTestSocketDirectory();
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const registry = new PluginMcpRegistry();
+        cleanup.push(() => registry.close());
+        const mcp = registry.createConnection({ folder: "slow", name: "Slow" });
+        const registrationId = mcp.register({
+            name: "Late",
+            tools: [
+                {
+                    description: "Attaches after the startup deadline.",
+                    inputSchema: {
+                        additionalProperties: false,
+                        properties: {},
+                        type: "object",
+                    },
+                    name: "late",
+                },
+            ],
+        });
+        const startup = new PluginStartupState();
+        startup.fail("The plugin did not report ready within 10 seconds.");
+        const server = createPluginApiServer({
+            listPlugins: async () => [],
+            mcp,
+            pluginFolder: "slow",
+            pluginName: "Slow",
+            startup,
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+
+        await expect(
+            requestStatus(
+                socketPath,
+                "private-plugin-token",
+                `/mcp/servers/${registrationId}/events`,
+            ),
+        ).resolves.toBe(400);
+        expect((await registry.load("/workspace", "auto")).tools).toEqual([]);
+    });
+
+    it("rejects a network listener stream that attaches after its generation timed out", async () => {
+        const directory = await createTestSocketDirectory();
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const registry = new PluginNetworkRegistry();
+        cleanup.push(() => registry.close());
+        const network = registry.createConnection({
+            folder: "slow",
+            interceptDomains: ["api.example.com"],
+            name: "Slow",
+        });
+        const registrationId = network.register("request");
+        const startup = new PluginStartupState();
+        startup.fail("The plugin did not report ready within 10 seconds.");
+        const server = createPluginApiServer({
+            listPlugins: async () => [],
+            network,
+            pluginFolder: "slow",
+            pluginName: "Slow",
+            startup,
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+
+        await expect(
+            requestStatus(
+                socketPath,
+                "private-plugin-token",
+                `/network/requests/${registrationId}/events`,
+            ),
+        ).resolves.toBe(400);
+        expect(registry.shouldIntercept("api.example.com")).toBe(false);
     });
 
     it("does not complete an in-flight MCP call after its real socket stream disconnects", async () => {
@@ -553,11 +764,13 @@ describe("plugin API server", () => {
         cleanup.push(() => store.close());
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
+        const startup = new PluginStartupState();
         const server = createPluginApiServer({
             listPlugins: async () => [],
             mcp: registry.createConnection({ folder: "projects", name: "Projects" }),
             pluginFolder: "projects",
             pluginName: "Projects",
+            startup,
             store,
             token: "private-plugin-token",
         });
@@ -596,6 +809,10 @@ describe("plugin API server", () => {
                 }),
             ],
         });
+        await createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        }).ready("Ready.");
         const retiredRegistrationId = contribution.registrationId;
         const tool = (await registry.load("/workspace", "auto")).tools[0]!;
         const call = Promise.resolve(tool.execute({} as never, {} as never, {}));
@@ -605,10 +822,8 @@ describe("plugin API server", () => {
         server.closeAllConnections();
         await rejectedCall;
         await callAborted.promise;
-        await expect
-            .poll(() => contribution.registrationId, { timeout: 2_000 })
-            .not.toBe(retiredRegistrationId);
-        await expect.poll(() => contribution.status, { timeout: 2_000 }).toBe("connected");
+        expect(contribution.registrationId).toBe(retiredRegistrationId);
+        await expect.poll(() => contribution.status, { timeout: 2_000 }).toBe("closed");
         expect(
             requests.some((request) =>
                 request.startsWith(`POST /mcp/servers/${retiredRegistrationId}/calls/`),
@@ -619,7 +834,7 @@ describe("plugin API server", () => {
         await contribution.close();
     });
 
-    it("does not unregister an MCP registration retired by closing its active stream", async () => {
+    it("unregisters an MCP registration before closing its active stream", async () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
         const socketPath = join(directory, "api.sock");
@@ -634,11 +849,13 @@ describe("plugin API server", () => {
         cleanup.push(() => store.close());
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
+        const startup = new PluginStartupState();
         const server = createPluginApiServer({
             listPlugins: async () => [],
             mcp: registry.createConnection({ folder: "projects", name: "Projects" }),
             pluginFolder: "projects",
             pluginName: "Projects",
+            startup,
             store,
             token: "private-plugin-token",
         });
@@ -671,7 +888,7 @@ describe("plugin API server", () => {
         await expect
             .poll(async () => (await registry.load("/workspace", "auto")).tools)
             .toEqual([]);
-        expect(requests).not.toContain(`DELETE /mcp/servers/${retiredRegistrationId}`);
+        expect(requests).toContain(`DELETE /mcp/servers/${retiredRegistrationId}`);
     });
 });
 
@@ -736,6 +953,7 @@ async function createWorkspaceApiFixture() {
         listPlugins: async () => [],
         pluginFolder: "test-plugin",
         pluginName: "Test Plugin",
+        startup: new PluginStartupState(),
         store,
         token: "private-plugin-token",
     });
@@ -774,6 +992,7 @@ async function createPluginApiFixture() {
         pluginDataDirectory,
         pluginFolder: "test-plugin",
         pluginName: "Test Plugin",
+        startup: new PluginStartupState(),
         store,
         token: "private-plugin-token",
     });
@@ -830,6 +1049,25 @@ function authorizedResponse(
                         status: response.statusCode ?? 500,
                     }),
                 );
+            },
+        );
+        request.once("error", reject);
+        request.end();
+    });
+}
+
+function requestStatus(socketPath: string, token: string, path: string): Promise<number> {
+    return new Promise<number>((resolve, reject) => {
+        const request = requestHttp(
+            {
+                headers: { authorization: `Bearer ${token}` },
+                method: "GET",
+                path,
+                socketPath,
+            },
+            (response) => {
+                response.resume();
+                response.once("end", () => resolve(response.statusCode ?? 500));
             },
         );
         request.once("error", reject);

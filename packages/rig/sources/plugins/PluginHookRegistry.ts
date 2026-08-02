@@ -41,7 +41,16 @@ interface ConnectionState {
     generation: string;
     hook?: HookRegistration;
     name: string;
+    onRequiredRegistrationRetired?: (retirement: PluginHookRegistrationRetirement) => void;
     tracing?: TraceRegistration;
+}
+
+export type PluginHookRegistrationRetirement =
+    | { reason: string; status: "failed" }
+    | { reason: string; status: "stopped" };
+
+export interface PluginHookConnectionOptions {
+    onRequiredRegistrationRetired?: (retirement: PluginHookRegistrationRetirement) => void;
 }
 
 export interface PluginHookConnection {
@@ -93,7 +102,10 @@ export class PluginHookRegistry {
         this.#now = options.now ?? Date.now;
     }
 
-    createConnection(plugin: { folder: string; name: string }): PluginHookConnection {
+    createConnection(
+        plugin: { folder: string; name: string },
+        options: PluginHookConnectionOptions = {},
+    ): PluginHookConnection {
         const previous = this.#currentByFolder.get(plugin.folder);
         if (previous !== undefined) {
             this.#retireState(previous, "replaced");
@@ -103,6 +115,11 @@ export class PluginHookRegistry {
             folder: plugin.folder,
             generation: randomUUID(),
             name: plugin.name,
+            ...(options.onRequiredRegistrationRetired === undefined
+                ? {}
+                : {
+                      onRequiredRegistrationRetired: options.onRequiredRegistrationRetired,
+                  }),
         };
         this.#connections.add(state);
         this.#currentByFolder.set(state.folder, state);
@@ -357,6 +374,7 @@ export class PluginHookRegistry {
     ): void {
         const hook = state.hook;
         if (hook === undefined) return;
+        const wasAttached = hook.attached !== undefined;
         delete state.hook;
         delete hook.attached;
         for (const settle of hook.pending.values()) settle(undefined);
@@ -367,6 +385,24 @@ export class PluginHookRegistry {
                 "plugin_system_prompt_stream_closed",
                 `Rig retired the ${state.name} plugin's system-prompt hook because its stream closed.`,
                 { plugin: state.name, pluginFolder: state.folder },
+            );
+        }
+        if (wasAttached) {
+            state.onRequiredRegistrationRetired?.(
+                reason === "unregistered"
+                    ? {
+                          reason: "The plugin unregistered its system-prompt hook.",
+                          status: "stopped",
+                      }
+                    : {
+                          reason:
+                              reason === "stream_closed"
+                                  ? "The plugin system-prompt hook connection closed."
+                                  : reason === "replaced"
+                                    ? "A newer plugin process replaced this system-prompt hook."
+                                    : "The plugin process stopped.",
+                          status: "failed",
+                      },
             );
         }
     }

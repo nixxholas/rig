@@ -48,6 +48,15 @@ interface PluginMcpOwner {
     folder: string;
     id: string;
     name: string;
+    onActiveRegistrationRetired?: (retirement: PluginMcpRegistrationRetirement) => void;
+}
+
+export type PluginMcpRegistrationRetirement =
+    | { reason: string; status: "failed" }
+    | { reason: string; status: "stopped" };
+
+export interface PluginMcpConnectionOptions {
+    onActiveRegistrationRetired?: (retirement: PluginMcpRegistrationRetirement) => void;
 }
 
 export interface PluginMcpConnection {
@@ -89,16 +98,24 @@ export interface PluginMcpRegistryOptions {
 export class PluginMcpRegistry implements McpToolProvider {
     readonly #callTimeoutMs: number;
     readonly #registrations = new Map<string, PluginMcpRegistration>();
-    readonly #listeners = new Set<() => void>();
     #closed = false;
 
     constructor(options: PluginMcpRegistryOptions = {}) {
         this.#callTimeoutMs = options.callTimeoutMs ?? DEFAULT_PLUGIN_MCP_CALL_TIMEOUT_MS;
     }
 
-    createConnection(plugin: { folder: string; name: string }): PluginMcpConnection {
+    createConnection(
+        plugin: { folder: string; name: string },
+        options: PluginMcpConnectionOptions = {},
+    ): PluginMcpConnection {
         if (this.#closed) throw new Error("Rig is shutting down, so plugin MCP is unavailable.");
-        const owner: PluginMcpOwner = { ...plugin, id: randomUUID() };
+        const owner: PluginMcpOwner = {
+            ...plugin,
+            id: randomUUID(),
+            ...(options.onActiveRegistrationRetired === undefined
+                ? {}
+                : { onActiveRegistrationRetired: options.onActiveRegistrationRetired }),
+        };
         let ownerClosed = false;
         const owned = () =>
             [...this.#registrations.values()].filter(
@@ -120,19 +137,24 @@ export class PluginMcpRegistry implements McpToolProvider {
                 }
                 registration.active = true;
                 registration.send = send;
-                this.#notify();
                 let attached = true;
                 return () => {
                     if (!attached) return;
                     attached = false;
-                    this.#retire(registration, "The plugin MCP connection closed.");
+                    this.#retire(registration, {
+                        reason: "The plugin MCP connection closed.",
+                        status: "failed",
+                    });
                 };
             },
             close: () => {
                 if (ownerClosed) return;
                 ownerClosed = true;
                 for (const registration of owned()) {
-                    this.#retire(registration, "The plugin process stopped.");
+                    this.#retire(registration, {
+                        reason: "The plugin process stopped.",
+                        status: "failed",
+                    });
                 }
             },
             complete: (registrationId, callId, completion) => {
@@ -165,14 +187,13 @@ export class PluginMcpRegistry implements McpToolProvider {
                     pendingCalls: new Map(),
                     server: decoded,
                 });
-                this.#notify();
                 return id;
             },
             unregister: (registrationId) => {
-                this.#retire(
-                    requireOwned(registrationId),
-                    "The plugin unregistered this MCP server.",
-                );
+                this.#retire(requireOwned(registrationId), {
+                    reason: "The plugin unregistered this MCP server.",
+                    status: "stopped",
+                });
             },
         };
     }
@@ -206,11 +227,6 @@ export class PluginMcpRegistry implements McpToolProvider {
             });
         }
         return { servers, tools };
-    }
-
-    subscribe(listener: () => void): () => void {
-        this.#listeners.add(listener);
-        return () => this.#listeners.delete(listener);
     }
 
     listAppTools(folder: string, generation: string) {
@@ -267,7 +283,10 @@ export class PluginMcpRegistry implements McpToolProvider {
         if (this.#closed) return Promise.resolve();
         this.#closed = true;
         for (const registration of this.#registrations.values()) {
-            this.#retire(registration, "Rig shut down the plugin MCP catalog.");
+            this.#retire(registration, {
+                reason: "Rig shut down the plugin MCP catalog.",
+                status: "failed",
+            });
         }
         return Promise.resolve();
     }
@@ -417,21 +436,21 @@ export class PluginMcpRegistry implements McpToolProvider {
         });
     }
 
-    #retire(registration: PluginMcpRegistration, reason: string): void {
+    #retire(
+        registration: PluginMcpRegistration,
+        retirement: PluginMcpRegistrationRetirement,
+    ): void {
         if (this.#registrations.get(registration.id) !== registration) return;
+        const wasActive = registration.active;
         this.#registrations.delete(registration.id);
         registration.active = false;
         delete registration.send;
         for (const call of registration.pendingCalls.values()) {
             call.cleanup();
-            call.reject(new Error(reason));
+            call.reject(new Error(retirement.reason));
         }
         registration.pendingCalls.clear();
-        this.#notify();
-    }
-
-    #notify(): void {
-        for (const listener of this.#listeners) listener();
+        if (wasActive) registration.owner.onActiveRegistrationRetired?.(retirement);
     }
 }
 

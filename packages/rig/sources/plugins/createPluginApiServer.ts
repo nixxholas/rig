@@ -6,6 +6,7 @@ import { Value } from "@sinclair/typebox/value";
 import type {
     AgentMessageDelivery,
     HappyPlugin,
+    HappyPluginStatus,
     HappyProviderUsageEntry,
     HappyProject,
     HappySlotEntry,
@@ -25,7 +26,9 @@ import {
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     happyNetworkEventSchema,
+    happyPluginReadyBodySchema,
     happySystemPromptHookCompletionSchema,
+    updateHappyPluginStatusBodySchema,
     listHappySlotEntriesInputSchema,
     happyNetworkRequestCompletionSchema,
     listWorkspacesInputSchema,
@@ -63,6 +66,7 @@ import { sendJson } from "../server/sendJson.js";
 import type { PluginHookConnection } from "./PluginHookRegistry.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
 import type { PluginNetworkConnection } from "./PluginNetworkRegistry.js";
+import type { PluginStartupState } from "./PluginStartupState.js";
 import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
 import { readPluginMediaFile } from "./readPluginMediaFile.js";
 
@@ -78,9 +82,11 @@ export interface CreatePluginApiServerOptions {
     hooks?: PluginHookConnection;
     mcp?: PluginMcpConnection;
     network?: PluginNetworkConnection;
+    onStatus?: (status: HappyPluginStatus) => void;
     pluginFolder: string;
     pluginDataDirectory?: string;
     pluginName: string;
+    startup: PluginStartupState;
     store: SessionStore;
     token: string;
 }
@@ -116,6 +122,28 @@ async function handleRequest(
     executeWorkspaceCommand: ReturnType<typeof createPluginWorkspaceCommandExecutor>,
 ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://rig-plugin.local");
+    if (request.method === "POST" && url.pathname === "/ready") {
+        const readiness = await readJson(request, happyPluginReadyBodySchema, "Plugin readiness");
+        try {
+            options.startup.ready();
+            options.onStatus?.(readiness.status);
+        } catch (error) {
+            throw new PluginApiRequestError(errorToMessage(error));
+        }
+        sendJson(response, 200, {});
+        return;
+    }
+    if (request.method === "POST" && url.pathname === "/status") {
+        const body = await readJson(request, updateHappyPluginStatusBodySchema, "Plugin status");
+        try {
+            options.startup.assertActive("Plugin status");
+            options.onStatus?.(body.status);
+        } catch (error) {
+            throw new PluginApiRequestError(errorToMessage(error));
+        }
+        sendJson(response, 200, {});
+        return;
+    }
     if (request.method === "GET" && url.pathname === "/projects") {
         sendJson<{ projects: readonly HappyProject[] }>(response, 200, {
             projects: options.store.listProjects().map(toHappyProject),
@@ -172,6 +200,7 @@ async function handleRequest(
                 isSelf: plugin.folder === options.pluginFolder,
                 name: plugin.name,
                 state: plugin.status,
+                ...(plugin.statusMessage === undefined ? {} : { status: plugin.statusMessage }),
                 version: plugin.version,
             }),
         );
@@ -357,6 +386,7 @@ async function handleRequest(
         }
     }
     if (request.method === "POST" && url.pathname === "/mcp/servers") {
+        assertStartupContribution(options, "MCP registration");
         const mcp = requireMcp(options);
         const registration = await readJson(
             request,
@@ -367,6 +397,7 @@ async function handleRequest(
         return;
     }
     if (request.method === "POST" && url.pathname === "/hooks/system-prompt") {
+        assertStartupContribution(options, "System-prompt hook registration");
         const hooks = requireHooks(options);
         sendJson(response, 201, {
             registrationId: runHookRegistrationOperation(() => hooks.registerSystemPrompt()),
@@ -374,6 +405,7 @@ async function handleRequest(
         return;
     }
     if (request.method === "POST" && url.pathname === "/tracing/subscriptions") {
+        assertActiveGeneration(options, "Tracing subscription registration");
         const hooks = requireHooks(options);
         sendJson(response, 201, {
             registrationId: runHookRegistrationOperation(() => hooks.registerTracing()),
@@ -388,6 +420,7 @@ async function handleRequest(
         parts[3] === "events" &&
         request.method === "GET"
     ) {
+        assertStartupContribution(options, "System-prompt hook stream attachment");
         const hooks = requireHooks(options);
         const registrationId = parts[2];
         const detach = runHookRegistrationOperation(() =>
@@ -416,6 +449,7 @@ async function handleRequest(
         parts[3] === "events" &&
         request.method === "GET"
     ) {
+        assertActiveGeneration(options, "Tracing subscription stream attachment");
         const hooks = requireHooks(options);
         const registrationId = parts[2];
         const detach = runHookRegistrationOperation(() =>
@@ -489,6 +523,7 @@ async function handleRequest(
         request.method === "POST" &&
         (url.pathname === "/network/requests" || url.pathname === "/network/tunnels")
     ) {
+        assertStartupContribution(options, "Network listener registration");
         const network = requireNetwork(options);
         sendJson(response, 201, {
             registrationId: network.register(
@@ -505,6 +540,7 @@ async function handleRequest(
         parts[3] === "events" &&
         request.method === "GET"
     ) {
+        assertStartupContribution(options, "Network listener stream attachment");
         const network = requireNetwork(options);
         let writable = true;
         const onDrain = () => {
@@ -572,6 +608,7 @@ async function handleRequest(
         parts[3] === "events" &&
         request.method === "GET"
     ) {
+        assertStartupContribution(options, "MCP stream attachment");
         const mcp = requireMcp(options);
         let detach = () => {};
         detach = mcp.attach(parts[2], (event) => {
@@ -862,5 +899,24 @@ function runHookRegistrationOperation<T>(operation: () => T): T {
         return operation();
     } catch (error) {
         throw new PluginHookConflictError(errorToMessage(error));
+    }
+}
+
+function assertStartupContribution(
+    options: CreatePluginApiServerOptions,
+    contribution: string,
+): void {
+    try {
+        options.startup.assertStarting(contribution);
+    } catch (error) {
+        throw new PluginApiRequestError(errorToMessage(error));
+    }
+}
+
+function assertActiveGeneration(options: CreatePluginApiServerOptions, contribution: string): void {
+    try {
+        options.startup.assertActive(contribution);
+    } catch (error) {
+        throw new PluginApiRequestError(errorToMessage(error));
     }
 }

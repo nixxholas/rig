@@ -54,6 +54,9 @@ describe("plugin MCP App projection", () => {
                 { generation: "generation-2", id: "usage:overview", pluginId: "usage" },
             ]);
         });
+        expect(connection.plugins()).toMatchObject([
+            { id: "usage", statusMessage: "Watching provider usage." },
+        ]);
         const application = connection.apps()[0];
         const pluginReference = connection.plugins()[0];
         stream.enqueue(encoder.encode(pluginsChanged(CURSOR_3, [plugin("generation-2")])));
@@ -367,6 +370,7 @@ function plugin(generation: string, withLargeResource = false): PluginSummary {
         logAvailable: false,
         name: "Usage",
         status: "running",
+        statusMessage: "Watching provider usage.",
         version: "1.2.3",
     };
 }

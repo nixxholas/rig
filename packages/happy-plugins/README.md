@@ -194,6 +194,9 @@ const sessions = await happy.sessions.list();
 
 console.log(`The plugin can see ${sessions.length} sessions.`);
 
+// Declare startup complete only after every MCP server and other contribution is registered.
+await happy.ready("Ready.");
+
 // Keep a service-style plugin alive until Happy shuts it down.
 await new Promise<void>((resolve) => {
     process.once("SIGTERM", resolve);
@@ -209,6 +212,17 @@ runtime values, are not supported. For JavaScript ESM, use an `.mjs` entry point
 Ask an agent to install the folder and Happy validates it, copies it unchanged, and starts the
 declared entry point right away. Uninstalling stops it and keeps the folder it writes to. Happy
 also loads every installed plugin when the daemon starts.
+
+Every process plugin has 10 seconds to register all of its MCP servers, managed-network listeners,
+and other contributions and then call `await happy.ready("Ready.")`. Registration must happen
+before the ready call. Missing the deadline fails and stops that process generation; late
+registration cannot revive it. Skills-only plugins have nothing to report and are ready
+immediately.
+
+The string passed to `ready` is the plugin's initial human-readable status. Update it while running
+with `await happy.status.set("Refreshing project data…")`. Happy coalesces rapid status changes
+before publishing them. An MCP stream that closes after readiness fails that process generation;
+register contributions once during startup and keep their returned server handles alive.
 
 ## Develop without Docker
 
@@ -350,10 +364,12 @@ await hook.close();
 await tracing.close();
 ```
 
-Both returned registrations expose `status`, `failure`, and the current `registrationId`. If an
-attached NDJSON stream closes or contains invalid data, the daemon retires that generation and the
-SDK logs the disconnect before re-registering with bounded backoff. Calling `close()` stops
-recovery.
+Both returned registrations expose `status`, `failure`, and the current `registrationId`.
+System-prompt hooks are required startup contributions: register them before `ready`, and a lost
+hook stream retires the plugin generation instead of registering a late replacement. Tracing
+subscriptions remain dynamic while the plugin runs; if their NDJSON stream closes or contains
+invalid data, the SDK logs the disconnect and re-registers with bounded backoff. Calling `close()`
+stops tracing recovery.
 
 ### Plugins
 
@@ -691,6 +707,8 @@ await happy.mcp.startServer({
         }),
     ],
 });
+
+await happy.ready("Ready.");
 ```
 
 Rig gives the tool a stable name derived from the plugin, server, and tool names and offers it in
@@ -702,10 +720,11 @@ replaced, restarted, and uninstalled plugin generations are retired immediately.
 `createHappyMcpToolName(pluginName, serverName, toolName)` returns that exact stable agent-facing
 name for tests, diagnostics, or documentation.
 
-The handle returned by `happy.mcp.startServer()` reports `status` as `connected`, `reconnecting`,
-or `closed`, exposes the most recent reconnect `failure`, and has a `registrationId` that changes
-after successful re-registration. An unexpected event-stream end aborts active calls and
-re-registers with bounded exponential backoff; `close()` stops that recovery permanently.
+The handle returned by `happy.mcp.startServer()` reports `status` as `connected` or `closed` and
+exposes the connection `failure`, if any. An unexpected event-stream end aborts active calls and
+closes that declared server. Restarting or replacing the plugin creates a new process generation
+with its own 10-second registration window. Calling the handle's `close()` intentionally
+unregisters the declared server and stops the current plugin generation.
 
 ## Runtime schemas
 

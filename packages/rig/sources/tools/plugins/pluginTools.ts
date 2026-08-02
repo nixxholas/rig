@@ -64,7 +64,7 @@ export const pluginInstallTool = defineTool({
     name: "plugin_install",
     label: "Install plugin",
     description:
-        "Install a prebuilt plugin from a folder on this machine or from a plugin listed by a GitHub repository. Rig copies and validates the plugin folder, then starts its declared JavaScript or TypeScript entry point right away.",
+        "Install a prebuilt plugin from a folder on this machine or from a plugin listed by a GitHub repository. Rig copies and validates the plugin folder, then starts its declared JavaScript or TypeScript entry point right away. Plugin code must register every contribution before calling happy.ready(...) within the startup window.",
     arguments: Type.Object(
         {
             path: Type.Optional(
@@ -196,6 +196,7 @@ export const pluginListTool = defineTool({
                     Type.Literal("running"),
                     Type.Literal("stopped"),
                 ]),
+                statusMessage: Type.Optional(Type.String()),
                 version: pluginVersionSchema,
             }),
         ),

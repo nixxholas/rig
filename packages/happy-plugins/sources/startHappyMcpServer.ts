@@ -19,9 +19,7 @@ import {
     registerHappyMcpServerResponseSchema,
 } from "./types.js";
 
-const INITIAL_RECONNECT_DELAY_MS = 50;
 const MAXIMUM_EVENT_LINE_BYTES = 1024 * 1024;
-const MAXIMUM_RECONNECT_DELAY_MS = 1_000;
 
 export interface HappyMcpTransport {
     request<TSchema_ extends TSchema>(
@@ -74,14 +72,12 @@ export async function startHappyMcpServer(
     Value.Assert(happyMcpServerRegistrationSchema, registration);
 
     const calls = new Map<string, AbortController>();
-    const lifetime = new AbortController();
     let closing = false;
     let closeTask: Promise<void> | undefined;
     let currentGeneration: HappyMcpGeneration | undefined;
     let failure: string | undefined;
     let latestRegistrationId = "";
-    let recovery: Promise<void> | undefined;
-    let status: HappyMcpServerStatus = "reconnecting";
+    let status: HappyMcpServerStatus = "closed";
 
     const abortCalls = () => {
         for (const controller of calls.values()) controller.abort();
@@ -182,34 +178,8 @@ export async function startHappyMcpServer(
             currentGeneration = undefined;
             abortCalls();
             failure = error.message;
-            status = "reconnecting";
-            // The host retires this registration when its stream closes. A DELETE here would race
-            // socket teardown and target a generation the host has already retired.
-            beginRecovery();
+            status = "closed";
         });
-    };
-
-    const beginRecovery = () => {
-        if (closing || recovery !== undefined) return;
-        const task = (async () => {
-            let delayMs = INITIAL_RECONNECT_DELAY_MS;
-            while (!closing) {
-                try {
-                    await waitForReconnect(delayMs, lifetime.signal);
-                    if (closing) return;
-                    await registerAndOpen();
-                    if (status === "connected" || closing) return;
-                } catch (error) {
-                    if (closing) return;
-                    failure = errorToMessage(error);
-                    status = "reconnecting";
-                    delayMs = Math.min(delayMs * 2, MAXIMUM_RECONNECT_DELAY_MS);
-                }
-            }
-        })().finally(() => {
-            if (recovery === task) recovery = undefined;
-        });
-        recovery = task;
     };
 
     await registerAndOpen();
@@ -229,20 +199,16 @@ export async function startHappyMcpServer(
             if (closeTask !== undefined) return closeTask;
             closing = true;
             status = "closed";
-            lifetime.abort();
-            const recoveryTask = recovery;
             const generation = currentGeneration;
             currentGeneration = undefined;
             const stream = generation?.stream;
-            stream?.close();
             abortCalls();
             const task = (async () => {
-                if (stream !== undefined) {
-                    await stream.closed;
-                } else if (generation !== undefined) {
+                if (generation !== undefined) {
                     await unregister(generation.registrationId);
                 }
-                if (recoveryTask !== undefined) await recoveryTask;
+                stream?.close();
+                if (stream !== undefined) await stream.closed;
             })();
             closeTask = task;
             return task;
@@ -367,21 +333,6 @@ function openEventStream(options: {
             else reject(error);
         });
         request.end();
-    });
-}
-
-function waitForReconnect(ms: number, signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return Promise.reject(new Error("MCP recovery stopped."));
-    return new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(() => {
-            signal.removeEventListener("abort", abort);
-            resolve();
-        }, ms);
-        const abort = () => {
-            clearTimeout(timer);
-            reject(new Error("MCP recovery stopped."));
-        };
-        signal.addEventListener("abort", abort, { once: true });
     });
 }
 

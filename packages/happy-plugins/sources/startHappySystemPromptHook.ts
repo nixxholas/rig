@@ -45,6 +45,7 @@ export async function startHappySystemPromptHook(
                 });
         },
         registerPath: "/hooks/system-prompt",
+        recover: false,
         transport,
     });
     return {

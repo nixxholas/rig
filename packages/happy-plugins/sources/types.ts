@@ -617,15 +617,15 @@ export interface StartHappyMcpServerOptions {
 }
 
 export interface HappyMcpServer {
-    /** Most recent connection failure while Happy is restoring this server. */
+    /** The connection failure that closed this server, when one occurred. */
     readonly failure: string | undefined;
     readonly name: string;
-    /** The current registration. It changes when an interrupted stream is restored. */
+    /** This server's registration for the current plugin process generation. */
     readonly registrationId: string;
     readonly status: HappyMcpServerStatus;
     close(): Promise<void>;
 }
-export type HappyMcpServerStatus = "closed" | "connected" | "reconnecting";
+export type HappyMcpServerStatus = "closed" | "connected";
 
 export const HAPPY_PLUGIN_MAX_APPS = 8;
 export const HAPPY_PLUGIN_MAX_APP_RESOURCES = 64;
@@ -902,12 +902,20 @@ export const happyPluginStateSchema = Type.Union([
 ]);
 export type HappyPluginState = Static<typeof happyPluginStateSchema>;
 
+export const happyPluginStatusSchema = Type.String({
+    maxLength: 512,
+    minLength: 1,
+    pattern: "\\S",
+});
+export type HappyPluginStatus = Static<typeof happyPluginStatusSchema>;
+
 export const happyPluginSchema = Type.Object(
     {
         folder: Type.String({ maxLength: 255, minLength: 1 }),
         isSelf: Type.Boolean(),
         name: nonEmptyText,
         state: happyPluginStateSchema,
+        status: Type.Optional(happyPluginStatusSchema),
         version: happyPluginVersionSchema,
     },
     exact,
@@ -1225,6 +1233,9 @@ export const createHappyPluginClientOptionsSchema = Type.Object(
 );
 export type CreateHappyPluginClientOptions = Static<typeof createHappyPluginClientOptionsSchema>;
 
+export const happyPluginReadyBodySchema = Type.Object({ status: happyPluginStatusSchema }, exact);
+export const updateHappyPluginStatusBodySchema = happyPluginReadyBodySchema;
+
 /**
  * The public API available to a running Happy plugin.
  *
@@ -1232,6 +1243,12 @@ export type CreateHappyPluginClientOptions = Static<typeof createHappyPluginClie
  * its transport when the plugin process starts.
  */
 export interface HappyPluginClient {
+    /**
+     * Declares startup complete after every MCP server and other contribution has registered.
+     *
+     * Happy rejects registrations made after this call.
+     */
+    ready(status: HappyPluginStatus): Promise<void>;
     /** Send a durable notification to an agent identified by a session's stable Agent ID. */
     readonly agents: {
         sendMessage(input: SendAgentMessageInput): Promise<AgentMessageDelivery>;
@@ -1289,6 +1306,10 @@ export interface HappyPluginClient {
         subscribe(
             handler: (event: HappyTracingEvent) => void | Promise<void>,
         ): Promise<HappyTracingSubscription>;
+    };
+    /** Update the plugin-authored human-readable status shown by Happy. */
+    readonly status: {
+        set(status: HappyPluginStatus): Promise<void>;
     };
     /** Inspect and mutate Happy-managed Git workspaces. */
     readonly workspaces: {

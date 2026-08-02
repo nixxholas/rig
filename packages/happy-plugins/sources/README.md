@@ -11,6 +11,7 @@ by both the fake host and Rig through the package's internal host export.
 It enforces the same tool visibility, JSON/key/value/count/quota rules, and manifest bundle
 validation as Rig.
 It creates a production-shaped writable data directory in a short operating-system temporary root
-and removes the root on close. MCP registrations reconnect with bounded backoff after a stream loss.
-The test host can invoke registered system-prompt middleware and publish tracing observations
-without a daemon.
+and removes the root on close. A production plugin must register every startup contribution and
+then call `happy.ready("Ready.")` within Happy's startup window; startup registration after
+readiness is rejected. The test host can invoke registered system-prompt middleware and publish
+tracing observations without a daemon.

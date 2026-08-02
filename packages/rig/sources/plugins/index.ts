@@ -23,6 +23,8 @@ export {
 export {
     PluginHookRegistry,
     type PluginHookConnection,
+    type PluginHookConnectionOptions,
+    type PluginHookRegistrationRetirement,
     type PluginHookRegistryOptions,
 } from "./PluginHookRegistry.js";
 export {
@@ -37,6 +39,11 @@ export {
 } from "./PluginNetworkRegistry.js";
 export { PluginManager, type PluginManagerOptions } from "./PluginManager.js";
 export { PluginNotFoundError } from "./PluginNotFoundError.js";
+export {
+    DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS,
+    PluginStartupState,
+    type PluginStartupTerminalState,
+} from "./PluginStartupState.js";
 export { getPluginsDirectory } from "./getPluginsDirectory.js";
 export {
     githubPluginCatalogEntrySchema,

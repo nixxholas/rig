@@ -41,6 +41,10 @@ import { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import { PluginAppRegistry, type PluginAppResource } from "./PluginAppRegistry.js";
 import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
+import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS } from "./PluginStartupState.js";
+
+const PLUGIN_STATUS_PUBLICATION_INTERVAL_MS = 100;
+const PLUGIN_PROCESS_EXIT_SETTLE_MS = 100;
 
 export interface PluginManagerOptions {
     appRegistry?: PluginAppRegistry;
@@ -57,6 +61,7 @@ export interface PluginManagerOptions {
     listProviderUsage?: StartPluginOptions["listProviderUsage"];
     /** How a registered plugin is started. Tests replace the real sandboxed process. */
     start?: (plugin: RegisteredPlugin, options: StartPluginOptions) => Promise<RunningPlugin>;
+    startupTimeoutMs?: number;
     store: SessionStore;
 }
 
@@ -71,6 +76,7 @@ interface PluginRuntimeState {
     logTruncated?: boolean;
     logPath?: string;
     status: PluginSummary["status"];
+    statusMessage?: string;
     updatedAt: number;
 }
 
@@ -79,6 +85,12 @@ interface PluginCatalog {
     plugins: readonly PluginSummary[];
     version: EventId;
 }
+
+type StatusPublicationState =
+    | { status: "idle" }
+    | { status: "publishing" }
+    | { status: "publishing_pending" }
+    | { status: "scheduled"; timer: NodeJS.Timeout };
 
 /**
  * Owns every installed plugin's lifecycle.
@@ -106,14 +118,15 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #networkRegistry: PluginNetworkRegistry;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
     readonly #running = new Map<string, RunningPlugin>();
+    readonly #startupGenerations = new Map<string, symbol>();
     readonly #states = new Map<string, PluginRuntimeState>();
     readonly #start: (
         plugin: RegisteredPlugin,
         options: StartPluginOptions,
     ) => Promise<RunningPlugin>;
     readonly #store: SessionStore;
-    readonly #unsubscribeApps: () => void;
-    readonly #unsubscribeMcp: () => void;
+    readonly #startupTimeoutMs: number;
+    #statusPublication: StatusPublicationState = { status: "idle" };
     #closed = false;
     #publication = Promise.resolve();
     #started = false;
@@ -150,15 +163,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
             });
         this.#listProviderUsage = options.listProviderUsage;
         this.#start = options.start ?? startPlugin;
+        this.#startupTimeoutMs = options.startupTimeoutMs ?? DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS;
         this.#store = options.store;
         this.directory = options.directory ?? getPluginsDirectory(this.#environment);
-        this.#unsubscribeApps = this.#appRegistry.subscribe(() => {
-            void this.#publishChanged();
-        });
-        this.#unsubscribeMcp =
-            options.mcpRegistry?.subscribe(() => {
-                void this.#publishChanged();
-            }) ?? (() => {});
     }
 
     async start(): Promise<void> {
@@ -177,10 +184,11 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 },
             );
         }
-        for (const plugin of discovery.plugins) {
-            if (this.#closed) return;
-            await this.#startRegistered(plugin.folderName);
-        }
+        await Promise.all(
+            discovery.plugins.map((plugin) =>
+                this.#closed ? Promise.resolve() : this.#startRegistered(plugin.folderName),
+            ),
+        );
         await this.#publishChanged();
     }
 
@@ -444,6 +452,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
                     logAvailable: state.error !== undefined || state.logPath !== undefined,
                     name: plugin.manifest.name,
                     status: state.status,
+                    ...(state.statusMessage === undefined
+                        ? {}
+                        : { statusMessage: state.statusMessage }),
                     version: plugin.manifest.version,
                 };
             }),
@@ -562,11 +573,14 @@ export class PluginManager implements ManagedNetworkInterceptor {
     async close(): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
+        if (this.#statusPublication.status === "scheduled") {
+            clearTimeout(this.#statusPublication.timer);
+        }
+        this.#statusPublication = { status: "idle" };
+        this.#startupGenerations.clear();
         await Promise.all([...this.#running.values()].map((plugin) => plugin.close()));
         this.#running.clear();
         this.#networkRegistry.close();
-        this.#unsubscribeApps();
-        this.#unsubscribeMcp();
     }
 
     #assertOpen(): void {
@@ -574,12 +588,18 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }
 
     async #startRegistered(folderName: string): Promise<void> {
+        const startupGeneration = Symbol(folderName);
+        this.#startupGenerations.set(folderName, startupGeneration);
+        const isCurrentStartup = () =>
+            this.#startupGenerations.get(folderName) === startupGeneration;
         const directory = join(this.directory, folderName);
         let name = folderName;
+        let running: RunningPlugin | undefined;
         try {
             const plugin = await readPluginManifest(directory);
             name = plugin.manifest.name;
             if (plugin.entryPath === undefined) {
+                if (this.#closed || !isCurrentStartup()) return;
                 this.#states.set(folderName, {
                     status: "running",
                     updatedAt: this.#now(),
@@ -590,7 +610,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 });
                 return;
             }
-            const running = await this.#start(plugin, {
+            running = await this.#start(plugin, {
                 appRegistry: this.#appRegistry,
                 ...(this.#defaultDocker === undefined
                     ? {}
@@ -606,16 +626,64 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 listPlugins: async () => (await this.list()).plugins,
                 ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
                 networkRegistry: this.#networkRegistry,
+                onStatus: (status) => this.#updatePluginStatus(folderName, status),
                 store: this.#store,
             });
-            if (this.#closed) {
-                await running.close();
+            if (this.#closed || !isCurrentStartup()) {
+                running.startup.fail("Rig shut down while the plugin was starting.");
+                await running.close({ force: true });
                 return;
             }
             this.#running.set(folderName, running);
+            const currentRunning = running;
+            void running.retirement.then((retirement) =>
+                retirement.status === "failed"
+                    ? this.#failRunning(
+                          folderName,
+                          name,
+                          directory,
+                          currentRunning,
+                          retirement.reason,
+                      )
+                    : this.#stopRetiredRunning(folderName, currentRunning),
+            );
+            const startup = await waitForPluginStartup(running, this.#startupTimeoutMs);
+            if (
+                this.#closed ||
+                !isCurrentStartup() ||
+                this.#running.get(folderName) !== running
+            ) {
+                await running.close({ force: true });
+                return;
+            }
+            if (startup.status === "failed") {
+                this.#running.delete(folderName);
+                const diagnostic = boundPluginLogText(startup.error);
+                this.#states.set(folderName, {
+                    error: diagnostic.text,
+                    logPath: running.logPath,
+                    logTruncated: diagnostic.truncated,
+                    status: "failed",
+                    ...(running.statusMessage === undefined
+                        ? {}
+                        : { statusMessage: running.statusMessage }),
+                    updatedAt: this.#now(),
+                });
+                this.#daemonLog.record(
+                    "error",
+                    "plugin_start_failed",
+                    `Rig could not start the ${name} plugin.`,
+                    { error: diagnostic.text, plugin: name, pluginDirectory: directory },
+                );
+                await running.close({ force: true });
+                return;
+            }
             this.#states.set(folderName, {
                 logPath: running.logPath,
                 status: "running",
+                ...(running.statusMessage === undefined
+                    ? {}
+                    : { statusMessage: running.statusMessage }),
                 updatedAt: this.#now(),
             });
             this.#daemonLog.record("info", "plugin_started", `The ${name} plugin started.`, {
@@ -635,7 +703,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                               : `The plugin exited after receiving ${signal}.`;
                     this.#forgetExited(
                         folderName,
-                        running,
+                        currentRunning,
                         exitError === undefined ? {} : { error: exitError },
                     );
                     this.#daemonLog.record(
@@ -650,7 +718,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
                     );
                 },
                 (error: unknown) => {
-                    this.#forgetExited(folderName, running, {
+                    this.#forgetExited(folderName, currentRunning, {
                         error: errorToMessage(error),
                     });
                     this.#daemonLog.record(
@@ -662,6 +730,16 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 },
             );
         } catch (error) {
+            if (this.#closed || !isCurrentStartup()) {
+                if (running !== undefined) await running.close({ force: true });
+                return;
+            }
+            if (running !== undefined) {
+                if (this.#running.get(folderName) === running) {
+                    this.#running.delete(folderName);
+                }
+                await running.close({ force: true });
+            }
             const diagnostic = boundPluginLogText(errorToMessage(error));
             this.#states.set(folderName, {
                 error: diagnostic.text,
@@ -675,10 +753,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 `Rig could not start the ${name} plugin.`,
                 { error: diagnostic.text, plugin: name, pluginDirectory: directory },
             );
+        } finally {
+            if (isCurrentStartup()) this.#startupGenerations.delete(folderName);
         }
     }
 
     async #stopRunning(folderName: string, publishStopped = false): Promise<void> {
+        this.#startupGenerations.delete(folderName);
         const running = this.#running.get(folderName);
         if (running === undefined) {
             if (this.#states.get(folderName)?.status !== "running") return;
@@ -694,9 +775,100 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#states.set(folderName, {
             logPath: running.logPath,
             status: "stopped",
+            ...(running.statusMessage === undefined
+                ? {}
+                : { statusMessage: running.statusMessage }),
             updatedAt: this.#now(),
         });
         if (publishStopped) await this.#publishChanged();
+    }
+
+    #updatePluginStatus(folderName: string, statusMessage: string): void {
+        const state = this.#states.get(folderName);
+        if (state?.status !== "running") return;
+        this.#states.set(folderName, {
+            ...state,
+            statusMessage,
+            updatedAt: this.#now(),
+        });
+        this.#scheduleStatusPublication();
+    }
+
+    #scheduleStatusPublication(): void {
+        if (this.#closed) return;
+        if (this.#statusPublication.status === "publishing") {
+            this.#statusPublication = { status: "publishing_pending" };
+            return;
+        }
+        if (this.#statusPublication.status !== "idle") return;
+        const timer = setTimeout(() => {
+            if (
+                this.#statusPublication.status !== "scheduled" ||
+                this.#statusPublication.timer !== timer
+            ) {
+                return;
+            }
+            this.#statusPublication = { status: "publishing" };
+            void this.#publishChanged().finally(() => this.#finishStatusPublication());
+        }, PLUGIN_STATUS_PUBLICATION_INTERVAL_MS);
+        timer.unref();
+        this.#statusPublication = { status: "scheduled", timer };
+    }
+
+    #finishStatusPublication(): void {
+        if (this.#closed) {
+            this.#statusPublication = { status: "idle" };
+            return;
+        }
+        const publishAgain = this.#statusPublication.status === "publishing_pending";
+        this.#statusPublication = { status: "idle" };
+        if (publishAgain) this.#scheduleStatusPublication();
+    }
+
+    async #failRunning(
+        folderName: string,
+        name: string,
+        directory: string,
+        running: RunningPlugin,
+        error: string,
+    ): Promise<void> {
+        if (this.#closed || this.#running.get(folderName) !== running) return;
+        if (await exitsWithin(running.completion, PLUGIN_PROCESS_EXIT_SETTLE_MS)) return;
+        if (this.#closed || this.#running.get(folderName) !== running) return;
+        this.#running.delete(folderName);
+        const diagnostic = boundPluginLogText(error);
+        this.#states.set(folderName, {
+            error: diagnostic.text,
+            logPath: running.logPath,
+            logTruncated: diagnostic.truncated,
+            status: "failed",
+            ...(running.statusMessage === undefined
+                ? {}
+                : { statusMessage: running.statusMessage }),
+            updatedAt: this.#now(),
+        });
+        this.#daemonLog.record(
+            "error",
+            "plugin_runtime_failed",
+            `The ${name} plugin failed while it was running.`,
+            { error: diagnostic.text, plugin: name, pluginDirectory: directory },
+        );
+        await Promise.allSettled([running.close({ force: true }), this.#publishChanged()]);
+    }
+
+    async #stopRetiredRunning(folderName: string, running: RunningPlugin): Promise<void> {
+        if (this.#closed || this.#running.get(folderName) !== running) return;
+        this.#running.delete(folderName);
+        await running.close();
+        this.#states.set(folderName, {
+            logPath: running.logPath,
+            status: "stopped",
+            ...(running.statusMessage === undefined
+                ? {}
+                : { statusMessage: running.statusMessage }),
+            updatedAt: this.#now(),
+        });
+        await this.#publishChanged();
     }
 
     /** A plugin that ends on its own leaves the running set, and clients see it stop. */
@@ -711,6 +883,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 : { error: boundedError.text, logTruncated: boundedError.truncated }),
             logPath: running.logPath,
             status: "stopped",
+            ...(running.statusMessage === undefined
+                ? {}
+                : { statusMessage: running.statusMessage }),
             updatedAt: this.#now(),
         });
         void this.#publishChanged();
@@ -752,4 +927,67 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#publication = next.catch(() => undefined);
         await next;
     }
+}
+
+async function waitForPluginStartup(
+    running: RunningPlugin,
+    timeoutMs: number,
+): Promise<{ status: "running" } | { error: string; status: "failed" }> {
+    const timer = setTimeout(
+        () =>
+            running.startup.fail(
+                `The plugin did not report ready within ${formatStartupDuration(timeoutMs)}.`,
+            ),
+        timeoutMs,
+    );
+    timer.unref();
+    void running.completion.then(
+        ({ code, signal }) => {
+            running.startup.fail(
+                code !== null && code !== 0
+                    ? `The plugin exited with code ${String(code)} before reporting ready.`
+                    : signal === null
+                      ? "The plugin exited before reporting ready."
+                      : `The plugin exited after receiving ${signal} before reporting ready.`,
+            );
+        },
+        (error: unknown) => {
+            running.startup.fail(errorToMessage(error));
+        },
+    );
+    try {
+        return await running.startup.settled;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function exitsWithin(
+    completion: RunningPlugin["completion"],
+    timeoutMs: number,
+): Promise<boolean> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        return await Promise.race([
+            completion.then(
+                () => true,
+                () => true,
+            ),
+            new Promise<false>((resolve) => {
+                timer = setTimeout(() => resolve(false), timeoutMs);
+                timer.unref();
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
+    }
+}
+
+function formatStartupDuration(timeoutMs: number): string {
+    if (timeoutMs < 1_000) {
+        return `${String(timeoutMs)} ${timeoutMs === 1 ? "millisecond" : "milliseconds"}`;
+    }
+    const seconds = timeoutMs / 1_000;
+    const formatted = Number(seconds.toFixed(3));
+    return `${String(formatted)} ${formatted === 1 ? "second" : "seconds"}`;
 }

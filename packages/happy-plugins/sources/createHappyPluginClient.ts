@@ -37,6 +37,7 @@ import {
     sessionResponseSchema,
     happySlotEntryResponseSchema,
     happySlotEntryIdSchema,
+    happyPluginStatusSchema,
     publishHappyMediaInputSchema,
     publishedHappyMediaSchema,
     updateHappySlotEntryInputSchema,
@@ -47,6 +48,7 @@ import {
 } from "./types.js";
 
 const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
+const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
 const errorResponseSchema = Type.Object({ error: Type.String() }, { additionalProperties: true });
 const requiredSettingSchema = Type.String({ minLength: 1, pattern: "\\S" });
 
@@ -103,6 +105,10 @@ export function createHappyPluginClient(
     };
 
     return {
+        ready: async (status) => {
+            Value.Assert(happyPluginStatusSchema, status);
+            await request("POST", "/ready", emptyResponseSchema, { status });
+        },
         agents: {
             sendMessage: (input) => {
                 Value.Assert(sendAgentMessageInputSchema, input);
@@ -222,6 +228,12 @@ export function createHappyPluginClient(
         },
         tracing: {
             subscribe: (handler) => subscribeHappyTracing(handler, streamTransport),
+        },
+        status: {
+            set: async (status) => {
+                Value.Assert(happyPluginStatusSchema, status);
+                await request("POST", "/status", emptyResponseSchema, { status });
+            },
         },
         workspaces: {
             archive: async (input) => {

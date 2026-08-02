@@ -23,6 +23,7 @@ describe("TypeScript plugins", () => {
                     "",
                     "const projects = await happy.projects.list();",
                     'await writeFile("started.txt", `ready:${projects.length}\\n`);',
+                    'await happy.ready("Ready.");',
                     'console.log("Plugin API ready");',
                     "await new Promise<void>(() => {});",
                     "",

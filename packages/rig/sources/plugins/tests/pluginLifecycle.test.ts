@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
 import type { FileSystemContext } from "../../agent/context/FileSystemContext.js";
@@ -10,8 +10,13 @@ import type { PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { PluginManager } from "../PluginManager.js";
-import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
+import {
+    PluginMcpRegistry,
+    type PluginMcpRegistrationRetirement,
+} from "../PluginMcpRegistry.js";
+import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS, PluginStartupState } from "../PluginStartupState.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
+import type { RegisteredPlugin } from "../types.js";
 
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -21,6 +26,22 @@ afterEach(async () => {
 });
 
 describe("plugin registration", () => {
+    it("uses one ten-second startup window", () => {
+        expect(DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS).toBe(10_000);
+    });
+
+    it("keeps the first startup terminal transition authoritative", async () => {
+        const startup = new PluginStartupState();
+
+        startup.ready();
+
+        expect(startup.fail("The deadline fired too late.")).toBe(false);
+        await expect(startup.settled).resolves.toEqual({ status: "running" });
+        expect(() => startup.ready()).toThrow(
+            "Plugin readiness was already reported for this plugin generation.",
+        );
+    });
+
     it("starts a plugin as it is installed and stops it as it is uninstalled", async () => {
         const harness = await createHarness();
 
@@ -52,6 +73,7 @@ describe("plugin registration", () => {
                 logAvailable: true,
                 name: "Clock",
                 status: "running",
+                statusMessage: "Ready.",
                 version: "0.0.0",
             },
         ]);
@@ -80,6 +102,12 @@ describe("plugin registration", () => {
             source: "current_run",
             status: "running",
             text: "[stdout] ready\n",
+        });
+        harness.setStatus("Clock", "Waiting for the next tick.");
+        await vi.waitFor(async () => {
+            await expect(harness.manager.list()).resolves.toMatchObject({
+                plugins: [{ statusMessage: "Waiting for the next tick." }],
+            });
         });
 
         const uninstalled = await harness.manager.uninstall({ fs: harness.fs, name: "Clock" });
@@ -220,17 +248,215 @@ describe("plugin registration", () => {
             status: "failed",
         });
     });
+
+    it("starts plugins concurrently and times out only the generation that never reports ready", async () => {
+        const harness = await createHarness({
+            startup(plugin, startup) {
+                if (plugin.manifest.name === "Fast") startup.ready();
+            },
+            startupTimeoutMs: 25,
+        });
+        await Promise.all([
+            createPluginSource(join(harness.manager.directory, "fast"), undefined, "Fast"),
+            createPluginSource(join(harness.manager.directory, "slow"), undefined, "Slow"),
+        ]);
+
+        const starting = harness.manager.start();
+        await vi.waitFor(() => {
+            expect(harness.started).toHaveLength(2);
+            expect(harness.started).toEqual(expect.arrayContaining(["Fast", "Slow"]));
+        });
+        await starting;
+
+        await expect(harness.manager.list()).resolves.toMatchObject({
+            plugins: [
+                { name: "Fast", status: "running" },
+                {
+                    error: "The plugin did not report ready within 25 milliseconds.",
+                    name: "Slow",
+                    status: "failed",
+                },
+            ],
+        });
+        expect(harness.stopped).toEqual(["Slow"]);
+    });
+
+    it("does not let a closing startup generation write a terminal state afterward", async () => {
+        const harness = await createHarness({
+            startup() {},
+            startupTimeoutMs: 10_000,
+        });
+        await createPluginSource(join(harness.manager.directory, "clock"));
+
+        const starting = harness.manager.start();
+        await vi.waitFor(() => expect(harness.started).toEqual(["Clock"]));
+        await harness.manager.close();
+        await starting;
+
+        await expect(harness.manager.list()).resolves.toMatchObject({
+            plugins: [{ name: "Clock", status: "stopped" }],
+        });
+        expect(harness.stopped).toEqual(["Clock"]);
+    });
+
+    it("fails and republishes a running generation whose MCP registration retires", async () => {
+        const harness = await createHarness();
+        await createPluginSource(join(harness.manager.directory, "clock"));
+        await harness.manager.start();
+        expect(harness.events).toHaveLength(1);
+
+        harness.retireRuntime("Clock", {
+            reason: "The plugin MCP connection closed.",
+            status: "failed",
+        });
+
+        await vi.waitFor(async () => {
+            await expect(harness.manager.list()).resolves.toMatchObject({
+                plugins: [
+                    {
+                        error: "The plugin MCP connection closed.",
+                        name: "Clock",
+                        status: "failed",
+                    },
+                ],
+            });
+            expect(harness.events).toHaveLength(2);
+        });
+        expect(lastPlugins(harness.events)).toMatchObject([
+            { error: "The plugin MCP connection closed.", status: "failed" },
+        ]);
+        expect(harness.stopped).toEqual(["Clock"]);
+    });
+
+    it("reports a clean process exit as stopped even when its MCP stream closes first", async () => {
+        const harness = await createHarness();
+        await createPluginSource(join(harness.manager.directory, "clock"));
+        await harness.manager.start();
+
+        harness.retireRuntime("Clock", {
+            reason: "The plugin MCP connection closed.",
+            status: "failed",
+        });
+        harness.exitRuntime("Clock");
+
+        await vi.waitFor(async () => {
+            await expect(harness.manager.list()).resolves.toMatchObject({
+                plugins: [{ name: "Clock", status: "stopped" }],
+            });
+        });
+        expect(harness.stopped).toEqual([]);
+    });
+
+    it("stops a running plugin that intentionally unregisters its MCP server", async () => {
+        const harness = await createHarness();
+        await createPluginSource(join(harness.manager.directory, "clock"));
+        await harness.manager.start();
+
+        harness.retireRuntime("Clock", {
+            reason: "The plugin unregistered this MCP server.",
+            status: "stopped",
+        });
+
+        await vi.waitFor(async () => {
+            await expect(harness.manager.list()).resolves.toMatchObject({
+                plugins: [{ name: "Clock", status: "stopped" }],
+            });
+        });
+        expect(harness.stopped).toEqual(["Clock"]);
+    });
+
+    it("closes a stale startup generation without replacing the current state", async () => {
+        const firstStart = deferred<void>();
+        const releaseFirstStart = deferred<void>();
+        const harness = await createHarness({
+            async beforeStart(_plugin, attempt) {
+                if (attempt !== 1) return;
+                firstStart.resolve();
+                await releaseFirstStart.promise;
+            },
+        });
+        await createPluginSource(join(harness.manager.directory, "clock"), "1.0.0");
+        const starting = harness.manager.start();
+        await firstStart.promise;
+        const source = join(harness.workspace, "clock");
+        await createPluginSource(source, "2.0.0");
+
+        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        releaseFirstStart.resolve();
+        await starting;
+
+        await expect(harness.manager.list()).resolves.toMatchObject({
+            plugins: [{ name: "Clock", status: "running", version: "2.0.0" }],
+        });
+        expect(harness.started).toEqual(["Clock", "Clock"]);
+        expect(harness.stopped).toEqual(["Clock"]);
+    });
+
+    it("does not let a stale startup error overwrite the current generation", async () => {
+        const firstStart = deferred<void>();
+        const releaseFirstStart = deferred<void>();
+        const harness = await createHarness({
+            async beforeStart(_plugin, attempt) {
+                if (attempt !== 1) return;
+                firstStart.resolve();
+                await releaseFirstStart.promise;
+            },
+            startError: (_plugin, attempt) =>
+                attempt === 1 ? new Error("The stale generation failed.") : undefined,
+        });
+        await createPluginSource(join(harness.manager.directory, "clock"), "1.0.0");
+        const starting = harness.manager.start();
+        await firstStart.promise;
+        const source = join(harness.workspace, "clock");
+        await createPluginSource(source, "2.0.0");
+
+        await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
+        releaseFirstStart.resolve();
+        await starting;
+
+        const listed = await harness.manager.list();
+        expect(listed).toMatchObject({
+            plugins: [{ status: "running", version: "2.0.0" }],
+        });
+        expect(listed.plugins[0]).not.toHaveProperty("error");
+    });
+
+    it("coalesces rapid status updates into one bounded catalog publication", async () => {
+        const harness = await createHarness();
+        await createPluginSource(join(harness.manager.directory, "clock"));
+        await harness.manager.start();
+        const publishedBeforeStatus = harness.events.length;
+
+        harness.setStatus("Clock", "First.");
+        harness.setStatus("Clock", "Second.");
+        harness.setStatus("Clock", "Latest.");
+
+        await vi.waitFor(() => expect(harness.events).toHaveLength(publishedBeforeStatus + 1));
+        expect(lastPlugins(harness.events)).toMatchObject([{ statusMessage: "Latest." }]);
+    });
 });
 
 function lastPlugins(events: readonly PluginsChangedEvent[]): unknown {
     return events.at(-1)?.data.plugins;
 }
 
-async function createHarness(options: { startError?: Error } = {}): Promise<{
+async function createHarness(
+    options: {
+        beforeStart?: (plugin: RegisteredPlugin, attempt: number) => Promise<void>;
+        startError?:
+            | Error
+            | ((plugin: RegisteredPlugin, attempt: number) => Error | undefined);
+        startup?: (plugin: RegisteredPlugin, startup: PluginStartupState) => void;
+        startupTimeoutMs?: number;
+    } = {},
+): Promise<{
     dataRoot: string;
     events: PluginsChangedEvent[];
+    exitRuntime(name: string): void;
     fs: FileSystemContext;
     manager: PluginManager;
+    retireRuntime(name: string, retirement: PluginMcpRegistrationRetirement): void;
+    setStatus(name: string, status: string): void;
     store: InMemorySessionStore;
     started: string[];
     stopped: string[];
@@ -259,14 +485,34 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
     // the gym.
     const started: string[] = [];
     const stopped: string[] = [];
+    const statusCallbacks = new Map<string, (status: string) => void>();
+    const completionCallbacks = new Map<string, () => void>();
+    const retirementCallbacks = new Map<
+        string,
+        (retirement: PluginMcpRegistrationRetirement) => void
+    >();
+    const startAttempts = new Map<string, number>();
     const manager = new PluginManager({
         daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
         directory: join(root, "plugins"),
         environment: { HAPPY_PLUGIN_DATA_DIRECTORY: dataRoot } as NodeJS.ProcessEnv,
         mcpRegistry: new PluginMcpRegistry(),
-        start: async (plugin) => {
+        ...(options.startupTimeoutMs === undefined
+            ? {}
+            : { startupTimeoutMs: options.startupTimeoutMs }),
+        start: async (plugin, startOptions) => {
             started.push(plugin.manifest.name);
-            if (options.startError !== undefined) throw options.startError;
+            const attempt = (startAttempts.get(plugin.folderName) ?? 0) + 1;
+            startAttempts.set(plugin.folderName, attempt);
+            await options.beforeStart?.(plugin, attempt);
+            if (startOptions.onStatus !== undefined) {
+                statusCallbacks.set(plugin.manifest.name, startOptions.onStatus);
+            }
+            const startError =
+                typeof options.startError === "function"
+                    ? options.startError(plugin, attempt)
+                    : options.startError;
+            if (startError !== undefined) throw startError;
             let finish = () => {};
             const completion = new Promise<{
                 code: number | null;
@@ -274,15 +520,28 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
             }>((resolve) => {
                 finish = () => resolve({ code: 0, signal: null });
             });
+            completionCallbacks.set(plugin.manifest.name, finish);
+            const retirement = new Promise<PluginMcpRegistrationRetirement>((resolve) => {
+                retirementCallbacks.set(plugin.manifest.name, resolve);
+            });
             const logPath = join(plugin.directory, "plugin.log");
             await writeFile(logPath, "[stdout] ready\n");
+            const startup = new PluginStartupState();
+            if (options.startup === undefined) startup.ready();
+            else options.startup(plugin, startup);
+            let closed = false;
             return {
                 completion,
                 dataDirectory: join(dataRoot, plugin.folderName),
                 logPath,
                 name: plugin.manifest.name,
                 pid: 1234,
+                retirement,
+                startup,
+                statusMessage: startup.status === "running" ? "Ready." : undefined,
                 close: () => {
+                    if (closed) return Promise.resolve();
+                    closed = true;
                     stopped.push(plugin.manifest.name);
                     finish();
                     return Promise.resolve();
@@ -296,17 +555,40 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
     return {
         dataRoot,
         events,
+        exitRuntime(name) {
+            const callback = completionCallbacks.get(name);
+            if (callback === undefined) {
+                throw new Error(`No completion callback exists for ${name}.`);
+            }
+            callback();
+        },
         started,
         stopped,
         // Plugin changes run with the Full access boundary the Auto reviewer grants them.
         fs: createNodeFileSystemContext(workspace, { permissionMode: () => "full_access" }),
         manager,
+        retireRuntime(name, retirement) {
+            const callback = retirementCallbacks.get(name);
+            if (callback === undefined) {
+                throw new Error(`No retirement callback exists for ${name}.`);
+            }
+            callback(retirement);
+        },
+        setStatus(name, status) {
+            const callback = statusCallbacks.get(name);
+            if (callback === undefined) throw new Error(`No status callback exists for ${name}.`);
+            callback(status);
+        },
         store,
         workspace,
     };
 }
 
-async function createPluginSource(directory: string, version?: string): Promise<void> {
+async function createPluginSource(
+    directory: string,
+    version?: string,
+    name = "Clock",
+): Promise<void> {
     await mkdir(directory, { recursive: true });
     await Promise.all([
         writeFile(
@@ -316,7 +598,7 @@ async function createPluginSource(directory: string, version?: string): Promise<
                     description: "A small clock.",
                     icon: "icon.png",
                     main: "index.ts",
-                    name: "Clock",
+                    name,
                     ...(version === undefined ? {} : { version }),
                 },
                 null,
@@ -331,4 +613,15 @@ async function createPluginSource(directory: string, version?: string): Promise<
             ),
         ),
     ]);
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+    let resolvePromise: (value: T | PromiseLike<T>) => void = () => {};
+    const promise = new Promise<T>((resolve) => {
+        resolvePromise = resolve;
+    });
+    return {
+        promise,
+        resolve: resolvePromise,
+    };
 }

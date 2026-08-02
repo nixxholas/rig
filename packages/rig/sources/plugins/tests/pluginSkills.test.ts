@@ -10,6 +10,7 @@ import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { PluginManager } from "../PluginManager.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
+import { PluginStartupState } from "../PluginStartupState.js";
 import { readPluginManifest } from "../readPluginManifest.js";
 import type { RegisteredPlugin } from "../types.js";
 
@@ -266,6 +267,8 @@ async function createHarness(): Promise<{
         mcpRegistry: new PluginMcpRegistry(),
         start: async (plugin: RegisteredPlugin) => {
             started.push(plugin.manifest.name);
+            const startup = new PluginStartupState();
+            startup.ready();
             let finish = () => {};
             const completion = new Promise<{
                 code: number | null;
@@ -279,6 +282,9 @@ async function createHarness(): Promise<{
                 logPath: join(plugin.directory, ".build", "plugin.log"),
                 name: plugin.manifest.name,
                 pid: 1234,
+                retirement: new Promise(() => {}),
+                startup,
+                statusMessage: "Ready.",
                 close: async () => finish(),
             };
         },

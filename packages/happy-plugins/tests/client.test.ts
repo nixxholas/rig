@@ -23,6 +23,23 @@ afterEach(async () => {
 });
 
 describe("happy-plugins client", () => {
+    it("reports readiness through an explicit startup declaration", async () => {
+        const directory = await mkdtemp(join(process.cwd(), ".c-"));
+        temporaryDirectories.push(directory);
+        const socketPath = join(directory, "s");
+        const server = createServer((request, response) => {
+            expect(request.method).toBe("POST");
+            expect(request.url).toBe("/ready");
+            response.end("{}");
+        });
+        servers.push(server);
+        await listen(server, socketPath);
+
+        await expect(
+            createHappyPluginClient({ socketPath, token: "plugin-token" }).ready("Ready."),
+        ).resolves.toBeUndefined();
+    });
+
     it("authenticates over the provided Unix socket and validates the response schema", async () => {
         const directory = await mkdtemp(join(process.cwd(), ".c-"));
         temporaryDirectories.push(directory);

@@ -4,6 +4,7 @@ import { chmod, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import type { HappyPluginStatus } from "happy-plugins";
 
 import { createSandboxedCommand } from "../agent/context/createSandboxedCommand.js";
 import { createToolEnvironment } from "../agent/context/createToolEnvironment.js";
@@ -18,11 +19,12 @@ import {
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
 import type { PluginHookRegistry } from "./PluginHookRegistry.js";
-import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
+import type { PluginMcpRegistrationRetirement, PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import type { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import type { PluginAppRegistry } from "./PluginAppRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 import { snapshotPluginApps } from "./snapshotPluginApps.js";
+import { PluginStartupState } from "./PluginStartupState.js";
 
 const STOP_GRACE_MS = 2_000;
 
@@ -32,7 +34,10 @@ export interface RunningPlugin {
     readonly logPath: string;
     readonly name: string;
     readonly pid: number | undefined;
-    close(): Promise<void>;
+    readonly retirement: Promise<PluginMcpRegistrationRetirement>;
+    readonly startup: PluginStartupState;
+    readonly statusMessage: string | undefined;
+    close(options?: { force?: boolean }): Promise<void>;
 }
 
 export interface StartPluginOptions {
@@ -46,6 +51,7 @@ export interface StartPluginOptions {
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     mcpRegistry?: PluginMcpRegistry;
     networkRegistry?: PluginNetworkRegistry;
+    onStatus?: (status: HappyPluginStatus) => void;
     store: SessionStore;
 }
 
@@ -78,19 +84,41 @@ export async function startPlugin(
     ]);
 
     const token = randomBytes(32).toString("base64url");
-    const mcp = options.mcpRegistry?.createConnection({
-        folder: plugin.folderName,
-        name: plugin.manifest.name,
+    const startup = new PluginStartupState();
+    let processState: "starting" | "running" | "closing" | "exited" = "starting";
+    let reportRetirement = (_retirement: PluginMcpRegistrationRetirement) => {};
+    const retirement = new Promise<PluginMcpRegistrationRetirement>((resolve) => {
+        reportRetirement = resolve;
     });
+    const handleRequiredRegistrationRetirement = (event: PluginMcpRegistrationRetirement): void => {
+        if (startup.fail(event.reason)) return;
+        if (processState === "closing" || processState === "exited") return;
+        reportRetirement(event);
+    };
+    let statusMessage: string | undefined;
+    const mcp = options.mcpRegistry?.createConnection(
+        {
+            folder: plugin.folderName,
+            name: plugin.manifest.name,
+        },
+        {
+            onActiveRegistrationRetired: handleRequiredRegistrationRetirement,
+        },
+    );
     const network = options.networkRegistry?.createConnection({
         folder: plugin.folderName,
         interceptDomains: plugin.manifest.interceptDomains ?? [],
         name: plugin.manifest.name,
     });
-    const hooks = options.hookRegistry?.createConnection({
-        folder: plugin.folderName,
-        name: plugin.manifest.name,
-    });
+    const hooks = options.hookRegistry?.createConnection(
+        {
+            folder: plugin.folderName,
+            name: plugin.manifest.name,
+        },
+        {
+            onRequiredRegistrationRetired: handleRequiredRegistrationRetirement,
+        },
+    );
     let unregisterApps: (() => void) | undefined;
     try {
         unregisterApps =
@@ -116,6 +144,11 @@ export async function startPlugin(
         pluginFolder: plugin.folderName,
         pluginDataDirectory: dataDirectory,
         pluginName: plugin.manifest.name,
+        onStatus: (status) => {
+            statusMessage = status;
+            options.onStatus?.(status);
+        },
+        startup,
         store: options.store,
         token,
     });
@@ -162,6 +195,7 @@ export async function startPlugin(
             },
             stdio: ["ignore", "pipe", "pipe"],
         });
+        processState = "running";
     } catch (error) {
         unregisterApps?.();
         hooks?.close();
@@ -189,10 +223,12 @@ export async function startPlugin(
     const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
         (resolve, reject) => {
             child.once("error", (error) => {
+                processState = "exited";
                 void finalize();
                 reject(error);
             });
             child.once("exit", (code, signal) => {
+                processState = "exited";
                 void finalize();
                 resolve({ code, signal });
             });
@@ -205,9 +241,20 @@ export async function startPlugin(
         logPath,
         name: plugin.manifest.name,
         pid: child.pid,
-        async close() {
+        retirement,
+        startup,
+        get statusMessage() {
+            return statusMessage;
+        },
+        async close(options = {}) {
+            if (processState !== "exited") processState = "closing";
             if (child.exitCode === null && child.signalCode === null) {
-                child.kill("SIGTERM");
+                child.kill(options.force === true ? "SIGKILL" : "SIGTERM");
+                if (options.force === true) {
+                    await completion.catch(() => undefined);
+                    await finalize();
+                    return;
+                }
                 const stopped = await Promise.race([
                     completion.then(
                         () => true,

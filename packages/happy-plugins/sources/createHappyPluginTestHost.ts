@@ -51,7 +51,9 @@ import {
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
     happyNetworkRequestCompletionSchema,
+    happyPluginReadyBodySchema,
     happySystemPromptHookCompletionSchema,
+    updateHappyPluginStatusBodySchema,
     happyPluginTestSeedSchema,
     listWorkspacesInputSchema,
     readWorkspaceFileBodySchema,
@@ -178,6 +180,8 @@ export async function createHappyPluginTestHost(
     const plugins: HappyPlugin[] = structuredClone(seed.plugins ?? []);
     const requests: HappyPluginTestRequest[] = [];
     const registrations = new Map<string, TestRegistration>();
+    let ready = false;
+    let pluginStatus: string | undefined;
     let systemPromptHook: TestEventRegistration | undefined;
     let tracingSubscription: TestEventRegistration | undefined;
     const systemPromptCalls = new Map<string, TestCall<HappySystemPromptHookResult>>();
@@ -224,6 +228,28 @@ export async function createHappyPluginTestHost(
             options.onRequest?.(structuredClone(observedRequest));
             const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
 
+            if (request.method === "POST" && url.pathname === "/ready") {
+                const readiness = decodeRequest(
+                    happyPluginReadyBodySchema,
+                    body,
+                    "Plugin readiness",
+                );
+                if (ready)
+                    throw new Error("The fake Happy host already received plugin readiness.");
+                pluginStatus = readiness.status;
+                ready = true;
+                send(response, 200, {});
+                return;
+            }
+            if (request.method === "POST" && url.pathname === "/status") {
+                pluginStatus = decodeRequest(
+                    updateHappyPluginStatusBodySchema,
+                    body,
+                    "Plugin status",
+                ).status;
+                send(response, 200, {});
+                return;
+            }
             if (request.method === "GET" && url.pathname === "/projects") {
                 send(response, 200, { projects });
                 return;
@@ -255,7 +281,13 @@ export async function createHappyPluginTestHost(
                 return;
             }
             if (request.method === "GET" && url.pathname === "/plugins") {
-                send(response, 200, { plugins });
+                send(response, 200, {
+                    plugins: plugins.map((plugin) =>
+                        plugin.isSelf && pluginStatus !== undefined
+                            ? { ...plugin, status: pluginStatus }
+                            : plugin,
+                    ),
+                });
                 return;
             }
             if (
@@ -329,6 +361,11 @@ export async function createHappyPluginTestHost(
                 return;
             }
             if (request.method === "POST" && url.pathname === "/mcp/servers") {
+                if (ready) {
+                    throw new Error(
+                        "MCP registration must be declared before the plugin reports ready.",
+                    );
+                }
                 const registeredServer = decodeRequest(
                     happyMcpServerRegistrationSchema,
                     body,
@@ -354,6 +391,11 @@ export async function createHappyPluginTestHost(
                 return;
             }
             if (request.method === "POST" && url.pathname === "/hooks/system-prompt") {
+                if (ready) {
+                    throw new Error(
+                        "System-prompt hook registration must be declared before the plugin reports ready.",
+                    );
+                }
                 if (systemPromptHook !== undefined) {
                     send(response, 409, { error: "A system-prompt hook is already registered." });
                     return;
@@ -379,6 +421,11 @@ export async function createHappyPluginTestHost(
                 parts[2] === systemPromptHook?.id &&
                 parts[3] === "events"
             ) {
+                if (ready) {
+                    throw new Error(
+                        "System-prompt hook stream attachment must be declared before the plugin reports ready.",
+                    );
+                }
                 response.writeHead(200, {
                     "cache-control": "no-store",
                     "content-type": "application/x-ndjson",
@@ -463,6 +510,11 @@ export async function createHappyPluginTestHost(
                 request.method === "POST" &&
                 (url.pathname === "/network/requests" || url.pathname === "/network/tunnels")
             ) {
+                if (ready) {
+                    throw new Error(
+                        "Network listener registration must be declared before the plugin reports ready.",
+                    );
+                }
                 const registration: TestNetworkRegistration = {
                     id: `test-network-${String(nextId++)}`,
                     type: url.pathname === "/network/requests" ? "request" : "tunnel",
@@ -489,6 +541,11 @@ export async function createHappyPluginTestHost(
                 parts[2] !== undefined &&
                 parts[3] === "events"
             ) {
+                if (ready) {
+                    throw new Error(
+                        "Network listener stream attachment must be declared before the plugin reports ready.",
+                    );
+                }
                 const registration = networkRegistrations.get(parts[2]);
                 if (registration === undefined) {
                     send(response, 404, { error: "That network listener is not active." });
@@ -548,6 +605,11 @@ export async function createHappyPluginTestHost(
                 parts[2] !== undefined &&
                 parts[3] === "events"
             ) {
+                if (ready) {
+                    throw new Error(
+                        "MCP stream attachment must be declared before the plugin reports ready.",
+                    );
+                }
                 const registration = registrations.get(parts[2]);
                 if (registration === undefined) {
                     send(response, 404, { error: "That MCP registration is not active." });

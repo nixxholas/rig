@@ -1382,6 +1382,8 @@ export interface PluginSummary {
     logAvailable: boolean;
     name: string;
     status: "failed" | "running" | "stopped";
+    /** The plugin's own human-readable description of its current state. */
+    statusMessage?: string;
     version: string;
 }
 

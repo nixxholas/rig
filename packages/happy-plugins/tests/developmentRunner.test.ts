@@ -40,6 +40,7 @@ describe("happy-plugin development runner", () => {
                 "    },",
                 "  })],",
                 "});",
+                'await happy.ready("Ready.");',
                 "",
             ].join("\n"),
         );

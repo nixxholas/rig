@@ -93,6 +93,8 @@ import { happy } from "happy-plugins";
 const projects = await happy.projects.list();
 console.log(`Rig has ${projects.length} projects.`);
 
+await happy.ready("Ready.");
+
 // A service-style plugin stays alive until Rig shuts it down.
 await new Promise<void>((resolve) => {
     process.once("SIGTERM", resolve);
@@ -131,6 +133,7 @@ happy.agents.sendMessage({ agentId, message });
 happy.providers.usage();
 
 happy.mcp.startServer({ name, tools });
+happy.ready("Ready."); // Call once, after every startup contribution is registered.
 happy.ui.startApplication({ id, title, entry, navigation?, resources, actions });
 ```
 
@@ -161,6 +164,7 @@ await happy.mcp.startServer({
         }),
     ],
 });
+await happy.ready("Ready.");
 
 // Keep the process alive so the server stays registered.
 await new Promise<void>(() => {});

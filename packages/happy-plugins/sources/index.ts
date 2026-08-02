@@ -38,6 +38,7 @@ export type {
     HappyPluginSystemPromptContribution,
     HappyPluginState,
     HappyPluginStreamStatus,
+    HappyPluginStatus,
     HappyPluginVersion,
     HappyPluginAppResourceSummary,
     HappyPluginAppSidebar,
@@ -120,6 +121,8 @@ export {
     happyPluginAppIdSchema,
     happyPluginAppManifestSchema,
     happyPluginManifestSchema,
+    happyPluginReadyBodySchema,
+    happyPluginStatusSchema,
     happyPluginSystemPromptContributionSchema,
     happyPluginVersionSchema,
     happyPluginAppResourceSummarySchema,
@@ -203,6 +206,7 @@ export {
     writeWorkspaceFileBodySchema,
     writeWorkspaceFileInputSchema,
     writeWorkspaceFileResultSchema,
+    updateHappyPluginStatusBodySchema,
 } from "./types.js";
 export {
     HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,

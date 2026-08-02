@@ -29,6 +29,7 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
     label: string;
     onEvent: (event: Static<TEventSchema>, registrationId: string) => void | Promise<void>;
     registerPath: string;
+    recover?: boolean;
     transport: HappyMcpTransport;
 }): Promise<HappyPluginEventRegistration> {
     const lifetime = new AbortController();
@@ -96,7 +97,11 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
             }
             currentGeneration = undefined;
             failure = error.message;
-            status = "reconnecting";
+            status = options.recover === false ? "closed" : "reconnecting";
+            if (options.recover === false) {
+                warn(`The Happy ${options.label} stream closed. ${error.message}`);
+                return;
+            }
             warn(
                 `The Happy ${options.label} stream closed; the SDK will reconnect. ${error.message}`,
             );
@@ -150,13 +155,12 @@ export async function startHappyPluginEventRegistration<TEventSchema extends TSc
             const generation = currentGeneration;
             currentGeneration = undefined;
             const stream = generation?.stream;
-            stream?.close();
             const task = (async () => {
-                if (stream !== undefined) {
-                    await stream.closed;
-                } else if (generation !== undefined) {
+                if (generation !== undefined) {
                     await unregister(generation.registrationId);
                 }
+                stream?.close();
+                if (stream !== undefined) await stream.closed;
                 if (recoveryTask !== undefined) await recoveryTask;
             })();
             closeTask = task;

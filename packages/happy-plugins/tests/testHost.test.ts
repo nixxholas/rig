@@ -64,11 +64,21 @@ describe("Happy plugin test host", () => {
         release();
         await expect.poll(() => traced).toEqual(["turn_started", "turn_finished"]);
 
+        const hookRegistrationId = hook.registrationId;
+        const tracingRegistrationId = tracing.registrationId;
         await hook.close();
         await tracing.close();
+        expect(host.requests).toContainEqual({
+            method: "DELETE",
+            path: `/hooks/system-prompt/${hookRegistrationId}`,
+        });
+        expect(host.requests).toContainEqual({
+            method: "DELETE",
+            path: `/tracing/subscriptions/${tracingRegistrationId}`,
+        });
     });
 
-    it("re-registers prompt and tracing streams after an unexpected detach", async () => {
+    it("retires a required prompt stream while dynamically restoring tracing", async () => {
         const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
         const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
         hosts.push(host);
@@ -85,21 +95,16 @@ describe("Happy plugin test host", () => {
         host.hooks.disconnect();
         host.tracing.disconnect();
 
-        await expect
-            .poll(
-                () =>
-                    hook.registrationId !== firstHookRegistration &&
-                    tracing.registrationId !== firstTracingRegistration,
-            )
-            .toBe(true);
-        expect(hook.status).toBe("connected");
+        await expect.poll(() => tracing.registrationId !== firstTracingRegistration).toBe(true);
+        expect(hook.registrationId).toBe(firstHookRegistration);
+        expect(hook.status).toBe("closed");
         expect(tracing.status).toBe("connected");
         await expect(
             host.hooks.applySystemPrompt({
                 systemPrompt: "Base",
                 userPrompt: "Continue.",
             }),
-        ).resolves.toEqual({ systemPrompt: "Base\nrecovered" });
+        ).rejects.toThrow("No system-prompt hook is attached");
         host.tracing.emit({
             model: "openai/gpt-test",
             provider: "codex",
@@ -113,6 +118,19 @@ describe("Happy plugin test host", () => {
         await hook.close();
         await tracing.close();
         warning.mockRestore();
+    });
+
+    it("rejects late hooks while allowing dynamic tracing after readiness", async () => {
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        hosts.push(host);
+
+        await host.client.ready("Ready.");
+        await expect(host.client.hooks.onSystemPrompt(() => ({}))).rejects.toThrow(
+            "must be declared before the plugin reports ready",
+        );
+        const tracing = await host.client.tracing.subscribe(() => {});
+        expect(tracing.status).toBe("connected");
+        await tracing.close();
     });
 
     it("exposes the exact stable tool identity used by ordinary agents", () => {
@@ -239,7 +257,7 @@ describe("Happy plugin test host", () => {
         const registrationId = server.registrationId;
         await server.close();
         await expect.poll(() => host.mcp.listTools()).toEqual([]);
-        expect(host.requests).not.toContainEqual({
+        expect(host.requests).toContainEqual({
             method: "DELETE",
             path: `/mcp/servers/${registrationId}`,
         });
@@ -273,6 +291,12 @@ describe("Happy plugin test host", () => {
             );
         });
         const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+        await host.client.ready("Serving network requests.");
+        await expect(
+            host.client.network.onRequest(() => ({ type: "pass_through" })),
+        ).rejects.toThrow(
+            "Network listener registration must be declared before the plugin reports ready.",
+        );
 
         await expect(
             host.network.request({
@@ -569,7 +593,7 @@ describe("Happy plugin test host", () => {
     });
 
     it.each(["close", "end", "error"] as const)(
-        "restores its catalog after an unexpected stream %s and stops recovery on close",
+        "retires its catalog after an unexpected stream %s without registering late",
         async (mode) => {
             const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
             hosts.push(host);
@@ -589,25 +613,19 @@ describe("Happy plugin test host", () => {
             const firstRegistration = server.registrationId;
 
             host.mcp.disconnectServers(mode);
-            await expect.poll(() => server.status, { timeout: 2_000 }).toBe("reconnecting");
+            await expect.poll(() => server.status, { timeout: 2_000 }).toBe("closed");
             expect(server.failure).toEqual(expect.any(String));
-            await host.mcp.waitForTools(1, 2_000);
-            await expect.poll(() => server.status, { timeout: 2_000 }).toBe("connected");
-            expect(server.registrationId).not.toBe(firstRegistration);
+            expect(host.mcp.listTools()).toEqual([]);
+            expect(server.registrationId).toBe(firstRegistration);
             expect(host.requests).not.toContainEqual({
                 method: "DELETE",
                 path: `/mcp/servers/${firstRegistration}`,
             });
-            await expect(host.mcp.callTool(`Recovery ${mode}`, "ping")).resolves.toEqual({
-                content: [{ text: "pong", type: "text" }],
-            });
 
-            const activeRegistration = server.registrationId;
             const registrationCount = host.requests.filter(
                 (request) => request.method === "POST" && request.path === "/mcp/servers",
             ).length;
             await server.close();
-            await new Promise((resolve) => setTimeout(resolve, 100));
             expect(server.status).toBe("closed");
             expect(
                 host.requests.filter(
@@ -616,7 +634,7 @@ describe("Happy plugin test host", () => {
             ).toHaveLength(registrationCount);
             expect(host.requests).not.toContainEqual({
                 method: "DELETE",
-                path: `/mcp/servers/${activeRegistration}`,
+                path: `/mcp/servers/${firstRegistration}`,
             });
         },
     );

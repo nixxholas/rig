@@ -71,7 +71,6 @@ interface RegisteredApp {
  */
 export class PluginAppRegistry {
     readonly #apps = new Map<string, RegisteredApp>();
-    readonly #listeners = new Set<() => void>();
     readonly #storageQueues = new Map<string, Promise<void>>();
     readonly mcp: PluginMcpRegistry;
 
@@ -94,7 +93,6 @@ export class PluginAppRegistry {
             });
             owned.push(id);
         }
-        this.#notify();
         let active = true;
         return () => {
             if (!active) return;
@@ -103,13 +101,7 @@ export class PluginAppRegistry {
                 const current = this.#apps.get(id);
                 if (current?.generation === generation) this.#apps.delete(id);
             }
-            this.#notify();
         };
-    }
-
-    subscribe(listener: () => void): () => void {
-        this.#listeners.add(listener);
-        return () => this.#listeners.delete(listener);
     }
 
     list(folder?: string): readonly HappyPluginAppContribution[] {
@@ -272,9 +264,6 @@ export class PluginAppRegistry {
         });
     }
 
-    #notify(): void {
-        for (const listener of this.#listeners) listener();
-    }
 }
 
 function toContribution(

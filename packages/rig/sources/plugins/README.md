@@ -102,12 +102,24 @@ create a session attachment because attachment delivery is owned by an agent tur
 and `main` file so a bad plugin can be reported without preventing other plugins or the daemon from
 starting.
 
-Registration is immediate. `install` copies and validates a folder, then starts the plugin before it
-returns; `uninstall` stops the plugin before removing its code and always keeps the folder the
-plugin writes to. Every change — including a plugin that exits on its own — publishes a live
-`plugins_changed` event carrying the whole current set, so clients never poll and never wait for a
-restart. A plugin is validated in a hidden staging folder, so an invalid replacement is never
-installed and never displaces a working one.
+Registration is synchronous in the product sense. Every process generation moves through one
+explicit `starting -> running | failed` state machine. It has one 10-second window to register its
+MCP server and managed-network listeners, attach their NDJSON streams, then call
+`happy.ready("Ready.")`. Registration must finish before readiness is reported. A generation that
+misses the window becomes failed with the reason
+`The plugin did not report ready within 10 seconds.`, its process is killed, and its startup state
+cannot transition again. Late registration and stream attachment are rejected for that generation.
+Skills-only plugins have no process contribution to declare and become running immediately.
+The readiness call also declares the plugin-authored status string; `happy.status.set(...)` may
+update it after startup. Rapid status writes are coalesced into bounded catalog publications.
+
+Daemon startup launches every discovered plugin concurrently and resolves the manager's `start`
+only after every plugin is running or failed. Installing and replacing a plugin use the same
+bounded startup path before returning. `uninstall` stops the plugin before removing its code and
+always keeps the folder the plugin writes to. Every completed change — including a plugin that
+exits on its own — publishes a live `plugins_changed` event carrying the whole current set, so
+clients never poll and never wait for a restart. A plugin is validated in a hidden staging folder,
+so an invalid replacement is never installed and never displaces a working one.
 
 Manifest versions use Semantic Versioning and default to `0.0.0` when omitted. Installing over an
 existing folder is classified as an upgrade, downgrade, or reinstall by comparing versions; the
@@ -134,24 +146,29 @@ two-second deadline inside a five-second aggregate chain budget. Oversized, time
 disconnected, failed, or over-budget calls are logged and skipped.
 `happy.tracing.subscribe` uses the same NDJSON stream style for observation-only turn, inference,
 and tool lifecycle events. Each plugin has a 128-event drop-oldest queue; socket backpressure never
-reaches the agent run, and logged drop counts make slow subscribers visible. Closing either stream
-retires its registration generation; the SDK logs the close and reconnects with bounded backoff.
-Synthetic tool results for calls interrupted before execution are durable loop events but do not
-produce tracing lifecycle events, so every traced tool finish has a matching start.
+reaches the agent run, and logged drop counts make slow subscribers visible. System-prompt hook
+registration and stream attachment are required startup contributions, so losing that stream after
+readiness retires the plugin generation under the same live-process-failure versus clean-exit rules
+as MCP. Tracing subscriptions remain dynamic before and after readiness; their stream generations
+recover with bounded backoff and cannot attach after the plugin generation has failed. Synthetic
+tool results for calls interrupted before execution are durable loop events but do not produce
+tracing lifecycle events, so every traced tool finish has a matching start.
 
 `PluginMcpRegistry` is a daemon-wide `McpToolProvider`. Each plugin process generation owns a
 connection to it through the already-authenticated plugin socket. An SDK registration becomes live
-only when its NDJSON call stream attaches; exit, disconnect, replacement, restart, or uninstall
-retires that generation and rejects pending calls before stale completions can land. Sessions load
-this provider through the same composite MCP path as configured servers, so provider tool assembly
-and `AgentContext`/`PermissionContext` behavior stay shared.
+only when its NDJSON call stream attaches during startup. Reporting ready closes registration for
+that generation. Exit, disconnect, replacement, restart, or uninstall retires the generation and
+rejects pending calls before stale completions can land. Sessions load this provider through the
+same composite MCP path as configured servers, so provider tool assembly and
+`AgentContext`/`PermissionContext` behavior stay shared. If an attached MCP stream closes after
+readiness, the generation becomes failed and stops; it cannot remain running without the tools it
+declared at startup. That retirement publishes the changed plugin catalog immediately.
 
 `PluginAppRegistry` owns bounded manifest-declared static bundles, app-scoped MCP calls, and
-plugin-private JSON storage. Static contributions become visible as soon as the plugin process
-starts, including apps with no tools. The catalog is republished when an MCP stream later attaches,
-so app-visible tools appear without hiding or remounting the static app. Stable identity combines
-the plugin folder and authored app ID; generation is unique to the process. Resource and tool
-routes require both, so replacement, exit, disconnect, restart, or uninstall retires stale views.
+plugin-private JSON storage. Static bundles and their startup-attached tools are published together
+when the plugin reports ready, including apps with no tools. Stable identity combines the plugin
+folder and authored app ID; generation is unique to the process. Resource and tool routes require
+both, so replacement, exit, disconnect, restart, or uninstall retires stale views.
 Resource, bundle, registration-body, tool-call body, storage, and concurrent-call limits keep
 memory and work bounded.
 

@@ -4,9 +4,33 @@ import type { HappyMcpEvent, HappyMcpServerRegistration } from "happy-plugins";
 
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { AnyDefinedTool } from "../../agent/types.js";
-import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
+import {
+    PluginMcpRegistry,
+    type PluginMcpRegistrationRetirement,
+} from "../PluginMcpRegistry.js";
 
 describe("PluginMcpRegistry", () => {
+    it("reports each live registration retirement to its owning generation", () => {
+        const registry = new PluginMcpRegistry();
+        const retired: PluginMcpRegistrationRetirement[] = [];
+        const connection = registry.createConnection(
+            { folder: "projects", name: "Projects" },
+            { onActiveRegistrationRetired: (retirement) => retired.push(retirement) },
+        );
+        const disconnectedId = connection.register(server("Catalog", ["list_projects"]));
+        const detach = connection.attach(disconnectedId, () => true);
+
+        detach();
+
+        const unregisteredId = connection.register(server("Catalog", ["list_projects"]));
+        connection.attach(unregisteredId, () => true);
+        connection.unregister(unregisteredId);
+        expect(retired).toEqual([
+            { reason: "The plugin MCP connection closed.", status: "failed" },
+            { reason: "The plugin unregistered this MCP server.", status: "stopped" },
+        ]);
+    });
+
     it("forwards concurrent calls, accepts reverse completion, and preserves MCP permissions", async () => {
         const registry = new PluginMcpRegistry();
         const connection = registry.createConnection({ folder: "projects", name: "Projects" });
