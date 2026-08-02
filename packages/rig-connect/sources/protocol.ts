@@ -84,6 +84,63 @@ export interface ImageBlock {
     detail?: "high" | "original";
 }
 
+export type Attachment =
+    | {
+          bytes: number;
+          height: number;
+          id: string;
+          kind: "image";
+          mediaType: string;
+          name: string;
+          source: string;
+          thumbhash: string;
+          width: number;
+      }
+    | {
+          bytes: number;
+          duration: number;
+          height: number;
+          id: string;
+          kind: "video";
+          mediaType?: string;
+          name: string;
+          preview: {
+              height: number;
+              mediaType: "image/png";
+              path: string;
+              thumbhash: string;
+              width: number;
+          };
+          source: string;
+          width: number;
+      }
+    | {
+          bytes: number;
+          duration: number;
+          id: string;
+          kind: "audio";
+          mediaType?: string;
+          name: string;
+          source: string;
+      }
+    | {
+          bytes: number;
+          id: string;
+          kind: "file";
+          mediaType?: string;
+          name: string;
+          source: string;
+      }
+    | {
+          description?: string;
+          id: string;
+          image?: string;
+          kind: "url";
+          siteName?: string;
+          source: string;
+          title: string;
+      };
+
 export type ContentBlock = TextBlock | ImageBlock;
 
 export interface ThinkingBlock {
@@ -231,6 +288,7 @@ export interface AgentMessage {
     role: "agent";
     id: string;
     blocks: readonly AgentBlock[];
+    attachments?: readonly Attachment[];
     usage?: Usage;
     contextTokens?: number;
     providerId?: string;
@@ -924,7 +982,14 @@ export type InterpretedSessionEvent =
     | BaseSessionEvent<"provider_quota_observed", { providerId: string; quota: ProviderQuota }>
     | BaseSessionEvent<
           "run_finished",
-          { errorMessage?: string; modelLocked: boolean; runId: string; stopReason: string }
+          {
+              attachmentMessageId?: string;
+              attachments?: readonly Attachment[];
+              errorMessage?: string;
+              modelLocked: boolean;
+              runId: string;
+              stopReason: string;
+          }
       >
     | BaseSessionEvent<"run_error", { errorMessage: string; modelLocked: boolean; runId: string }>
     | BaseSessionEvent<

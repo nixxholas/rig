@@ -55,6 +55,9 @@ import type { SchedulingContext } from "../scheduling/index.js";
 import type { ProviderUsageContext } from "../agent/context/ProviderUsageContext.js";
 import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 import type { ImageGenerationProvider } from "../tools/imageGeneration/createImageGenerationTool.js";
+import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
+import { CONTAINER_GENERATED_PATH } from "../execution/index.js";
+import { AttachmentContext } from "../tools/attachments/AttachmentContext.js";
 
 export interface CreateCodingAssistantAgentOptions {
     appendSystemPrompt?: string;
@@ -105,6 +108,7 @@ export function createCodingAssistantAgent(
     options: CreateCodingAssistantAgentOptions,
 ): CodingAssistantRuntime {
     const processManager = options.processManager ?? new NativeProcessManager();
+    const env = options.env ?? process.env;
     const agentId = options.agentId ?? createId();
     const workflowsEnabled = options.workflows !== undefined && options.workflowsEnabled !== false;
     const sharedContextOptions = {
@@ -130,6 +134,17 @@ export function createCodingAssistantAgent(
                     sessionId: options.sessionId ?? options.agentId ?? "standalone",
                 });
     const runtimeCwd = context.fs.cwd;
+    context.attachments = new AttachmentContext();
+    if (
+        process.env.RIG_GYM_RUNTIME !== "just-bash" &&
+        (options.docker === undefined || options.docker.container === undefined)
+    ) {
+        const hostDirectory = getGeneratedDirectory(env);
+        context.generatedMedia = createGeneratedMediaStore({
+            hostDirectory,
+            ...(options.docker === undefined ? {} : { modelDirectory: CONTAINER_GENERATED_PATH }),
+        });
+    }
     context.agentCommunication =
         options.agentCommunication ??
         ({
@@ -184,7 +199,6 @@ export function createCodingAssistantAgent(
     if (providerId !== "gym" && (providerConfig === undefined || !providerConfig.enabled)) {
         throw new Error(`Unknown or disabled inference provider '${providerId}'.`);
     }
-    const env = options.env ?? process.env;
     const nativeProvider =
         options.executor ??
         (() => {

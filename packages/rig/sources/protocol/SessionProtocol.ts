@@ -5,6 +5,7 @@ import type {
     ContentBlock,
 } from "../agent/index.js";
 import type { AgentMessage, Message, UserMessage } from "../agent/types.js";
+import type { Attachment } from "./Attachment.js";
 import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import type {
     ProviderModelCompatibilityType,
@@ -1052,6 +1053,9 @@ export type RunFinishedEvent = BaseSessionEvent<
     "run_finished",
     {
         agentRunId?: string;
+        /** Atomically decorates the completed turn's final message. */
+        attachmentMessageId?: string;
+        attachments?: readonly Attachment[];
         /** Present whenever `stopReason` is `error`, so the failure stays readable in history. */
         errorMessage?: string;
         modelLocked: boolean;

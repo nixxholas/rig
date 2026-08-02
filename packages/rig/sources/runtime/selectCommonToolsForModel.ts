@@ -12,11 +12,13 @@ import { webappCreateTool } from "../tools/webapps/webapp_create.js";
 import { webappListTool } from "../tools/webapps/webapp_list.js";
 import { webappRevertTool } from "../tools/webapps/webapp_revert.js";
 import { webappUpdateTool } from "../tools/webapps/webapp_update.js";
+import { attachTool } from "../tools/attachments/attach.js";
 
 export function selectCommonToolsForModel(options: {
     isSubagent: boolean;
 }): readonly AnyDefinedTool[] {
     return [
+        attachTool,
         waitTool,
         waitUntilTool,
         ...(options.isSubagent ? [] : [scheduleMessageTool, cancelAskTool]),

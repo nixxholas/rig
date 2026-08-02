@@ -31,5 +31,5 @@ Guidelines:
 - If neither mechanism can include every target image, ask the user to attach the missing images again.
 - Directly generate the image without reconfirmation or clarification unless required images must be attached again.
 - Always use this tool for image editing unless the user explicitly requests otherwise.
-- The finished image is saved under \`generated_images/\` in the workspace and returned to you.`,
+- The finished image is saved in the shared generated-files folder named in your environment instructions and returned to you.`,
 };

@@ -179,6 +179,9 @@ importers:
       ssh2:
         specifier: ^1.17.0
         version: 1.17.0
+      thumbhash:
+        specifier: ^0.1.1
+        version: 0.1.1
       typescript-7:
         specifier: npm:typescript@^7.0.2
         version: typescript@7.0.2
@@ -3555,6 +3558,9 @@ packages:
   text-decoder@1.2.7:
     resolution: {integrity: sha512-vlLytXkeP4xvEq2otHeJfSQIRyWxo/oZGEbXrtEEF9Hnmrdly59sUbzZ/QgyWuLYHctCHxFF4tRQZNQ9k60ExQ==}
 
+  thumbhash@0.1.1:
+    resolution: {integrity: sha512-kH5pKeIIBPQXAOni2AiY/Cu/NKdkFREdpH+TLdM0g6WA7RriCv0kPLgP731ady67MhTAqrVG/4mnEeibVuCJcg==}
+
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
 
@@ -6833,6 +6839,8 @@ snapshots:
       b4a: 1.8.1
     transitivePeerDependencies:
       - react-native-b4a
+
+  thumbhash@0.1.1: {}
 
   tinybench@2.9.0: {}
 

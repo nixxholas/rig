@@ -3,6 +3,7 @@ import type {
     AgentBlock,
     AgentLoopEvent,
     AgentMessage,
+    Attachment,
     BackgroundProcess,
     ContentBlock,
     CompactionMessage,
@@ -38,6 +39,7 @@ import type {
 } from "./protocol.js";
 import type {
     ActiveTurn,
+    AgentAttachmentsElement,
     AgentTextElement,
     ChatDelta,
     ChatElement,
@@ -1056,12 +1058,26 @@ export class ChatStore {
                 break;
             case "run_finished": {
                 const data = event.data as {
+                    attachmentMessageId?: string;
+                    attachments?: readonly Attachment[];
                     errorMessage?: string;
                     modelLocked: boolean;
                     runId: string;
                     stopReason: string;
                 };
                 this.#session = { ...this.#session, modelLocked: data.modelLocked };
+                if (
+                    data.attachmentMessageId !== undefined &&
+                    data.attachments !== undefined &&
+                    data.attachments.length > 0
+                ) {
+                    this.#upsertAgentAttachments(
+                        data.attachmentMessageId,
+                        data.attachments,
+                        event.createdAt,
+                        data.runId,
+                    );
+                }
                 const outcome =
                     data.stopReason === "error"
                         ? "error"
@@ -2415,6 +2431,9 @@ export class ChatStore {
             this.#turnUsage = addUsage(this.#turnUsage, message.usage);
             deltas.push({ type: "session_changed", session: this.#session });
         }
+        if (message.attachments !== undefined && message.attachments.length > 0) {
+            this.#upsertAgentAttachments(message.id, message.attachments, at, elementTurnId);
+        }
     }
 
     /** Applies a later copy of a message that is already in the list. */
@@ -2423,6 +2442,37 @@ export class ChatStore {
             if (isToolCallBlock(block)) this.#upsertToolCall(block, at, this.#turnId ?? "");
             else if (isToolResultBlock(block)) this.#applyToolResult(block);
         }
+        if (message.attachments !== undefined && message.attachments.length > 0) {
+            this.#upsertAgentAttachments(
+                message.id,
+                message.attachments,
+                at,
+                this.#turnId ?? `history:${message.id}`,
+            );
+        }
+    }
+
+    #upsertAgentAttachments(
+        messageId: string,
+        attachments: readonly Attachment[],
+        at: number,
+        runId: string,
+    ): void {
+        const id = `${messageId}:attachments`;
+        const existing = this.#byId.get(id);
+        if (existing?.kind === "agent_attachments") {
+            this.#update(id, { attachments });
+            return;
+        }
+        const element: AgentAttachmentsElement = {
+            attachments,
+            createdAt: at,
+            id,
+            kind: "agent_attachments",
+            messageId,
+            ...this.#elementIdentity(runId),
+        };
+        this.#appendGroupContent(element);
     }
 
     /**

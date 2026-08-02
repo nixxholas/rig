@@ -93,6 +93,12 @@ export async function createSystemPrompt(
         parts.push(createBundledDocsInstructions(options.context.docsPath));
     }
 
+    if (options.context.generatedMedia !== undefined) {
+        parts.push(
+            `# Generated files\n\nGenerated images and media previews are stored in \`${options.context.generatedMedia.modelDirectory}\`. Files there are shared user data and may be read by any session. Use this exact folder when referring to generated output.`,
+        );
+    }
+
     if (options.tools?.some((tool) => tool.namespace?.name === "rig") === true) {
         parts.push(RIG_AGENT_TOOL_INSTRUCTIONS);
     }

@@ -304,3 +304,9 @@ export {
     SESSION_DRAFT_MAX_LENGTH,
     SESSION_STREAM_TURN_LIMIT,
 } from "./SessionProtocol.js";
+export {
+    AttachmentImagePreviewSchema,
+    AttachmentSchema,
+    type Attachment,
+    type AttachmentImagePreview,
+} from "./Attachment.js";

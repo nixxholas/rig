@@ -79,6 +79,7 @@ export type { ServerCompatibility } from "./ServerCompatibility.js";
 export type {
     ActiveGroup,
     ActiveTurn,
+    AgentAttachmentsElement,
     AgentTextElement,
     ChatDelta,
     ChatElement,

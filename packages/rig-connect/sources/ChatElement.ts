@@ -10,6 +10,7 @@ import type {
     PendingSteeringMessage,
     PermissionReviewState,
     SessionActivity,
+    Attachment,
     SessionAgentMetadata,
     SessionExecutionEnvironment,
     SessionGoal,
@@ -38,6 +39,7 @@ export type ChatElement =
     | SystemNoticeElement
     | InferenceElement
     | AgentTextElement
+    | AgentAttachmentsElement
     | ThinkingElement
     | ToolCallElement
     | CompactionElement
@@ -91,6 +93,13 @@ export interface AgentTextElement extends BaseChatElement {
     text: string;
     /** False while the model is still producing this text. */
     complete: boolean;
+}
+
+/** Prepared media intent committed only when an agent turn finishes successfully. */
+export interface AgentAttachmentsElement extends BaseChatElement {
+    attachments: readonly Attachment[];
+    kind: "agent_attachments";
+    messageId: string;
 }
 
 export interface ThinkingElement extends BaseChatElement {

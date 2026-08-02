@@ -5,6 +5,7 @@ import { selectCommonToolsForModel } from "./selectCommonToolsForModel.js";
 describe("selectCommonToolsForModel", () => {
     it("gives primary agents all scheduling tools", () => {
         expect(selectCommonToolsForModel({ isSubagent: false }).map((tool) => tool.name)).toEqual([
+            "attach",
             "wait",
             "wait_until",
             "schedule_message",
@@ -28,6 +29,7 @@ describe("selectCommonToolsForModel", () => {
 
     it("never gives schedule_message to subagents", () => {
         expect(selectCommonToolsForModel({ isSubagent: true }).map((tool) => tool.name)).toEqual([
+            "attach",
             "wait",
             "wait_until",
             "get_agent_tree_usage",

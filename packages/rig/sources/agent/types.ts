@@ -15,6 +15,7 @@ import type {
 import type { ToolResultPresentation } from "./ToolResultPresentation.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { UnansweredUserInput, UserInputResponse } from "../user-input/types.js";
+import type { Attachment } from "../protocol/Attachment.js";
 
 /** Plain text content. */
 export interface TextBlock {
@@ -182,6 +183,8 @@ export interface AgentMessage {
     role: "agent";
     id: string;
     blocks: readonly AgentBlock[];
+    /** Model-invisible files and links prepared for application rendering after turn completion. */
+    attachments?: readonly Attachment[];
     /** Provider-reported usage for inference messages. Tool-result messages omit it. */
     usage?: Usage;
     /** Context window occupied immediately after this inference. */

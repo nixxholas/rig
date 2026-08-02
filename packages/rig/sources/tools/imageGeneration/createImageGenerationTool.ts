@@ -149,11 +149,19 @@ export function createImageGenerationTool(
             }
             const bytes = await decodeAndValidatePng(successful.generated.base64);
             const callId = turnId.replaceAll(/[^A-Za-z0-9_-]/gu, "_");
-            const path = await writeGeneratedMediaFile(
-                join(context.fs.cwd, "generated_images", `${callId}.png`),
-                bytes,
-                context,
-            );
+            const path =
+                context.generatedMedia === undefined
+                    ? await writeGeneratedMediaFile(
+                          join(context.fs.cwd, "generated_images", `${callId}.png`),
+                          bytes,
+                          context,
+                      )
+                    : (
+                          await context.generatedMedia.write(bytes, {
+                              extension: "png",
+                              preferredName: callId,
+                          })
+                      ).path;
             return {
                 bytes: bytes.byteLength,
                 image_base64: successful.generated.base64,

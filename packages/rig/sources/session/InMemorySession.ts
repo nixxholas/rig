@@ -97,7 +97,7 @@ import { sessionUnreadStateAfterEvent } from "./impl/sessionUnreadStateAfterEven
 import { IDLE_SESSION_ACTIVITY, sessionActivityAfterEvent } from "./sessionActivityAfterEvent.js";
 import { aggregateSessionTokenCount } from "./usage/aggregateSessionTokenCount.js";
 import { sessionTokenCountAfterEvent } from "./usage/sessionTokenCountAfterEvent.js";
-import type { Model, Provider, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
+import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import { createEncryptedAgentTransportScope } from "../executor/createEncryptedAgentTransportScope.js";
 import type {
     DurableUserInputCall,
@@ -3058,6 +3058,7 @@ export class InMemorySession {
         // conversation that knew its task ids. Nothing would ever read or stop
         // those commands again, so they go with the history that started them.
         await this.#killRuntimeProcesses({ includeBackground: true });
+        this.#runtime?.context.attachments?.discard();
         await this.#ensureRuntime().agent.reset();
         this.#status = "idle";
         this.#interruption = undefined;
@@ -4954,6 +4955,7 @@ export class InMemorySession {
             this.#appendRunFinished(runId, result);
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
+            runtime?.context.attachments?.discard();
             if (this.#activeRun?.runId !== runId) return;
             const errorMessage = errorToMessage(error);
             this.#appendDurableError(runId, errorMessage, runtime);
@@ -5688,6 +5690,13 @@ export class InMemorySession {
     }
 
     #appendRunFinished(runId: string, result: AgentRunResult): SessionRunCompletion["status"] {
+        if (this.#persistence?.transaction !== undefined) {
+            return this.#persistence.transaction(() => this.#commitRunFinished(runId, result));
+        }
+        return this.#commitRunFinished(runId, result);
+    }
+
+    #commitRunFinished(runId: string, result: AgentRunResult): SessionRunCompletion["status"] {
         const stopReason: StopReason = result.stopReason;
         if (result.stopReason === "error") {
             this.#appendDurableError(runId, result.errorMessage, this.#runtime);
@@ -5702,6 +5711,38 @@ export class InMemorySession {
             stopReason !== "error" &&
             responseText === undefined;
         const subagentFailed = providerFailed || tokenExhausted;
+        const attachmentContext = this.#runtime?.context.attachments;
+        let attachmentCompletion:
+            | {
+                  attachmentMessageId: string;
+                  attachments: NonNullable<AgentMessage["attachments"]>;
+              }
+            | undefined;
+        if (subagentFailed || stopReason === "aborted" || stopReason === "error") {
+            attachmentContext?.discard();
+        } else if ((attachmentContext?.pending().length ?? 0) > 0) {
+            const target = this.#messages.findLast(
+                (entry) =>
+                    entry.runId === runId &&
+                    !entry.isPartial &&
+                    entry.message.role === "agent" &&
+                    entry.message.internal !== true,
+            );
+            if (target?.message.role === "agent") {
+                const attachments = attachmentContext?.takePending() ?? [];
+                const message: AgentMessage = {
+                    ...target.message,
+                    attachments: [...(target.message.attachments ?? []), ...attachments],
+                };
+                this.#storeMessage(target.position, message, false, runId);
+                attachmentCompletion = {
+                    attachmentMessageId: message.id,
+                    attachments: message.attachments ?? [],
+                };
+            } else {
+                attachmentContext?.discard();
+            }
+        }
         if (!this.#workspaceArchived) {
             this.#status = subagentFailed
                 ? "error"
@@ -5734,6 +5775,7 @@ export class InMemorySession {
         }
         this.#append("run_finished", {
             agentRunId: result.runId,
+            ...attachmentCompletion,
             ...(result.errorMessage === undefined ? {} : { errorMessage: result.errorMessage }),
             modelLocked: this.#modelLocked(),
             runId,
@@ -6516,6 +6558,7 @@ export class InMemorySession {
             }
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
+            runtime?.context.attachments?.discard();
             if (this.#activeRun?.runId !== queued.runId) {
                 return;
             }

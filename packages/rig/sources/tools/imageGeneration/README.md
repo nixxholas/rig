@@ -14,12 +14,16 @@ codex_imagegen (Codex models)   imagegen (every other family)
              remaining providers in round-robin order
                           |
                           v
-              generated_images/<tool-call>.png
+                 user data/Generated/<tool-call>.png
 ```
 
 One implementation sits behind both names. `selectToolsForModel` picks the
 surface, so a model family gets the wording its training expects while
 execution, permissions, and persistence stay identical.
+
+The generated-media store is Rig-owned and publicly readable. Native models see
+its host path; managed Docker models see the same folder read-only at
+`/happy/generated`.
 
 Neither surface is namespaced, and Codex models deliberately do not see a tool
 called `imagegen`: the Responses API reserves both the `image_gen` namespace and

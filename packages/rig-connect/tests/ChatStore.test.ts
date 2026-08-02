@@ -114,6 +114,56 @@ function runOneTurn(store: ChatStore): ChatDelta[] {
 }
 
 describe("ChatStore", () => {
+    it("commits final-message attachments before closing the live turn", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        store.apply(event("run_started", { runId: "run-1" }));
+        store.apply(
+            agentEvent({ iteration: 1, messageId: "m1", type: "inference_iteration_start" }),
+        );
+        store.apply(
+            event("agent_message", {
+                message: {
+                    blocks: [{ text: "Done.", type: "text" }],
+                    id: "m1",
+                    role: "agent",
+                },
+                runId: "run-1",
+            }),
+        );
+        store.apply(
+            event("run_finished", {
+                attachmentMessageId: "m1",
+                attachments: [
+                    {
+                        bytes: 10,
+                        height: 20,
+                        id: "image-1",
+                        kind: "image",
+                        mediaType: "image/png",
+                        name: "result.png",
+                        source: "/happy/generated/result.png",
+                        thumbhash: "AQID",
+                        width: 30,
+                    },
+                ],
+                modelLocked: false,
+                runId: "run-1",
+                stopReason: "stop",
+            }),
+        );
+
+        expect(store.elements().map((element) => element.kind)).toEqual([
+            "agent_text",
+            "agent_attachments",
+            "group_end",
+        ]);
+        expect(store.elements()[1]).toMatchObject({
+            kind: "agent_attachments",
+            messageId: "m1",
+        });
+    });
+
     it("projects complete application state and keeps it current from events", () => {
         const store = new ChatStore("session-1");
         const opening = hello();

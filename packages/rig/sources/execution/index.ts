@@ -4,6 +4,7 @@ export { createDockerBashContext } from "./createDockerBashContext.js";
 export { createDockerFileSystemContext } from "./createDockerFileSystemContext.js";
 export { DockerEnvironment } from "./DockerEnvironment.js";
 export { CONTAINER_DOCS_PATH, getBundledDocsRoot } from "./getBundledDocsRoot.js";
+export { CONTAINER_GENERATED_PATH } from "./getGeneratedMount.js";
 export { resolveDockerExecutionConfig } from "./resolveDockerExecutionConfig.js";
 export { validateDockerExecutionConfig } from "./validateDockerExecutionConfig.js";
 export { summarizeDockerExecution } from "./summarizeDockerExecution.js";

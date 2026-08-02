@@ -26,6 +26,8 @@ import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import type { FileSearchServiceContract } from "../../file-search/FileSearchService.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import { CONTAINER_DOCS_PATH, getBundledDocsRoot } from "../../execution/getBundledDocsRoot.js";
+import { CONTAINER_GENERATED_PATH } from "../../execution/getGeneratedMount.js";
+import { getGeneratedDirectory } from "../../generated-media/index.js";
 import type { GlobalEventQueue } from "../../global-event/GlobalEventQueue.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
@@ -1008,6 +1010,11 @@ describe("createProtocolHttpServer", () => {
                 mounts: [
                     { source: "/tmp/default-project", target: "/workspace" },
                     { readOnly: true, source: getBundledDocsRoot(), target: CONTAINER_DOCS_PATH },
+                    {
+                        readOnly: true,
+                        source: getGeneratedDirectory(),
+                        target: CONTAINER_GENERATED_PATH,
+                    },
                 ],
                 name: `rig-${configured.session.id}`,
                 workingDirectory: "/workspace",

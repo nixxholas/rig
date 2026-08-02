@@ -95,6 +95,14 @@ export class DockerEnvironment {
                         Source: mount.source,
                         Target: mount.target,
                         ReadOnly: mount.readOnly ?? false,
+                        ...(mount.target === "/happy/generated"
+                            ? {
+                                  BindOptions: {
+                                      CreateMountpoint: true,
+                                      Propagation: "rprivate" as const,
+                                  },
+                              }
+                            : {}),
                     })),
                     // Restricted commands create their own user, PID, mount, and network
                     // namespaces with Bubblewrap. Docker's default seccomp profile blocks
