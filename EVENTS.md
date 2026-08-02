@@ -103,8 +103,10 @@ They arrive on the global stream only.
 | ------------------ | --------------------------------------------------------------------------------- | ------------------------------------------ | ------ |
 | `presence_changed` | The user switches presence.                                                       | `presence`: current `PresenceSnapshot`     | **No** |
 | `plugins_changed`  | Plugins finish loading at startup, one is installed or uninstalled, or one stops. | `plugins`: every installed `PluginSummary` | **No** |
+| `slots_changed`    | A slot entry is created, updated, or removed.                                     | `entries`: every current `SlotEntry`       | **No** |
+| `webapps_changed`  | A webapp is imported, updated with a new version, or reverted.                    | `webapps`: every current `Webapp`          | **No** |
 
-Both are live-only and carry the complete current state, so a client that
+All four are live-only and carry the complete current state, so a client that
 reconnects reads what is there now instead of replaying past changes.
 
 `plugins_changed` reports each installed plugin's `name`, `description`,
@@ -112,6 +114,16 @@ reconnects reads what is there now instead of replaying past changes.
 to, and whether it is `running`. Installing a plugin starts it and uninstalling
 one stops it before its code is removed, so a client never has to poll or wait
 for a daemon restart to show the current set.
+
+`slots_changed` carries every slot entry — agent-authored content plugged into
+the Happy app's fixed UI slots — with each entry's slot, scope, TypeBox-typed
+content, author session, description, and purpose. `webapps_changed` carries
+every webapp with its description, purpose, author session, version history,
+and which imported version is current. Entries are read and changed through
+`GET`/`POST /slots` and `PATCH`/`DELETE /slots/{id}`; webapps through
+`GET`/`POST /webapps`, `POST /webapps/{name}/versions`,
+`POST /webapps/{name}/revert`, and `GET /webapps/{name}/files/{path}` for the
+current version's static files.
 
 ## `agent_event` subtypes
 

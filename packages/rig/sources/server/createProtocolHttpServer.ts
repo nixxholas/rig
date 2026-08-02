@@ -166,6 +166,21 @@ import type {
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginAppError, PluginNotFoundError } from "../plugins/index.js";
+import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
+import { readWebappFile, WebappInvalidError, WebappNotFoundError } from "../webapps/index.js";
+import { createWebappRequestSchema, slotNameSchema } from "../protocol/index.js";
+import type {
+    CreateSlotEntryRequest,
+    ListSlotEntriesResponse,
+    ListWebappsResponse,
+    RevertWebappRequest,
+    SlotEntryResponse,
+    SlotManagementErrorCode,
+    UpdateSlotEntryRequest,
+    UpdateWebappRequest,
+    WebappManagementErrorCode,
+    WebappResponse,
+} from "../protocol/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
@@ -642,6 +657,208 @@ async function handleRequest(
         return;
     }
 
+    if (route.name === "slots") {
+        if (request.method === "GET") {
+            const slot = url.searchParams.get("slot") ?? undefined;
+            if (slot !== undefined && !Value.Check(slotNameSchema, slot)) {
+                sendSlotManagementError(
+                    response,
+                    400,
+                    "invalid_request",
+                    `Unknown slot ${JSON.stringify(slot)}.`,
+                );
+                return;
+            }
+            const projectId = url.searchParams.get("projectId") ?? undefined;
+            const workspaceId = url.searchParams.get("workspaceId") ?? undefined;
+            const sessionId = url.searchParams.get("sessionId") ?? undefined;
+            sendJson<ListSlotEntriesResponse>(response, 200, {
+                entries: store.slots.list({
+                    ...(slot === undefined ? {} : { slot }),
+                    ...(projectId === undefined ? {} : { projectId }),
+                    ...(workspaceId === undefined ? {} : { workspaceId }),
+                    ...(sessionId === undefined ? {} : { sessionId }),
+                }),
+            });
+            return;
+        }
+        if (request.method === "POST") {
+            let body: unknown;
+            try {
+                body = await readJson<unknown>(request, 256 * 1024);
+            } catch (error) {
+                sendInvalidSlotBody(response, error);
+                return;
+            }
+            try {
+                sendJson<SlotEntryResponse>(response, 201, {
+                    entry: store.slots.create(body as CreateSlotEntryRequest),
+                });
+            } catch (error) {
+                if (error instanceof SlotEntryInvalidError) {
+                    sendSlotManagementError(response, 400, "invalid_entry", error.message);
+                    return;
+                }
+                throw error;
+            }
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+    }
+    if (route.name === "slot-entry") {
+        if (request.method === "PATCH") {
+            let body: unknown;
+            try {
+                body = await readJson<unknown>(request, 256 * 1024);
+            } catch (error) {
+                sendInvalidSlotBody(response, error);
+                return;
+            }
+            try {
+                sendJson<SlotEntryResponse>(response, 200, {
+                    entry: store.slots.update(route.slotEntryId, body as UpdateSlotEntryRequest),
+                });
+            } catch (error) {
+                if (error instanceof SlotEntryInvalidError) {
+                    sendSlotManagementError(response, 400, "invalid_entry", error.message);
+                    return;
+                }
+                if (error instanceof SlotEntryNotFoundError) {
+                    sendSlotManagementError(response, 404, "entry_not_found", error.message);
+                    return;
+                }
+                throw error;
+            }
+            return;
+        }
+        if (request.method === "DELETE") {
+            try {
+                sendJson<SlotEntryResponse>(response, 200, {
+                    entry: store.slots.remove(route.slotEntryId),
+                });
+            } catch (error) {
+                if (error instanceof SlotEntryNotFoundError) {
+                    sendSlotManagementError(response, 404, "entry_not_found", error.message);
+                    return;
+                }
+                throw error;
+            }
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+    }
+    if (route.name === "webapps") {
+        if (request.method === "GET") {
+            sendJson<ListWebappsResponse>(response, 200, { webapps: store.webapps.list() });
+            return;
+        }
+        if (request.method === "POST") {
+            let body: unknown;
+            try {
+                body = await readJson<unknown>(request, 64 * 1024);
+            } catch (error) {
+                sendInvalidWebappBody(response, error);
+                return;
+            }
+            if (!Value.Check(createWebappRequestSchema, body)) {
+                sendWebappManagementError(
+                    response,
+                    400,
+                    "invalid_request",
+                    "A webapp import needs a kebab-case name, description, purpose, author session, and source folder path.",
+                );
+                return;
+            }
+            try {
+                sendJson<WebappResponse>(response, 201, {
+                    webapp: await store.webapps.create(body),
+                });
+            } catch (error) {
+                if (error instanceof WebappInvalidError) {
+                    sendWebappManagementError(response, 400, "invalid_webapp", error.message);
+                    return;
+                }
+                throw error;
+            }
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
+    }
+    if (route.name === "webapp-versions" || route.name === "webapp-revert") {
+        if (request.method !== "POST") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        let body: unknown;
+        try {
+            body = await readJson<unknown>(request, 64 * 1024);
+        } catch (error) {
+            sendInvalidWebappBody(response, error);
+            return;
+        }
+        try {
+            const webapp =
+                route.name === "webapp-versions"
+                    ? await store.webapps.update(route.webappName, body as UpdateWebappRequest)
+                    : store.webapps.revert(route.webappName, body as RevertWebappRequest);
+            sendJson<WebappResponse>(response, 200, { webapp });
+        } catch (error) {
+            if (error instanceof WebappInvalidError) {
+                sendWebappManagementError(response, 400, "invalid_webapp", error.message);
+                return;
+            }
+            if (error instanceof WebappNotFoundError) {
+                sendWebappManagementError(response, 404, "webapp_not_found", error.message);
+                return;
+            }
+            throw error;
+        }
+        return;
+    }
+    if (route.name === "webapp-file") {
+        if (request.method !== "GET") {
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        const webapp = store.webapps.get(route.webappName);
+        if (webapp === undefined) {
+            sendWebappManagementError(
+                response,
+                404,
+                "webapp_not_found",
+                `No webapp named ${JSON.stringify(route.webappName)} exists.`,
+            );
+            return;
+        }
+        const file = await readWebappFile(
+            route.webappName,
+            webapp.currentVersion,
+            route.webappFilePath,
+        );
+        if (file.type === "invalid_path") {
+            sendWebappManagementError(
+                response,
+                400,
+                "invalid_request",
+                "Webapp file paths may not traverse outside the webapp folder or name dotfiles.",
+            );
+            return;
+        }
+        if (file.type === "not_found") {
+            sendWebappManagementError(response, 404, "webapp_not_found", "Webapp file not found.");
+            return;
+        }
+        response.writeHead(200, {
+            "content-length": file.data.byteLength,
+            "content-type": file.contentType,
+            "x-content-type-options": "nosniff",
+        });
+        response.end(file.data);
+        return;
+    }
     if (request.method === "POST" && route.name === "debug-inspector") {
         if (runtimeConfig.onStartInspector === undefined) {
             sendJson(response, 409, { error: "This daemon cannot start a debugger." });
@@ -2700,9 +2917,14 @@ function matchRoute(pathname: string):
               | "secret-registrations"
               | "sessions"
               | "shutdown"
-              | "timeline";
+              | "slots"
+              | "timeline"
+              | "webapps";
           sessionId?: undefined;
       }
+    | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
+    | { name: "webapp-revert" | "webapp-versions"; sessionId?: undefined; webappName: string }
+    | { name: "webapp-file"; sessionId?: undefined; webappFilePath: string; webappName: string }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
     | {
           name: "plugin-log" | "plugin-uninstall";
@@ -2833,6 +3055,27 @@ function matchRoute(pathname: string):
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
     if (pathname === "/shutdown") return { name: "shutdown" };
+    if (pathname === "/slots") return { name: "slots" };
+    if (pathname === "/webapps") return { name: "webapps" };
+
+    const webappFile = /^\/webapps\/([^/]+)\/files(?:\/(.*))?$/u.exec(pathname);
+    if (webappFile !== null) {
+        const webappName = decodeUrlComponent(webappFile[1]);
+        if (webappName === undefined) return undefined;
+        const rawSegments = (webappFile[2] ?? "").split("/").filter((segment) => segment !== "");
+        const segments = rawSegments.map(decodeUrlComponent);
+        if (segments.some((segment) => segment === undefined)) return undefined;
+        return { name: "webapp-file", webappFilePath: segments.join("/"), webappName };
+    }
+    const webappOperation = /^\/webapps\/([^/]+)\/(versions|revert)$/u.exec(pathname);
+    if (webappOperation !== null) {
+        const webappName = decodeUrlComponent(webappOperation[1]);
+        if (webappName === undefined) return undefined;
+        return {
+            name: webappOperation[2] === "versions" ? "webapp-versions" : "webapp-revert",
+            webappName,
+        };
+    }
 
     const globalParts = pathname.split("/").filter(Boolean);
     const appOperation =
@@ -2860,6 +3103,10 @@ function matchRoute(pathname: string):
         globalParts[2] === "log"
     ) {
         return { name: "plugin-log", pluginName: decodeURIComponent(globalParts[1]) };
+    }
+    if (globalParts.length === 2 && globalParts[0] === "slots" && globalParts[1] !== undefined) {
+        const slotEntryId = decodeUrlComponent(globalParts[1]);
+        return slotEntryId === undefined ? undefined : { name: "slot-entry", slotEntryId };
     }
     if (globalParts.length === 2 && globalParts[0] === "plugins" && globalParts[1] !== undefined) {
         const pluginName = decodeUrlComponent(globalParts[1]);
@@ -3093,6 +3340,55 @@ function sendPluginAppError(response: ServerResponse, error: unknown): void {
     throw error;
 }
 
+function sendSlotManagementError(
+    response: ServerResponse,
+    status: number,
+    code: SlotManagementErrorCode,
+    message: string,
+): void {
+    sendJson(response, status, { error: { code, message } });
+}
+
+function sendInvalidSlotBody(response: ServerResponse, error: unknown): void {
+    if (error instanceof RequestBodyTooLargeError) {
+        sendSlotManagementError(
+            response,
+            413,
+            "invalid_request",
+            "The slot entry is larger than the allowed limit.",
+        );
+        return;
+    }
+    sendSlotManagementError(response, 400, "invalid_request", "A slot entry must be valid JSON.");
+}
+
+function sendInvalidWebappBody(response: ServerResponse, error: unknown): void {
+    if (error instanceof RequestBodyTooLargeError) {
+        sendWebappManagementError(
+            response,
+            413,
+            "invalid_request",
+            "The webapp request is larger than the allowed limit.",
+        );
+        return;
+    }
+    sendWebappManagementError(
+        response,
+        400,
+        "invalid_request",
+        "A webapp request must be valid JSON.",
+    );
+}
+
+function sendWebappManagementError(
+    response: ServerResponse,
+    status: number,
+    code: WebappManagementErrorCode,
+    message: string,
+): void {
+    sendJson(response, status, { error: { code, message } });
+}
+
 function sendPluginManagementError(
     response: ServerResponse,
     status: number,
@@ -3178,6 +3474,12 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "secret-registrations") return request.method === "POST";
+    if (route.name === "slots") return request.method === "POST";
+    if (route.name === "slot-entry") return request.method !== "GET";
+    if (route.name === "webapps") return request.method === "POST";
+    if (route.name === "webapp-versions" || route.name === "webapp-revert") {
+        return request.method === "POST";
+    }
     if (route.name === "secret-registration") return request.method === "DELETE";
     if (route.name === "messages" && route.sessionId === undefined) {
         return request.method === "POST";
