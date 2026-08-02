@@ -15,6 +15,14 @@ describe("selectCommonToolsForModel", () => {
             "plugin_uninstall",
             "plugin_list",
             "plugin_logs",
+            "slot_create",
+            "slot_update",
+            "slot_remove",
+            "slot_list",
+            "webapp_create",
+            "webapp_update",
+            "webapp_revert",
+            "webapp_list",
         ]);
     });
 
@@ -28,6 +36,14 @@ describe("selectCommonToolsForModel", () => {
             "plugin_uninstall",
             "plugin_list",
             "plugin_logs",
+            "slot_create",
+            "slot_update",
+            "slot_remove",
+            "slot_list",
+            "webapp_create",
+            "webapp_update",
+            "webapp_revert",
+            "webapp_list",
         ]);
     });
 });

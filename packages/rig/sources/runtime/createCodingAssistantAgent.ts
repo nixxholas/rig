@@ -48,6 +48,7 @@ import { selectCollaborationToolsForModel } from "./selectCollaborationToolsForM
 import { agentCommunicationTools } from "../tools/agents/index.js";
 import { agentFolderLabel } from "../agent/agentFolderLabel.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
+import type { SlotContext } from "../agent/context/SlotContext.js";
 import type { WorkspaceContext } from "../agent/context/WorkspaceContext.js";
 import { crossWorkspaceTools, workspaceTools } from "../tools/workspaces/workspaceTools.js";
 import type { SchedulingContext } from "../scheduling/index.js";
@@ -88,6 +89,7 @@ export interface CreateCodingAssistantAgentOptions {
     startDate?: string;
     secrets?: SessionSecretContext;
     scheduling?: SchedulingContext;
+    slots?: SlotContext;
     subagents?: SubagentContext;
     systemPrompt?: string;
     plugins?: PluginContext;
@@ -156,6 +158,9 @@ export function createCodingAssistantAgent(
     }
     if (options.scheduling !== undefined) {
         context.scheduling = options.scheduling;
+    }
+    if (options.slots !== undefined) {
+        context.slots = options.slots;
     }
     if (options.providerUsage !== undefined) {
         context.providerUsage = options.providerUsage;
