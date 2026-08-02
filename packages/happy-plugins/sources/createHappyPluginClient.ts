@@ -4,6 +4,10 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import { startHappyMcpServer } from "./startHappyMcpServer.js";
+import {
+    startHappyNetworkRequestHandler,
+    startHappyNetworkTunnelHandler,
+} from "./startHappyNetworkListener.js";
 import type { CreateHappyPluginClientOptions, HappyPluginClient } from "./types.js";
 import {
     agentMessageDeliverySchema,
@@ -134,6 +138,28 @@ export function createHappyPluginClient(
                 );
             },
         },
+        network: {
+            onRequest: (handler) =>
+                startHappyNetworkRequestHandler(handler, {
+                    request,
+                    get socketPath() {
+                        return socketPath();
+                    },
+                    get token() {
+                        return token();
+                    },
+                }),
+            onTunnel: (handler) =>
+                startHappyNetworkTunnelHandler(handler, {
+                    request,
+                    get socketPath() {
+                        return socketPath();
+                    },
+                    get token() {
+                        return token();
+                    },
+                }),
+        },
         plugins: {
             list: async () => (await request("GET", "/plugins", listPluginsResponseSchema)).plugins,
         },
@@ -153,8 +179,7 @@ export function createHappyPluginClient(
         slots: {
             create: async (input) => {
                 Value.Assert(createHappySlotEntryInputSchema, input);
-                return (await request("POST", "/slots", happySlotEntryResponseSchema, input))
-                    .entry;
+                return (await request("POST", "/slots", happySlotEntryResponseSchema, input)).entry;
             },
             list: async (input = {}) => {
                 Value.Assert(listHappySlotEntriesInputSchema, input);
@@ -164,9 +189,8 @@ export function createHappyPluginClient(
                 if (input.workspaceId !== undefined) query.set("workspaceId", input.workspaceId);
                 if (input.sessionId !== undefined) query.set("sessionId", input.sessionId);
                 const suffix = query.size === 0 ? "" : `?${query.toString()}`;
-                return (
-                    await request("GET", `/slots${suffix}`, listHappySlotEntriesResponseSchema)
-                ).entries;
+                return (await request("GET", `/slots${suffix}`, listHappySlotEntriesResponseSchema))
+                    .entries;
             },
             remove: async (id) => {
                 Value.Assert(happySlotEntryIdSchema, id);

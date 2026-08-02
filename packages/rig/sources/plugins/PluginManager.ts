@@ -8,6 +8,11 @@ import type { EventId, PluginLogSnapshot, PluginSummary } from "../protocol/inde
 import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
+import type {
+    ManagedNetworkHttpRequest,
+    ManagedNetworkInterceptor,
+} from "../agent/context/ManagedNetworkPolicy.js";
+import type { HappyNetworkRequestCompletion, HappyNetworkTunnel } from "happy-plugins";
 import type { Skill } from "../agent/skills/Skill.js";
 import { loadSkills } from "../agent/skills/loadSkills.js";
 import { discoverPlugins } from "./discoverPlugins.js";
@@ -26,6 +31,7 @@ import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
+import { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import { PluginAppRegistry, type PluginAppResource } from "./PluginAppRegistry.js";
 import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
@@ -40,6 +46,7 @@ export interface PluginManagerOptions {
     generatedMedia?: GeneratedMediaStore;
     now?: () => number;
     mcpRegistry?: PluginMcpRegistry;
+    networkRegistry?: PluginNetworkRegistry;
     listProviderUsage?: StartPluginOptions["listProviderUsage"];
     /** How a registered plugin is started. Tests replace the real sandboxed process. */
     start?: (plugin: RegisteredPlugin, options: StartPluginOptions) => Promise<RunningPlugin>;
@@ -73,7 +80,7 @@ interface PluginCatalog {
  * the call returns, and an uninstalled one is stopped before its code is removed. Each change
  * publishes the whole current set so attached clients stay in step without polling.
  */
-export class PluginManager {
+export class PluginManager implements ManagedNetworkInterceptor {
     readonly directory: string;
 
     readonly #appRegistry: PluginAppRegistry;
@@ -88,6 +95,7 @@ export class PluginManager {
     #discovery: { promise: Promise<PluginDiscovery>; version: EventId } | undefined;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
+    readonly #networkRegistry: PluginNetworkRegistry;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
     readonly #running = new Map<string, RunningPlugin>();
     readonly #states = new Map<string, PluginRuntimeState>();
@@ -114,6 +122,18 @@ export class PluginManager {
         this.#generatedMedia = options.generatedMedia;
         this.#now = options.now ?? Date.now;
         this.#mcpRegistry = options.mcpRegistry;
+        this.#networkRegistry =
+            options.networkRegistry ??
+            new PluginNetworkRegistry({
+                onFailure: (failure) => {
+                    this.#daemonLog.record(
+                        "warning",
+                        "plugin_network_interception_failed",
+                        "A plugin network interception failed open to normal proxy behavior.",
+                        failure,
+                    );
+                },
+            });
         this.#listProviderUsage = options.listProviderUsage;
         this.#start = options.start ?? startPlugin;
         this.#store = options.store;
@@ -458,11 +478,28 @@ export class PluginManager {
         return this.#appRegistry.storageDelete(applicationId, generation, key);
     }
 
+    interceptHttp(request: ManagedNetworkHttpRequest): Promise<HappyNetworkRequestCompletion> {
+        return this.#networkRegistry.interceptHttp(request);
+    }
+
+    observeTunnel(tunnel: HappyNetworkTunnel): void {
+        this.#networkRegistry.observeTunnel(tunnel);
+    }
+
+    recordFailure(hostname: string, error: unknown): void {
+        this.#networkRegistry.recordFailure(hostname, error);
+    }
+
+    shouldIntercept(hostname: string): boolean {
+        return this.#networkRegistry.shouldIntercept(hostname);
+    }
+
     async close(): Promise<void> {
         if (this.#closed) return;
         this.#closed = true;
         await Promise.all([...this.#running.values()].map((plugin) => plugin.close()));
         this.#running.clear();
+        this.#networkRegistry.close();
         this.#unsubscribeApps();
         this.#unsubscribeMcp();
     }
@@ -502,6 +539,7 @@ export class PluginManager {
                     : { listProviderUsage: this.#listProviderUsage }),
                 listPlugins: async () => (await this.list()).plugins,
                 ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
+                networkRegistry: this.#networkRegistry,
                 store: this.#store,
             });
             if (this.#closed) {

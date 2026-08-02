@@ -12,6 +12,7 @@ import { assertCanUseCustomShell } from "./assertCanUseCustomShell.js";
 import { createSandboxedCommand } from "./createSandboxedCommand.js";
 import {
     type ManagedNetworkBlockedRequest,
+    type ManagedNetworkInterceptor,
     type ManagedNetworkProxyHandle,
     shouldApplyManagedNetworkPolicy,
     shouldBypassManagedProxyForLoopback,
@@ -42,6 +43,7 @@ import { formatManagedNetworkDenial } from "./formatManagedNetworkDenial.js";
 export interface CreateNodeBashContextOptions {
     cwd: string;
     loadManagedNetworkPolicy?: typeof loadProjectManagedNetworkPolicy;
+    networkInterceptor?: ManagedNetworkInterceptor;
     processManager: NativeProcessManager;
     permissions: PermissionContext;
     secrets?: SessionSecretContext;
@@ -125,7 +127,9 @@ export function createNodeBashContext(options: CreateNodeBashContextOptions): Ba
         cwd === undefined ? options.cwd : isAbsolute(cwd) ? cwd : resolve(options.cwd, cwd);
     const loadManagedNetworkPolicy =
         options.loadManagedNetworkPolicy ?? loadProjectManagedNetworkPolicy;
-    const startManagedNetwork = options.startManagedNetwork ?? startCommandManagedNetwork;
+    const startManagedNetwork =
+        options.startManagedNetwork ??
+        ((policy) => startCommandManagedNetwork(policy, options.networkInterceptor));
 
     /**
      * Forgets the oldest finished commands once too many have piled up.
@@ -523,6 +527,7 @@ interface CommandManagedNetwork {
 
 async function startCommandManagedNetwork(
     policy: import("./ManagedNetworkPolicy.js").ManagedNetworkPolicy | undefined,
+    networkInterceptor?: ManagedNetworkInterceptor,
 ): Promise<CommandManagedNetwork | undefined> {
     if (policy === undefined) return undefined;
     if (process.platform !== "darwin" && process.platform !== "linux")
@@ -536,7 +541,9 @@ async function startCommandManagedNetwork(
     validateManagedNetworkLoopbackPorts(policy.allowedLoopbackPorts ?? []);
     if ((policy.allowedDomains?.length ?? 0) === 0 && process.platform !== "linux")
         return { close: async () => {} };
-    const proxy = await startManagedNetworkProxy(policy);
+    const proxy = await startManagedNetworkProxy(policy, {
+        ...(networkInterceptor === undefined ? {} : { networkInterceptor }),
+    });
     try {
         const bridge =
             process.platform === "linux"

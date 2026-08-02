@@ -16,6 +16,7 @@ import type {
 import {
     HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
     HAPPY_PLUGIN_MAX_MEDIA_BYTES,
+    HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES,
     archiveWorkspaceBodySchema,
     createHappySlotEntryInputSchema,
     createSessionInputSchema,
@@ -23,7 +24,9 @@ import {
     executeWorkspaceCommandBodySchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
+    happyNetworkEventSchema,
     listHappySlotEntriesInputSchema,
+    happyNetworkRequestCompletionSchema,
     listWorkspacesInputSchema,
     publishHappyMediaBodySchema,
     readWorkspaceFileBodySchema,
@@ -57,6 +60,7 @@ import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
+import type { PluginNetworkConnection } from "./PluginNetworkRegistry.js";
 import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
 import { readPluginMediaFile } from "./readPluginMediaFile.js";
 
@@ -70,6 +74,7 @@ export interface CreatePluginApiServerOptions {
     listPlugins: () => Promise<readonly PluginSummary[]>;
     listProviderUsage?: () => readonly HappyProviderUsageEntry[];
     mcp?: PluginMcpConnection;
+    network?: PluginNetworkConnection;
     pluginFolder: string;
     pluginDataDirectory?: string;
     pluginName: string;
@@ -353,6 +358,85 @@ async function handleRequest(
         return;
     }
     if (
+        request.method === "POST" &&
+        (url.pathname === "/network/requests" || url.pathname === "/network/tunnels")
+    ) {
+        const network = requireNetwork(options);
+        sendJson(response, 201, {
+            registrationId: network.register(
+                url.pathname === "/network/requests" ? "request" : "tunnel",
+            ),
+        });
+        return;
+    }
+    if (
+        parts.length === 4 &&
+        parts[0] === "network" &&
+        (parts[1] === "requests" || parts[1] === "tunnels") &&
+        parts[2] !== undefined &&
+        parts[3] === "events" &&
+        request.method === "GET"
+    ) {
+        const network = requireNetwork(options);
+        let writable = true;
+        const onDrain = () => {
+            writable = true;
+        };
+        let detach = () => {};
+        detach = network.attach(parts[2], (event) => {
+            if (!writable || response.destroyed || response.writableEnded) return false;
+            const line = encodeNetworkEvent(event);
+            if (line === undefined) return false;
+            const accepted = response.write(line);
+            if (!accepted) {
+                // At most this one bounded event is queued. Further events fail open until Node
+                // reports that the socket drained, so a stalled plugin cannot grow daemon memory.
+                writable = false;
+                response.once("drain", onDrain);
+            }
+            return accepted;
+        });
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        response.once("close", () => {
+            response.off("drain", onDrain);
+            detach();
+        });
+        return;
+    }
+    if (
+        parts.length === 5 &&
+        parts[0] === "network" &&
+        parts[1] === "requests" &&
+        parts[2] !== undefined &&
+        parts[3] === "calls" &&
+        parts[4] !== undefined &&
+        request.method === "POST"
+    ) {
+        const completion = await readJson(
+            request,
+            happyNetworkRequestCompletionSchema,
+            "Network request result",
+        );
+        requireNetwork(options).complete(parts[2], parts[4], completion);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
+        parts.length === 3 &&
+        parts[0] === "network" &&
+        (parts[1] === "requests" || parts[1] === "tunnels") &&
+        parts[2] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        requireNetwork(options).unregister(parts[2]);
+        sendJson(response, 200, {});
+        return;
+    }
+    if (
         parts.length === 4 &&
         parts[0] === "mcp" &&
         parts[1] === "servers" &&
@@ -618,4 +702,20 @@ function requireMcp(options: CreatePluginApiServerOptions): PluginMcpConnection 
         throw new PluginApiRequestError("This plugin runtime does not provide MCP registration.");
     }
     return options.mcp;
+}
+
+function requireNetwork(options: CreatePluginApiServerOptions): PluginNetworkConnection {
+    if (options.network === undefined) {
+        throw new PluginApiRequestError("Plugin network interception is unavailable.");
+    }
+    return options.network;
+}
+
+function encodeNetworkEvent(event: unknown): string | undefined {
+    try {
+        const line = `${JSON.stringify(Value.Decode(happyNetworkEventSchema, event))}\n`;
+        return Buffer.byteLength(line) <= HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES ? line : undefined;
+    } catch {
+        return undefined;
+    }
 }

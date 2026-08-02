@@ -11,3 +11,5 @@ publishes. Spawning a real plugin is covered by the gym instead.
 
 `PluginMcpRegistry.test.ts` covers live registration identity, forwarding, concurrency,
 cancellation, timeout, permissions, restart, and stale-completion contracts.
+`PluginNetworkRegistry.test.ts` covers deterministic first-folder handling and observation-only
+delivery to later matching plugins.

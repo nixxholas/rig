@@ -25,6 +25,11 @@ export {
     type PluginMcpConnection,
     type PluginMcpRegistryOptions,
 } from "./PluginMcpRegistry.js";
+export {
+    PluginNetworkRegistry,
+    type PluginNetworkConnection,
+    type PluginNetworkRegistryOptions,
+} from "./PluginNetworkRegistry.js";
 export { PluginManager, type PluginManagerOptions } from "./PluginManager.js";
 export { PluginNotFoundError } from "./PluginNotFoundError.js";
 export { getPluginsDirectory } from "./getPluginsDirectory.js";

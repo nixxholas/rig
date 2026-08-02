@@ -18,7 +18,7 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 
 The SDK is an early preview. The current surface covers projects, workspace commands and files,
 sessions, messages to agents, UI slots, generated-media publishing, provider usage, MCP tool
-contributions, and local application contributions.
+contributions, managed-network interception, and local application contributions.
 
 Plugins can add persistent content to Happy's fixed UI slots. Happy validates the same content and
 slot/scope rules used by its HTTP API and agent tools, and records the plugin as the entry's author.
@@ -119,10 +119,66 @@ rejected.
 - `icon`: a relative path to a PNG file inside the plugin folder.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
   sidebar metadata, and optional image icon.
+- `interceptDomains`: up to 16 exact hostnames whose already-allowed managed-proxy traffic the
+  plugin wants to observe or rewrite. Wildcards are not supported. This field never grants network
+  access or changes the sandbox allowlist.
 
 Main and icon paths must remain inside the plugin folder. The main entry point and icon themselves
 must be ordinary files rather than symbolic links. Happy does not register a plugin whose
 manifest, icon, or main entry point is invalid.
+
+### Managed network requests
+
+Declare the exact hostnames in `happy.plugin.json`, then register handlers:
+
+```json
+{
+    "name": "API fixture",
+    "description": "Supplies deterministic API responses.",
+    "main": "index.ts",
+    "icon": "icon.png",
+    "interceptDomains": ["api.example.com"]
+}
+```
+
+```ts
+import { happy } from "happy-plugins";
+
+await happy.network.onRequest(async (request) => {
+    if (request.mode === "observe") return { type: "pass_through" };
+    if (new URL(request.url).pathname !== "/fixture") return { type: "pass_through" };
+    return {
+        type: "response",
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from('{"source":"plugin"}'),
+    };
+});
+
+await happy.network.onTunnel((tunnel) => {
+    console.log(
+        `${tunnel.hostname}:${tunnel.port} transferred ` +
+            `${tunnel.bytesFromClient}/${tunnel.bytesFromServer} bytes`,
+    );
+});
+```
+
+Plain HTTP request and synthetic/replacement bodies are limited to 256 KiB. The handler may return
+`pass_through`, a full `response`, or a replacement `request`; omitted replacement fields retain
+their original values. Rig gives both body capture and the handler about five seconds. A streaming
+body that does not finish in that window stays on the normal streaming proxy path instead. A
+timeout, thrown error, disconnect, malformed result, or oversized body fails open to normal
+forwarding and is written to Rig's log.
+
+Network policy always runs before plugin selection. Declaring a hostname never makes a blocked
+destination reachable, and a rewritten URL is checked against the allowlist again. When multiple
+running plugins declare one hostname, the lexicographically first plugin folder handles it. Later
+plugins receive the request with `mode: "observe"` and their return values are ignored.
+
+HTTPS interception is observation-only. Rig sees the CONNECT hostname but deliberately does not
+mint certificates or unwrap TLS, so full HTTPS MITM is out of scope. `onTunnel` fires after an
+allowed tunnel closes with its hostname, port, and byte counts; it cannot inspect or modify HTTPS
+headers, bodies, or responses.
 
 ### `index.ts`
 
@@ -212,6 +268,10 @@ persistent state exactly as they use the production directory. `host.rootDirecto
 temporary root and `host.close()` removes it. Pass `{ temporaryDirectory }` as the second argument
 when a test sandbox requires a writable temporary parent; the host still creates and cleans its own
 child root there.
+
+Use `host.network.request()` to exercise a registered `happy.network.onRequest` handler and
+`host.network.tunnel()` to send an observation to `happy.network.onTunnel`, without opening a real
+network connection.
 
 ## Runtime model
 

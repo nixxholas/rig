@@ -1,23 +1,39 @@
 import { lookup } from "node:dns/promises";
-import { createServer, request as httpRequest, type IncomingMessage } from "node:http";
+import {
+    createServer,
+    request as httpRequest,
+    type IncomingHttpHeaders,
+    type IncomingMessage,
+    validateHeaderName,
+    validateHeaderValue,
+} from "node:http";
 import { createServer as createTcpServer, isIP } from "node:net";
 import { connect } from "node:net";
 import type { Socket } from "node:net";
-import type { Duplex } from "node:stream";
+import { PassThrough, type Duplex, type Readable } from "node:stream";
+import { Value } from "@sinclair/typebox/value";
+import {
+    HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES,
+    happyNetworkRequestCompletionSchema,
+} from "happy-plugins";
 import type {
     ManagedNetworkBlockedRequest,
     ManagedNetworkPolicy,
     ManagedNetworkProxyHandle,
     ManagedNetworkRule,
+    ManagedNetworkInterceptor,
 } from "./ManagedNetworkPolicy.js";
 
 const DEFAULT_DNS_RESOLUTION_TIMEOUT_MS = 2_000;
+const DEFAULT_INTERCEPTION_BODY_TIMEOUT_MS = 5_000;
 
 export async function startManagedNetworkProxy(
     policy: ManagedNetworkPolicy,
     options: {
         connectUpstream?: (options: { host: string; port: number }) => Socket;
+        interceptionBodyTimeoutMs?: number;
         onHttpListening?: (port: number) => void;
+        networkInterceptor?: ManagedNetworkInterceptor;
         resolveAddress?: (host: string) => Promise<string>;
         resolveTimeoutMs?: number;
         socksPort?: number;
@@ -28,6 +44,11 @@ export async function startManagedNetworkProxy(
     const resolveTimeoutMs = options.resolveTimeoutMs ?? DEFAULT_DNS_RESOLUTION_TIMEOUT_MS;
     if (!Number.isSafeInteger(resolveTimeoutMs) || resolveTimeoutMs < 1) {
         throw new Error("Managed network DNS resolution timeout must be a positive integer.");
+    }
+    const interceptionBodyTimeoutMs =
+        options.interceptionBodyTimeoutMs ?? DEFAULT_INTERCEPTION_BODY_TIMEOUT_MS;
+    if (!Number.isSafeInteger(interceptionBodyTimeoutMs) || interceptionBodyTimeoutMs < 1) {
+        throw new Error("Plugin interception body timeout must be a positive integer.");
     }
     const resolveAddress = createBoundedResolver(
         options.resolveAddress ?? resolvePublicAddress,
@@ -57,6 +78,8 @@ export async function startManagedNetworkProxy(
             resolveAddress,
             lifecycle.signal,
             recordBlockedRequest,
+            options.networkInterceptor,
+            interceptionBodyTimeoutMs,
         );
     });
     server.on("connection", (socket) => {
@@ -77,6 +100,7 @@ export async function startManagedNetworkProxy(
             connectUpstream,
             lifecycle.signal,
             recordBlockedRequest,
+            options.networkInterceptor,
         );
     });
     server.on("clientError", (_error, socket) => socket.destroy());
@@ -259,7 +283,10 @@ async function proxyConnect(
     connectUpstream: (options: { host: string; port: number }) => Socket,
     signal: AbortSignal,
     recordBlockedRequest: (request: ManagedNetworkBlockedRequest) => void,
+    networkInterceptor?: ManagedNetworkInterceptor,
 ): Promise<void> {
+    // CONNECT exposes only the authority. Rig deliberately does not mint certificates or unwrap
+    // TLS, so plugins receive byte-count observations after the opaque tunnel closes.
     const target = parseAuthority(incoming.url, 443);
     if (target === undefined) {
         client.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
@@ -290,6 +317,33 @@ async function proxyConnect(
             upstream.destroy();
         });
         upstream.once("connect", () => {
+            let bytesFromClient = head.length;
+            let bytesFromServer = 0;
+            let observed = false;
+            const observe = () => {
+                if (observed) return;
+                observed = true;
+                try {
+                    networkInterceptor?.observeTunnel({
+                        bytesFromClient,
+                        bytesFromServer,
+                        hostname: normalizeDomain(target.host),
+                        port: target.port,
+                        type: "tunnel",
+                    });
+                } catch (error) {
+                    if (networkInterceptor !== undefined) {
+                        recordInterceptorFailure(networkInterceptor, target.host, error);
+                    }
+                }
+            };
+            client.on("data", (chunk: Buffer | string) => {
+                bytesFromClient += Buffer.byteLength(chunk);
+            });
+            upstream.on("data", (chunk: Buffer | string) => {
+                bytesFromServer += Buffer.byteLength(chunk);
+            });
+            upstream.once("close", observe);
             client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
             if (head.length > 0) upstream.write(head);
             client.pipe(upstream);
@@ -321,6 +375,8 @@ async function proxyHttpRequest(
     resolveAddress: (host: string) => Promise<string>,
     signal: AbortSignal,
     recordBlockedRequest: (request: ManagedNetworkBlockedRequest) => void,
+    networkInterceptor?: ManagedNetworkInterceptor,
+    interceptionBodyTimeoutMs = DEFAULT_INTERCEPTION_BODY_TIMEOUT_MS,
 ): Promise<void> {
     let target: URL;
     try {
@@ -345,14 +401,110 @@ async function proxyHttpRequest(
         writeHttpBlocked(response, blockedReason);
         return;
     }
+    let requestTarget = target;
+    let requestMethod = incoming.method ?? "GET";
+    let requestHeaders: IncomingHttpHeaders = { ...incoming.headers };
+    let requestBody: Buffer | Readable = incoming;
+    const normalizedHostname = normalizeDomain(target.hostname);
+    let shouldIntercept = false;
+    if (networkInterceptor !== undefined) {
+        try {
+            shouldIntercept = networkInterceptor.shouldIntercept(normalizedHostname);
+        } catch (error) {
+            recordInterceptorFailure(networkInterceptor, normalizedHostname, error);
+        }
+    }
+    if (networkInterceptor !== undefined && shouldIntercept) {
+        const captured = await readInterceptionBody(incoming, interceptionBodyTimeoutMs);
+        if ("stream" in captured) {
+            requestBody = captured.stream;
+            recordInterceptorFailure(
+                networkInterceptor,
+                normalizedHostname,
+                new Error(
+                    captured.reason === "too_large"
+                        ? `The HTTP request body exceeded ${String(HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES)} bytes.`
+                        : `The HTTP request body did not finish within ${String(interceptionBodyTimeoutMs)}ms.`,
+                ),
+            );
+        } else {
+            const buffered = captured.body;
+            requestBody = buffered;
+            try {
+                const action = Value.Decode(
+                    happyNetworkRequestCompletionSchema,
+                    await networkInterceptor.interceptHttp({
+                        body: buffered,
+                        headers: normalizeHeaders(incoming.headers),
+                        hostname: normalizedHostname,
+                        method: requestMethod,
+                        url: target.toString(),
+                    }),
+                );
+                if (action.type === "error") {
+                    throw new Error(`The plugin network handler failed: ${action.error}`);
+                }
+                if (action.type === "response") {
+                    const body = decodeBoundedPluginBody(action.bodyBase64);
+                    const headers = action.headers ?? {};
+                    validatePluginHeaders(headers);
+                    response.writeHead(action.status, headers);
+                    response.end(body);
+                    return;
+                }
+                if (action.type === "request") {
+                    if (action.headers !== undefined) validatePluginHeaders(action.headers);
+                    requestTarget = action.url === undefined ? target : parseHttpTarget(action.url);
+                    requestMethod = action.method ?? requestMethod;
+                    requestHeaders = action.headers ?? requestHeaders;
+                    if (action.bodyBase64 !== undefined) {
+                        requestBody = decodeBoundedPluginBody(action.bodyBase64);
+                        requestHeaders = {
+                            ...requestHeaders,
+                            "content-length": String(requestBody.length),
+                        };
+                        delete requestHeaders["transfer-encoding"];
+                    }
+                    const rewrittenPort =
+                        requestTarget.port === "" ? 80 : Number(requestTarget.port);
+                    const rewrittenBlock = blockReason(
+                        policy,
+                        requestTarget.hostname,
+                        rewrittenPort,
+                    );
+                    if (rewrittenBlock !== undefined) {
+                        recordBlockedRequest({
+                            host: normalizeDomain(requestTarget.hostname),
+                            port: rewrittenPort,
+                            protocol: "http",
+                            reason: rewrittenBlock,
+                        });
+                        writeHttpBlocked(response, rewrittenBlock);
+                        return;
+                    }
+                }
+            } catch (error) {
+                recordInterceptorFailure(networkInterceptor, normalizedHostname, error);
+                requestTarget = target;
+                requestMethod = incoming.method ?? "GET";
+                requestHeaders = { ...incoming.headers };
+                requestBody = buffered;
+            }
+        }
+    }
+    const requestPort = requestTarget.port === "" ? 80 : Number(requestTarget.port);
     try {
-        const address = await resolveAddressWhileOpen(target.hostname, resolveAddress, signal);
+        const address = await resolveAddressWhileOpen(
+            requestTarget.hostname,
+            resolveAddress,
+            signal,
+        );
         const upstream = httpRequest({
-            headers: { ...incoming.headers, host: target.host },
+            headers: { ...requestHeaders, host: requestTarget.host },
             host: address,
-            method: incoming.method,
-            path: `${target.pathname}${target.search}`,
-            port,
+            method: requestMethod,
+            path: `${requestTarget.pathname}${requestTarget.search}`,
+            port: requestPort,
         });
         upstream.on("socket", (socket) => socket.on("error", () => {}));
         sockets.add(upstream);
@@ -365,14 +517,15 @@ async function proxyHttpRequest(
             if (!response.headersSent) response.writeHead(502);
             response.end();
         });
-        incoming.pipe(upstream);
+        if (Buffer.isBuffer(requestBody)) upstream.end(requestBody);
+        else requestBody.pipe(upstream);
     } catch (error) {
         if (!response.destroyed) {
             const reason = resolutionBlockedReason(error);
             if (reason !== undefined) {
                 recordBlockedRequest({
-                    host: normalizeDomain(target.hostname),
-                    port,
+                    host: normalizeDomain(requestTarget.hostname),
+                    port: requestPort,
                     protocol: "http",
                     reason,
                 });
@@ -381,6 +534,119 @@ async function proxyHttpRequest(
                 response.writeHead(502).end();
             }
         }
+    }
+}
+
+async function readInterceptionBody(
+    incoming: IncomingMessage,
+    timeoutMs: number,
+): Promise<{ body: Buffer } | { reason: "timeout" | "too_large"; stream: Readable }> {
+    const contentLength = Number(incoming.headers["content-length"]);
+    if (Number.isFinite(contentLength) && contentLength > HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES) {
+        return { reason: "too_large", stream: incoming };
+    }
+    return new Promise((resolve, reject) => {
+        const chunks: Buffer[] = [];
+        let length = 0;
+        let settled = false;
+        const cleanup = () => {
+            clearTimeout(timer);
+            incoming.off("data", onData);
+            incoming.off("end", onEnd);
+            incoming.off("error", onError);
+        };
+        const finishWithStream = (reason: "timeout" | "too_large") => {
+            if (settled) return;
+            settled = true;
+            incoming.pause();
+            cleanup();
+            const replay = new PassThrough();
+            for (const buffered of chunks) replay.write(buffered);
+            incoming.pipe(replay);
+            incoming.resume();
+            resolve({ reason, stream: replay });
+        };
+        const onData = (chunk: Buffer | string) => {
+            const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            length += bytes.length;
+            if (length <= HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES) {
+                chunks.push(bytes);
+                return;
+            }
+            chunks.push(bytes);
+            finishWithStream("too_large");
+        };
+        const onEnd = () => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve({ body: Buffer.concat(chunks) });
+        };
+        const onError = (error: Error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(error);
+        };
+        const timer = setTimeout(() => finishWithStream("timeout"), timeoutMs);
+        timer.unref();
+        incoming.on("data", onData);
+        incoming.once("end", onEnd);
+        incoming.once("error", onError);
+    });
+}
+
+function normalizeHeaders(headers: IncomingHttpHeaders): Record<string, string | string[]> {
+    return Object.fromEntries(
+        Object.entries(headers).flatMap(([name, value]) =>
+            value === undefined ? [] : [[name, value]],
+        ),
+    );
+}
+
+function parseHttpTarget(value: string): URL {
+    const target = new URL(value);
+    if (target.protocol !== "http:" || target.username !== "" || target.password !== "") {
+        throw new Error("A plugin may rewrite a managed proxy request only to an HTTP URL.");
+    }
+    const port = target.port === "" ? 80 : Number(target.port);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
+        throw new Error("A plugin returned an invalid HTTP request port.");
+    }
+    return target;
+}
+
+function decodeBoundedPluginBody(value: string | undefined): Buffer {
+    if (value === undefined) return Buffer.alloc(0);
+    const body = Buffer.from(value, "base64");
+    if (body.length > HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES) {
+        throw new Error(
+            `A plugin network body exceeded ${String(HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES)} bytes.`,
+        );
+    }
+    return body;
+}
+
+function validatePluginHeaders(
+    headers: Readonly<Record<string, string | readonly string[]>>,
+): void {
+    for (const [name, value] of Object.entries(headers)) {
+        validateHeaderName(name);
+        for (const item of typeof value === "string" ? [value] : value) {
+            validateHeaderValue(name, item);
+        }
+    }
+}
+
+function recordInterceptorFailure(
+    interceptor: ManagedNetworkInterceptor,
+    hostname: string,
+    error: unknown,
+): void {
+    try {
+        interceptor.recordFailure(hostname, error);
+    } catch {
+        // Logging is optional; it must never replace the normal proxy path.
     }
 }
 

@@ -20,6 +20,7 @@ import {
 } from "../agent/context/bashSessionLimits.js";
 import {
     type ManagedNetworkBlockedRequest,
+    type ManagedNetworkInterceptor,
     type ManagedNetworkProxyHandle,
     shouldApplyManagedNetworkPolicy,
     validateManagedNetworkLoopbackPorts,
@@ -105,6 +106,7 @@ export function createDockerBashContext(
     environment: DockerEnvironment,
     permissions: PermissionContext,
     secrets?: SessionSecretContext,
+    networkInterceptor?: ManagedNetworkInterceptor,
 ): BashContext {
     const sessions = new Map<number, DockerBashSession>();
     const contextId = randomUUID();
@@ -213,6 +215,7 @@ export function createDockerBashContext(
                       containerNetworkBridgeRoot!,
                       networkBridgeHostPath!,
                       networkPolicy!,
+                      networkInterceptor,
                   );
             if (containerNetworkBridgeRoot !== undefined) {
                 await validateDockerNetworkBridgeRoot(container, containerNetworkBridgeRoot);
@@ -762,6 +765,7 @@ async function startDockerManagedNetwork(
     containerBridgeRoot: string,
     workspaceHostPath: string,
     policy: import("../agent/context/ManagedNetworkPolicy.js").ManagedNetworkPolicy,
+    networkInterceptor?: ManagedNetworkInterceptor,
 ): Promise<DockerManagedNetwork> {
     if (
         (policy.allowedDomains?.length ?? 0) === 0 &&
@@ -783,7 +787,9 @@ async function startDockerManagedNetwork(
         const runningShortRoot = shortRoot;
         const shortDirectory = join(runningShortRoot, "s");
         await symlink(directory, shortDirectory, "dir");
-        const runningProxy = await startManagedNetworkProxy(policy);
+        const runningProxy = await startManagedNetworkProxy(policy, {
+            ...(networkInterceptor === undefined ? {} : { networkInterceptor }),
+        });
         proxy = runningProxy;
         bridge = await startLinuxManagedNetworkBridge(runningProxy, {
             directory: shortDirectory,

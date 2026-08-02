@@ -2,7 +2,7 @@ import { access, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promi
 import { request as requestHttp } from "node:http";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
     createHappyPluginTestHost,
@@ -160,6 +160,53 @@ describe("Happy plugin test host", () => {
 
         await host.close();
         await expect(access(host.rootDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    });
+
+    it("exercises network request handlers and tunnel observers", async () => {
+        const host = await createHappyPluginTestHost({}, { temporaryDirectory: process.cwd() });
+        hosts.push(host);
+        const tunnels: string[] = [];
+        const requestSubscription = await host.client.network.onRequest((request) => ({
+            body: Buffer.from(`${request.method} ${request.url}`),
+            headers: { "content-type": "text/plain" },
+            status: 202,
+            type: "response",
+        }));
+        const tunnelSubscription = await host.client.network.onTunnel((tunnel) => {
+            tunnels.push(
+                `${tunnel.hostname}:${String(tunnel.port)} ${String(tunnel.bytesFromClient)}/${String(tunnel.bytesFromServer)}`,
+            );
+        });
+        const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+
+        await expect(
+            host.network.request({
+                body: Buffer.alloc(0),
+                headers: {},
+                hostname: "api.example.com",
+                method: "GET",
+                url: "http://api.example.com/items",
+            }),
+        ).resolves.toMatchObject({
+            body: Buffer.from("GET http://api.example.com/items"),
+            status: 202,
+            type: "response",
+        });
+        host.network.tunnel({ type: "invalid" } as never);
+        host.network.tunnel({
+            bytesFromClient: 12,
+            bytesFromServer: 34,
+            hostname: "api.example.com",
+            port: 443,
+            type: "tunnel",
+        });
+        await expect.poll(() => tunnels).toEqual(["api.example.com:443 12/34"]);
+        expect(consoleError).toHaveBeenCalledWith(
+            expect.stringContaining("Happy dropped an invalid network event"),
+        );
+        consoleError.mockRestore();
+
+        await Promise.all([requestSubscription.close(), tunnelSubscription.close()]);
     });
 
     it("mirrors workspace command and file APIs for plugin authoring", async () => {

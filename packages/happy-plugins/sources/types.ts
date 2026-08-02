@@ -5,6 +5,14 @@ const nonEmptyText = Type.String({ minLength: 1 });
 
 // Must stay in sync with MAX_INSTALLED_PLUGINS in Rig's plugin discovery.
 export const HAPPY_PLUGIN_MAX_LIST_ITEMS = 64;
+export const HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS = 16;
+export const HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES = 256 * 1024;
+export const HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES = 512 * 1024;
+export const HAPPY_PLUGIN_MAX_NETWORK_HEADER_BYTES = 64 * 1024;
+export const HAPPY_PLUGIN_MAX_NETWORK_HEADER_COUNT = 128;
+export const HAPPY_PLUGIN_MAX_NETWORK_HEADER_VALUE_LENGTH = 8_192;
+export const HAPPY_PLUGIN_MAX_NETWORK_METHOD_LENGTH = 64;
+export const HAPPY_PLUGIN_MAX_NETWORK_URL_LENGTH = 8_192;
 
 export const happyProjectSchema = Type.Object(
     {
@@ -692,6 +700,20 @@ export const happyPluginManifestSchema = Type.Object(
         ),
         description: Type.String({ minLength: 1 }),
         icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
+        interceptDomains: Type.Optional(
+            Type.Array(
+                Type.String({
+                    maxLength: 253,
+                    minLength: 1,
+                    pattern:
+                        "^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)(?:\\.(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?))*$",
+                }),
+                {
+                    maxItems: HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS,
+                    uniqueItems: true,
+                },
+            ),
+        ),
         main: Type.Optional(
             Type.String({
                 pattern:
@@ -705,6 +727,152 @@ export const happyPluginManifestSchema = Type.Object(
     exact,
 );
 export type HappyPluginManifest = Static<typeof happyPluginManifestSchema>;
+
+const happyNetworkHeaderValueSchema = Type.Union([
+    Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_HEADER_VALUE_LENGTH }),
+    Type.Array(Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_HEADER_VALUE_LENGTH }), {
+        maxItems: 32,
+    }),
+]);
+export const happyNetworkHeadersSchema = Type.Record(
+    Type.String({ maxLength: 256, minLength: 1 }),
+    happyNetworkHeaderValueSchema,
+    { maxProperties: HAPPY_PLUGIN_MAX_NETWORK_HEADER_COUNT },
+);
+export type HappyNetworkHeaders = Static<typeof happyNetworkHeadersSchema>;
+
+const happyNetworkBodyBase64Schema = Type.String({
+    maxLength: Math.ceil(HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES / 3) * 4,
+    pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+});
+
+export const happyNetworkRequestSchema = Type.Object(
+    {
+        body: Type.Uint8Array({ maxByteLength: HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES }),
+        headers: happyNetworkHeadersSchema,
+        hostname: Type.String({ maxLength: 253, minLength: 1 }),
+        method: Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_METHOD_LENGTH, minLength: 1 }),
+        mode: Type.Union([Type.Literal("handle"), Type.Literal("observe")]),
+        url: Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_URL_LENGTH, minLength: 1 }),
+    },
+    exact,
+);
+export type HappyNetworkRequest = Static<typeof happyNetworkRequestSchema>;
+
+export const happyNetworkRequestEventSchema = Type.Object(
+    {
+        bodyBase64: happyNetworkBodyBase64Schema,
+        callId: nonEmptyText,
+        headers: happyNetworkHeadersSchema,
+        hostname: Type.String({ maxLength: 253, minLength: 1 }),
+        method: Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_METHOD_LENGTH, minLength: 1 }),
+        mode: Type.Union([Type.Literal("handle"), Type.Literal("observe")]),
+        type: Type.Literal("request"),
+        url: Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_URL_LENGTH, minLength: 1 }),
+    },
+    exact,
+);
+export type HappyNetworkRequestEvent = Static<typeof happyNetworkRequestEventSchema>;
+
+export const happyNetworkTunnelEventSchema = Type.Object(
+    {
+        bytesFromClient: Type.Integer({ minimum: 0 }),
+        bytesFromServer: Type.Integer({ minimum: 0 }),
+        hostname: Type.String({ maxLength: 253, minLength: 1 }),
+        port: Type.Integer({ maximum: 65_535, minimum: 1 }),
+        type: Type.Literal("tunnel"),
+    },
+    exact,
+);
+export type HappyNetworkTunnel = Static<typeof happyNetworkTunnelEventSchema>;
+
+export const happyNetworkEventSchema = Type.Union([
+    happyNetworkRequestEventSchema,
+    happyNetworkTunnelEventSchema,
+]);
+export type HappyNetworkEvent = Static<typeof happyNetworkEventSchema>;
+
+export const happyNetworkPassThroughSchema = Type.Object(
+    { type: Type.Literal("pass_through") },
+    exact,
+);
+export const happyNetworkModifiedRequestSchema = Type.Object(
+    {
+        body: Type.Optional(
+            Type.Uint8Array({ maxByteLength: HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES }),
+        ),
+        headers: Type.Optional(happyNetworkHeadersSchema),
+        method: Type.Optional(
+            Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_METHOD_LENGTH, minLength: 1 }),
+        ),
+        type: Type.Literal("request"),
+        url: Type.Optional(
+            Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_URL_LENGTH, minLength: 1 }),
+        ),
+    },
+    exact,
+);
+export const happyNetworkSyntheticResponseSchema = Type.Object(
+    {
+        body: Type.Optional(
+            Type.Uint8Array({ maxByteLength: HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES }),
+        ),
+        headers: Type.Optional(happyNetworkHeadersSchema),
+        status: Type.Integer({ maximum: 599, minimum: 200 }),
+        type: Type.Literal("response"),
+    },
+    exact,
+);
+export const happyNetworkRequestResultSchema = Type.Union([
+    happyNetworkPassThroughSchema,
+    happyNetworkModifiedRequestSchema,
+    happyNetworkSyntheticResponseSchema,
+]);
+export type HappyNetworkRequestResult = Static<typeof happyNetworkRequestResultSchema>;
+
+export const happyNetworkRequestCompletionSchema = Type.Union([
+    happyNetworkPassThroughSchema,
+    Type.Object({ error: nonEmptyText, type: Type.Literal("error") }, exact),
+    Type.Object(
+        {
+            bodyBase64: Type.Optional(happyNetworkBodyBase64Schema),
+            headers: Type.Optional(happyNetworkHeadersSchema),
+            method: Type.Optional(
+                Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_METHOD_LENGTH, minLength: 1 }),
+            ),
+            type: Type.Literal("request"),
+            url: Type.Optional(
+                Type.String({ maxLength: HAPPY_PLUGIN_MAX_NETWORK_URL_LENGTH, minLength: 1 }),
+            ),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            bodyBase64: Type.Optional(happyNetworkBodyBase64Schema),
+            headers: Type.Optional(happyNetworkHeadersSchema),
+            status: Type.Integer({ maximum: 599, minimum: 200 }),
+            type: Type.Literal("response"),
+        },
+        exact,
+    ),
+]);
+export type HappyNetworkRequestCompletion = Static<typeof happyNetworkRequestCompletionSchema>;
+
+export const registerHappyNetworkListenerResponseSchema = Type.Object(
+    { registrationId: nonEmptyText },
+    exact,
+);
+
+export interface HappyNetworkSubscription {
+    close(): Promise<void>;
+}
+
+export type HappyNetworkRequestHandler = (
+    request: HappyNetworkRequest,
+) => HappyNetworkRequestResult | Promise<HappyNetworkRequestResult>;
+
+export type HappyNetworkTunnelHandler = (tunnel: HappyNetworkTunnel) => void | Promise<void>;
 
 export const happyPluginStateSchema = Type.Union([
     Type.Literal("failed"),
@@ -910,6 +1078,14 @@ export interface HappyPluginClient {
     /** Publish a bounded file into Happy's shared generated-media folder. */
     readonly media: {
         publish(input: PublishHappyMediaInput): Promise<PublishedHappyMedia>;
+    };
+    /**
+     * Observe or handle manifest-declared network destinations reached through Happy's managed
+     * proxy. The sandbox network allowlist remains authoritative.
+     */
+    readonly network: {
+        onRequest(handler: HappyNetworkRequestHandler): Promise<HappyNetworkSubscription>;
+        onTunnel(handler: HappyNetworkTunnelHandler): Promise<HappyNetworkSubscription>;
     };
     /** Inspect plugins registered with the owning Happy daemon. */
     readonly plugins: {

@@ -18,6 +18,7 @@ import {
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { PluginLog } from "./PluginLog.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
+import type { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import type { PluginAppRegistry } from "./PluginAppRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 import { snapshotPluginApps } from "./snapshotPluginApps.js";
@@ -42,6 +43,7 @@ export interface StartPluginOptions {
     listPlugins: CreatePluginApiServerOptions["listPlugins"];
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     mcpRegistry?: PluginMcpRegistry;
+    networkRegistry?: PluginNetworkRegistry;
     store: SessionStore;
 }
 
@@ -78,6 +80,11 @@ export async function startPlugin(
         folder: plugin.folderName,
         name: plugin.manifest.name,
     });
+    const network = options.networkRegistry?.createConnection({
+        folder: plugin.folderName,
+        interceptDomains: plugin.manifest.interceptDomains ?? [],
+        name: plugin.manifest.name,
+    });
     let unregisterApps: (() => void) | undefined;
     try {
         unregisterApps =
@@ -86,6 +93,7 @@ export async function startPlugin(
                 : options.appRegistry?.register(runtime, mcp.generation, dataDirectory);
     } catch (error) {
         mcp?.close();
+        network?.close();
         throw error;
     }
     const server = createPluginApiServer({
@@ -96,6 +104,7 @@ export async function startPlugin(
         listPlugins: options.listPlugins,
         ...(options.generatedMedia === undefined ? {} : { generatedMedia: options.generatedMedia }),
         ...(mcp === undefined ? {} : { mcp }),
+        ...(network === undefined ? {} : { network }),
         pluginFolder: plugin.folderName,
         pluginDataDirectory: dataDirectory,
         pluginName: plugin.manifest.name,
@@ -114,6 +123,7 @@ export async function startPlugin(
     } catch (error) {
         unregisterApps?.();
         mcp?.close();
+        network?.close();
         await closeServer(server);
         await rm(socketPath, { force: true });
         throw error;
@@ -146,6 +156,7 @@ export async function startPlugin(
     } catch (error) {
         unregisterApps?.();
         mcp?.close();
+        network?.close();
         await Promise.allSettled([closeServer(server), log.close()]);
         await rm(socketPath, { force: true });
         throw error;
@@ -162,6 +173,7 @@ export async function startPlugin(
         ]).then(() => {
             unregisterApps?.();
             mcp?.close();
+            network?.close();
         }));
     const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
         (resolve, reject) => {

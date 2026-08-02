@@ -26,6 +26,10 @@ import { readPluginWorkspaceFile } from "./readPluginWorkspaceFile.js";
 import type {
     HappyMcpServerRegistration,
     HappyMcpToolResult,
+    HappyNetworkRequest,
+    HappyNetworkRequestCompletion,
+    HappyNetworkRequestResult,
+    HappyNetworkTunnel,
     HappyPlugin,
     HappyPluginClient,
     HappyPluginTestRequest,
@@ -43,6 +47,7 @@ import {
     executeWorkspaceCommandBodySchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
+    happyNetworkRequestCompletionSchema,
     happyPluginTestSeedSchema,
     listWorkspacesInputSchema,
     readWorkspaceFileBodySchema,
@@ -93,6 +98,13 @@ export interface HappyPluginTestHost {
         }[];
         waitForTools(count?: number, timeoutMs?: number): Promise<void>;
     };
+    readonly network: {
+        request(
+            request: Omit<HappyNetworkRequest, "mode">,
+            options?: { timeoutMs?: number },
+        ): Promise<HappyNetworkRequestResult>;
+        tunnel(tunnel: HappyNetworkTunnel): void;
+    };
     readonly requests: readonly HappyPluginTestRequest[];
     readonly rootDirectory: string;
     close(): Promise<void>;
@@ -117,6 +129,12 @@ interface TestCall<T> {
     resolve(result: T): void;
 }
 
+interface TestNetworkRegistration {
+    id: string;
+    response?: ServerResponse;
+    type: "request" | "tunnel";
+}
+
 /** Starts an in-memory, Unix-socket Happy host for plugin tests and local authoring. */
 export async function createHappyPluginTestHost(
     seed: HappyPluginTestSeed = {},
@@ -139,6 +157,8 @@ export async function createHappyPluginTestHost(
     const requests: HappyPluginTestRequest[] = [];
     const registrations = new Map<string, TestRegistration>();
     const calls = new Map<string, TestCall<HappyMcpToolResult>>();
+    const networkCalls = new Map<string, TestCall<HappyNetworkRequestCompletion>>();
+    const networkRegistrations = new Map<string, TestNetworkRegistration>();
     const appStorage = new Map<string, string>();
     const executeWorkspaceCommand = createPluginWorkspaceCommandExecutor();
     let nextId = 1;
@@ -301,6 +321,87 @@ export async function createHappyPluginTestHost(
                 };
                 registrations.set(registration.id, registration);
                 send(response, 201, { registrationId: registration.id });
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                (url.pathname === "/network/requests" || url.pathname === "/network/tunnels")
+            ) {
+                const registration: TestNetworkRegistration = {
+                    id: `test-network-${String(nextId++)}`,
+                    type: url.pathname === "/network/requests" ? "request" : "tunnel",
+                };
+                if (
+                    [...networkRegistrations.values()].some(
+                        (candidate) => candidate.type === registration.type,
+                    )
+                ) {
+                    send(response, 409, {
+                        error: `The fake host already has a ${registration.type} listener.`,
+                    });
+                    return;
+                }
+                networkRegistrations.set(registration.id, registration);
+                send(response, 201, { registrationId: registration.id });
+                return;
+            }
+            if (
+                request.method === "GET" &&
+                parts.length === 4 &&
+                parts[0] === "network" &&
+                (parts[1] === "requests" || parts[1] === "tunnels") &&
+                parts[2] !== undefined &&
+                parts[3] === "events"
+            ) {
+                const registration = networkRegistrations.get(parts[2]);
+                if (registration === undefined) {
+                    send(response, 404, { error: "That network listener is not active." });
+                    return;
+                }
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                registration.response = response;
+                response.once("close", () => networkRegistrations.delete(registration.id));
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length === 5 &&
+                parts[0] === "network" &&
+                parts[1] === "requests" &&
+                parts[2] !== undefined &&
+                parts[3] === "calls" &&
+                parts[4] !== undefined
+            ) {
+                const call = networkCalls.get(parts[4]);
+                if (call === undefined) {
+                    send(response, 409, { error: "That network request is no longer active." });
+                    return;
+                }
+                networkCalls.delete(parts[4]);
+                call.resolve(
+                    decodeRequest(
+                        happyNetworkRequestCompletionSchema,
+                        body,
+                        "Network request result",
+                    ),
+                );
+                send(response, 200, {});
+                return;
+            }
+            if (
+                request.method === "DELETE" &&
+                parts.length === 3 &&
+                parts[0] === "network" &&
+                (parts[1] === "requests" || parts[1] === "tunnels") &&
+                parts[2] !== undefined
+            ) {
+                networkRegistrations.get(parts[2])?.response?.end();
+                networkRegistrations.delete(parts[2]);
+                send(response, 200, {});
                 return;
             }
             if (
@@ -631,6 +732,57 @@ export async function createHappyPluginTestHost(
                 });
             },
         },
+        network: {
+            request(request, requestOptions = {}) {
+                const registration = [...networkRegistrations.values()].find(
+                    (candidate) => candidate.type === "request" && candidate.response !== undefined,
+                );
+                if (registration?.response === undefined) {
+                    return Promise.reject(
+                        new Error("The fake Happy host has no connected network request handler."),
+                    );
+                }
+                const callId = `test-network-call-${String(nextId++)}`;
+                return new Promise<HappyNetworkRequestResult>((resolve, reject) => {
+                    const timeoutMs = requestOptions.timeoutMs ?? CALL_TIMEOUT_MS;
+                    const timer = setTimeout(() => {
+                        networkCalls.delete(callId);
+                        reject(
+                            new Error(
+                                `The fake network request timed out after ${String(timeoutMs)}ms.`,
+                            ),
+                        );
+                    }, timeoutMs);
+                    timer.unref();
+                    networkCalls.set(callId, {
+                        cleanup: () => clearTimeout(timer),
+                        reject,
+                        resolve: (completion) => {
+                            clearTimeout(timer);
+                            resolve(decodeNetworkCompletion(completion));
+                        },
+                    });
+                    registration.response!.write(
+                        `${JSON.stringify({
+                            bodyBase64: Buffer.from(request.body).toString("base64"),
+                            callId,
+                            headers: request.headers,
+                            hostname: request.hostname,
+                            method: request.method,
+                            mode: "handle",
+                            type: "request",
+                            url: request.url,
+                        })}\n`,
+                    );
+                });
+            },
+            tunnel(tunnel) {
+                for (const registration of networkRegistrations.values()) {
+                    if (registration.type !== "tunnel") continue;
+                    registration.response?.write(`${JSON.stringify(tunnel)}\n`);
+                }
+            },
+        },
         async close() {
             if (closed) return;
             closed = true;
@@ -639,6 +791,15 @@ export async function createHappyPluginTestHost(
                 call.reject(new Error("The fake Happy host closed."));
             }
             calls.clear();
+            for (const call of networkCalls.values()) {
+                call.cleanup();
+                call.reject(new Error("The fake Happy host closed."));
+            }
+            networkCalls.clear();
+            for (const registration of networkRegistrations.values()) {
+                registration.response?.end();
+            }
+            networkRegistrations.clear();
             for (const registration of registrations.values()) registration.response?.end();
             registrations.clear();
             await new Promise<void>((resolve) => {
@@ -649,6 +810,19 @@ export async function createHappyPluginTestHost(
         },
     };
     return host;
+}
+
+function decodeNetworkCompletion(
+    completion: HappyNetworkRequestCompletion,
+): HappyNetworkRequestResult {
+    if (completion.type === "pass_through" || completion.type === "error") {
+        return { type: "pass_through" };
+    }
+    const { bodyBase64, ...rest } = completion;
+    return {
+        ...rest,
+        ...(bodyBase64 === undefined ? {} : { body: Buffer.from(bodyBase64, "base64") }),
+    };
 }
 
 async function readBody(request: IncomingMessage, maximumBytes: number): Promise<unknown> {

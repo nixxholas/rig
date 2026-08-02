@@ -51,10 +51,7 @@ import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
-import {
-    createGeneratedMediaStore,
-    getGeneratedDirectory,
-} from "../generated-media/index.js";
+import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -425,6 +422,16 @@ async function runOwnedLocalProtocolServer(
                 requirePluginManager(pluginManager).installFromGitHub(...parameters),
             loadSkills: (fs) => requirePluginManager(pluginManager).loadSkills(fs),
             list: () => requirePluginManager(pluginManager).list(),
+            network: {
+                interceptHttp: (request) =>
+                    requirePluginManager(pluginManager).interceptHttp(request),
+                observeTunnel: (tunnel) =>
+                    requirePluginManager(pluginManager).observeTunnel(tunnel),
+                recordFailure: (hostname, error) =>
+                    requirePluginManager(pluginManager).recordFailure(hostname, error),
+                shouldIntercept: (hostname) =>
+                    requirePluginManager(pluginManager).shouldIntercept(hostname),
+            },
             readAppResource: (...parameters) =>
                 requirePluginManager(pluginManager).readAppResource(...parameters),
             readLog: (name) => requirePluginManager(pluginManager).readLog(name),

@@ -61,6 +61,37 @@ Plugin-created entries carry a typed plugin author containing the stable install
 human-readable plugin name. Uninstall removes every slot entry authored by that plugin, because
 the author and the code responsible for maintaining the entry are gone.
 
+## Managed network interception
+
+A process plugin may declare up to 16 exact hostnames in the manifest's `interceptDomains` array.
+Wildcards are deliberately unsupported. These declarations are selectors, never permissions:
+they do not add a domain or port to the project/global managed-network allowlist. The proxy checks
+the sandbox policy first, and a blocked destination is rejected without contacting any plugin.
+A plugin rewrite is checked against the same policy again before Rig opens the rewritten
+destination.
+
+For allowed plain-HTTP traffic, the proxy buffers at most 256 KiB of request body and sends the
+method, URL, headers, and bytes through the authenticated plugin socket. A handler has five seconds
+to pass through, return a complete synthetic response, or replace request fields before normal
+forwarding. Response bodies and replacement request bodies have the same 256 KiB bound. An
+oversized body, a request body that does not finish within five seconds, a handler timeout,
+disconnect, malformed result, or any other plugin failure is logged against the owning plugin and
+fails open to the ordinary proxy path. Requests without a matching live listener stay on the
+streaming proxy path and are never buffered for interception.
+
+Socket events are validated and capped at 512 KiB before they are written. Header metadata is
+clamped to a 64 KiB aggregate budget, and a backpressured plugin stream receives no more events
+until it drains, so optional observation cannot create an unbounded daemon buffer.
+
+When several running plugins declare the same hostname, folder-name order decides ownership:
+the lexicographically first plugin may handle the request and the rest receive events marked
+`mode: "observe"` only.
+
+HTTPS remains an opaque CONNECT tunnel. Rig does not mint certificates and does not unwrap TLS;
+full HTTPS MITM is out of scope. A plugin can observe only the declared hostname, port, and the
+client/server byte counts reported when an allowed tunnel closes. Every matching plugin receives
+that fire-and-forget observation. SOCKS traffic is unchanged and is not intercepted.
+
 Plugins may also publish a file to the shared generated-media store, either from bounded bytes or
 from a relative path inside their own writable folder. Both forms are capped at 10 MiB. Path reads
 resolve canonically and reject traversal and symbolic-link escapes. The result is a

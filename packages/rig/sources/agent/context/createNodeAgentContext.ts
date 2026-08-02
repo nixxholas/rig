@@ -14,12 +14,14 @@ import {
 } from "../../permissions/index.js";
 import type { SessionSecretContext } from "../../secrets/index.js";
 import { getBundledDocsRoot } from "../../execution/getBundledDocsRoot.js";
+import type { PluginContext } from "./PluginContext.js";
 
 export interface CreateNodeAgentContextOptions {
     cwd: string;
     goals?: GoalContext;
     processManager: NativeProcessManager;
     permissionMode?: PermissionMode;
+    plugins?: PluginContext;
     secrets?: SessionSecretContext;
     tasks?: TaskContext;
     userInput?: UserInputContext;
@@ -36,6 +38,9 @@ export function createNodeAgentContext(options: CreateNodeAgentContextOptions): 
             cwd: options.cwd,
             processManager: options.processManager,
             permissions,
+            ...(options.plugins?.network === undefined
+                ? {}
+                : { networkInterceptor: options.plugins.network }),
             ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
         }),
         docsPath: getBundledDocsRoot(),

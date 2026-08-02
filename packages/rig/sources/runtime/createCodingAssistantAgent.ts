@@ -115,6 +115,7 @@ export function createCodingAssistantAgent(
     const sharedContextOptions = {
         ...(options.goals !== undefined ? { goals: options.goals } : {}),
         ...(options.permissionMode !== undefined ? { permissionMode: options.permissionMode } : {}),
+        ...(options.plugins !== undefined ? { plugins: options.plugins } : {}),
         ...(options.secrets !== undefined ? { secrets: options.secrets } : {}),
         ...(options.tasks !== undefined ? { tasks: options.tasks } : {}),
         ...(options.userInput !== undefined ? { userInput: options.userInput } : {}),

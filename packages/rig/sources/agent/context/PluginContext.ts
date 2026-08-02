@@ -13,6 +13,7 @@ import type {
 } from "../../plugins/githubPluginCatalog.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 import type { Skill } from "../skills/Skill.js";
+import type { ManagedNetworkInterceptor } from "./ManagedNetworkPolicy.js";
 
 /**
  * Managing the plugins installed on this machine.
@@ -21,6 +22,8 @@ import type { Skill } from "../skills/Skill.js";
  * uninstalled — and the daemon announces the new set to every attached client.
  */
 export interface PluginContext {
+    /** Internal managed-proxy hook; absent in lightweight test/plugin-tool contexts. */
+    network?: ManagedNetworkInterceptor;
     discoverRepository(
         source: GitHubPluginSource,
         signal?: AbortSignal,
