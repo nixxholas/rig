@@ -6,6 +6,11 @@ import type {
     UninstalledPluginSummary,
 } from "../../protocol/index.js";
 import type { PluginAppResource } from "../../plugins/PluginAppRegistry.js";
+import type {
+    GitHubPluginIndex,
+    GitHubPluginInstallSource,
+    GitHubPluginSource,
+} from "../../plugins/githubPluginCatalog.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 
 /**
@@ -15,11 +20,19 @@ import type { FileSystemContext } from "./FileSystemContext.js";
  * uninstalled — and the daemon announces the new set to every attached client.
  */
 export interface PluginContext {
+    discoverRepository(
+        source: GitHubPluginSource,
+        signal?: AbortSignal,
+    ): Promise<GitHubPluginIndex>;
     install(options: {
         fs: FileSystemContext;
         signal?: AbortSignal;
         sourceDirectory: string;
     }): Promise<InstalledPluginSummary>;
+    installFromGitHub(
+        source: GitHubPluginInstallSource,
+        options: { fs: FileSystemContext; signal?: AbortSignal },
+    ): Promise<InstalledPluginSummary>;
     list(): Promise<{
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];

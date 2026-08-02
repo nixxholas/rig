@@ -414,7 +414,11 @@ async function runOwnedLocalProtocolServer(
         const plugins: PluginContext = {
             callAppTool: (...parameters) =>
                 requirePluginManager(pluginManager).callAppTool(...parameters),
+            discoverRepository: (...parameters) =>
+                requirePluginManager(pluginManager).discoverRepository(...parameters),
             install: (request) => requirePluginManager(pluginManager).install(request),
+            installFromGitHub: (...parameters) =>
+                requirePluginManager(pluginManager).installFromGitHub(...parameters),
             list: () => requirePluginManager(pluginManager).list(),
             readAppResource: (...parameters) =>
                 requirePluginManager(pluginManager).readAppResource(...parameters),

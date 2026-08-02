@@ -6,6 +6,13 @@ import { resolveFileSystemPath } from "../../agent/context/resolveFileSystemPath
 import { defineTool } from "../../agent/types.js";
 import { quoteVisibleExact } from "../../permissions/quoteVisibleExact.js";
 import { getPluginsDirectory } from "../../plugins/getPluginsDirectory.js";
+import {
+    githubGitRefSchema,
+    githubPluginCatalogEntrySchema,
+    githubPluginNameSchema,
+    githubPluginSourceSchema,
+    githubRepositorySchema,
+} from "../../plugins/githubPluginCatalog.js";
 import { pluginVersionSchema } from "../../plugins/types.js";
 import { pluginInstallClassificationSchema } from "../../protocol/index.js";
 
@@ -14,19 +21,66 @@ import { pluginInstallClassificationSchema } from "../../protocol/index.js";
  * outside the Auto sandbox and is reviewed before it runs.
  */
 const OUTSIDE_WORKSPACE = "Access: unrestricted filesystem access outside the workspace sandbox";
+const GITHUB_ACCESS = "Access: reads public repository data from GitHub";
+
+export const pluginDiscoverTool = defineTool({
+    name: "plugin_discover",
+    label: "Discover GitHub plugins",
+    description:
+        "List the plugins offered by a GitHub repository whose root contains happy-plugins.json. The repository must be written as owner/repo; omit ref to use its default branch.",
+    arguments: githubPluginSourceSchema,
+    returnType: Type.Object(
+        {
+            plugins: Type.Array(githubPluginCatalogEntrySchema),
+            ref: Type.Optional(Type.String()),
+            repository: Type.String(),
+        },
+        { additionalProperties: false },
+    ),
+    requiresAutoOrFullAccess: true,
+    shouldReviewInAutoMode: () => true,
+    describeAutoPermissionAction: ({ repository, ref }) =>
+        `read the plugin catalog from ${quoteVisibleExact(repository)} on GitHub at ${quoteVisibleExact(ref ?? "the default branch")}. ${GITHUB_ACCESS}`,
+    execute: async ({ repository, ref }, context, execution) => ({
+        ...(await requirePlugins(context).discoverRepository(
+            {
+                ...(ref === undefined ? {} : { ref }),
+                repository,
+            },
+            execution.signal,
+        )),
+        ...(ref === undefined ? {} : { ref }),
+        repository,
+    }),
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+    toUI: (result) =>
+        result.plugins.length === 0
+            ? `No plugins are listed by ${result.repository}.`
+            : `Found ${String(result.plugins.length)} ${result.plugins.length === 1 ? "plugin" : "plugins"} in ${result.repository}.`,
+    locks: [],
+});
 
 export const pluginInstallTool = defineTool({
     name: "plugin_install",
     label: "Install plugin",
     description:
-        "Install a plugin from a folder on this machine. Rig copies the sources into its managed plugins folder, compiles them, and starts the plugin right away; a plugin that fails to build is not installed.",
+        "Install a plugin from a folder on this machine or from a plugin listed by a GitHub repository. Rig copies the sources into its managed plugins folder, compiles them, and starts the plugin right away; a plugin that fails to build is not installed.",
     arguments: Type.Object(
         {
-            path: Type.String({
-                description: "Path to the plugin folder containing happy.plugin.json.",
-            }),
+            path: Type.Optional(
+                Type.String({
+                    description: "Path to the plugin folder containing happy.plugin.json.",
+                }),
+            ),
+            plugin: Type.Optional(githubPluginNameSchema),
+            ref: Type.Optional(githubGitRefSchema),
+            repository: Type.Optional(githubRepositorySchema),
         },
-        { additionalProperties: false },
+        {
+            additionalProperties: false,
+            description:
+                "Provide either a local path or a GitHub repository, indexed plugin name, and optional ref.",
+        },
     ),
     returnType: Type.Object({
         classification: pluginInstallClassificationSchema,
@@ -36,15 +90,61 @@ export const pluginInstallTool = defineTool({
         name: Type.String(),
         version: pluginVersionSchema,
     }),
+    requiresAutoOrFullAccess: true,
     shouldReviewInAutoMode: () => true,
     shouldRunInFullAccessInAutoMode: () => true,
-    describeAutoPermissionAction: ({ path }, context) =>
-        `install the plugin at ${quoteVisibleExact(resolvePluginSource(path, context))} into ${quoteVisibleExact(getPluginsDirectory())}, compiling its TypeScript and running it. ${OUTSIDE_WORKSPACE}`,
-    execute: ({ path }, context) =>
-        requirePlugins(context).install({
-            fs: context.fs,
-            sourceDirectory: resolvePluginSource(path, context),
-        }),
+    describeAutoPermissionAction: (source, context) => {
+        if (
+            source.path !== undefined &&
+            source.repository === undefined &&
+            source.plugin === undefined &&
+            source.ref === undefined
+        ) {
+            return `install the plugin at ${quoteVisibleExact(resolvePluginSource(source.path, context))} into ${quoteVisibleExact(getPluginsDirectory())}, compiling its TypeScript and running it. ${OUTSIDE_WORKSPACE}`;
+        }
+        if (
+            source.path === undefined &&
+            source.repository !== undefined &&
+            source.plugin !== undefined
+        ) {
+            return `download the indexed plugin ${quoteVisibleExact(source.plugin)} from ${quoteVisibleExact(source.repository)} on GitHub at ${quoteVisibleExact(source.ref ?? "the default branch")}, install it into ${quoteVisibleExact(getPluginsDirectory())}, compile its TypeScript, and run it. ${GITHUB_ACCESS}. ${OUTSIDE_WORKSPACE}`;
+        }
+        return `attempt to install a plugin from an invalid source into ${quoteVisibleExact(getPluginsDirectory())}. ${GITHUB_ACCESS}. ${OUTSIDE_WORKSPACE}`;
+    },
+    execute: async (source, context, execution) => {
+        if (source.path !== undefined) {
+            if (
+                source.repository !== undefined ||
+                source.plugin !== undefined ||
+                source.ref !== undefined
+            ) {
+                throw new Error(
+                    "Provide either a local plugin path or a GitHub repository and plugin name, but not both.",
+                );
+            }
+            return requirePlugins(context).install({
+                fs: context.fs,
+                ...(execution.signal === undefined ? {} : { signal: execution.signal }),
+                sourceDirectory: resolvePluginSource(source.path, context),
+            });
+        }
+        if (source.repository === undefined || source.plugin === undefined) {
+            throw new Error(
+                "Provide either a local plugin path or a GitHub repository and plugin name.",
+            );
+        }
+        return requirePlugins(context).installFromGitHub(
+            {
+                plugin: source.plugin,
+                ...(source.ref === undefined ? {} : { ref: source.ref }),
+                repository: source.repository,
+            },
+            {
+                fs: context.fs,
+                ...(execution.signal === undefined ? {} : { signal: execution.signal }),
+            },
+        );
+    },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) => `Installed and started the ${result.name} plugin.`,
     locks: ["plugins"],
@@ -154,7 +254,13 @@ export const pluginLogsTool = defineTool({
     locks: [],
 });
 
-export const pluginTools = [pluginInstallTool, pluginUninstallTool, pluginListTool, pluginLogsTool];
+export const pluginTools = [
+    pluginDiscoverTool,
+    pluginInstallTool,
+    pluginUninstallTool,
+    pluginListTool,
+    pluginLogsTool,
+];
 
 function requirePlugins(context: AgentContext): PluginContext {
     if (context.plugins === undefined) {

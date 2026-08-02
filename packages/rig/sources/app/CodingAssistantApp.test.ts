@@ -3243,7 +3243,13 @@ describe("CodingAssistantApp", () => {
             async callAppTool() {
                 throw new Error("Unused in this test.");
             },
+            async discoverRepository() {
+                throw new Error("Unused in this test.");
+            },
             async install() {
+                throw new Error("Unused in this test.");
+            },
+            async installFromGitHub() {
                 throw new Error("Unused in this test.");
             },
             async list() {

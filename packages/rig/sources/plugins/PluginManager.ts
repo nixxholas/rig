@@ -8,8 +8,16 @@ import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
 import { discoverPlugins } from "./discoverPlugins.js";
+import { discoverGitHubPlugins } from "./discoverGitHubPlugins.js";
+import type { GitHubFetch } from "./fetchBoundedGitHubResource.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { getPluginsDirectory } from "./getPluginsDirectory.js";
+import type {
+    GitHubPluginIndex,
+    GitHubPluginInstallSource,
+    GitHubPluginSource,
+} from "./githubPluginCatalog.js";
+import { installGitHubPlugin } from "./installGitHubPlugin.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 import { PluginBuildError } from "./PluginBuildError.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
@@ -26,6 +34,7 @@ export interface PluginManagerOptions {
     defaultDocker?: DockerExecutionConfig;
     directory?: string;
     environment?: NodeJS.ProcessEnv;
+    githubFetch?: GitHubFetch;
     now?: () => number;
     mcpRegistry?: PluginMcpRegistry;
     listProviderUsage?: StartPluginOptions["listProviderUsage"];
@@ -71,6 +80,7 @@ export class PluginManager {
     readonly #daemonLog: DaemonLog;
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #environment: NodeJS.ProcessEnv;
+    readonly #githubFetch: GitHubFetch | undefined;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
@@ -95,6 +105,7 @@ export class PluginManager {
         this.#daemonLog = options.daemonLog;
         this.#defaultDocker = options.defaultDocker;
         this.#environment = options.environment ?? process.env;
+        this.#githubFetch = options.githubFetch;
         this.#now = options.now ?? Date.now;
         this.#mcpRegistry = options.mcpRegistry;
         this.#listProviderUsage = options.listProviderUsage;
@@ -146,11 +157,44 @@ export class PluginManager {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
             sourceDirectory: options.sourceDirectory,
         });
+        await this.#activateInstalled(installed);
+        return installed;
+    }
+
+    /** Lists the plugins published by a GitHub repository index. */
+    async discoverRepository(
+        source: GitHubPluginSource,
+        signal?: AbortSignal,
+    ): Promise<GitHubPluginIndex> {
+        this.#assertOpen();
+        return discoverGitHubPlugins(source, {
+            ...(this.#githubFetch === undefined ? {} : { fetcher: this.#githubFetch }),
+            ...(signal === undefined ? {} : { signal }),
+        });
+    }
+
+    /** Installs one indexed plugin from a GitHub repository and starts it. */
+    async installFromGitHub(
+        source: GitHubPluginInstallSource,
+        options: { fs: FileSystemContext; signal?: AbortSignal },
+    ): Promise<InstalledPlugin> {
+        this.#assertOpen();
+        const installed = await installGitHubPlugin({
+            ...(this.#githubFetch === undefined ? {} : { fetcher: this.#githubFetch }),
+            fs: options.fs,
+            pluginsDirectory: this.directory,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+            source,
+        });
+        await this.#activateInstalled(installed);
+        return installed;
+    }
+
+    async #activateInstalled(installed: InstalledPlugin): Promise<void> {
         // Replacing an installed plugin retires the process built from the previous code.
         await this.#stopRunning(installed.folder, true);
         await this.#startRegistered(installed.folder);
         await this.#publishChanged({ installation: installed });
-        return installed;
     }
 
     /** Stops a plugin and removes its installed code, keeping the folder it writes to. */

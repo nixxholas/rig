@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentContext } from "../../agent/context/AgentContext.js";
 import type { PluginContext } from "../../agent/context/PluginContext.js";
 import {
+    pluginDiscoverTool,
     pluginInstallTool,
     pluginListTool,
     pluginLogsTool,
@@ -13,6 +14,16 @@ describe("plugin tools", () => {
     it("reviews every plugin action and elevates only the two that change the installation", () => {
         const context = {} as AgentContext;
 
+        expect(pluginInstallTool.arguments.type).toBe("object");
+        expect(
+            pluginDiscoverTool.shouldReviewInAutoMode({ repository: "happy-dev/plugins" }, context),
+        ).toBe(true);
+        expect(
+            pluginDiscoverTool.shouldRunInFullAccessInAutoMode(
+                { repository: "happy-dev/plugins" },
+                context,
+            ),
+        ).toBe(false);
         expect(pluginInstallTool.shouldReviewInAutoMode({ path: "./clock" }, context)).toBe(true);
         expect(
             pluginInstallTool.shouldRunInFullAccessInAutoMode({ path: "./clock" }, context),
@@ -23,6 +34,8 @@ describe("plugin tools", () => {
         ).toBe(true);
         expect(pluginListTool.shouldReviewInAutoMode({}, context)).toBe(true);
         expect(pluginListTool.shouldRunInFullAccessInAutoMode({}, context)).toBe(false);
+        expect(pluginDiscoverTool.requiresAutoOrFullAccess).toBe(true);
+        expect(pluginInstallTool.requiresAutoOrFullAccess).toBe(true);
     });
 
     it("discloses the folder it reaches outside the workspace", () => {
@@ -45,6 +58,12 @@ describe("plugin tools", () => {
         expect(pluginListTool.describeAutoPermissionAction?.({}, context)).toContain(
             "outside the workspace sandbox",
         );
+        expect(
+            pluginDiscoverTool.describeAutoPermissionAction?.(
+                { repository: "happy-dev/plugins" },
+                context,
+            ),
+        ).toContain("public repository data from GitHub");
     });
 
     it("installs from a path the session resolves and uninstalls by name", async () => {
@@ -75,6 +94,82 @@ describe("plugin tools", () => {
             pluginUninstallTool.execute({ name: "Clock" }, context, {}),
         ).resolves.toMatchObject({ dataDirectory: "/home/steve/Happy/Plugins/clock" });
         expect(uninstall).toHaveBeenCalledWith({ fs: context.fs, name: "Clock" });
+    });
+
+    it("discovers and installs an indexed GitHub plugin through the plugin context", async () => {
+        const discoverRepository = vi.fn(async () => ({
+            plugins: [
+                {
+                    description: "A small clock.",
+                    displayName: "Clock",
+                    name: "clock",
+                    path: "plugins/clock",
+                    version: "1.2.0",
+                },
+            ],
+        }));
+        const installFromGitHub = vi.fn(async () => ({
+            classification: "fresh-install" as const,
+            description: "A small clock.",
+            directory: "/home/steve/.happy/rig/plugins/clock",
+            folder: "clock",
+            name: "Clock",
+            version: "1.2.0",
+        }));
+        const context = createContext({ discoverRepository, installFromGitHub });
+
+        await expect(
+            pluginDiscoverTool.execute(
+                { ref: "v1.2.0", repository: "happy-dev/plugins" },
+                context,
+                {},
+            ),
+        ).resolves.toMatchObject({ plugins: [{ name: "clock" }] });
+        await expect(
+            pluginInstallTool.execute(
+                {
+                    plugin: "clock",
+                    ref: "v1.2.0",
+                    repository: "happy-dev/plugins",
+                },
+                context,
+                {},
+            ),
+        ).resolves.toMatchObject({ name: "Clock" });
+        expect(discoverRepository).toHaveBeenCalledWith(
+            { ref: "v1.2.0", repository: "happy-dev/plugins" },
+            undefined,
+        );
+        expect(installFromGitHub).toHaveBeenCalledWith(
+            {
+                plugin: "clock",
+                ref: "v1.2.0",
+                repository: "happy-dev/plugins",
+            },
+            { fs: context.fs },
+        );
+    });
+
+    it("rejects mixed local and GitHub install sources", async () => {
+        const install = vi.fn();
+        const installFromGitHub = vi.fn();
+        const context = createContext({ install, installFromGitHub });
+
+        await expect(
+            pluginInstallTool.execute(
+                {
+                    path: "./clock",
+                    plugin: "clock",
+                    repository: "happy-dev/plugins",
+                },
+                context,
+                {},
+            ),
+        ).rejects.toThrow(
+            "Provide either a local plugin path or a GitHub repository and plugin name, but not both.",
+        );
+        expect(install).not.toHaveBeenCalled();
+        expect(installFromGitHub).not.toHaveBeenCalled();
     });
 
     it("reports which installed plugins are running", async () => {

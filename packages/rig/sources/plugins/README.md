@@ -80,3 +80,38 @@ generation. `readLog` returns its newest 16 KiB, or the newest 16 KiB of the bui
 marks the snapshot when that read bound omitted older output. The daemon protocol serves these
 through `GET /plugins` and `GET /plugins/<name>/log`; `/plugins`, the `plugin_logs` agent tool, and
 `rig-connect` consume that boundary without polling.
+
+## GitHub repository catalogs
+
+A GitHub repository can publish plugins by placing `happy-plugins.json` at its root. The index is
+an object with one `plugins` array. Every entry names the plugin's folder, gives its human-facing
+display name and description, declares an exact Semantic Version, and points to the plugin
+subdirectory inside the repository. That subdirectory contains `happy.plugin.json`, `icon.png`,
+and the plugin's code.
+
+```json
+{
+    "plugins": [
+        {
+            "name": "clock",
+            "displayName": "Clock",
+            "description": "Shows the current time to agents.",
+            "version": "1.2.0",
+            "path": "plugins/clock"
+        },
+        {
+            "name": "github-watch",
+            "displayName": "GitHub Watch",
+            "description": "Reports repository checks and failures.",
+            "version": "0.4.1",
+            "path": "plugins/github-watch"
+        }
+    ]
+}
+```
+
+Rig validates the complete index before returning any catalog entries. Repository names use
+`owner/repo` form, and callers may select a branch, tag, or commit; omitting the ref uses the
+repository's default branch. Discovery reads at most 1 MiB and times out after 10 seconds.
+Installation downloads a bounded GitHub tarball, extracts only the indexed subdirectory into a
+temporary staging folder, and then uses the same local installation path as every other plugin.
