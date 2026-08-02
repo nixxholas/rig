@@ -414,6 +414,7 @@ export async function* mapOpenAIResponseStream(
             for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
                 responseItems.set(outputIndex, JSON.stringify(item));
             }
+            yield* closeOpenServerToolCalls(activeItems);
             for (const [outputIndex, activeItem] of activeItems) {
                 if (
                     (activeItem.type !== "function_call" &&
@@ -474,24 +475,7 @@ export async function* mapOpenAIResponseStream(
             for (const [outputIndex, item] of (event.response.output ?? []).entries()) {
                 responseItems.set(outputIndex, JSON.stringify(item));
             }
-            for (const [outputIndex, activeItem] of activeItems) {
-                // A hosted call always finishes inside its own response, so a still-open one only
-                // means we never saw its done event. Close it rather than leave it running.
-                if (
-                    activeItem.type !== "server_tool_call" ||
-                    activeItem.callId === undefined ||
-                    activeItem.name === undefined
-                ) {
-                    continue;
-                }
-                yield {
-                    type: "server_tool_call_end",
-                    callId: activeItem.callId,
-                    name: activeItem.name,
-                    arguments: activeItem.argumentsJson ?? "",
-                };
-                activeItems.delete(outputIndex);
-            }
+            yield* closeOpenServerToolCalls(activeItems);
             for (const [outputIndex, activeItem] of activeItems) {
                 if (
                     (activeItem.type !== "function_call" &&
@@ -582,6 +566,35 @@ export async function* mapOpenAIResponseStream(
         toolCalls,
         usage,
     };
+}
+
+/**
+ * Ends every hosted call still open when a response reaches its terminal event.
+ *
+ * A hosted call always completes inside the response that started it, so one still open here only
+ * means its own done event never arrived — whether the response completed or was truncated. Its
+ * end is the durable half of the pair, so failing to emit it would strand a live row and lose the
+ * record that the provider searched at all.
+ */
+function* closeOpenServerToolCalls(
+    activeItems: Map<number, ActiveOutputItem>,
+): Generator<SessionEvent> {
+    for (const [outputIndex, activeItem] of activeItems) {
+        if (
+            activeItem.type !== "server_tool_call" ||
+            activeItem.callId === undefined ||
+            activeItem.name === undefined
+        ) {
+            continue;
+        }
+        yield {
+            type: "server_tool_call_end",
+            callId: activeItem.callId,
+            name: activeItem.name,
+            arguments: activeItem.argumentsJson ?? "",
+        };
+        activeItems.delete(outputIndex);
+    }
 }
 
 /**

@@ -128,6 +128,58 @@ describe("Grok hosted search goldens", () => {
         expect(input.filter((item: any) => item.type === "function_call_output")).toEqual([]);
     });
 
+    it("closes a hosted call the model truncated, so the search still reaches history", async () => {
+        const events: SessionEvent[] = [];
+        const mapped = mapOpenAIResponseStream(
+            stream([
+                {
+                    type: "response.output_item.added",
+                    output_index: 0,
+                    item: {
+                        type: "custom_tool_call",
+                        call_id: "xs-1",
+                        name: "x_keyword_search",
+                        input: "",
+                    },
+                },
+                {
+                    type: "response.custom_tool_call_input.delta",
+                    output_index: 0,
+                    delta: '{"query":"Claude Code"',
+                },
+                {
+                    type: "response.incomplete",
+                    response: {
+                        incomplete_details: { reason: "max_output_tokens" },
+                        output: [],
+                        usage: { total_tokens: 5 },
+                    },
+                },
+            ]),
+            {
+                failureMessage: "unused",
+                vendor: "grok",
+                clientToolNames: new Set(["read_file"]),
+            },
+        );
+        let next = await mapped.next();
+        while (next.done !== true) {
+            events.push(next.value);
+            next = await mapped.next();
+        }
+
+        // Its completion is what becomes a history row, so a truncated turn must still emit one.
+        expect(events).toContainEqual({
+            type: "server_tool_call_end",
+            callId: "xs-1",
+            name: "x_keyword_search",
+            arguments: '{"query":"Claude Code"',
+        });
+        // It is still nothing the client has to run.
+        expect(next.value.toolCalls).toEqual([]);
+        expect(next.value.stopReason).toBe("length");
+    });
+
     it("keeps an undeclared custom tool executable when the client declared no tool names", async () => {
         const events: SessionEvent[] = [];
         const mapped = mapOpenAIResponseStream(
