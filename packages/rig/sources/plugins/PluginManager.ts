@@ -1,5 +1,6 @@
 import { join } from "node:path";
 
+import type Dockerode from "dockerode";
 import {
     HAPPY_PLUGIN_MAX_SYSTEM_PROMPT_BYTES,
     type HappySystemPromptHookInput,
@@ -21,6 +22,7 @@ import type { HappyNetworkRequestCompletion, HappyNetworkTunnel } from "happy-pl
 import type { Skill } from "../agent/skills/Skill.js";
 import { loadSkills } from "../agent/skills/loadSkills.js";
 import { discoverPlugins } from "./discoverPlugins.js";
+import { createPluginDockerClient } from "./createPluginDockerClient.js";
 import { discoverGitHubPlugins } from "./discoverGitHubPlugins.js";
 import type { GitHubFetch } from "./fetchBoundedGitHubResource.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
@@ -34,6 +36,8 @@ import { installGitHubPlugin } from "./installGitHubPlugin.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
+import { removePluginDockerImages } from "./preparePluginDockerImage.js";
+import { resolvePluginDockerImage } from "./resolvePluginDockerRuntime.js";
 import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
 import { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
@@ -41,6 +45,7 @@ import { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import { PluginAppRegistry, type PluginAppResource } from "./PluginAppRegistry.js";
 import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
+import { removePluginDockerContainers } from "./startPluginDockerContainer.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS } from "./PluginStartupState.js";
 
 const PLUGIN_STATUS_PUBLICATION_INTERVAL_MS = 100;
@@ -51,6 +56,8 @@ export interface PluginManagerOptions {
     daemonLog: DaemonLog;
     defaultDocker?: DockerExecutionConfig;
     directory?: string;
+    docker?: Dockerode;
+    dockerCleanupTimeoutMs?: number;
     environment?: NodeJS.ProcessEnv;
     githubFetch?: GitHubFetch;
     generatedMedia?: GeneratedMediaStore;
@@ -108,6 +115,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
     #catalogVersion: EventId = this.#createEventId();
     readonly #daemonLog: DaemonLog;
     readonly #defaultDocker: DockerExecutionConfig | undefined;
+    readonly #docker: Dockerode;
+    readonly #dockerCleanupTimeoutMs: number | undefined;
     readonly #environment: NodeJS.ProcessEnv;
     readonly #githubFetch: GitHubFetch | undefined;
     readonly #generatedMedia: GeneratedMediaStore | undefined;
@@ -138,6 +147,8 @@ export class PluginManager implements ManagedNetworkInterceptor {
         this.#appRegistry = options.appRegistry ?? new PluginAppRegistry(options.mcpRegistry!);
         this.#daemonLog = options.daemonLog;
         this.#defaultDocker = options.defaultDocker;
+        this.#docker = options.docker ?? createPluginDockerClient(options.defaultDocker);
+        this.#dockerCleanupTimeoutMs = options.dockerCleanupTimeoutMs;
         this.#environment = options.environment ?? process.env;
         this.#githubFetch = options.githubFetch;
         this.#generatedMedia = options.generatedMedia;
@@ -200,6 +211,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }): Promise<InstalledPlugin> {
         this.#assertOpen();
         const installed = await installPluginFromPath({
+            docker: this.#docker,
             fs: options.fs,
             pluginsDirectory: this.directory,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -228,6 +240,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     ): Promise<InstalledPlugin> {
         this.#assertOpen();
         const installed = await installGitHubPlugin({
+            docker: this.#docker,
             ...(this.#githubFetch === undefined ? {} : { fetcher: this.#githubFetch }),
             fs: options.fs,
             pluginsDirectory: this.directory,
@@ -241,7 +254,23 @@ export class PluginManager implements ManagedNetworkInterceptor {
     async #activateInstalled(installed: InstalledPlugin): Promise<void> {
         // Replacing an installed plugin retires the process built from the previous code.
         await this.#stopRunning(installed.folder, true);
-        await this.#startRegistered(installed.folder);
+        await this.#startRegistered(installed.folder, { preserveLog: true });
+        try {
+            const plugin = await readPluginManifest(installed.directory);
+            if (plugin.docker !== undefined) {
+                await removePluginDockerImages(installed.folder, {
+                    docker: this.#docker,
+                    ...(this.#dockerCleanupTimeoutMs === undefined
+                        ? {}
+                        : { timeoutMs: this.#dockerCleanupTimeoutMs }),
+                    ...(plugin.docker.type === "dockerfile"
+                        ? { keepImage: await resolvePluginDockerImage(plugin) }
+                        : {}),
+                });
+            }
+        } catch (error) {
+            this.#recordDockerCleanupFailure(installed.name, "remove superseded images", error);
+        }
         await this.#publishChanged({ installation: installed });
     }
 
@@ -270,6 +299,34 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
         options.signal?.throwIfAborted();
         await this.#stopRunning(installed.folderName);
+        if (installed.docker !== undefined) {
+            await Promise.all([
+                removePluginDockerContainers(installed.folderName, {
+                    docker: this.#docker,
+                    ...(this.#dockerCleanupTimeoutMs === undefined
+                        ? {}
+                        : { timeoutMs: this.#dockerCleanupTimeoutMs }),
+                }).catch((error: unknown) =>
+                    this.#recordDockerCleanupFailure(
+                        installed.manifest.name,
+                        "remove containers during uninstall",
+                        error,
+                    ),
+                ),
+                removePluginDockerImages(installed.folderName, {
+                    docker: this.#docker,
+                    ...(this.#dockerCleanupTimeoutMs === undefined
+                        ? {}
+                        : { timeoutMs: this.#dockerCleanupTimeoutMs }),
+                }).catch((error: unknown) =>
+                    this.#recordDockerCleanupFailure(
+                        installed.manifest.name,
+                        "remove images during uninstall",
+                        error,
+                    ),
+                ),
+            ]);
+        }
         await options.fs.rm(join(this.directory, installed.folderName), {
             force: true,
             recursive: true,
@@ -578,7 +635,18 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
         this.#statusPublication = { status: "idle" };
         this.#startupGenerations.clear();
-        await Promise.all([...this.#running.values()].map((plugin) => plugin.close()));
+        await Promise.all(
+            [...this.#running.values()].map((plugin) =>
+                plugin.close().catch((error: unknown) => {
+                    this.#daemonLog.record(
+                        "warning",
+                        "plugin_stop_cleanup_failed",
+                        `Rig could not completely clean up the ${plugin.name} plugin while shutting down.`,
+                        { error: errorToMessage(error), plugin: plugin.name },
+                    );
+                }),
+            ),
+        );
         this.#running.clear();
         this.#networkRegistry.close();
     }
@@ -587,7 +655,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
         if (this.#closed) throw new Error("Rig is shutting down, so plugins cannot change now.");
     }
 
-    async #startRegistered(folderName: string): Promise<void> {
+    async #startRegistered(
+        folderName: string,
+        options: { preserveLog?: boolean } = {},
+    ): Promise<void> {
         const startupGeneration = Symbol(folderName);
         this.#startupGenerations.set(folderName, startupGeneration);
         const isCurrentStartup = () =>
@@ -610,12 +681,17 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 });
                 return;
             }
-            running = await this.#start(plugin, {
+            const startupStartedAt = Date.now();
+            const starting = this.#start(plugin, {
                 appRegistry: this.#appRegistry,
                 ...(this.#defaultDocker === undefined
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),
                 environment: this.#environment,
+                docker: this.#docker,
+                ...(this.#dockerCleanupTimeoutMs === undefined
+                    ? {}
+                    : { dockerCleanupTimeoutMs: this.#dockerCleanupTimeoutMs }),
                 ...(this.#generatedMedia === undefined
                     ? {}
                     : { generatedMedia: this.#generatedMedia }),
@@ -627,8 +703,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
                 networkRegistry: this.#networkRegistry,
                 onStatus: (status) => this.#updatePluginStatus(folderName, status),
+                ...(options.preserveLog === true ? { preserveLog: true } : {}),
                 store: this.#store,
             });
+            running = await startPluginWithin(starting, this.#startupTimeoutMs);
             if (this.#closed || !isCurrentStartup()) {
                 running.startup.fail("Rig shut down while the plugin was starting.");
                 await running.close({ force: true });
@@ -647,12 +725,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
                       )
                     : this.#stopRetiredRunning(folderName, currentRunning),
             );
-            const startup = await waitForPluginStartup(running, this.#startupTimeoutMs);
-            if (
-                this.#closed ||
-                !isCurrentStartup() ||
-                this.#running.get(folderName) !== running
-            ) {
+            const startupElapsedMs = Date.now() - startupStartedAt;
+            const startup = await waitForPluginStartup(
+                running,
+                Math.max(0, this.#startupTimeoutMs - startupElapsedMs),
+                this.#startupTimeoutMs,
+            );
+            if (this.#closed || !isCurrentStartup() || this.#running.get(folderName) !== running) {
                 await running.close({ force: true });
                 return;
             }
@@ -771,7 +850,14 @@ export class PluginManager implements ManagedNetworkInterceptor {
             return;
         }
         this.#running.delete(folderName);
-        await running.close();
+        await running.close().catch((error: unknown) => {
+            this.#daemonLog.record(
+                "warning",
+                "plugin_stop_cleanup_failed",
+                `Rig could not completely clean up the ${running.name} plugin while stopping it.`,
+                { error: errorToMessage(error), plugin: running.name },
+            );
+        });
         this.#states.set(folderName, {
             logPath: running.logPath,
             status: "stopped",
@@ -781,6 +867,15 @@ export class PluginManager implements ManagedNetworkInterceptor {
             updatedAt: this.#now(),
         });
         if (publishStopped) await this.#publishChanged();
+    }
+
+    #recordDockerCleanupFailure(plugin: string, action: string, error: unknown): void {
+        this.#daemonLog.record(
+            "warning",
+            "plugin_docker_cleanup_failed",
+            `Rig could not ${action} for the ${plugin} plugin. The plugin change still completed.`,
+            { error: errorToMessage(error), plugin },
+        );
     }
 
     #updatePluginStatus(folderName: string, statusMessage: string): void {
@@ -932,11 +1027,12 @@ export class PluginManager implements ManagedNetworkInterceptor {
 async function waitForPluginStartup(
     running: RunningPlugin,
     timeoutMs: number,
+    reportedTimeoutMs = timeoutMs,
 ): Promise<{ status: "running" } | { error: string; status: "failed" }> {
     const timer = setTimeout(
         () =>
             running.startup.fail(
-                `The plugin did not report ready within ${formatStartupDuration(timeoutMs)}.`,
+                `The plugin did not report ready within ${formatStartupDuration(reportedTimeoutMs)}.`,
             ),
         timeoutMs,
     );
@@ -959,6 +1055,38 @@ async function waitForPluginStartup(
         return await running.startup.settled;
     } finally {
         clearTimeout(timer);
+    }
+}
+
+async function startPluginWithin(
+    starting: Promise<RunningPlugin>,
+    timeoutMs: number,
+): Promise<RunningPlugin> {
+    let timer: NodeJS.Timeout | undefined;
+    let timedOut = false;
+    void starting.then(
+        async (running) => {
+            if (timedOut) await running.close({ force: true });
+        },
+        () => {},
+    );
+    try {
+        return await Promise.race([
+            starting,
+            new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(() => {
+                    timedOut = true;
+                    reject(
+                        new Error(
+                            `The plugin did not report ready within ${formatStartupDuration(timeoutMs)}.`,
+                        ),
+                    );
+                }, timeoutMs);
+                timer.unref();
+            }),
+        ]);
+    } finally {
+        if (timer !== undefined) clearTimeout(timer);
     }
 }
 

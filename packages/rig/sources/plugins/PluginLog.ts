@@ -23,7 +23,7 @@ export class PluginLog {
     #tail: Buffer = Buffer.alloc(0);
     #truncated = false;
 
-    constructor(options: { maximumBytes?: number; path: string }) {
+    constructor(options: { initialContent?: Buffer; maximumBytes?: number; path: string }) {
         this.path = options.path;
         this.#temporaryPath = `${options.path}.next`;
         this.#maximumBytes = options.maximumBytes ?? MAXIMUM_PLUGIN_LOG_STORAGE_BYTES;
@@ -31,6 +31,17 @@ export class PluginLog {
             0,
             Math.min(TRUNCATION_NOTICE.length, this.#maximumBytes),
         );
+        if (options.initialContent !== undefined) {
+            if (options.initialContent.length <= this.#maximumBytes) {
+                this.#tail = Buffer.from(options.initialContent);
+            } else {
+                this.#truncated = true;
+                this.#tail = takeRecentCompleteUtf8(
+                    options.initialContent,
+                    this.#maximumBytes - this.#truncationNotice.length,
+                );
+            }
+        }
         this.#scheduleFlush();
     }
 

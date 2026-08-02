@@ -46,6 +46,7 @@ const result = await build({
     entryNames: "[name]",
     entryPoints: {
         main: "sources/main.ts",
+        "plugin-docker-bootstrap": "sources/plugins/pluginDockerBootstrap.ts",
         "plugin-sdk-loader": "sources/plugins/happyPluginsLoader.ts",
         readPackageVersion: "sources/readPackageVersion.ts",
     },

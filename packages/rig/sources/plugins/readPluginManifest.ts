@@ -10,11 +10,15 @@ import {
     pluginManifestSchema,
     type RegisteredPlugin,
 } from "./types.js";
+import { resolvePluginDockerRuntime } from "./resolvePluginDockerRuntime.js";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const CONVENTIONAL_SKILLS_DIRECTORY = "skills";
 
-export async function readPluginManifest(directory: string): Promise<RegisteredPlugin> {
+export async function readPluginManifest(
+    directory: string,
+    options: { folderName?: string } = {},
+): Promise<RegisteredPlugin> {
     const manifestPath = resolve(directory, PLUGIN_MANIFEST_FILE_NAME);
     let parsed: unknown;
     try {
@@ -45,9 +49,17 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
         manifest.main === undefined
             ? undefined
             : resolveOwnedPath(directory, manifest.main, "main entry point");
+    const folderName = options.folderName ?? directory.split(/[\\/]/u).at(-1) ?? directory;
     const iconPath = resolveOwnedPath(directory, manifest.icon, "icon");
-    const skillsPath = await resolveSkillsPath(directory, manifest.skills);
-    const systemPrompt = await resolveSystemPrompt(directory, manifest.systemPrompt);
+    const [docker, skillsPath, systemPrompt] = await Promise.all([
+        resolvePluginDockerRuntime({
+            declaration: manifest.docker,
+            directory,
+            hasMain: entryPath !== undefined,
+        }),
+        resolveSkillsPath(directory, manifest.skills),
+        resolveSystemPrompt(directory, manifest.systemPrompt),
+    ]);
     if (entryPath === undefined && skillsPath === undefined && systemPrompt === undefined) {
         throw new Error(
             "The plugin must declare a main entry point, provide a skills directory, or contribute a system prompt.",
@@ -77,8 +89,9 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
 
     return {
         directory: resolve(directory),
+        ...(docker === undefined ? {} : { docker }),
         ...(entryPath === undefined ? {} : { entryPath }),
-        folderName: directory.split(/[\\/]/u).at(-1) ?? directory,
+        folderName,
         iconPath,
         manifest,
         manifestPath,

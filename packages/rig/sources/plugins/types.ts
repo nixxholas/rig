@@ -1,4 +1,4 @@
-import { Type } from "@sinclair/typebox";
+import { type Static, Type } from "@sinclair/typebox";
 
 import {
     happyPluginManifestSchema,
@@ -22,8 +22,27 @@ export const fileSystemErrorSchema = Type.Object({
     code: Type.String(),
 });
 
+export const pluginDockerRuntimeSchema = Type.Union([
+    Type.Object(
+        {
+            dockerfilePath: Type.String(),
+            type: Type.Literal("dockerfile"),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            image: Type.String(),
+            type: Type.Literal("image"),
+        },
+        { additionalProperties: false },
+    ),
+]);
+export type PluginDockerRuntime = Static<typeof pluginDockerRuntimeSchema>;
+
 export interface RegisteredPlugin {
     directory: string;
+    docker?: PluginDockerRuntime;
     entryPath?: string;
     folderName: string;
     iconPath: string;

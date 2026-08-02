@@ -46,6 +46,67 @@ The plugin process runs with its writable folder as the working directory and re
 `HAPPY_PLUGIN_DIRECTORY`. The socket sits there too, because the sandbox that confines the plugin
 allows writes only inside that folder.
 
+## Docker runtime
+
+A root `Dockerfile` makes a process plugin run inside Docker. Rig builds it during installation and
+tags the image as `rig-plugin-<folder>:<content-hash>`. An already-present tag is reused, so
+installing unchanged contents does not rebuild the image. The Docker build stream is retained in
+the same bounded `plugin.log` as the plugin's stdout and stderr. A manifest may explicitly confirm
+the Dockerfile with `"docker": true`, or run from a prebuilt image without a Dockerfile with
+`"docker": { "image": "registry.example.com/plugin:1.0.0" }`. Rig pulls a declared image during
+installation only when it is absent locally. Build and pull failures reject the staged installation
+before it replaces any working version.
+
+The image supplies the plugin's Node executable. Rig does not inject its own Node, so the image must
+provide a Node release compatible with this Rig's native TypeScript stripping and synchronous
+module-loader hooks. Rig starts `node --import <loader> <main>` inside the image. Plugin code is
+mounted read-only at `/plugin`; the built `happy-plugins` SDK and loader are separate read-only
+mounts. The user-visible writable folder is mounted read-write at `/plugin-data`, becomes the
+working directory, and receives `HAPPY_PLUGIN_DIRECTORY=/plugin-data`.
+
+The authenticated host API socket remains in `.runtime/plugin.sock` beneath that writable folder.
+Native Linux Docker connects to it through the bind mount as
+`/plugin-data/.runtime/plugin.sock`. Docker Desktop exposes a host-created socket in the mount but
+does not reliably let Linux connect to it (`ENOTSUP`), so macOS uses the same pattern as Rig's
+Docker proxy sockets: a short-lived loopback relay reaches the host socket, while a Rig-supplied
+Node bootstrap exposes a container-native socket at `/tmp/happy-plugin.sock`. The relay is bound
+only to host loopback and exists only for this plugin generation. Each connection must prefix the
+generation's unguessable token before the relay opens the API socket, and every API request still
+uses that token as bearer authentication. Both sides cap the relay at 64 concurrent connections
+and close connections that do not finish their handshake within 30 seconds. Once authenticated,
+an NDJSON or other streaming connection may remain idle without being mistaken for a dead
+handshake. No `socat` or other runtime is silently injected; the image's Node provides the tiny
+bridge.
+
+The API token is mounted from a mode-0600 generation file and injected only into the bootstrap's
+plugin child, so it is not retained in Docker's inspectable container environment. Rig does not
+copy the host environment into the container: it keeps the image's own environment, passes only
+locale, terminal, time-zone, and color settings from the host, and sets container-native
+`HOME=/plugin-data` and temporary-directory variables for `/tmp`. Host credentials, executable
+paths, sockets, and shell paths are never forwarded.
+
+Docker plugin containers have a read-only root filesystem, a private tmpfs at `/tmp`, all Linux
+capabilities dropped, `no-new-privileges` enabled, a 2 GiB memory limit, and a 512-process limit.
+On native Linux the container uses Rig's host uid and gid so writes in `/plugin-data` remain
+user-owned, and networking is disabled because the bind-mounted Unix socket needs no network.
+Docker Desktop's authenticated host bridge requires bridge networking; that platform therefore
+retains the image's ordinary outbound container networking under Rig's trusted-plugin model.
+Docker Desktop must also allow bind mounts from both the installed plugin folder and Rig's own
+installation folder, because the loader, SDK, bootstrap, and TypeBox runtime are mounted from
+there. These normally live below the user's home folder. A package-manager installation elsewhere,
+such as `/opt`, may need that path added in Docker Desktop's Resources > File Sharing settings.
+Docker's original mount-denial text is retained in the plugin startup error.
+
+Container names are deterministic from the installed folder and runtime generation. Ownership
+labels let Rig remove every stale generation before startup, without deleting a foreign container
+that merely collides by name. Exit, stop, failure, replacement, and uninstall remove containers;
+upgrade and uninstall also attempt to remove superseded Rig-built images. Cleanup calls have
+client-side deadlines. Transient cleanup failures are logged but do not turn an otherwise
+successful install into a failure or prevent uninstall from removing plugin files and state. The
+single ten-second startup budget covers Docker inspection and container creation as well as
+`happy.ready(...)`. A stuck or unavailable Docker daemon therefore fails only that plugin
+generation with a human-readable reason and never holds daemon startup open.
+
 The authenticated socket also resolves workspace IDs to daemon-owned paths for trusted, one-shot
 Bash commands and bounded file reads and writes. Commands always run non-interactively with a
 timeout (30 seconds by default, at most 5 minutes), retain at most 1 MiB from each output stream,
@@ -100,7 +161,9 @@ create a session attachment because attachment delivery is owned by an agent tur
 
 `PluginManager` is the daemon lifecycle boundary. Registration validates each manifest, PNG icon,
 and `main` file so a bad plugin can be reported without preventing other plugins or the daemon from
-starting.
+starting. Dockerfile discovery on catalog and log-read paths checks only the declaration and
+Dockerfile; content hashing is deferred until image preparation or process startup actually needs
+an image tag.
 
 Registration is synchronous in the product sense. Every process generation moves through one
 explicit `starting -> running | failed` state machine. It has one 10-second window to register its

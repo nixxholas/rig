@@ -1,9 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmod, mkdir, rm } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import type Dockerode from "dockerode";
 import type { HappyPluginStatus } from "happy-plugins";
 
 import { createSandboxedCommand } from "../agent/context/createSandboxedCommand.js";
@@ -24,6 +25,11 @@ import type { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
 import type { PluginAppRegistry } from "./PluginAppRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
 import { snapshotPluginApps } from "./snapshotPluginApps.js";
+import { startPluginDockerContainer } from "./startPluginDockerContainer.js";
+import {
+    startPluginDockerSocketBridge,
+    type PluginDockerSocketBridge,
+} from "./startPluginDockerSocketBridge.js";
 import { PluginStartupState } from "./PluginStartupState.js";
 
 const STOP_GRACE_MS = 2_000;
@@ -44,6 +50,8 @@ export interface StartPluginOptions {
     appRegistry?: PluginAppRegistry;
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
+    docker?: Dockerode;
+    dockerCleanupTimeoutMs?: number;
     environment?: NodeJS.ProcessEnv;
     generatedMedia?: GeneratedMediaStore;
     hookRegistry?: PluginHookRegistry;
@@ -52,7 +60,16 @@ export interface StartPluginOptions {
     mcpRegistry?: PluginMcpRegistry;
     networkRegistry?: PluginNetworkRegistry;
     onStatus?: (status: HappyPluginStatus) => void;
+    preserveLog?: boolean;
     store: SessionStore;
+}
+
+interface PluginProcess {
+    readonly completion: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
+    readonly pid: number | undefined;
+    readonly stderr: NodeJS.ReadableStream | undefined;
+    readonly stdout: NodeJS.ReadableStream | undefined;
+    close(options?: { force?: boolean }): Promise<void>;
 }
 
 export async function startPlugin(
@@ -77,8 +94,16 @@ export async function startPlugin(
     await mkdir(dataDirectory, { mode: 0o755, recursive: true });
     await mkdir(runtimeSocketDirectory, { mode: 0o700, recursive: true });
     await chmod(runtimeSocketDirectory, 0o700);
+    const preserveDockerBuildLog = options.preserveLog === true && plugin.docker !== undefined;
+    const preservedLog = preserveDockerBuildLog
+        ? await readFile(logPath).catch(() => undefined)
+        : undefined;
+    const initialLog =
+        preservedLog === undefined
+            ? undefined
+            : Buffer.concat([preservedLog, Buffer.from("\n[rig] Plugin process started.\n")]);
     await Promise.all([
-        rm(logPath, { force: true }),
+        ...(preserveDockerBuildLog ? [] : [rm(logPath, { force: true })]),
         rm(`${logPath}.next`, { force: true }),
         rm(socketPath, { force: true }),
     ]);
@@ -152,6 +177,7 @@ export async function startPlugin(
         store: options.store,
         token,
     });
+    let dockerSocketBridge: PluginDockerSocketBridge | undefined;
     try {
         await new Promise<void>((resolve, reject) => {
             server.once("error", reject);
@@ -161,56 +187,63 @@ export async function startPlugin(
             });
         });
         await restrictSocketAccess(socketPath);
+        if (plugin.docker !== undefined && process.platform === "darwin") {
+            dockerSocketBridge = await startPluginDockerSocketBridge(socketPath, token);
+        }
     } catch (error) {
         unregisterApps?.();
         hooks?.close();
         mcp?.close();
         network?.close();
+        await dockerSocketBridge?.close();
         await closeServer(server);
         await rm(socketPath, { force: true });
         throw error;
     }
 
-    let child: ChildProcess;
-    const log = new PluginLog({ path: logPath });
+    let pluginProcess: PluginProcess;
+    const log = new PluginLog({
+        ...(initialLog === undefined ? {} : { initialContent: initialLog }),
+        path: logPath,
+    });
     try {
-        const node = await createPluginNodeRuntime({ entryPath: plugin.entryPath });
-        const command = await createSandboxedCommand({
-            argv: [...node.argv],
-            command: node.executable,
-            commandCwd: dataDirectory,
-            cwd: dataDirectory,
-            mode: "workspace_write",
-            shell: environment.SHELL?.trim() || "/bin/sh",
-        });
-        child = spawn(command.command, command.args ?? [], {
-            cwd: dataDirectory,
-            env: {
-                ...(await createToolEnvironment("workspace_write", environment, {
-                    cwd: dataDirectory,
-                })),
-                HAPPY_PLUGIN_DIRECTORY: dataDirectory,
-                HAPPY_PLUGIN_SOCKET_PATH: socketPath,
-                HAPPY_PLUGIN_TOKEN: token,
-            },
-            stdio: ["ignore", "pipe", "pipe"],
-        });
+        pluginProcess =
+            plugin.docker === undefined
+                ? await startNativePluginProcess(plugin.entryPath, dataDirectory, environment, {
+                      socketPath,
+                      token,
+                  })
+                : await startPluginDockerContainer({
+                      ...(options.dockerCleanupTimeoutMs === undefined
+                          ? {}
+                          : { cleanupTimeoutMs: options.dockerCleanupTimeoutMs }),
+                      dataDirectory,
+                      ...(options.docker === undefined ? {} : { docker: options.docker }),
+                      environment,
+                      plugin,
+                      ...(dockerSocketBridge === undefined
+                          ? {}
+                          : { socketBridgePort: dockerSocketBridge.port }),
+                      token,
+                  });
         processState = "running";
     } catch (error) {
         unregisterApps?.();
         hooks?.close();
         mcp?.close();
         network?.close();
-        await Promise.allSettled([closeServer(server), log.close()]);
+        await Promise.allSettled([dockerSocketBridge?.close(), closeServer(server), log.close()]);
         await rm(socketPath, { force: true });
         throw error;
     }
 
-    child.stdout?.on("data", (chunk: Buffer) => log.append("stdout", chunk));
-    child.stderr?.on("data", (chunk: Buffer) => log.append("stderr", chunk));
+    pluginProcess.stdout?.on("data", (chunk: Buffer) => log.append("stdout", chunk));
+    pluginProcess.stderr?.on("data", (chunk: Buffer) => log.append("stderr", chunk));
     let finalized: Promise<void> | undefined;
     const finalize = () =>
         (finalized ??= Promise.allSettled([
+            pluginProcess.close({ force: true }),
+            dockerSocketBridge?.close(),
             closeServer(server),
             log.close(),
             rm(socketPath, { force: true }),
@@ -220,18 +253,16 @@ export async function startPlugin(
             mcp?.close();
             network?.close();
         }));
-    const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-        (resolve, reject) => {
-            child.once("error", (error) => {
-                processState = "exited";
-                void finalize();
-                reject(error);
-            });
-            child.once("exit", (code, signal) => {
-                processState = "exited";
-                void finalize();
-                resolve({ code, signal });
-            });
+    const completion = pluginProcess.completion.then(
+        (result) => {
+            processState = "exited";
+            void finalize();
+            return result;
+        },
+        (error: unknown) => {
+            processState = "exited";
+            void finalize();
+            throw error;
         },
     );
 
@@ -240,7 +271,7 @@ export async function startPlugin(
         dataDirectory,
         logPath,
         name: plugin.manifest.name,
-        pid: child.pid,
+        pid: pluginProcess.pid,
         retirement,
         startup,
         get statusMessage() {
@@ -248,31 +279,88 @@ export async function startPlugin(
         },
         async close(options = {}) {
             if (processState !== "exited") processState = "closing";
-            if (child.exitCode === null && child.signalCode === null) {
-                child.kill(options.force === true ? "SIGKILL" : "SIGTERM");
-                if (options.force === true) {
-                    await completion.catch(() => undefined);
-                    await finalize();
-                    return;
-                }
-                const stopped = await Promise.race([
-                    completion.then(
-                        () => true,
-                        () => true,
-                    ),
-                    new Promise<false>((resolve) => {
-                        const timer = setTimeout(() => resolve(false), STOP_GRACE_MS);
-                        timer.unref();
-                    }),
-                ]);
-                if (!stopped) {
-                    child.kill("SIGKILL");
-                    await completion.catch(() => undefined);
-                }
+            try {
+                await pluginProcess.close(options);
+            } finally {
+                await finalize();
             }
-            await finalize();
         },
     };
+}
+
+async function startNativePluginProcess(
+    entryPath: string,
+    dataDirectory: string,
+    environment: NodeJS.ProcessEnv,
+    connection: { socketPath: string; token: string },
+): Promise<PluginProcess> {
+    const node = await createPluginNodeRuntime({ entryPath });
+    const command = await createSandboxedCommand({
+        argv: [...node.argv],
+        command: node.executable,
+        commandCwd: dataDirectory,
+        cwd: dataDirectory,
+        mode: "workspace_write",
+        shell: environment.SHELL?.trim() || "/bin/sh",
+    });
+    const child = spawn(command.command, command.args ?? [], {
+        cwd: dataDirectory,
+        env: {
+            ...(await createToolEnvironment("workspace_write", environment, {
+                cwd: dataDirectory,
+            })),
+            HAPPY_PLUGIN_DIRECTORY: dataDirectory,
+            HAPPY_PLUGIN_SOCKET_PATH: connection.socketPath,
+            HAPPY_PLUGIN_TOKEN: connection.token,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+    });
+    const completion = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+        (resolve, reject) => {
+            child.once("error", reject);
+            child.once("exit", (code, signal) => resolve({ code, signal }));
+        },
+    );
+    let gracefulClose: Promise<void> | undefined;
+    let forcedClose: Promise<void> | undefined;
+    return {
+        completion,
+        pid: child.pid,
+        stderr: child.stderr,
+        stdout: child.stdout,
+        close(options = {}) {
+            if (options.force === true) {
+                return (forcedClose ??= closeNativeProcess(child, completion, true));
+            }
+            return (gracefulClose ??= closeNativeProcess(child, completion, false));
+        },
+    };
+}
+
+async function closeNativeProcess(
+    child: ReturnType<typeof spawn>,
+    completion: Promise<unknown>,
+    force: boolean,
+): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill(force ? "SIGKILL" : "SIGTERM");
+    if (force) {
+        await completion.catch(() => undefined);
+        return;
+    }
+    const stopped = await Promise.race([
+        completion.then(
+            () => true,
+            () => true,
+        ),
+        new Promise<false>((resolve) => {
+            const timer = setTimeout(() => resolve(false), STOP_GRACE_MS);
+            timer.unref();
+        }),
+    ]);
+    if (stopped) return;
+    child.kill("SIGKILL");
+    await completion.catch(() => undefined);
 }
 
 async function restrictSocketAccess(socketPath: string): Promise<void> {

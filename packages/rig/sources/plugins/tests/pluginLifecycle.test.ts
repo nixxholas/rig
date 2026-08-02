@@ -1,6 +1,7 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import type Dockerode from "dockerode";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
@@ -10,10 +11,7 @@ import type { PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { PluginManager } from "../PluginManager.js";
-import {
-    PluginMcpRegistry,
-    type PluginMcpRegistrationRetirement,
-} from "../PluginMcpRegistry.js";
+import { PluginMcpRegistry, type PluginMcpRegistrationRetirement } from "../PluginMcpRegistry.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS, PluginStartupState } from "../PluginStartupState.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
 import type { RegisteredPlugin } from "../types.js";
@@ -143,6 +141,36 @@ describe("plugin registration", () => {
             expect(event.createdAt).toEqual(expect.any(Number));
         }
         expect(new Set(harness.events.map((event) => event.id)).size).toBe(harness.events.length);
+    });
+
+    it("completes install and uninstall when Docker housekeeping fails", async () => {
+        const docker = {
+            getImage: () => ({ inspect: async () => ({}) }),
+            listContainers: async () => Promise.reject(new Error("Docker stopped responding.")),
+            listImages: async () => Promise.reject(new Error("Docker stopped responding.")),
+        } as unknown as Dockerode;
+        const harness = await createHarness({ docker });
+        await harness.manager.start();
+        const source = join(harness.workspace, "docker-clock");
+        await createPluginSource(source, undefined, "Docker Clock", {
+            image: "example.invalid/docker-clock:1.0.0",
+        });
+
+        const installed = await harness.manager.install({
+            fs: harness.fs,
+            sourceDirectory: source,
+        });
+
+        expect(harness.events.at(-1)?.data.installation).toEqual(installed);
+        await expect(harness.manager.list()).resolves.toMatchObject({
+            plugins: [{ name: "Docker Clock", status: "running" }],
+        });
+
+        await expect(
+            harness.manager.uninstall({ fs: harness.fs, name: "Docker Clock" }),
+        ).resolves.toMatchObject({ folder: "docker-clock", name: "Docker Clock" });
+        await expect(access(installed.directory)).rejects.toMatchObject({ code: "ENOENT" });
+        expect(lastPlugins(harness.events)).toEqual([]);
     });
 
     it("announces an upgrade classification with the new catalog version", async () => {
@@ -279,6 +307,28 @@ describe("plugin registration", () => {
             ],
         });
         expect(harness.stopped).toEqual(["Slow"]);
+    });
+
+    it("includes process creation in the startup deadline and closes a late generation", async () => {
+        const releaseStart = deferred<void>();
+        const harness = await createHarness({
+            beforeStart: async () => releaseStart.promise,
+            startupTimeoutMs: 25,
+        });
+        await createPluginSource(join(harness.manager.directory, "slow"));
+
+        await harness.manager.start();
+
+        await expect(harness.manager.list()).resolves.toMatchObject({
+            plugins: [
+                {
+                    error: "The plugin did not report ready within 25 milliseconds.",
+                    status: "failed",
+                },
+            ],
+        });
+        releaseStart.resolve();
+        await vi.waitFor(() => expect(harness.stopped).toEqual(["Clock"]));
     });
 
     it("does not let a closing startup generation write a terminal state afterward", async () => {
@@ -443,9 +493,9 @@ function lastPlugins(events: readonly PluginsChangedEvent[]): unknown {
 async function createHarness(
     options: {
         beforeStart?: (plugin: RegisteredPlugin, attempt: number) => Promise<void>;
-        startError?:
-            | Error
-            | ((plugin: RegisteredPlugin, attempt: number) => Error | undefined);
+        docker?: Dockerode;
+        dockerCleanupTimeoutMs?: number;
+        startError?: Error | ((plugin: RegisteredPlugin, attempt: number) => Error | undefined);
         startup?: (plugin: RegisteredPlugin, startup: PluginStartupState) => void;
         startupTimeoutMs?: number;
     } = {},
@@ -495,6 +545,10 @@ async function createHarness(
     const manager = new PluginManager({
         daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
         directory: join(root, "plugins"),
+        ...(options.docker === undefined ? {} : { docker: options.docker }),
+        ...(options.dockerCleanupTimeoutMs === undefined
+            ? {}
+            : { dockerCleanupTimeoutMs: options.dockerCleanupTimeoutMs }),
         environment: { HAPPY_PLUGIN_DATA_DIRECTORY: dataRoot } as NodeJS.ProcessEnv,
         mcpRegistry: new PluginMcpRegistry(),
         ...(options.startupTimeoutMs === undefined
@@ -588,6 +642,7 @@ async function createPluginSource(
     directory: string,
     version?: string,
     name = "Clock",
+    docker?: true | { image: string },
 ): Promise<void> {
     await mkdir(directory, { recursive: true });
     await Promise.all([
@@ -596,6 +651,7 @@ async function createPluginSource(
             `${JSON.stringify(
                 {
                     description: "A small clock.",
+                    ...(docker === undefined ? {} : { docker }),
                     icon: "icon.png",
                     main: "index.ts",
                     name,

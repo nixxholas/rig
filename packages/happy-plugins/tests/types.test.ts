@@ -5,6 +5,30 @@ import { happyPluginManifestSchema } from "../sources/types.js";
 import { HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS } from "../sources/types.js";
 
 describe("happy plugin manifest", () => {
+    it("accepts Dockerfile and prebuilt-image runtime declarations", () => {
+        const manifest = {
+            description: "Runs in a container.",
+            icon: "icon.png",
+            main: "index.ts",
+            name: "Docker fixture",
+        };
+
+        expect(Value.Check(happyPluginManifestSchema, { ...manifest, docker: true })).toBe(true);
+        expect(
+            Value.Check(happyPluginManifestSchema, {
+                ...manifest,
+                docker: { image: "registry.example.com/plugins/fixture:1.0.0" },
+            }),
+        ).toBe(true);
+        expect(Value.Check(happyPluginManifestSchema, { ...manifest, docker: false })).toBe(false);
+        expect(
+            Value.Check(happyPluginManifestSchema, {
+                ...manifest,
+                docker: { image: "invalid image", pull: true },
+            }),
+        ).toBe(false);
+    });
+
     it("matches entry point extensions case-insensitively and rejects declarations", () => {
         const manifest = {
             description: "Tests the manifest entry point.",

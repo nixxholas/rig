@@ -96,6 +96,7 @@ The manifest is intentionally small and exact:
     "version": "1.0.0",
     "main": "index.ts",
     "icon": "icon.png",
+    "docker": { "image": "registry.example.com/project-counter:1.0.0" },
     "systemPrompt": { "path": "SYSTEM_PROMPT.md" },
     "apps": [
         {
@@ -109,14 +110,16 @@ The manifest is intentionally small and exact:
 }
 ```
 
-`name`, `description`, and `icon` are required. `main`, `skills`, `systemPrompt`, `version`, and
-`apps` are optional, but at least a main entry point, a skills directory, or a system-prompt
-contribution must be present. Extra fields are rejected.
+`name`, `description`, and `icon` are required. `main`, `skills`, `systemPrompt`, `version`,
+`docker`, and `apps` are optional, but at least a main entry point, a skills directory, or a
+system-prompt contribution must be present. Extra fields are rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
 - `version`: a Semantic Versioning string. An omitted version is treated as `0.0.0`.
 - `main`: a relative path to a runnable JavaScript or TypeScript file inside the plugin folder.
+- `docker`: `true` when the folder contains a root `Dockerfile`, or `{ "image": "..." }` to use a
+  prebuilt image without a Dockerfile. A Docker plugin must declare `main`.
 - `skills`: a relative path to a skills directory. When omitted, Happy uses `skills/` if present.
 - `systemPrompt`: either `{ "text": "..." }` for inline text or `{ "path": "..." }` for a
   relative ordinary file inside the plugin folder. A contribution and the combined active-plugin
@@ -131,6 +134,58 @@ contribution must be present. Extra fields are rejected.
 Main and icon paths must remain inside the plugin folder. The main entry point and icon themselves
 must be ordinary files rather than symbolic links. Happy does not register a plugin whose
 manifest, icon, or main entry point is invalid.
+
+### Run the plugin in Docker
+
+Adding a root `Dockerfile` is enough to select Docker:
+
+```dockerfile
+FROM node:24-alpine
+WORKDIR /plugin
+```
+
+Happy builds the image while installing the plugin and reuses its deterministic content-hash tag
+when the plugin contents are unchanged. For a prebuilt image, omit the Dockerfile and set
+`"docker": { "image": "registry.example.com/project-counter:1.0.0" }`; Happy pulls it during
+installation only when it is not already local. Build and pull output is included in the plugin
+log.
+
+The image must provide a compatible `node` executable. Happy deliberately does not inject the host
+Node runtime. At startup it mounts the plugin at `/plugin` read-only, its writable data folder at
+`/plugin-data`, and Happy's built SDK and import loader read-only. The usual
+`HAPPY_PLUGIN_DIRECTORY`, `HAPPY_PLUGIN_SOCKET_PATH`, and `HAPPY_PLUGIN_TOKEN` variables are
+translated to container paths. Native Linux uses the authenticated socket through the writable
+bind mount at `/plugin-data/.runtime/plugin.sock`. Docker Desktop cannot reliably connect directly
+to a host-created Unix socket in a bind mount, so Happy keeps the authoritative host socket in the
+writable folder and uses a generation-scoped loopback relay plus a container-native
+`/tmp/happy-plugin.sock`. The image needs no bridge dependency beyond its required Node runtime,
+and each relayed connection must authenticate with the generation token before it can reach the
+API socket. API requests retain their normal bearer authentication too. Relay connections are
+bounded. Connections that do not finish authentication expire after 30 seconds; established MCP,
+hook, and other streaming connections may remain idle without being closed.
+
+The container root is read-only, `/tmp` is a private tmpfs, all Linux capabilities are dropped, and
+`no-new-privileges` is enabled; memory and process counts are bounded. On native Linux the
+container runs with Happy's host uid and gid and has networking disabled because it uses the
+bind-mounted Unix socket. Docker Desktop needs bridge networking for its authenticated host relay,
+so images on that platform retain ordinary container egress under Happy's trusted-plugin model.
+Docker Desktop must permit bind mounts from the installed plugin folder and Happy's installation
+folder, which supplies the loader, SDK, bootstrap, and TypeBox runtime. Installations outside the
+folders Docker Desktop shares by default—commonly package-manager paths such as `/opt`—must be
+added in Resources > File Sharing. A denied mount is reported with Docker's original error text.
+
+Happy keeps the image's environment but forwards only safe locale, terminal, time-zone, and color
+settings from the host. `HOME` points to `/plugin-data`, temporary-directory variables point to
+`/tmp`, and host credentials and host-only paths are not copied. The API token is mounted from a
+private generation file and injected into the plugin child without storing it in Docker's
+inspectable environment.
+
+Happy removes every owned stale container generation before startup and removes the current one on
+exit, failure, replacement, stop, or uninstall. Superseded Happy-built images are removed on
+upgrade and uninstall when Docker is available. Cleanup has a client-side deadline; a cleanup
+failure is logged but does not make a completed install fail or prevent uninstall from removing
+the plugin's files and state. One ten-second startup budget covers Docker container creation and
+`happy.ready(...)`, so a stuck daemon fails this plugin without delaying unrelated plugins.
 
 ### Managed network requests
 

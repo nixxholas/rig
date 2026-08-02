@@ -710,6 +710,21 @@ export type HappyPluginSystemPromptContribution = Static<
     typeof happyPluginSystemPromptContributionSchema
 >;
 
+export const happyPluginDockerSchema = Type.Union([
+    Type.Literal(true),
+    Type.Object(
+        {
+            image: Type.String({
+                maxLength: 512,
+                minLength: 1,
+                pattern: "^\\S+$",
+            }),
+        },
+        exact,
+    ),
+]);
+export type HappyPluginDocker = Static<typeof happyPluginDockerSchema>;
+
 export const happyPluginManifestSchema = Type.Object(
     {
         apps: Type.Optional(
@@ -719,6 +734,7 @@ export const happyPluginManifestSchema = Type.Object(
             }),
         ),
         description: Type.String({ minLength: 1 }),
+        docker: Type.Optional(happyPluginDockerSchema),
         icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
         interceptDomains: Type.Optional(
             Type.Array(

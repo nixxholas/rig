@@ -5,6 +5,7 @@ import { pipeline } from "node:stream/promises";
 import { dirname, join } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
+import type Dockerode from "dockerode";
 import { extract as extractTar } from "tar-stream";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
@@ -28,6 +29,7 @@ const MAXIMUM_EXTRACTED_PLUGIN_FILES = 2_000;
 const MAXIMUM_EXTRACTED_PLUGIN_ENTRIES = 4_000;
 
 export async function installGitHubPlugin(options: {
+    docker?: Dockerode;
     fetcher?: GitHubFetch;
     fs: FileSystemContext;
     pluginsDirectory: string;
@@ -96,6 +98,7 @@ export async function installGitHubPlugin(options: {
             ...(options.signal === undefined ? {} : { signal: options.signal }),
         });
         return await installPluginFromPath({
+            ...(options.docker === undefined ? {} : { docker: options.docker }),
             fs: options.fs,
             pluginsDirectory: options.pluginsDirectory,
             ...(options.signal === undefined ? {} : { signal: options.signal }),

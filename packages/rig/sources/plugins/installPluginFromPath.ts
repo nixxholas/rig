@@ -1,8 +1,11 @@
 import { basename, join } from "node:path";
 
+import type Dockerode from "dockerode";
+
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
 import type { InstalledPluginSummary, PluginInstallClassification } from "../protocol/index.js";
 import { comparePluginVersions } from "./comparePluginVersions.js";
+import { preparePluginDockerImage } from "./preparePluginDockerImage.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import { PLUGIN_MANIFEST_FILE_NAME } from "./types.js";
 
@@ -20,6 +23,7 @@ export type InstalledPlugin = InstalledPluginSummary;
  * discovery and never replaces a working installation.
  */
 export async function installPluginFromPath(options: {
+    docker?: Dockerode;
     fs: FileSystemContext;
     pluginsDirectory: string;
     signal?: AbortSignal;
@@ -45,7 +49,11 @@ export async function installPluginFromPath(options: {
         await copyTree(fs, sourceDirectory, stagingDirectory, signal);
         // Registration runs against the staged copy, so an invalid manifest or escaping or missing
         // asset is reported before anything is installed.
-        const staged = await readPluginManifest(stagingDirectory);
+        const staged = await readPluginManifest(stagingDirectory, { folderName: folder });
+        await preparePluginDockerImage(staged, {
+            ...(options.docker === undefined ? {} : { docker: options.docker }),
+            ...(signal === undefined ? {} : { signal }),
+        });
         signal?.throwIfAborted();
 
         const directory = join(pluginsDirectory, folder);
