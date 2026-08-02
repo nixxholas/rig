@@ -17,10 +17,10 @@ import type { ProviderUsage } from "@/core/ProviderUsage.js";
 import { EMPTY_SESSION_CACHE_USAGE, type SessionCacheUsage } from "@/core/SessionCacheUsage.js";
 import type { SessionCompaction, SessionCompactionOptions } from "@/core/SessionCompaction.js";
 import type {
+    SessionAssistantMessage,
     SessionContext,
     SessionReasoning,
     SessionToolCall,
-    SessionToolResultMessage,
 } from "@/core/SessionContext.js";
 import type { SessionEvent, SessionStream } from "@/core/SessionEvent.js";
 import type { SessionReasoningEffort, SessionRunRequest } from "@/core/SessionRunRequest.js";
@@ -42,6 +42,8 @@ import {
     createClaudeSessionReplay,
     type ClaudeSessionReplay,
 } from "@/vendors/claude/impl/createClaudeSessionReplay.js";
+import { claudeMessageIdentity } from "@/vendors/claude/impl/claudeMessageIdentity.js";
+import { resolveClaudeLiveDelta } from "@/vendors/claude/impl/resolveClaudeLiveDelta.js";
 import {
     claudeSdkBuiltInToolNames,
     toClaudeSdkOptions,
@@ -83,6 +85,8 @@ export class ClaudeSession extends BaseSession {
     private readonly query: ClaudeSdkQuery;
     private activeQuery: ReturnType<ClaudeSdkQuery> | undefined;
     private activeQueryKey: string | undefined;
+    /** Wire identity of the conversation the live query holds, including what it generated. */
+    private sentConversation: readonly string[] | undefined;
     private activePromptQueue: ClaudePromptQueue | undefined;
     private activeReplay: ClaudeSessionReplay | undefined;
     private activeToolBridge: ClaudeToolBridge | undefined;
@@ -350,20 +354,26 @@ export class ClaudeSession extends BaseSession {
 
             if (usage !== undefined) yield usage;
             if (terminal.state !== "error" && terminal.state !== "cancelled") {
+                const assistantMessage: SessionAssistantMessage = {
+                    role: "assistant",
+                    content: assistantText,
+                    ...(reasoning.length === 0 ? {} : { reasoning }),
+                    ...(this.lastQueryToolCalls.length === 0
+                        ? {}
+                        : { toolCalls: this.lastQueryToolCalls }),
+                };
                 this.context = {
                     instructions: this.context.instructions,
-                    messages: [
-                        ...this.context.messages,
-                        {
-                            role: "assistant",
-                            content: assistantText,
-                            ...(reasoning.length === 0 ? {} : { reasoning }),
-                            ...(this.lastQueryToolCalls.length === 0
-                                ? {}
-                                : { toolCalls: this.lastQueryToolCalls }),
-                        },
-                    ],
+                    messages: [...this.context.messages, assistantMessage],
                 };
+                // The query generated this turn, so it holds it even though no caller sent it.
+                // Leaving it out would let a later edit of this message look like an append.
+                if (this.sentConversation !== undefined) {
+                    this.sentConversation = [
+                        ...this.sentConversation,
+                        claudeMessageIdentity(assistantMessage),
+                    ];
+                }
             }
             if (blockStopped) yield { type: "block_stop" };
             yield terminal;
@@ -401,16 +411,22 @@ export class ClaudeSession extends BaseSession {
             systemPrompt,
             tools,
         });
-        // The live MCP bridge can close a tool batch only while its results remain at the
-        // context tail. Replay any later notice in order instead of stranding the open SDK tool.
-        const interruptedAfterToolBatch =
-            this.lastQueryToolCalls.length > 0 &&
-            configuredContext.messages.at(-1)?.role !== "tool";
-        const continuingQuery =
-            this.activeQuery !== undefined &&
-            this.activePromptQueue !== undefined &&
-            this.activeQueryKey === queryKey &&
-            !interruptedAfterToolBatch;
+        // Subsumes the older tail check: the live MCP bridge can close a tool batch only while
+        // its results remain at the context tail, and requiring the suffix to be exactly that
+        // batch already refuses anything appended after it rather than stranding the open tool.
+        const incomingConversation = configuredContext.messages.map(claudeMessageIdentity);
+        const delta =
+            this.activeQuery === undefined ||
+            this.activePromptQueue === undefined ||
+            this.activeQueryKey !== queryKey
+                ? ({ kind: "restart" } as const)
+                : resolveClaudeLiveDelta({
+                      incoming: incomingConversation,
+                      messages: configuredContext.messages,
+                      pendingToolCallIds: this.lastQueryToolCalls.map((call) => call.callId),
+                      sent: this.sentConversation,
+                  });
+        const continuingQuery = delta.kind !== "restart";
         if (!continuingQuery) this.closeActiveQuery();
         const {
             abort: _abort,
@@ -498,18 +514,17 @@ export class ClaudeSession extends BaseSession {
                 this.activeQueryKey = queryKey;
                 this.activeQuery = this.query({ prompt: promptQueue, options: sdkOptions });
                 stream = this.activeQuery;
-            } else {
-                const toolResults = trailingToolResults(configuredContext.messages);
-                const resolvedToolResult = this.activeToolBridge?.resolveAll(toolResults) === true;
-                if (toolResults.length > 0 && !resolvedToolResult) {
+            } else if (delta.kind === "tool_results") {
+                if (this.activeToolBridge?.resolveAll(delta.results) !== true) {
                     throw new Error("Claude could not match every result in the tool batch.");
                 }
-                if (!resolvedToolResult) {
-                    this.activePromptQueue?.enqueue(
-                        createClaudeLivePromptMessage(configuredContext.messages),
-                    );
-                }
+            } else {
+                this.activePromptQueue?.enqueue(
+                    createClaudeLivePromptMessage(configuredContext.messages),
+                );
             }
+            // Only once the turn has actually been handed over does the query hold it.
+            this.sentConversation = incomingConversation;
             if (stream === undefined) throw new Error("Claude SDK query was not created.");
             for (;;) {
                 const next = await nextClaudeMessage(stream, aborted, options.abort);
@@ -826,6 +841,7 @@ export class ClaudeSession extends BaseSession {
         this.activeQuery?.close();
         this.activeQuery = undefined;
         this.activeQueryKey = undefined;
+        this.sentConversation = undefined;
         this.activeReplay = undefined;
     }
 }
@@ -836,18 +852,6 @@ async function nextClaudeMessage(
     signal: AbortSignal | undefined,
 ): Promise<Awaited<ReturnType<typeof stream.next>> | typeof CLAUDE_QUERY_ABORTED> {
     return signal?.aborted ? CLAUDE_QUERY_ABORTED : Promise.race([stream.next(), aborted]);
-}
-
-function trailingToolResults(
-    messages: readonly SessionContext["messages"][number][],
-): SessionToolResultMessage[] {
-    const results: SessionToolResultMessage[] = [];
-    for (let index = messages.length - 1; index >= 0; index -= 1) {
-        const message = messages[index];
-        if (message?.role !== "tool") break;
-        results.unshift(message);
-    }
-    return results;
 }
 
 function toUsage(usage: {
