@@ -55,6 +55,8 @@ import { buildTimeline, isTimelineEventType } from "../timeline/index.js";
 import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js";
 import { timelineAgentSource } from "./impl/timelineAgentSource.js";
 import { queryLiveAgentTreeUsage } from "./queryLiveAgentTreeUsage.js";
+import { SlotEntryStore } from "../slots/index.js";
+import { WebappStore } from "../webapps/index.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
@@ -86,6 +88,8 @@ export class InMemorySessionStore implements SessionStore {
     readonly liveEvents = new LiveGlobalEventQueue();
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
+    readonly slots: SlotEntryStore;
+    readonly webapps: WebappStore;
     #secrets: SecretRegistry;
     #sessions = new Map<string, InMemorySession>();
     #activeTransaction: TX | undefined;
@@ -96,6 +100,15 @@ export class InMemorySessionStore implements SessionStore {
         this.#client = opened.client;
         this.#database = opened.database;
         migrateSessionDatabase(this.#database);
+        this.slots = new SlotEntryStore({
+            publish: (event) => this.#publishGlobalEvent(event),
+            sessionExists: (sessionId) => this.#sessions.has(sessionId),
+            tx: () => this.#activeTransaction ?? this.#database,
+        });
+        this.webapps = new WebappStore({
+            publish: (event) => this.#publishGlobalEvent(event),
+            tx: () => this.#activeTransaction ?? this.#database,
+        });
         this.#projects = new ProjectRepository({
             database: this.#database,
             ...(options.homeDirectory === undefined
@@ -295,6 +308,7 @@ export class InMemorySessionStore implements SessionStore {
                 : {}),
             request: source.requestForSubagent(),
             onAppendEvent: (event) => this.#publishGlobalEvent(event),
+            slotStores: { entries: this.slots, webapps: this.webapps },
             projectId: sourceSnapshot.projectId,
             projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
             secretRegistry: this.#secrets,
@@ -377,6 +391,7 @@ export class InMemorySessionStore implements SessionStore {
             projectSecretIds: this.#projectSecrets(ownership.project.id),
             request,
             secretRegistry: this.#secrets,
+            slotStores: { entries: this.slots, webapps: this.webapps },
             ...(ownership.workspace === undefined ? {} : { workspaceId: ownership.workspace.id }),
         });
         this.#sessions.set(session.id, session);

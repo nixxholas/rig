@@ -4,6 +4,7 @@ import type { FileReadState } from "./FileReadState.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
 import type { GoalContext } from "./GoalContext.js";
 import type { PluginContext } from "./PluginContext.js";
+import type { SlotContext } from "./SlotContext.js";
 import type { SubagentContext } from "./SubagentContext.js";
 import type { UserInputContext } from "./UserInputContext.js";
 import type { TaskContext } from "./TaskContext.js";
@@ -31,6 +32,7 @@ export interface AgentContext {
     providerUsage?: ProviderUsageContext;
     scheduling?: SchedulingContext;
     secrets?: SessionSecretContext;
+    slots?: SlotContext;
     subagents?: SubagentContext;
     tasks?: TaskContext;
     userInput?: UserInputContext;

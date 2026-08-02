@@ -27,6 +27,9 @@ import type { Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { BashSessionExit } from "../agent/context/BashContext.js";
 import { BASH_SESSION_STOP_GRACE_MS } from "../agent/context/bashSessionLimits.js";
 import type { BashContext } from "../agent/context/BashContext.js";
+import type { SlotContext } from "../agent/context/SlotContext.js";
+import type { SlotEntryStore } from "../slots/index.js";
+import type { WebappStore } from "../webapps/index.js";
 import {
     createGoalContinuationPrompt,
     normalizeGoalObjective,
@@ -367,9 +370,16 @@ export interface InMemorySessionOptions {
     projectId?: string;
     secretRegistry?: SecretRegistry;
     restore?: PersistedSessionState;
+    /** The slot and webapp stores this session's agent may drive through its common tools. */
+    slotStores?: SessionSlotStores;
     taskDrain?: TaskDrain;
     workspaceFeatures?: WorkspaceFeatures;
     workspaceId?: string;
+}
+
+export interface SessionSlotStores {
+    entries: SlotEntryStore;
+    webapps: WebappStore;
 }
 
 /** Which parts of Rig's workspace API the agent in this session may use. */
@@ -551,6 +561,7 @@ export class InMemorySession {
     #pendingUserInputs = new Map<string, PendingUserInput>();
     #persistence: InMemorySessionPersistence | undefined;
     #presence: { state(): PresenceState } | undefined;
+    #slotStores: SessionSlotStores | undefined;
     #userInputPresenceTimers = new Map<string, ReturnType<typeof setTimeout>>();
     #providerId: string;
     #projectId: string;
@@ -608,6 +619,7 @@ export class InMemorySession {
         this.#modelCatalog = options.modelCatalog;
         this.#persistence = options.persistence;
         this.#presence = options.presence;
+        this.#slotStores = options.slotStores;
         this.#request = {
             ...options.request,
             trackUnread: options.restore?.trackUnread ?? options.request.trackUnread ?? false,
@@ -5757,6 +5769,26 @@ export class InMemorySession {
         this.#appendAgentMessage(runId, message);
     }
 
+    /** The slot and webapp surface handed to this session's tools, with this session as author. */
+    #slotContext(): SlotContext {
+        const stores = this.#slotStores;
+        if (stores === undefined) {
+            throw new Error("Slots are unavailable in this session.");
+        }
+        return {
+            createEntry: (request) =>
+                stores.entries.create({ ...request, authorSessionId: this.id }),
+            createWebapp: (request) =>
+                stores.webapps.create({ ...request, authorSessionId: this.id }),
+            listEntries: (filter) => stores.entries.list(filter),
+            listWebapps: () => stores.webapps.list(),
+            removeEntry: (id) => stores.entries.remove(id),
+            revertWebapp: (name, request) => stores.webapps.revert(name, request),
+            updateEntry: (id, request) => stores.entries.update(id, request),
+            updateWebapp: (name, request) => stores.webapps.update(name, request),
+        };
+    }
+
     #finishElapsedInterval(): void {
         if (this.#activeSince === undefined) return;
         this.#elapsedMs += Math.max(0, this.#now() - this.#activeSince);
@@ -5838,6 +5870,7 @@ export class InMemorySession {
                 request: (request, requestOptions) =>
                     this.requestUserInput(request, requestOptions),
             },
+            ...(this.#slotStores === undefined ? {} : { slots: this.#slotContext() }),
             sessionId: this.#agentMetadata.rootSessionId,
             startDate: toLocalDate(this.events.firstMessageCreatedAt() ?? this.#createdAt),
             ...(this.#systemPrompt !== undefined ? { systemPrompt: this.#systemPrompt } : {}),

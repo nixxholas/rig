@@ -130,6 +130,9 @@ import { sessionOrderKeyForCreation } from "./impl/sessionOrderKeyForCreation.js
 import { queryTerminalRunEvent } from "../persistence/session/queryTerminalRunEvent.js";
 import { inTx } from "../persistence/inTx.js";
 import { PresenceStore, resolvePresences } from "../presence/index.js";
+import { SlotEntryStore } from "../slots/index.js";
+import { WebappStore } from "../webapps/index.js";
+import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 
@@ -191,6 +194,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly liveEvents = new LiveGlobalEventQueue();
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
+    readonly slots: SlotEntryStore;
+    readonly webapps: WebappStore;
 
     constructor(options: PersistentSessionStoreOptions) {
         this.presence = options.presence ?? new PresenceStore({ presences: resolvePresences() });
@@ -229,6 +234,18 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             options.durableGlobalEventQueue === true
                 ? new PersistentGlobalEventQueue(this.#database)
                 : new InMemoryGlobalEventQueue();
+        this.slots = new SlotEntryStore({
+            now: this.#now,
+            publish: (event) => this.#publishGlobalEvent(event),
+            sessionExists: (sessionId) =>
+                querySlotScopeTargetExists(this.#tx(), "session", sessionId),
+            tx: () => this.#tx(),
+        });
+        this.webapps = new WebappStore({
+            now: this.#now,
+            publish: (event) => this.#publishGlobalEvent(event),
+            tx: () => this.#tx(),
+        });
         this.#projects = new ProjectRepository({
             database: this.#database,
             ...(options.projectGit === undefined ? {} : { git: options.projectGit }),
@@ -475,6 +492,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     : {}),
                 onAppendEvent: (event) => this.#appendEvent(event),
                 persistence: this,
+                slotStores: { entries: this.slots, webapps: this.webapps },
                 request: source.requestForSubagent(),
                 projectId: sourceSnapshot.projectId,
                 projectSecretIds: this.#projectSecrets(sourceSnapshot.projectId),
@@ -575,6 +593,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                     this.#newLastSessionOrderKey(ownership.project.id, ownership.workspace?.id),
                 ),
                 persistence: this,
+                slotStores: { entries: this.slots, webapps: this.webapps },
                 projectId: ownership.project.id,
                 projectSecretIds: this.#projectSecrets(ownership.project.id),
                 request,
@@ -1338,6 +1357,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 : { mcpToolProvider: this.#mcpToolProvider }),
             onAppendEvent: (event) => this.#appendEvent(event),
             persistence: this,
+            slotStores: { entries: this.slots, webapps: this.webapps },
             projectSecretIds: queryProjectSecretIds(this.#tx(), loaded.projectId),
             projectId: loaded.projectId,
             request: loaded.request,
