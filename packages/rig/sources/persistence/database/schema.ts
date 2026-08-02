@@ -442,6 +442,45 @@ export const happyOutbox = sqliteTable(
     ],
 );
 
+export const slotEntries = sqliteTable("slot_entries", {
+    id: text("id").primaryKey(),
+    slot: text("slot").notNull(),
+    scope: text("scope").notNull(),
+    projectId: text("project_id").references(() => projects.id),
+    workspaceId: text("workspace_id").references(() => projectWorkspaces.id),
+    sessionId: text("session_id"),
+    contentJson: text("content_json").notNull(),
+    authorSessionId: text("author_session_id").notNull(),
+    description: text("description").notNull(),
+    purpose: text("purpose").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
+export const webapps = sqliteTable("webapps", {
+    name: text("name").primaryKey(),
+    description: text("description").notNull(),
+    purpose: text("purpose").notNull(),
+    authorSessionId: text("author_session_id").notNull(),
+    sourceDescription: text("source_description"),
+    currentVersion: integer("current_version").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
+export const webappVersions = sqliteTable(
+    "webapp_versions",
+    {
+        webappName: text("webapp_name")
+            .notNull()
+            .references(() => webapps.name, { onDelete: "cascade" }),
+        version: integer("version").notNull(),
+        changeDescription: text("change_description").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [primaryKey({ columns: [table.webappName, table.version] })],
+);
+
 export const durableGlobalEvents = sqliteTable("durable_global_events", {
     cursor: text("cursor").primaryKey(),
     eventId: text("event_id").notNull().unique(),
