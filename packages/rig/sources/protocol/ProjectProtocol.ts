@@ -9,6 +9,8 @@ import type {
     SessionSummary,
 } from "./SessionProtocol.js";
 import type { RemoteTerminalSummary } from "../terminal/types.js";
+import type { SlotsChangedEvent } from "./SlotProtocol.js";
+import type { WebappsChangedEvent } from "./WebappProtocol.js";
 
 export type ProjectKind = "regular" | "home";
 export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
@@ -405,6 +407,8 @@ export interface PluginsChangedEvent {
 export type GlobalLiveEvent =
     | PluginsChangedEvent
     | PresenceChangedEvent
+    | SlotsChangedEvent
+    | WebappsChangedEvent
     | ProjectGitEvent
     | ProjectWorkspaceGitEvent
     | RemoteTerminalsChangedEvent
@@ -433,6 +437,8 @@ export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent 
     return (
         event.type === "plugins_changed" ||
         event.type === "presence_changed" ||
+        event.type === "slots_changed" ||
+        event.type === "webapps_changed" ||
         event.type === "project_git_changed" ||
         event.type === "workspace_git_changed" ||
         event.type === "remote_terminals_changed" ||

@@ -1455,7 +1455,75 @@ export type GlobalEvent =
           id: string;
           type: "plugins_changed";
       }
+    | {
+          createdAt: number;
+          data: { entries: readonly SlotEntry[] };
+          id: string;
+          type: "slots_changed";
+      }
+    | {
+          createdAt: number;
+          data: { webapps: readonly Webapp[] };
+          id: string;
+          type: "webapps_changed";
+      }
     | SessionEvent;
+
+/** The fixed Happy UI locations an agent can plug content into. */
+export type SlotName = "above-composer" | "sidebar" | "status-line" | "title";
+
+export type SlotScope = "everywhere" | "project" | "session" | "workspace";
+
+export type SlotAction =
+    | { message: string; type: "send-current-chat" }
+    | { type: "open-webapp"; webapp: string }
+    | { message: string; sessionId: string; type: "send-chat" }
+    | { message: string; sessionId: string; type: "draft-chat" }
+    | {
+          effort?: string;
+          model?: string;
+          projectId?: string;
+          prompt?: string;
+          type: "new-chat";
+          workspaceId?: string;
+      };
+
+export type SlotContent =
+    | { markdown: string; type: "text" }
+    | { action: SlotAction; label: string; type: "button" };
+
+export interface SlotEntry {
+    authorSessionId: string;
+    content: SlotContent;
+    createdAt: number;
+    description: string;
+    id: string;
+    projectId?: string;
+    purpose: string;
+    scope: SlotScope;
+    sessionId?: string;
+    slot: SlotName;
+    updatedAt: number;
+}
+
+export interface WebappVersion {
+    changeDescription: string;
+    createdAt: number;
+    version: number;
+}
+
+/** An imported, versioned webapp whose current version rig serves as static files. */
+export interface Webapp {
+    authorSessionId: string;
+    createdAt: number;
+    currentVersion: number;
+    description: string;
+    name: string;
+    purpose: string;
+    sourceDescription?: string;
+    updatedAt: number;
+    versions: readonly WebappVersion[];
+}
 
 export interface MutationRequest {
     mutationId: MutationId;
