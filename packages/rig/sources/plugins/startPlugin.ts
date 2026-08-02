@@ -8,6 +8,7 @@ import { Value } from "@sinclair/typebox/value";
 import { createSandboxedCommand } from "../agent/context/createSandboxedCommand.js";
 import { createToolEnvironment } from "../agent/context/createToolEnvironment.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
+import type { GeneratedMediaStore } from "../generated-media/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
 import {
@@ -36,6 +37,7 @@ export interface StartPluginOptions extends BuildPluginOptions {
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
+    generatedMedia?: GeneratedMediaStore;
     listPlugins: CreatePluginApiServerOptions["listPlugins"];
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     mcpRegistry?: PluginMcpRegistry;
@@ -85,8 +87,10 @@ export async function startPlugin(
             ? {}
             : { listProviderUsage: options.listProviderUsage }),
         listPlugins: options.listPlugins,
+        ...(options.generatedMedia === undefined ? {} : { generatedMedia: options.generatedMedia }),
         ...(mcp === undefined ? {} : { mcp }),
         pluginFolder: plugin.folderName,
+        pluginDataDirectory: dataDirectory,
         pluginName: plugin.manifest.name,
         store: options.store,
         token,

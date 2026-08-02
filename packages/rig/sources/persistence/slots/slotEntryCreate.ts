@@ -5,7 +5,9 @@ import type { TX } from "../Transaction.js";
 export function slotEntryCreate(tx: TX, entry: SlotEntry): void {
     tx.insert(slotEntries)
         .values({
-            authorSessionId: entry.authorSessionId,
+            authorId: entry.author.type === "agent" ? entry.author.sessionId : entry.author.folder,
+            authorName: entry.author.type === "plugin" ? entry.author.name : null,
+            authorType: entry.author.type,
             contentJson: JSON.stringify(entry.content),
             createdAtMs: entry.createdAt,
             description: entry.description,

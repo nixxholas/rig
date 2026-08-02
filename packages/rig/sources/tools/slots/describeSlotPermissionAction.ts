@@ -7,7 +7,7 @@ import type {
     UpdateSlotEntryRequest,
 } from "../../protocol/SlotProtocol.js";
 
-type SlotCreateArgs = Omit<CreateSlotEntryRequest, "authorSessionId">;
+type SlotCreateArgs = Omit<CreateSlotEntryRequest, "author">;
 
 export function describeSlotCreatePermissionAction(args: SlotCreateArgs): string {
     return `create ${describeContent(args.content)} in the ${describeSlot(args.slot)} slot for ${describeScope(args)}, described as ${quoteVisibleExact(args.description)}, to ${quoteVisibleExact(args.purpose)}`;

@@ -17,7 +17,7 @@ import type { FileSystemContext } from "./FileSystemContext.js";
  * builds this context; a tool can never claim another agent's authorship through arguments.
  */
 export interface SlotContext {
-    createEntry(request: Omit<CreateSlotEntryRequest, "authorSessionId">): SlotEntry;
+    createEntry(request: Omit<CreateSlotEntryRequest, "author">): SlotEntry;
     createWebapp(
         request: Omit<CreateWebappRequest, "authorSessionId">,
         sourceFileSystem?: FileSystemContext,

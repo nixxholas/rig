@@ -7,6 +7,7 @@ import { querySlotEntry } from "../persistence/slots/querySlotEntry.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
 import { slotEntryCreate } from "../persistence/slots/slotEntryCreate.js";
 import { slotEntryRemove } from "../persistence/slots/slotEntryRemove.js";
+import { slotEntriesRemoveByPluginAuthor } from "../persistence/slots/slotEntriesRemoveByPluginAuthor.js";
 import { slotEntryUpdate } from "../persistence/slots/slotEntryUpdate.js";
 import type { TX } from "../persistence/Transaction.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
@@ -39,7 +40,7 @@ export interface SlotEntryStoreOptions {
 }
 
 /**
- * Owns every slot entry: agent-authored content plugged into the fixed Happy UI slots.
+ * Owns every slot entry: agent- and plugin-authored content plugged into fixed Happy UI slots.
  *
  * Rig verifies types only — an unknown slot, scope, content shape, or dangling scope reference is
  * rejected with a typed error, and the content itself is never interpreted. Every change persists
@@ -75,7 +76,7 @@ export class SlotEntryStore {
             scope: request.scope,
             ...scopeReference(request),
             content: request.content,
-            authorSessionId: request.authorSessionId,
+            author: request.author,
             description: request.description,
             purpose: request.purpose,
             createdAt: now,
@@ -104,6 +105,13 @@ export class SlotEntryStore {
             return entry;
         });
         this.#publishChanged();
+        return removed;
+    }
+
+    /** Removes the entries whose author disappeared with an uninstalled plugin. */
+    removeByPluginAuthor(folder: string): number {
+        const removed = inTx(this.#tx(), (tx) => slotEntriesRemoveByPluginAuthor(tx, folder));
+        if (removed > 0) this.#publishChanged();
         return removed;
     }
 

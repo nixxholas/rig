@@ -1607,8 +1607,12 @@ export type SlotContent =
     | { markdown: string; type: "text" }
     | { action: SlotAction; label: string; type: "button" };
 
+export type SlotEntryAuthor =
+    | { sessionId: string; type: "agent" }
+    | { folder: string; name: string; type: "plugin" };
+
 export interface SlotEntry {
-    authorSessionId: string;
+    author: SlotEntryAuthor;
     content: SlotContent;
     createdAt: number;
     description: string;

@@ -8,6 +8,7 @@ import type { CreateHappyPluginClientOptions, HappyPluginClient } from "./types.
 import {
     agentMessageDeliverySchema,
     archiveWorkspaceInputSchema,
+    createHappySlotEntryInputSchema,
     createHappyPluginClientOptionsSchema,
     createSessionInputSchema,
     createWorkspaceInputSchema,
@@ -16,6 +17,8 @@ import {
     executeWorkspaceCommandResultSchema,
     listProjectsResponseSchema,
     listHappyProviderUsageResponseSchema,
+    listHappySlotEntriesInputSchema,
+    listHappySlotEntriesResponseSchema,
     listPluginsResponseSchema,
     listSessionsResponseSchema,
     listWorkspacesInputSchema,
@@ -26,6 +29,11 @@ import {
     renameWorkspaceInputSchema,
     sendAgentMessageInputSchema,
     sessionResponseSchema,
+    happySlotEntryResponseSchema,
+    happySlotEntryIdSchema,
+    publishHappyMediaInputSchema,
+    publishedHappyMediaSchema,
+    updateHappySlotEntryInputSchema,
     workspaceResponseSchema,
     HAPPY_PLUGIN_MAX_FILE_BYTES,
     writeWorkspaceFileInputSchema,
@@ -107,6 +115,25 @@ export function createHappyPluginClient(
                     },
                 }),
         },
+        media: {
+            publish: (input) => {
+                Value.Assert(publishHappyMediaInputSchema, input);
+                return request(
+                    "POST",
+                    "/media",
+                    publishedHappyMediaSchema,
+                    "bytes" in input
+                        ? {
+                              contentBase64: Buffer.from(input.bytes).toString("base64"),
+                              name: input.name,
+                          }
+                        : {
+                              ...(input.name === undefined ? {} : { name: input.name }),
+                              path: input.path,
+                          },
+                );
+            },
+        },
         plugins: {
             list: async () => (await request("GET", "/plugins", listPluginsResponseSchema)).plugins,
         },
@@ -122,6 +149,47 @@ export function createHappyPluginClient(
             },
             list: async () =>
                 (await request("GET", "/sessions", listSessionsResponseSchema)).sessions,
+        },
+        slots: {
+            create: async (input) => {
+                Value.Assert(createHappySlotEntryInputSchema, input);
+                return (await request("POST", "/slots", happySlotEntryResponseSchema, input))
+                    .entry;
+            },
+            list: async (input = {}) => {
+                Value.Assert(listHappySlotEntriesInputSchema, input);
+                const query = new URLSearchParams();
+                if (input.slot !== undefined) query.set("slot", input.slot);
+                if (input.projectId !== undefined) query.set("projectId", input.projectId);
+                if (input.workspaceId !== undefined) query.set("workspaceId", input.workspaceId);
+                if (input.sessionId !== undefined) query.set("sessionId", input.sessionId);
+                const suffix = query.size === 0 ? "" : `?${query.toString()}`;
+                return (
+                    await request("GET", `/slots${suffix}`, listHappySlotEntriesResponseSchema)
+                ).entries;
+            },
+            remove: async (id) => {
+                Value.Assert(happySlotEntryIdSchema, id);
+                return (
+                    await request(
+                        "DELETE",
+                        `/slots/${encodeURIComponent(id)}`,
+                        happySlotEntryResponseSchema,
+                    )
+                ).entry;
+            },
+            update: async (id, input) => {
+                Value.Assert(happySlotEntryIdSchema, id);
+                Value.Assert(updateHappySlotEntryInputSchema, input);
+                return (
+                    await request(
+                        "PATCH",
+                        `/slots/${encodeURIComponent(id)}`,
+                        happySlotEntryResponseSchema,
+                        input,
+                    )
+                ).entry;
+            },
         },
         workspaces: {
             archive: async (input) => {

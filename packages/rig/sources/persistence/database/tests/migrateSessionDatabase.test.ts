@@ -60,13 +60,56 @@ describe("migrateSessionDatabase", () => {
         opened.client.close();
     });
 
-    it("discards only pre-icon webapps when adding the required icon metadata", () => {
+    it("discards only pre-icon webapps while preserving legacy slot entries", () => {
         const opened = openTestDatabase();
         opened.database.run(sql.raw("PRAGMA application_id = 1380534066"));
         opened.database.run(sql.raw("PRAGMA user_version = 9"));
         opened.database.run(sql.raw("CREATE TABLE unrelated_data (value TEXT NOT NULL)"));
         opened.database.run(sql.raw("INSERT INTO unrelated_data (value) VALUES ('keep me')"));
         opened.database.run(sql.raw("CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY)"));
+        opened.database.run(
+            sql.raw(`
+                CREATE TABLE slot_entries (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    slot TEXT NOT NULL,
+                    scope TEXT NOT NULL,
+                    project_id TEXT,
+                    workspace_id TEXT,
+                    session_id TEXT,
+                    content_json TEXT NOT NULL,
+                    author_session_id TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    purpose TEXT NOT NULL,
+                    created_at_ms INTEGER NOT NULL,
+                    updated_at_ms INTEGER NOT NULL
+                )
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO slot_entries (
+                    id,
+                    slot,
+                    scope,
+                    content_json,
+                    author_session_id,
+                    description,
+                    purpose,
+                    created_at_ms,
+                    updated_at_ms
+                ) VALUES (
+                    'legacy-slot',
+                    'status-line',
+                    'everywhere',
+                    '{"type":"text","markdown":"Legacy status"}',
+                    'session-1',
+                    'Legacy status',
+                    'Preserve the old slot entry',
+                    1,
+                    2
+                )
+            `),
+        );
         opened.database.run(
             sql.raw(`
                 CREATE TABLE webapps (
@@ -120,6 +163,19 @@ describe("migrateSessionDatabase", () => {
 
         expect(opened.database.all(sql.raw("SELECT * FROM webapps"))).toEqual([]);
         expect(opened.database.all(sql.raw("SELECT * FROM webapp_versions"))).toEqual([]);
+        expect(
+            opened.database.get(
+                sql.raw(`
+                    SELECT author_type, author_id, author_name
+                    FROM slot_entries
+                    WHERE id = 'legacy-slot'
+                `),
+            ),
+        ).toEqual({
+            author_type: "agent",
+            author_id: "session-1",
+            author_name: null,
+        });
         expect(opened.database.get(sql.raw("SELECT value FROM unrelated_data"))).toEqual({
             value: "keep me",
         });

@@ -251,6 +251,214 @@ export const agentMessageDeliverySchema = Type.Object(
 );
 export type AgentMessageDelivery = Static<typeof agentMessageDeliverySchema>;
 
+export const happySlotNameSchema = Type.Union([
+    Type.Literal("status-line"),
+    Type.Literal("above-composer"),
+    Type.Literal("title"),
+    Type.Literal("sidebar"),
+]);
+export type HappySlotName = Static<typeof happySlotNameSchema>;
+
+export const happySlotScopeSchema = Type.Union([
+    Type.Literal("everywhere"),
+    Type.Literal("project"),
+    Type.Literal("workspace"),
+    Type.Literal("session"),
+]);
+export type HappySlotScope = Static<typeof happySlotScopeSchema>;
+
+export const happySlotActionSchema = Type.Union([
+    Type.Object({ message: Type.String(), type: Type.Literal("send-current-chat") }, exact),
+    Type.Object(
+        {
+            path: Type.Optional(Type.String()),
+            query: Type.Optional(Type.Record(Type.String(), Type.String())),
+            type: Type.Literal("open-webapp"),
+            webapp: Type.String(),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            message: Type.String(),
+            sessionId: Type.String(),
+            type: Type.Literal("send-chat"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            message: Type.String(),
+            sessionId: Type.String(),
+            type: Type.Literal("draft-chat"),
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            effort: Type.Optional(Type.String()),
+            model: Type.Optional(Type.String()),
+            projectId: Type.Optional(Type.String()),
+            prompt: Type.Optional(Type.String()),
+            type: Type.Literal("new-chat"),
+            workspaceId: Type.Optional(Type.String()),
+        },
+        exact,
+    ),
+]);
+export type HappySlotAction = Static<typeof happySlotActionSchema>;
+
+export const happySlotContentSchema = Type.Union([
+    Type.Object({ markdown: Type.String(), type: Type.Literal("text") }, exact),
+    Type.Object(
+        {
+            action: happySlotActionSchema,
+            label: Type.String(),
+            type: Type.Literal("button"),
+        },
+        exact,
+    ),
+]);
+export type HappySlotContent = Static<typeof happySlotContentSchema>;
+
+export const happySlotEntryAuthorSchema = Type.Union([
+    Type.Object({ sessionId: Type.String(), type: Type.Literal("agent") }, exact),
+    Type.Object(
+        {
+            folder: Type.String(),
+            name: Type.String(),
+            type: Type.Literal("plugin"),
+        },
+        exact,
+    ),
+]);
+export type HappySlotEntryAuthor = Static<typeof happySlotEntryAuthorSchema>;
+
+export const happySlotEntrySchema = Type.Object(
+    {
+        author: happySlotEntryAuthorSchema,
+        content: happySlotContentSchema,
+        createdAt: Type.Number(),
+        description: Type.String(),
+        id: Type.String(),
+        projectId: Type.Optional(Type.String()),
+        purpose: Type.String(),
+        scope: happySlotScopeSchema,
+        sessionId: Type.Optional(Type.String()),
+        slot: happySlotNameSchema,
+        updatedAt: Type.Number(),
+        workspaceId: Type.Optional(Type.String()),
+    },
+    exact,
+);
+export type HappySlotEntry = Static<typeof happySlotEntrySchema>;
+
+export const happySlotEntryIdSchema = Type.String({ minLength: 1 });
+
+export const createHappySlotEntryInputSchema = Type.Object(
+    {
+        content: happySlotContentSchema,
+        description: Type.String(),
+        projectId: Type.Optional(Type.String()),
+        purpose: Type.String(),
+        scope: happySlotScopeSchema,
+        sessionId: Type.Optional(Type.String()),
+        slot: happySlotNameSchema,
+        workspaceId: Type.Optional(Type.String()),
+    },
+    exact,
+);
+export type CreateHappySlotEntryInput = Static<typeof createHappySlotEntryInputSchema>;
+
+export const listHappySlotEntriesInputSchema = Type.Object(
+    {
+        projectId: Type.Optional(Type.String()),
+        sessionId: Type.Optional(Type.String()),
+        slot: Type.Optional(happySlotNameSchema),
+        workspaceId: Type.Optional(Type.String()),
+    },
+    exact,
+);
+export type ListHappySlotEntriesInput = Static<typeof listHappySlotEntriesInputSchema>;
+
+export const updateHappySlotEntryInputSchema = Type.Object(
+    {
+        content: Type.Optional(happySlotContentSchema),
+        description: Type.Optional(Type.String()),
+        purpose: Type.Optional(Type.String()),
+        slot: Type.Optional(happySlotNameSchema),
+    },
+    exact,
+);
+export type UpdateHappySlotEntryInput = Static<typeof updateHappySlotEntryInputSchema>;
+
+export const happySlotEntryResponseSchema = Type.Object({ entry: happySlotEntrySchema }, exact);
+export const listHappySlotEntriesResponseSchema = Type.Object(
+    { entries: Type.Array(happySlotEntrySchema) },
+    exact,
+);
+
+export const HAPPY_PLUGIN_MAX_MEDIA_BYTES = 10 * 1024 * 1024;
+const happyPublishedMediaNameSchema = Type.String({
+    maxLength: 255,
+    minLength: 3,
+    pattern: "^[^/\\\\]+\\.[A-Za-z0-9]{1,10}$",
+});
+const happyPublishedMediaPathSchema = Type.String({
+    maxLength: 4_096,
+    minLength: 3,
+    pattern: "^.+\\.[A-Za-z0-9]{1,10}$",
+});
+const happyPublishedMediaBytesBase64Schema = Type.String({
+    maxLength: Math.ceil(HAPPY_PLUGIN_MAX_MEDIA_BYTES / 3) * 4,
+    pattern: "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+});
+
+export const publishHappyMediaInputSchema = Type.Union([
+    Type.Object(
+        {
+            bytes: Type.Uint8Array({ maxByteLength: HAPPY_PLUGIN_MAX_MEDIA_BYTES }),
+            name: happyPublishedMediaNameSchema,
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            name: Type.Optional(happyPublishedMediaNameSchema),
+            path: happyPublishedMediaPathSchema,
+        },
+        exact,
+    ),
+]);
+export type PublishHappyMediaInput = Static<typeof publishHappyMediaInputSchema>;
+
+export const publishHappyMediaBodySchema = Type.Union([
+    Type.Object(
+        {
+            contentBase64: happyPublishedMediaBytesBase64Schema,
+            name: happyPublishedMediaNameSchema,
+        },
+        exact,
+    ),
+    Type.Object(
+        {
+            name: Type.Optional(happyPublishedMediaNameSchema),
+            path: happyPublishedMediaPathSchema,
+        },
+        exact,
+    ),
+]);
+
+export const publishedHappyMediaSchema = Type.Object(
+    {
+        bytes: Type.Integer({ maximum: HAPPY_PLUGIN_MAX_MEDIA_BYTES, minimum: 0 }),
+        location: Type.String({ pattern: "^generated/[A-Za-z0-9][A-Za-z0-9._-]*$" }),
+        name: happyPublishedMediaNameSchema,
+    },
+    exact,
+);
+export type PublishedHappyMedia = Static<typeof publishedHappyMediaSchema>;
+
 export const listProjectsResponseSchema = Type.Object(
     { projects: Type.Array(happyProjectSchema) },
     exact,
@@ -693,6 +901,10 @@ export interface HappyPluginClient {
     readonly mcp: {
         startServer(options: StartHappyMcpServerOptions): Promise<HappyMcpServer>;
     };
+    /** Publish a bounded file into Happy's shared generated-media folder. */
+    readonly media: {
+        publish(input: PublishHappyMediaInput): Promise<PublishedHappyMedia>;
+    };
     /** Inspect plugins registered with the owning Happy daemon. */
     readonly plugins: {
         list(): Promise<readonly HappyPlugin[]>;
@@ -705,6 +917,13 @@ export interface HappyPluginClient {
     readonly sessions: {
         create(input: CreateSessionInput): Promise<HappySession>;
         list(): Promise<readonly HappySession[]>;
+    };
+    /** Add and manage persistent entries in Happy's fixed UI slots. */
+    readonly slots: {
+        create(input: CreateHappySlotEntryInput): Promise<HappySlotEntry>;
+        list(input?: ListHappySlotEntriesInput): Promise<readonly HappySlotEntry[]>;
+        remove(id: string): Promise<HappySlotEntry>;
+        update(id: string, input: UpdateHappySlotEntryInput): Promise<HappySlotEntry>;
     };
     /** Inspect and mutate Happy-managed Git workspaces. */
     readonly workspaces: {

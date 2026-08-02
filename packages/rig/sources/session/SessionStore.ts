@@ -37,7 +37,7 @@ export interface SessionStore {
     /** Where the user is right now, and every presence they can switch to. */
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
-    /** Agent-authored content plugged into the fixed Happy UI slots. */
+    /** Agent- and plugin-authored content plugged into the fixed Happy UI slots. */
     readonly slots: SlotEntryStore;
     /** Imported, versioned webapps rig serves as static files. */
     readonly webapps: WebappStore;

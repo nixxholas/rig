@@ -106,6 +106,32 @@ export const slotContentSchema = Type.Union([
 
 export type SlotContent = Static<typeof slotContentSchema>;
 
+export const slotEntryAuthorSchema = Type.Union([
+    Type.Object(
+        {
+            type: Type.Literal("agent"),
+            sessionId: Type.String({
+                description: "The session of the agent that created the entry.",
+            }),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            type: Type.Literal("plugin"),
+            folder: Type.String({
+                description: "Stable installed folder of the plugin that created the entry.",
+            }),
+            name: Type.String({
+                description: "Human-readable name of the plugin that created the entry.",
+            }),
+        },
+        { additionalProperties: false },
+    ),
+]);
+
+export type SlotEntryAuthor = Static<typeof slotEntryAuthorSchema>;
+
 export const slotEntrySchema = Type.Object(
     {
         id: Type.String(),
@@ -115,9 +141,7 @@ export const slotEntrySchema = Type.Object(
         workspaceId: Type.Optional(Type.String()),
         sessionId: Type.Optional(Type.String()),
         content: slotContentSchema,
-        authorSessionId: Type.String({
-            description: "The session of the agent that created the entry.",
-        }),
+        author: slotEntryAuthorSchema,
         description: Type.String({ description: "What the entry is." }),
         purpose: Type.String({ description: "Why the entry exists." }),
         createdAt: Type.Number(),
@@ -136,7 +160,7 @@ export const createSlotEntryRequestSchema = Type.Object(
         workspaceId: Type.Optional(Type.String()),
         sessionId: Type.Optional(Type.String()),
         content: slotContentSchema,
-        authorSessionId: Type.String(),
+        author: slotEntryAuthorSchema,
         description: Type.String(),
         purpose: Type.String(),
     },

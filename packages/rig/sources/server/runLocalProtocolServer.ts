@@ -51,6 +51,10 @@ import type { LocalServerPaths } from "./LocalServerPaths.js";
 import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
+import {
+    createGeneratedMediaStore,
+    getGeneratedDirectory,
+} from "../generated-media/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -500,6 +504,9 @@ async function runOwnedLocalProtocolServer(
                 ? {}
                 : { defaultDocker: loadedConfig.config.docker }),
             listProviderUsage: () => providerUsageTracker?.all() ?? [],
+            generatedMedia: createGeneratedMediaStore({
+                hostDirectory: getGeneratedDirectory(),
+            }),
             mcpRegistry: pluginMcpRegistry,
             store,
         }));

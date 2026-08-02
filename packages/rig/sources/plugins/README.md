@@ -38,6 +38,17 @@ the SDK's globally unique workspace ID; project-scoped create, rename, and archi
 their project context. Workspace exec runs as a daemon-side child process outside the plugin's own
 process sandbox. This is intentional under Rig's plugin trust model.
 
+The socket exposes the same persistent slot store used by Happy's HTTP routes and agent tools.
+Plugin-created entries carry a typed plugin author containing the stable installed folder and
+human-readable plugin name. Uninstall removes every slot entry authored by that plugin, because
+the author and the code responsible for maintaining the entry are gone.
+
+Plugins may also publish a file to the shared generated-media store, either from bounded bytes or
+from a relative path inside their own writable folder. Both forms are capped at 10 MiB. Path reads
+resolve canonically and reject traversal and symbolic-link escapes. The result is a
+`generated/<name>` locator served by the existing authenticated generated-media route; it does not
+create a session attachment because attachment delivery is owned by an agent turn.
+
 `PluginManager` is the daemon lifecycle boundary. Registration and compilation are separate
 functions so a bad plugin can be reported without preventing other plugins or the daemon
 from starting.

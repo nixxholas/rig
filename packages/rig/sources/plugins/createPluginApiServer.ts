@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { basename, extname } from "node:path";
 
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -7,21 +8,28 @@ import type {
     HappyPlugin,
     HappyProviderUsageEntry,
     HappyProject,
+    HappySlotEntry,
     HappySession,
     HappyWorkspace,
+    PublishedHappyMedia,
 } from "happy-plugins";
 import {
     HAPPY_PLUGIN_DEFAULT_COMMAND_TIMEOUT_MS,
+    HAPPY_PLUGIN_MAX_MEDIA_BYTES,
     archiveWorkspaceBodySchema,
+    createHappySlotEntryInputSchema,
     createSessionInputSchema,
     createWorkspaceBodySchema,
     executeWorkspaceCommandBodySchema,
     happyMcpCallCompletionSchema,
     happyMcpServerRegistrationSchema,
+    listHappySlotEntriesInputSchema,
     listWorkspacesInputSchema,
+    publishHappyMediaBodySchema,
     readWorkspaceFileBodySchema,
     renameWorkspaceBodySchema,
     sendAgentMessageBodySchema,
+    updateHappySlotEntryInputSchema,
     writeWorkspaceFileBodySchema,
 } from "happy-plugins";
 import {
@@ -35,6 +43,7 @@ import {
 
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
+import type { GeneratedMediaStore } from "../generated-media/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type {
     PluginSummary,
@@ -44,20 +53,25 @@ import type {
 } from "../protocol/index.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import type { SessionStore } from "../session/SessionStore.js";
+import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
 import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
+import { readPluginMediaFile } from "./readPluginMediaFile.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_WORKSPACE_FILE_REQUEST_BYTES = 2 * 1024 * 1024;
+const MAX_MEDIA_REQUEST_BYTES = 15 * 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
     defaultDocker?: DockerExecutionConfig;
+    generatedMedia?: GeneratedMediaStore;
     listPlugins: () => Promise<readonly PluginSummary[]>;
     listProviderUsage?: () => readonly HappyProviderUsageEntry[];
     mcp?: PluginMcpConnection;
     pluginFolder: string;
+    pluginDataDirectory?: string;
     pluginName: string;
     store: SessionStore;
     token: string;
@@ -150,8 +164,126 @@ async function handleRequest(
         sendJson<{ plugins: readonly HappyPlugin[] }>(response, 200, { plugins });
         return;
     }
+    if (request.method === "GET" && url.pathname === "/slots") {
+        const input = parseValue(
+            listHappySlotEntriesInputSchema,
+            {
+                ...(url.searchParams.has("projectId")
+                    ? { projectId: url.searchParams.get("projectId") ?? "" }
+                    : {}),
+                ...(url.searchParams.has("sessionId")
+                    ? { sessionId: url.searchParams.get("sessionId") ?? "" }
+                    : {}),
+                ...(url.searchParams.has("slot")
+                    ? { slot: url.searchParams.get("slot") ?? "" }
+                    : {}),
+                ...(url.searchParams.has("workspaceId")
+                    ? { workspaceId: url.searchParams.get("workspaceId") ?? "" }
+                    : {}),
+            },
+            "Slot list settings",
+        );
+        sendJson<{ entries: readonly HappySlotEntry[] }>(response, 200, {
+            entries: options.store.slots.list(input),
+        });
+        return;
+    }
+    if (request.method === "POST" && url.pathname === "/slots") {
+        const body = await readJson(request, createHappySlotEntryInputSchema, "Slot entry");
+        try {
+            sendJson<{ entry: HappySlotEntry }>(response, 201, {
+                entry: options.store.slots.create({
+                    ...body,
+                    author: {
+                        folder: options.pluginFolder,
+                        name: options.pluginName,
+                        type: "plugin",
+                    },
+                }),
+            });
+        } catch (error) {
+            if (error instanceof SlotEntryInvalidError) {
+                throw new PluginApiRequestError(error.message);
+            }
+            throw error;
+        }
+        return;
+    }
+    if (request.method === "POST" && url.pathname === "/media") {
+        const generatedMedia = requireGeneratedMedia(options);
+        const pluginDataDirectory = requirePluginDataDirectory(options);
+        const body = await readJson(
+            request,
+            publishHappyMediaBodySchema,
+            "Published media",
+            MAX_MEDIA_REQUEST_BYTES,
+        );
+        const bytes =
+            "contentBase64" in body
+                ? Buffer.from(body.contentBase64, "base64")
+                : await readPluginMediaFile(pluginDataDirectory, body.path);
+        if (bytes.byteLength > HAPPY_PLUGIN_MAX_MEDIA_BYTES) {
+            throw new PluginApiRequestTooLargeError(
+                `Plugin media cannot exceed ${String(HAPPY_PLUGIN_MAX_MEDIA_BYTES)} bytes.`,
+            );
+        }
+        const preferredName =
+            body.name ?? ("path" in body ? basename(body.path) : "plugin-media.bin");
+        const written = await generatedMedia.write(bytes, {
+            extension: extname(preferredName),
+            preferredName,
+        });
+        sendJson<PublishedHappyMedia>(response, 201, {
+            bytes: bytes.byteLength,
+            location: written.location,
+            name: basename(written.hostPath),
+        });
+        return;
+    }
 
     const parts = url.pathname.split("/").filter(Boolean).map(decodeURIComponent);
+    if (
+        parts.length === 2 &&
+        parts[0] === "slots" &&
+        parts[1] !== undefined &&
+        request.method === "PATCH"
+    ) {
+        const body = await readJson(request, updateHappySlotEntryInputSchema, "Slot entry update");
+        try {
+            sendJson<{ entry: HappySlotEntry }>(response, 200, {
+                entry: options.store.slots.update(parts[1], body),
+            });
+        } catch (error) {
+            if (error instanceof SlotEntryInvalidError) {
+                throw new PluginApiRequestError(error.message);
+            }
+            if (error instanceof SlotEntryNotFoundError) {
+                sendJson(response, 404, { error: error.message });
+                return;
+            }
+            throw error;
+        }
+        return;
+    }
+    if (
+        parts.length === 2 &&
+        parts[0] === "slots" &&
+        parts[1] !== undefined &&
+        request.method === "DELETE"
+    ) {
+        try {
+            sendJson<{ entry: HappySlotEntry }>(response, 200, {
+                entry: options.store.slots.remove(parts[1]),
+            });
+        } catch (error) {
+            if (error instanceof SlotEntryNotFoundError) {
+                sendJson(response, 404, { error: error.message });
+                return;
+            }
+            throw error;
+        }
+        return;
+    }
     if (
         request.method === "POST" &&
         parts.length >= 3 &&
@@ -384,6 +516,16 @@ async function handleRequest(
     }
 
     sendJson(response, 404, { error: "This Rig plugin API action does not exist." });
+}
+
+function requireGeneratedMedia(options: CreatePluginApiServerOptions): GeneratedMediaStore {
+    if (options.generatedMedia !== undefined) return options.generatedMedia;
+    throw new PluginApiRequestError("Generated media is unavailable to this plugin.");
+}
+
+function requirePluginDataDirectory(options: CreatePluginApiServerOptions): string {
+    if (options.pluginDataDirectory !== undefined) return options.pluginDataDirectory;
+    throw new PluginApiRequestError("This plugin has no writable folder for media publishing.");
 }
 
 function toHappyProject(project: Project): HappyProject {

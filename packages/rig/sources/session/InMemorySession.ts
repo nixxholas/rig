@@ -5833,7 +5833,10 @@ export class InMemorySession {
         }
         return {
             createEntry: (request) =>
-                stores.entries.create({ ...request, authorSessionId: this.id }),
+                stores.entries.create({
+                    ...request,
+                    author: { type: "agent", sessionId: this.id },
+                }),
             createWebapp: (request, sourceFileSystem) =>
                 stores.webapps.create({ ...request, authorSessionId: this.id }, sourceFileSystem),
             listEntries: (filter) => stores.entries.list(filter),

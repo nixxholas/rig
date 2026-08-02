@@ -1,5 +1,5 @@
 import { request as requestHttp } from "node:http";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
@@ -7,11 +7,13 @@ import {
     defineMcpTool,
     HAPPY_PLUGIN_MAX_COMMAND_OUTPUT_BYTES,
     HAPPY_PLUGIN_MAX_LIST_ITEMS,
+    HAPPY_PLUGIN_MAX_MEDIA_BYTES,
     Type,
 } from "happy-plugins";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createGeneratedMediaStore } from "../../generated-media/index.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createPluginApiServer } from "../createPluginApiServer.js";
 import { MAX_INSTALLED_PLUGINS } from "../discoverPlugins.js";
@@ -66,6 +68,91 @@ describe("plugin API server", () => {
             }).projects.list(),
         ).resolves.toEqual([]);
         await expect(unauthorizedStatus(socketPath)).resolves.toBe(401);
+    });
+
+    it("creates, lists, updates, and removes slot entries with plugin authorship", async () => {
+        const fixture = await createPluginApiFixture();
+
+        await expect(
+            fixture.client.slots.create({
+                content: { markdown: "Wrong place", type: "text" },
+                description: "Invalid shortcut",
+                purpose: "Exercise the slot matrix",
+                scope: "session",
+                sessionId: "missing-session",
+                slot: "sidebar",
+            }),
+        ).rejects.toMatchObject({
+            message: "The sidebar slot allows only the everywhere scope.",
+            status: 400,
+        });
+
+        const created = await fixture.client.slots.create({
+            content: { markdown: "Build is green", type: "text" },
+            description: "Build status",
+            purpose: "Keep the current build visible",
+            scope: "everywhere",
+            slot: "status-line",
+        });
+        expect(created).toMatchObject({
+            author: { folder: "test-plugin", name: "Test Plugin", type: "plugin" },
+            content: { markdown: "Build is green", type: "text" },
+            scope: "everywhere",
+            slot: "status-line",
+        });
+
+        await expect(fixture.client.slots.list({ slot: "status-line" })).resolves.toEqual([created]);
+        const updated = await fixture.client.slots.update(created.id, {
+            content: {
+                action: { message: "show logs", type: "send-current-chat" },
+                label: "Open logs",
+                type: "button",
+            },
+            slot: "sidebar",
+        });
+        expect(updated).toMatchObject({
+            author: { folder: "test-plugin", name: "Test Plugin", type: "plugin" },
+            slot: "sidebar",
+        });
+        await expect(fixture.client.slots.remove(created.id)).resolves.toEqual(updated);
+        await expect(fixture.client.slots.list()).resolves.toEqual([]);
+    });
+
+    it("publishes bounded bytes or plugin-owned files through generated media", async () => {
+        const fixture = await createPluginApiFixture();
+        await writeFile(join(fixture.pluginDataDirectory, "report.txt"), "path media");
+        await writeFile(join(fixture.directory, "outside.txt"), "outside");
+        await writeFile(
+            join(fixture.pluginDataDirectory, "too-large.bin"),
+            Buffer.alloc(HAPPY_PLUGIN_MAX_MEDIA_BYTES + 1),
+        );
+
+        const bytesPublished = await fixture.client.media.publish({
+            bytes: Buffer.from("byte media"),
+            name: "summary.txt",
+        });
+        expect(bytesPublished).toMatchObject({
+            bytes: 10,
+            location: expect.stringMatching(/^generated\/summary-[a-f0-9]{8}\.txt$/u),
+            name: expect.stringMatching(/^summary-[a-f0-9]{8}\.txt$/u),
+        });
+        await expect(
+            readFile(join(fixture.generatedDirectory, bytesPublished.name), "utf8"),
+        ).resolves.toBe("byte media");
+
+        const pathPublished = await fixture.client.media.publish({ path: "report.txt" });
+        await expect(
+            readFile(join(fixture.generatedDirectory, pathPublished.name), "utf8"),
+        ).resolves.toBe("path media");
+        await expect(
+            fixture.client.media.publish({ path: "../outside.txt" }),
+        ).rejects.toMatchObject({
+            message: "Plugin media paths cannot leave the plugin data folder.",
+            status: 400,
+        });
+        await expect(
+            fixture.client.media.publish({ path: "too-large.bin" }),
+        ).rejects.toMatchObject({ status: 413 });
     });
 
     it("executes one-shot workspace commands with captured output and a bounded timeout", async () => {
@@ -611,6 +698,44 @@ async function createWorkspaceApiFixture() {
         directory,
         workspaceId,
         workspacePath,
+    };
+}
+
+async function createPluginApiFixture() {
+    const directory = await createTestSocketDirectory();
+    cleanup.push(() => rm(directory, { force: true, recursive: true }));
+    const pluginDataDirectory = join(directory, "plugin-data");
+    const generatedDirectory = join(directory, "generated");
+    await mkdir(pluginDataDirectory);
+    const socketPath = join(directory, "api.sock");
+    const store = new InMemorySessionStore({
+        modelCatalog: {
+            defaultModelId: "",
+            defaultProviderId: "",
+            models: [],
+            providers: [],
+        },
+    });
+    cleanup.push(() => store.close());
+    const server = createPluginApiServer({
+        generatedMedia: createGeneratedMediaStore({ hostDirectory: generatedDirectory }),
+        listPlugins: async () => [],
+        pluginDataDirectory,
+        pluginFolder: "test-plugin",
+        pluginName: "Test Plugin",
+        store,
+        token: "private-plugin-token",
+    });
+    cleanup.push(() => closeServer(server));
+    await listen(server, socketPath);
+    return {
+        client: createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        }),
+        directory,
+        generatedDirectory,
+        pluginDataDirectory,
     };
 }
 

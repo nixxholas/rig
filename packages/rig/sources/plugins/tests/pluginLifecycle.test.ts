@@ -60,6 +60,23 @@ describe("plugin registration", () => {
         expect(harness.events.at(-1)?.data.installation).toEqual(installed);
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
+        harness.store.slots.create({
+            author: { folder: "clock", name: "Clock", type: "plugin" },
+            content: { markdown: "Tick", type: "text" },
+            description: "Clock status",
+            purpose: "Show the plugin's current state",
+            scope: "everywhere",
+            slot: "status-line",
+        });
+        const retainedEntry = harness.store.slots.create({
+            author: { folder: "calendar", name: "Calendar", type: "plugin" },
+            content: { markdown: "Today", type: "text" },
+            description: "Calendar status",
+            purpose: "Verify uninstall cleanup stays selective",
+            scope: "everywhere",
+            slot: "status-line",
+        });
+        expect(harness.store.slots.list()).toHaveLength(2);
         await expect(harness.manager.readLog("Clock")).resolves.toMatchObject({
             source: "current_run",
             status: "running",
@@ -77,6 +94,7 @@ describe("plugin registration", () => {
         // The process stops before its code is removed, and is not started again.
         expect(harness.stopped).toEqual(["Clock"]);
         expect(harness.started).toEqual(["Clock"]);
+        expect(harness.store.slots.list()).toEqual([retainedEntry]);
     });
 
     it("announces every registration change on the live event stream", async () => {
@@ -213,6 +231,7 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
     events: PluginsChangedEvent[];
     fs: FileSystemContext;
     manager: PluginManager;
+    store: InMemorySessionStore;
     started: string[];
     stopped: string[];
     workspace: string;
@@ -283,6 +302,7 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
         // Plugin changes run with the Full access boundary the Auto reviewer grants them.
         fs: createNodeFileSystemContext(workspace, { permissionMode: () => "full_access" }),
         manager,
+        store,
         workspace,
     };
 }

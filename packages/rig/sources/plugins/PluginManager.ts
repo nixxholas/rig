@@ -2,6 +2,7 @@ import { join } from "node:path";
 
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
+import type { GeneratedMediaStore } from "../generated-media/index.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
 import type { EventId, PluginLogSnapshot, PluginSummary } from "../protocol/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
@@ -35,6 +36,7 @@ export interface PluginManagerOptions {
     directory?: string;
     environment?: NodeJS.ProcessEnv;
     githubFetch?: GitHubFetch;
+    generatedMedia?: GeneratedMediaStore;
     now?: () => number;
     mcpRegistry?: PluginMcpRegistry;
     listProviderUsage?: StartPluginOptions["listProviderUsage"];
@@ -81,6 +83,7 @@ export class PluginManager {
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #environment: NodeJS.ProcessEnv;
     readonly #githubFetch: GitHubFetch | undefined;
+    readonly #generatedMedia: GeneratedMediaStore | undefined;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
@@ -106,6 +109,7 @@ export class PluginManager {
         this.#defaultDocker = options.defaultDocker;
         this.#environment = options.environment ?? process.env;
         this.#githubFetch = options.githubFetch;
+        this.#generatedMedia = options.generatedMedia;
         this.#now = options.now ?? Date.now;
         this.#mcpRegistry = options.mcpRegistry;
         this.#listProviderUsage = options.listProviderUsage;
@@ -226,6 +230,7 @@ export class PluginManager {
             force: true,
             recursive: true,
         });
+        this.#store.slots.removeByPluginAuthor(installed.folderName);
         this.#states.delete(installed.folderName);
         this.#daemonLog.record(
             "info",
@@ -390,6 +395,9 @@ export class PluginManager {
                     ? {}
                     : { defaultDocker: this.#defaultDocker }),
                 environment: this.#environment,
+                ...(this.#generatedMedia === undefined
+                    ? {}
+                    : { generatedMedia: this.#generatedMedia }),
                 ...(this.#listProviderUsage === undefined
                     ? {}
                     : { listProviderUsage: this.#listProviderUsage }),

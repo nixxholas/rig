@@ -34,7 +34,7 @@ describe("slot HTTP protocol", () => {
 
         const response = await request(port, {
             body: JSON.stringify({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: { markdown: "Session shortcut", type: "text" },
                 description: "Session shortcut",
                 purpose: "Keep this session visible",
@@ -60,7 +60,7 @@ describe("slot HTTP protocol", () => {
 
         const created = await request(port, {
             body: JSON.stringify({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: { markdown: "**All green**", type: "text" },
                 description: "Status text",
                 purpose: "Keeps CI visible",
@@ -75,7 +75,7 @@ describe("slot HTTP protocol", () => {
 
         const unknownSlot = await request(port, {
             body: JSON.stringify({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: { markdown: "x", type: "text" },
                 description: "d",
                 purpose: "p",
@@ -92,7 +92,7 @@ describe("slot HTTP protocol", () => {
 
         const malformedAction = await request(port, {
             body: JSON.stringify({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: {
                     action: { type: "send-chat", message: "hello" },
                     label: "Send",
@@ -113,7 +113,7 @@ describe("slot HTTP protocol", () => {
 
         const webappButton = await request(port, {
             body: JSON.stringify({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: {
                     action: {
                         path: "/reports/daily",
@@ -419,7 +419,7 @@ describe("webapp HTTP protocol", () => {
 
         const slot = await request(port, {
             body: JSON.stringify({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: {
                     action: { type: "open-webapp", webapp: "scoped-dashboard" },
                     label: "Open dashboard",

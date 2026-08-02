@@ -25,7 +25,7 @@ describe("slot entry store", () => {
         let store = new PersistentSessionStore({ databasePath });
         cleanups.push(() => store.close());
         const entry = store.slots.create({
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: {
                 action: {
                     path: "reports/today.html",
@@ -48,7 +48,7 @@ describe("slot entry store", () => {
         const restored = store.slots.list();
         expect(restored).toHaveLength(1);
         expect(restored[0]).toMatchObject({
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: {
                 action: {
                     path: "reports/today.html",
@@ -71,7 +71,7 @@ describe("slot entry store", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         cleanups.push(() => store.close());
         const valid = {
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
             purpose: "p",
@@ -118,7 +118,7 @@ describe("slot entry store", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         cleanups.push(() => store.close());
         const valid = {
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
             purpose: "p",
@@ -150,7 +150,7 @@ describe("slot entry store", () => {
         const store = new PersistentSessionStore({ databasePath });
         cleanups.push(() => store.close());
         const common = {
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
             purpose: "p",
@@ -211,7 +211,7 @@ describe("slot entry store", () => {
         const store = new PersistentSessionStore({ databasePath });
         cleanups.push(() => store.close());
         const entry = store.slots.create({
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
             purpose: "p",
@@ -251,7 +251,7 @@ describe("slot entry store", () => {
 
         expect(() =>
             store.slots.create({
-                authorSessionId: "session-1",
+                author: { type: "agent", sessionId: "session-1" },
                 content: webappButton,
                 description: "Dashboard",
                 purpose: "Track work",
@@ -263,7 +263,7 @@ describe("slot entry store", () => {
         );
 
         const entry = store.slots.create({
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "Dashboard",
             purpose: "Track work",
@@ -280,7 +280,7 @@ describe("slot entry store", () => {
         createSessionDatabaseFixture(databasePath);
         const opened = openSessionDatabase(databasePath);
         slotEntryCreate(opened.database, {
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             createdAt: 1,
             description: "old description",
@@ -313,7 +313,7 @@ describe("slot entry store", () => {
             if (delivery.event.type === "slots_changed") events.push(delivery.event);
         });
         const entry = store.slots.create({
-            authorSessionId: "session-1",
+            author: { type: "agent", sessionId: "session-1" },
             content: { markdown: "hi", type: "text" },
             description: "d",
             purpose: "p",

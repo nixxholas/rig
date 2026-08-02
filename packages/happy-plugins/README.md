@@ -17,8 +17,30 @@ open a daemon connection, find credentials, or depend on Happy's internal protoc
 ## Status
 
 The SDK is an early preview. The current surface covers projects, workspace commands and files,
-sessions, messages to agents, provider usage, MCP tool contributions, and local application
-contributions.
+sessions, messages to agents, UI slots, generated-media publishing, provider usage, MCP tool
+contributions, and local application contributions.
+
+Plugins can add persistent content to Happy's fixed UI slots. Happy validates the same content and
+slot/scope rules used by its HTTP API and agent tools, and records the plugin as the entry's author.
+
+```ts
+const entry = await happy.slots.create({
+    content: { markdown: "Build is green", type: "text" },
+    description: "Build status",
+    purpose: "Keep the current build visible",
+    scope: "everywhere",
+    slot: "status-line",
+});
+```
+
+`happy.media.publish` copies either bytes or a relative path from the plugin's writable folder into
+the shared Happy generated-media folder. Files are limited to 10 MiB, and path publishing rejects
+traversal and symbolic-link escapes.
+
+```ts
+await happy.media.publish({ path: "reports/latest.pdf" });
+await happy.media.publish({ bytes: pngBytes, name: "chart.png" });
+```
 
 ## How authoring and runtime versions work
 

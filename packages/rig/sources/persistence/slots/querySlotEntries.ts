@@ -1,6 +1,12 @@
 import { sql, type SQL } from "drizzle-orm";
+import { Value } from "@sinclair/typebox/value";
 
-import type { SlotContent, SlotEntry, SlotEntryFilter } from "../../protocol/SlotProtocol.js";
+import {
+    slotEntryAuthorSchema,
+    type SlotContent,
+    type SlotEntry,
+    type SlotEntryFilter,
+} from "../../protocol/SlotProtocol.js";
 import type { TX } from "../Transaction.js";
 import { readNumber, readOptionalString, readString } from "../session/impl/sqliteRow.js";
 
@@ -38,6 +44,8 @@ export function readSlotEntryRow(row: Record<string, unknown>): SlotEntry {
     const projectId = readOptionalString(row, "project_id");
     const workspaceId = readOptionalString(row, "workspace_id");
     const sessionId = readOptionalString(row, "session_id");
+    const authorType = readString(row, "author_type");
+    const authorId = readString(row, "author_id");
     return {
         id: readString(row, "id"),
         slot: readString(row, "slot") as SlotEntry["slot"],
@@ -46,7 +54,16 @@ export function readSlotEntryRow(row: Record<string, unknown>): SlotEntry {
         ...(workspaceId === undefined ? {} : { workspaceId }),
         ...(sessionId === undefined ? {} : { sessionId }),
         content: JSON.parse(readString(row, "content_json")) as SlotContent,
-        authorSessionId: readString(row, "author_session_id"),
+        author: Value.Decode(
+            slotEntryAuthorSchema,
+            authorType === "plugin"
+                ? {
+                      type: authorType,
+                      folder: authorId,
+                      name: readString(row, "author_name"),
+                  }
+                : { type: authorType, sessionId: authorId },
+        ),
         description: readString(row, "description"),
         purpose: readString(row, "purpose"),
         createdAt: readNumber(row, "created_at_ms"),
