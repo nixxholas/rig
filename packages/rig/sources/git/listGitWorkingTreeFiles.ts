@@ -60,6 +60,10 @@ function isMissingRepository(error: unknown): boolean {
     if (typeof error !== "object" || error === null) return false;
     const stderr = String((error as { stderr?: unknown }).stderr ?? "");
     const message = error instanceof Error ? error.message : "";
-    // Scans run with `LC_ALL=C`, so Git's wording here is the untranslated one.
-    return `${message}\n${stderr}`.includes("not a git repository");
+    // Scans run with `LC_ALL=C`, so Git's wording here is the untranslated one. Only the message it
+    // gives after searching and finding nothing means the folder holds no Git: it reads either
+    // "(or any of the parent directories)" or "(or any parent up to mount point ...)". Git's other
+    // refusal names the repository it could not read — a worktree cut off from the control
+    // directory it lives in reads that way — and that is a failure, not a folder without Git.
+    return `${message}\n${stderr}`.includes("not a git repository (or any");
 }

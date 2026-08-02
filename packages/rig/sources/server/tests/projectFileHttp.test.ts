@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { createTestFixtureDirectory } from "../../testing/createTestFixtureDirectory.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 
 const execFile = promisify(execFileCallback);
@@ -41,8 +42,11 @@ describe("Project files over HTTP", () => {
 
     it("answers with no files when the folder is not a repository", async () => {
         const fixture = await startServer();
-        const folder = join(fixture.root, "plain");
-        await mkdir(folder, { recursive: true });
+        // This one folder lives in the operating system's temporary directory rather than in the
+        // fixture root: the fixture root sits inside this repository's own checkout, and Git would
+        // find that repository by walking up from any folder placed there.
+        const folder = await mkdtemp(join(tmpdir(), "rig-plain-folder-"));
+        cleanups.push(async () => await rm(folder, { force: true, recursive: true }));
         await writeFile(join(folder, "a.txt"), "a\n");
         const projectId = fixture.store.create({ cwd: folder }).snapshot().projectId;
 
@@ -50,6 +54,26 @@ describe("Project files over HTTP", () => {
 
         expect(response.status).toBe(200);
         expect(response.body).toEqual({ paths: [], truncated: false });
+    });
+
+    it("reports a checkout whose repository is unreadable as a failure, not as no files", async () => {
+        const fixture = await startServer();
+        const repository = await createRepository(fixture.root);
+        const worktree = join(fixture.root, "worktree");
+        await git(repository, ["worktree", "add", "--quiet", "--detach", worktree, "HEAD"]);
+        const projectId = fixture.store.create({ cwd: worktree }).snapshot().projectId;
+        expect((await fixture.get(`/projects/${projectId}/file-paths`)).body.paths).toEqual([
+            "seed.txt",
+        ]);
+
+        // A worktree keeps its control directory in the repository it was forked from. Losing that
+        // leaves a checkout Git finds and refuses to read, which is a failure rather than a folder
+        // that happens to hold no files.
+        await rm(join(repository, ".git"), { force: true, recursive: true });
+        const response = await fixture.get(`/projects/${projectId}/file-paths`);
+
+        expect(response.status).toBe(400);
+        expect(typeof response.body.error).toBe("string");
     });
 
     it("reads a file as it was at a revision", async () => {
@@ -153,7 +177,7 @@ async function startServer(): Promise<{
     root: string;
     store: InMemorySessionStore;
 }> {
-    const root = await mkdtemp(join(tmpdir(), "rig-project-files-"));
+    const root = await createTestFixtureDirectory();
     const socketDirectory = await createTestSocketDirectory();
     const socketPath = join(socketDirectory, "server.sock");
     const store = new InMemorySessionStore({ workspacesDirectory: join(root, "workspaces") });
