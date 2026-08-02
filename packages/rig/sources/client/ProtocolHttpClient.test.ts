@@ -75,9 +75,14 @@ describe("ProtocolHttpClient", () => {
             await client.renameProjectWorkspace("project-1", "workspace-1", { name: "Renamed" }, 3);
             await client.archiveProjectWorkspace("project-1", "workspace-1", 4);
             await client.archiveProject("project-1", 5);
+            await client.updateProjectSettings(
+                "project-1",
+                { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
+                6,
+            );
 
-            expect(versions).toEqual(['"3"', '"4"', '"5"']);
-            expect(paths.at(-1)).toBe("/projects/project-1/archive");
+            expect(versions).toEqual(['"3"', '"4"', '"5"', '"6"']);
+            expect(paths.at(-1)).toBe("/projects/project-1/settings");
         } finally {
             await new Promise<void>((resolve) => server.close(() => resolve()));
             await rm(directory, { recursive: true, force: true });

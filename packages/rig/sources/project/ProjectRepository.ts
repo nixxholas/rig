@@ -14,6 +14,8 @@ import {
     type Project,
     type ProjectAvatarSource,
     type ProjectEvent,
+    type ProjectSettings,
+    type ProjectSettingsUpdate,
     type ProjectWorkspace,
     type ProjectWorkspaceEvent,
     type ReorderRequest,
@@ -56,6 +58,7 @@ import { workspaceMarkReady } from "../persistence/project/workspaceMarkReady.js
 import { workspaceRename } from "../persistence/project/workspaceRename.js";
 import { workspaceReorder } from "../persistence/project/workspaceReorder.js";
 import { projectSetDefaultBranch } from "../persistence/project/projectSetDefaultBranch.js";
+import { projectSetSettings } from "../persistence/project/projectSetSettings.js";
 import { inTx } from "../persistence/inTx.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
@@ -108,6 +111,12 @@ export interface ProjectAvatarAsset {
     bytes: Buffer;
     hash: string;
     mediaType: "image/webp";
+}
+
+export interface ProjectSessionSettings {
+    projectId: string;
+    settings: ProjectSettings;
+    workspaceId?: string;
 }
 
 export interface ProjectRepositoryOptions {
@@ -419,6 +428,54 @@ export class ProjectRepository {
             }
             return this.#publishedProject(projectId, mutationId);
         });
+    }
+
+    setProjectSettings(
+        projectId: string,
+        settings: ProjectSettingsUpdate,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined {
+        const current = this.getProject(projectId);
+        if (current === undefined) return undefined;
+        if (expectedVersion !== undefined && expectedVersion !== current.version) {
+            throw new Error("The project changed before its settings could be saved.");
+        }
+        return this.#mutate((tx) => {
+            const changed = projectSetSettings(
+                tx,
+                projectId,
+                settings,
+                this.#now(),
+                expectedVersion,
+            );
+            if (changed === 0) {
+                if (expectedVersion !== undefined) {
+                    throw new Error("The project changed before its settings could be saved.");
+                }
+                return this.getProject(projectId);
+            }
+            return this.#publishedProject(projectId, mutationId);
+        });
+    }
+
+    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined {
+        const path = normalizeProjectCwd(cwd);
+        const workspace = queryWorkspaceByPath(this.#database, path);
+        if (workspace !== undefined) {
+            const project = queryProject(this.#database, workspace.projectId);
+            return project === undefined
+                ? undefined
+                : {
+                      projectId: project.id,
+                      settings: project.settings,
+                      workspaceId: workspace.id,
+                  };
+        }
+        const project = queryProjectByPath(this.#database, path);
+        return project === undefined
+            ? undefined
+            : { projectId: project.id, settings: project.settings };
     }
 
     reorderProject(

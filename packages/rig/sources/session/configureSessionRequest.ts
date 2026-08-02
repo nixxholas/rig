@@ -1,4 +1,5 @@
 import type { CreateSessionRequest } from "../protocol/index.js";
+import type { ProjectSessionSettings } from "../project/ProjectRepository.js";
 import {
     resolveDockerExecutionConfig,
     validateDockerExecutionConfig,
@@ -9,6 +10,7 @@ import { SessionConfigurationError } from "./SessionConfigurationError.js";
 export function configureSessionRequest(
     request: CreateSessionRequest,
     defaultDocker: DockerExecutionConfig | undefined,
+    queryProjectSettings?: () => ProjectSessionSettings | undefined,
 ): CreateSessionRequest {
     if (request.local === true && request.docker !== undefined) {
         throw new SessionConfigurationError(
@@ -16,7 +18,28 @@ export function configureSessionRequest(
         );
     }
     const { local: _local, ...configured } = request;
-    const docker = request.docker ?? (request.local === true ? undefined : defaultDocker);
+    const projectSettings =
+        request.local === true || request.docker !== undefined
+            ? undefined
+            : queryProjectSettings?.();
+    const projectCompute = projectSettings?.settings.defaultWorkspaceCompute;
+    const projectDocker =
+        projectCompute?.type === "docker" && projectSettings !== undefined
+            ? {
+                  image: projectCompute.image,
+                  mounts: [{ source: request.cwd, target: "/workspace" }],
+                  name:
+                      projectSettings.workspaceId === undefined
+                          ? `rig-project-${projectSettings.projectId}-${String(projectCompute.generation)}`
+                          : `rig-workspace-${projectSettings.workspaceId}-${String(projectCompute.generation)}`,
+                  workingDirectory: "/workspace",
+              }
+            : undefined;
+    const docker =
+        request.docker ??
+        (request.local === true || projectCompute?.type === "local"
+            ? undefined
+            : (projectDocker ?? defaultDocker));
     if (docker !== undefined) {
         try {
             validateDockerExecutionConfig(docker);

@@ -45,6 +45,8 @@ export type {
     ProjectNameSource,
     ProjectPresence,
     ProjectResponse,
+    ProjectSettings,
+    ProjectSettingsUpdate,
     ProjectScope,
     ProjectWorkspace,
     ProjectWorkspaceEvent,
@@ -53,6 +55,8 @@ export type {
     ProjectWorkspaceResponse,
     ProjectWorkspaceStatus,
     ProjectWorktreeSupport,
+    ProjectWorkspaceCompute,
+    ProjectWorkspaceComputeInput,
     RemoteTerminalGroupState,
     RemoteTerminalsChangedEvent,
     RenameProjectRequest,
@@ -60,6 +64,7 @@ export type {
     ReorderRequest,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
+    UpdateProjectSettingsRequest,
     UninstalledPluginSummary,
     UninstallPluginResponse,
 } from "./ProjectProtocol.js";
@@ -93,6 +98,13 @@ export type {
 } from "@slopus/rig-providers";
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
+export {
+    projectSettingsSchema,
+    projectSettingsUpdateSchema,
+    projectWorkspaceComputeSchema,
+    projectWorkspaceComputeInputSchema,
+    updateProjectSettingsRequestSchema,
+} from "./ProjectProtocol.js";
 export type {
     GetTimelineRequest,
     GetTimelineResponse,

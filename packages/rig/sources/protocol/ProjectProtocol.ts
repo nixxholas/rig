@@ -1,4 +1,5 @@
 import type { HappyPluginAppContribution } from "happy-plugins";
+import { Type, type Static } from "@sinclair/typebox";
 
 import type { EventId } from "./EventId.js";
 import type {
@@ -95,6 +96,65 @@ export interface ProjectAvatar {
     width: number;
 }
 
+export const projectWorkspaceComputeInputSchema = Type.Union([
+    Type.Object({ type: Type.Literal("local") }, { additionalProperties: false }),
+    Type.Object(
+        {
+            image: Type.String({ minLength: 1, pattern: "^\\S+$" }),
+            type: Type.Literal("docker"),
+        },
+        { additionalProperties: false },
+    ),
+]);
+
+export type ProjectWorkspaceComputeInput = Static<typeof projectWorkspaceComputeInputSchema>;
+
+export const projectWorkspaceComputeSchema = Type.Union([
+    Type.Object(
+        {
+            generation: Type.Integer({ minimum: 1 }),
+            type: Type.Literal("local"),
+        },
+        { additionalProperties: false },
+    ),
+    Type.Object(
+        {
+            generation: Type.Integer({ minimum: 1 }),
+            image: Type.String({ minLength: 1, pattern: "^\\S+$" }),
+            type: Type.Literal("docker"),
+        },
+        { additionalProperties: false },
+    ),
+]);
+
+export type ProjectWorkspaceCompute = Static<typeof projectWorkspaceComputeSchema>;
+
+export const projectSettingsSchema = Type.Object(
+    {
+        defaultWorkspaceCompute: Type.Optional(projectWorkspaceComputeSchema),
+    },
+    { additionalProperties: false },
+);
+
+export type ProjectSettings = Static<typeof projectSettingsSchema>;
+
+export const projectSettingsUpdateSchema = Type.Object(
+    {
+        defaultWorkspaceCompute: Type.Optional(projectWorkspaceComputeInputSchema),
+    },
+    { additionalProperties: false },
+);
+export type ProjectSettingsUpdate = Static<typeof projectSettingsUpdateSchema>;
+
+export const updateProjectSettingsRequestSchema = Type.Object(
+    {
+        defaultWorkspaceCompute: Type.Optional(projectWorkspaceComputeInputSchema),
+        mutationId: Type.Optional(Type.String({ minLength: 1 })),
+    },
+    { additionalProperties: false },
+);
+export type UpdateProjectSettingsRequest = Static<typeof updateProjectSettingsRequestSchema>;
+
 export interface Project {
     archivedAt?: number;
     avatar?: ProjectAvatar;
@@ -113,6 +173,7 @@ export interface Project {
     orderKey: string;
     path: string;
     presence: ProjectPresence;
+    settings: ProjectSettings;
     storageKey: string;
     updatedAt: number;
     version: number;

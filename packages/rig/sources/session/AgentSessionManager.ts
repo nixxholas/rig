@@ -64,6 +64,7 @@ export interface AgentSessionRepository {
         metadata: SessionAgentMetadata,
         id: string,
     ): InMemorySession;
+    configureWorkspaceRequest?(request: CreateSessionRequest): CreateSessionRequest;
     findByAgentId?(agentId: string): InMemorySession | undefined;
     get(sessionId: string): InMemorySession | undefined;
     listByRoot(rootSessionId: string): readonly InMemorySession[];
@@ -250,14 +251,15 @@ export class AgentSessionManager {
             throw new Error("That workspace is the one this session already works in.");
         }
         const sessionId = createId();
+        const workspaceRequest = {
+            ...delegator.requestForSubagent(),
+            cwd: workspace.path,
+            projectId,
+            trackUnread: true,
+            workspaceId: workspace.id,
+        };
         const delegate = create(
-            {
-                ...delegator.requestForSubagent(),
-                cwd: workspace.path,
-                projectId,
-                trackUnread: true,
-                workspaceId: workspace.id,
-            },
+            this.#repository.configureWorkspaceRequest?.(workspaceRequest) ?? workspaceRequest,
             {
                 delegatedBySessionId: delegatorSessionId,
                 depth: 0,
@@ -905,14 +907,19 @@ export class AgentSessionManager {
                 ...(request.readOnly === true ? { permissionMode: "read_only" as const } : {}),
                 ...(request.serviceTier === undefined ? {} : { serviceTier: request.serviceTier }),
             };
+            const configuredChildRequest =
+                request.workspaceId !== undefined &&
+                request.workspaceId !== parent.snapshot().workspaceId
+                    ? (this.#repository.configureWorkspaceRequest?.(childRequest) ?? childRequest)
+                    : childRequest;
             child =
                 request.contextMode === "parent"
                     ? this.#repository.createSubagent(
-                          childRequest,
+                          configuredChildRequest,
                           metadata,
                           request.contextMessages,
                       )
-                    : this.#repository.createSubagent(childRequest, metadata);
+                    : this.#repository.createSubagent(configuredChildRequest, metadata);
             const childPath = this.#pathFor(child);
             const parentPath = this.#pathFor(parent);
             submitted = child.submit({

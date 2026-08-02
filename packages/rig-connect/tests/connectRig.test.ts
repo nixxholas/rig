@@ -145,6 +145,7 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
                 orderKey: "a",
                 path: "/work",
                 presence: "present",
+                settings: {},
                 updatedAt: 1,
                 version: 3,
                 worktreeSupport: "supported",

@@ -10,6 +10,7 @@ import type {
     GitRepositoryFacts,
     ModelCatalog,
     Project,
+    ProjectSettingsUpdate,
     ProjectWorkspace,
     ReorderRequest,
     RegisterSecretRequest,
@@ -35,7 +36,11 @@ import type { TX } from "../persistence/Transaction.js";
 import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
-import { ProjectRepository, type ProjectAvatarAsset } from "../project/ProjectRepository.js";
+import {
+    ProjectRepository,
+    type ProjectAvatarAsset,
+    type ProjectSessionSettings,
+} from "../project/ProjectRepository.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
@@ -57,9 +62,12 @@ import { timelineAgentSource } from "./impl/timelineAgentSource.js";
 import { queryLiveAgentTreeUsage } from "./queryLiveAgentTreeUsage.js";
 import { SlotEntryStore } from "../slots/index.js";
 import { WebappStore } from "../webapps/index.js";
+import type { DockerExecutionConfig } from "../execution/index.js";
+import { configureSessionRequest } from "./configureSessionRequest.js";
 
 export interface InMemorySessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
+    defaultDocker?: DockerExecutionConfig;
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
     onWorkspaceCleanupError?: (error: unknown, projectId: string, workspaceId: string) => void;
@@ -73,6 +81,7 @@ export interface InMemorySessionStoreOptions {
 export class InMemorySessionStore implements SessionStore {
     #agentManager: AgentSessionManager;
     #createRuntime: InMemorySessionOptions["createRuntime"];
+    readonly #defaultDocker: DockerExecutionConfig | undefined;
     #modelCatalog: ModelCatalog;
     #mcpToolProvider: McpToolProvider | undefined;
     #onWorkspaceCleanupError:
@@ -157,6 +166,7 @@ export class InMemorySessionStore implements SessionStore {
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
         this.#onWorkspaceCleanupError = options.onWorkspaceCleanupError;
         this.#createRuntime = options.createRuntime;
+        this.#defaultDocker = options.defaultDocker;
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#agentManager = new AgentSessionManager({
             repository: {
@@ -167,6 +177,7 @@ export class InMemorySessionStore implements SessionStore {
                         : this.archiveWorkspace(projectId, workspaceId),
                 createOwnedWorkspace: (ownerSessionId, projectId, request) =>
                     this.#projects.createWorkspace(projectId, request, ownerSessionId),
+                configureWorkspaceRequest: (request) => this.#configureWorkspaceRequest(request),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
                 findByAgentId: (agentId) => this.findByAgentId(agentId),
@@ -192,6 +203,13 @@ export class InMemorySessionStore implements SessionStore {
 
         session.changeEffort(request);
         return session;
+    }
+
+    #configureWorkspaceRequest(request: CreateSessionRequest): CreateSessionRequest {
+        const { docker: _docker, local: _local, ...base } = request;
+        return configureSessionRequest(base, this.#defaultDocker, () =>
+            this.#projects.queryProjectSettings(request.cwd),
+        );
     }
 
     attachSecret(
@@ -360,6 +378,16 @@ export class InMemorySessionStore implements SessionStore {
         const ownership = (() => {
             if (inherited === undefined) {
                 return this.#projects.resolve(request.cwd, request.workspaceId, request.projectId);
+            }
+            if (
+                request.workspaceId !== undefined &&
+                request.workspaceId !== inherited.workspaceId
+            ) {
+                return this.#projects.resolve(
+                    request.cwd,
+                    request.workspaceId,
+                    inherited.projectId,
+                );
             }
             const project = this.#projects.getProject(inherited.projectId);
             if (project === undefined) {
@@ -578,6 +606,19 @@ export class InMemorySessionStore implements SessionStore {
         return this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
     }
 
+    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined {
+        return this.#projects.queryProjectSettings(cwd);
+    }
+
+    setProjectSettings(
+        projectId: string,
+        settings: ProjectSettingsUpdate,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined {
+        return this.#projects.setProjectSettings(projectId, settings, expectedVersion, mutationId);
+    }
+
     refreshProject(projectId: string): Project | undefined {
         return this.#projects.refreshProject(projectId);
     }
@@ -786,20 +827,12 @@ export class InMemorySessionStore implements SessionStore {
         if (workspace !== undefined && workspace.status !== "ready") {
             throw new Error("Only ready workspaces can open terminals.");
         }
-        const session = [...this.#sessions.values()]
-            .filter((candidate) => {
-                if (candidate.isSubagent()) return false;
-                const snapshot = candidate.snapshot();
-                return (
-                    snapshot.projectId === scope.projectId &&
-                    snapshot.workspaceId === scope.workspaceId
-                );
-            })
-            .sort((left, right) => right.summary().updatedAt - left.summary().updatedAt)
-            .at(0);
-        const docker = session?.requestForSubagent().docker;
+        const cwd = workspace?.path ?? project.path;
+        const docker = configureSessionRequest({ cwd }, this.#defaultDocker, () =>
+            this.#projects.queryProjectSettings(cwd),
+        ).docker;
         return {
-            cwd: workspace?.path ?? project.path,
+            cwd,
             ...(docker === undefined ? {} : { docker }),
         };
     }

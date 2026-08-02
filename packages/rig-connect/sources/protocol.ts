@@ -1144,6 +1144,11 @@ export interface Project {
     orderKey: string;
     path: string;
     presence: "present" | "missing";
+    settings: {
+        defaultWorkspaceCompute?:
+            | { generation: number; type: "local" }
+            | { generation: number; image: string; type: "docker" };
+    };
     updatedAt: number;
     version: number;
     worktreeSupport: "supported" | "unsupported" | "unknown";

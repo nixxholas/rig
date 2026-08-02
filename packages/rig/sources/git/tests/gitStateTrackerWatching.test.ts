@@ -91,6 +91,7 @@ function projectFor(path: string): Project {
         orderKey: "a0",
         path,
         presence: "present",
+        settings: {},
         storageKey: "fixture",
         updatedAt: 1,
         version: 1,

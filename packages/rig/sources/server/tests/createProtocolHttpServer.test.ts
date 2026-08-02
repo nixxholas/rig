@@ -437,7 +437,7 @@ describe("createProtocolHttpServer", () => {
         await writeFile(join(projectDirectory, "README.md"), "fixture\n");
         await execFile("git", ["-C", projectDirectory, "add", "README.md"]);
         await execFile("git", ["-C", projectDirectory, "commit", "-m", "Initial"]);
-        const { client, close, socketPath } = await startServer();
+        const { client, close, socketPath, store } = await startServer();
         try {
             const source = await client.createSession({ cwd: projectDirectory });
             const created = await requestRawJson(
@@ -465,12 +465,27 @@ describe("createProtocolHttpServer", () => {
                 { interval: 20, timeout: 5_000 },
             );
 
+            const project = (await client.getProject(source.session.projectId)).project;
+            await client.updateProjectSettings(
+                project.id,
+                {
+                    defaultWorkspaceCompute: {
+                        image: "workspace-dev:latest",
+                        type: "docker",
+                    },
+                    mutationId: "workspace-compute-1",
+                },
+                project.version,
+            );
             const attached = await client.createSession({ cwd: workspace.path });
 
             expect(attached.session).toMatchObject({
                 projectId: source.session.projectId,
                 workspaceId: workspace.id,
             });
+            expect(store.get(attached.session.id)?.requestForSubagent().docker?.name).toBe(
+                `rig-workspace-${workspace.id}-1`,
+            );
         } finally {
             await close();
             await rm(projectDirectory, removeFixtureOptions);
@@ -535,10 +550,41 @@ describe("createProtocolHttpServer", () => {
                 second.session.projectId,
                 first.session.projectId,
             ]);
+            const configuredProject = await client.updateProjectSettings(
+                first.session.projectId,
+                {
+                    defaultWorkspaceCompute: {
+                        image: "rig-dev:latest",
+                        type: "docker",
+                    },
+                    mutationId: "project-settings-1",
+                },
+                firstProject.project.version,
+            );
+            expect(configuredProject.project.settings).toEqual({
+                defaultWorkspaceCompute: {
+                    generation: 1,
+                    image: "rig-dev:latest",
+                    type: "docker",
+                },
+            });
+            await expect(
+                client.updateProjectSettings(
+                    first.session.projectId,
+                    {
+                        defaultWorkspaceCompute: {
+                            image: "rig-dev:latest",
+                            type: "docker",
+                        },
+                        mutationId: "project-settings-1",
+                    },
+                    firstProject.project.version,
+                ),
+            ).resolves.toEqual(configuredProject);
             const reorderedProject = await client.reorderProject(
                 first.session.projectId,
                 { afterId: null },
-                firstProject.project.version,
+                configuredProject.project.version,
             );
             expect((await client.listProjects()).projects.map((project) => project.id)).toEqual([
                 first.session.projectId,
@@ -547,6 +593,10 @@ describe("createProtocolHttpServer", () => {
 
             const laterChat = await client.createSession({
                 cwd: "/tmp/rig-project-api/one/project",
+            });
+            expect(laterChat.session.environment).toMatchObject({
+                reference: "rig-dev:latest",
+                type: "docker",
             });
             expect(
                 (await client.listSessions({ archived: "all" })).sessions
@@ -612,6 +662,80 @@ describe("createProtocolHttpServer", () => {
             expect(
                 (await client.clearProjectAvatar(first.session.projectId)).project.avatar,
             ).toBeUndefined();
+        } finally {
+            await close();
+        }
+    });
+
+    it("shares versioned project compute by default while preserving session overrides", async () => {
+        const store = new InMemorySessionStore();
+        const { client, close } = await startServer({ store });
+        const cwd = "/tmp/rig-project-compute/project";
+        try {
+            const seed = await client.createSession({ cwd });
+            const project = store.getProject(seed.session.projectId)!;
+            const dockerProject = await client.updateProjectSettings(
+                project.id,
+                {
+                    defaultWorkspaceCompute: {
+                        image: "rig-dev:latest",
+                        type: "docker",
+                    },
+                    mutationId: "compute-docker-1",
+                },
+                project.version,
+            );
+
+            const firstDocker = await client.createSession({ cwd });
+            const secondDocker = await client.createSession({ cwd });
+            const sharedName = store.get(firstDocker.session.id)?.requestForSubagent().docker?.name;
+            expect(sharedName).toBe(`rig-project-${project.id}-1`);
+            expect(store.get(secondDocker.session.id)?.requestForSubagent().docker?.name).toBe(
+                sharedName,
+            );
+
+            const explicitLocal = await client.createSession({ cwd, local: true });
+            expect(explicitLocal.session.environment).toEqual({ type: "local" });
+            const explicitDocker = await client.createSession({
+                cwd,
+                docker: {
+                    image: "session-only:latest",
+                    workingDirectory: "/workspace",
+                },
+            });
+            expect(store.get(explicitDocker.session.id)?.requestForSubagent().docker?.name).toBe(
+                `rig-${explicitDocker.session.id}`,
+            );
+
+            const localProject = await client.updateProjectSettings(
+                project.id,
+                {
+                    defaultWorkspaceCompute: { type: "local" },
+                    mutationId: "compute-local-2",
+                },
+                dockerProject.project.version,
+            );
+            const defaultLocal = await client.createSession({ cwd });
+            expect(defaultLocal.session.environment).toEqual({ type: "local" });
+            expect(store.get(firstDocker.session.id)?.requestForSubagent().docker?.name).toBe(
+                sharedName,
+            );
+
+            await client.updateProjectSettings(
+                project.id,
+                {
+                    defaultWorkspaceCompute: {
+                        image: "rig-dev:latest",
+                        type: "docker",
+                    },
+                    mutationId: "compute-docker-3",
+                },
+                localProject.project.version,
+            );
+            const nextDocker = await client.createSession({ cwd });
+            expect(store.get(nextDocker.session.id)?.requestForSubagent().docker?.name).toBe(
+                `rig-project-${project.id}-3`,
+            );
         } finally {
             await close();
         }
@@ -2949,7 +3073,13 @@ async function startServer(
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = join(directory, "server.sock");
-    const store = options.store ?? new InMemorySessionStore();
+    const store =
+        options.store ??
+        new InMemorySessionStore({
+            ...(options.defaultDocker === undefined
+                ? {}
+                : { defaultDocker: options.defaultDocker }),
+        });
     const server = createProtocolHttpServer({
         ...(options.defaultDocker === undefined ? {} : { defaultDocker: options.defaultDocker }),
         ...(options.fileSearchService !== undefined

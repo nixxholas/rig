@@ -449,6 +449,9 @@ async function runOwnedLocalProtocolServer(
                     resolveCodexStreamMaxRetries: () => runtimeSettings.codexStreamMaxRetries,
                 }),
             databasePath: paths.databasePath,
+            ...(loadedConfig.config.docker === undefined
+                ? {}
+                : { defaultDocker: loadedConfig.config.docker }),
             durableGlobalEventQueue: loadedConfig.config.settings.durableGlobalEventQueue,
             presence: createConfiguredPresenceStore(loadedConfig.config.presence),
             mcpToolProvider,
@@ -519,7 +522,9 @@ async function runOwnedLocalProtocolServer(
                     createSession: (id, request) =>
                         store!.createWithId(
                             id,
-                            configureSessionRequest(request, loadedConfig.config.docker),
+                            configureSessionRequest(request, loadedConfig.config.docker, () =>
+                                store!.queryProjectSettings(request.cwd),
+                            ),
                         ),
                     databasePath: paths.databasePath,
                     getSubagents: (sessionId) => store?.listSubagents(sessionId) ?? [],
@@ -609,6 +614,8 @@ async function runOwnedLocalProtocolServer(
                                                   configureSessionRequest(
                                                       request,
                                                       loadedConfig.config.docker,
+                                                      () =>
+                                                          store!.queryProjectSettings(request.cwd),
                                                   ),
                                               ),
                                           databasePath: paths.databasePath,

@@ -97,7 +97,11 @@ async function handleRequest(
     }
     if (request.method === "POST" && url.pathname === "/sessions") {
         const body = await readJson(request, createSessionInputSchema, "Session settings");
-        const session = options.store.create(configureSessionRequest(body, options.defaultDocker));
+        const session = options.store.create(
+            configureSessionRequest(body, options.defaultDocker, () =>
+                options.store.queryProjectSettings(body.cwd),
+            ),
+        );
         sendJson<{ session: HappySession }>(response, 201, {
             session: toHappySession(options.store, session.snapshot()),
         });

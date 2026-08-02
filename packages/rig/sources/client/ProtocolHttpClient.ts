@@ -90,6 +90,7 @@ import type {
     UpdateGlobalInstructionsResponse,
     UpdateGlobalSecurityPolicyRequest,
     UpdateGlobalSecurityPolicyResponse,
+    UpdateProjectSettingsRequest,
     UpdateSessionRequest,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
@@ -539,6 +540,19 @@ export class ProtocolHttpClient {
         return this.#requestJson("PATCH", `/projects/${encodeURIComponent(projectId)}`, request, {
             "if-match": `"${String(expectedVersion)}"`,
         });
+    }
+
+    updateProjectSettings(
+        projectId: string,
+        request: UpdateProjectSettingsRequest,
+        expectedVersion: number,
+    ): Promise<ProjectResponse> {
+        return this.#requestJson(
+            "PUT",
+            `/projects/${encodeURIComponent(projectId)}/settings`,
+            request,
+            { "if-match": `"${String(expectedVersion)}"` },
+        );
     }
 
     refreshProject(projectId: string): Promise<ProjectResponse> {

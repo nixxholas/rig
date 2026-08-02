@@ -41,6 +41,9 @@ export const projects = sqliteTable(
         updatedAtMs: integer("updated_at_ms").notNull(),
         archivedAtMs: integer("archived_at_ms"),
         defaultBranch: text("default_branch"),
+        defaultCompute: text("default_compute"),
+        defaultDockerImage: text("default_docker_image"),
+        defaultComputeGeneration: integer("default_compute_generation").notNull().default(0),
     },
     (table) => [
         index("projects_updated").on(desc(table.updatedAtMs)),

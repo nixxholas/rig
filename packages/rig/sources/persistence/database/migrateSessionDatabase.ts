@@ -11,6 +11,8 @@ import { presenceQuestionDeadlines } from "./migrations/07-presence-question-dea
 import { agentTreeUsage } from "./migrations/08-agent-tree-usage.js";
 import { slots } from "./migrations/09-slots.js";
 import { webappIcons } from "./migrations/10-webapp-icons.js";
+import { projectSettings } from "./migrations/11-project-settings.js";
+import { projectComputeGeneration } from "./migrations/12-project-compute-generation.js";
 
 const migrations = [
     init,
@@ -23,6 +25,8 @@ const migrations = [
     agentTreeUsage,
     slots,
     webappIcons,
+    projectSettings,
+    projectComputeGeneration,
 ] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 

@@ -8,6 +8,7 @@ import type {
     GetTimelineRequest,
     GitRepositoryFacts,
     Project,
+    ProjectSettingsUpdate,
     ProjectWorkspace,
     ReorderRequest,
     RegisterSecretRequest,
@@ -22,7 +23,7 @@ import type { SecretAttachmentScope } from "../secrets/index.js";
 import type { ExternalToolCall } from "../external-tools/index.js";
 import type { GlobalEventQueue } from "../global-event/GlobalEventQueue.js";
 import type { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
-import type { ProjectAvatarAsset } from "../project/ProjectRepository.js";
+import type { ProjectAvatarAsset, ProjectSessionSettings } from "../project/ProjectRepository.js";
 import type { ProjectRemoteTerminalStore } from "../terminal/index.js";
 import type { DurableUserInputCall } from "../user-input/index.js";
 import type { PresenceStore } from "../presence/index.js";
@@ -94,6 +95,7 @@ export interface SessionStore {
         expectedVersion?: number,
         mutationId?: string,
     ): Project | undefined;
+    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined;
     renameWorkspace(
         projectId: string,
         workspaceId: string,
@@ -126,6 +128,12 @@ export interface SessionStore {
         bytes: Buffer,
         expectedVersion?: number,
     ): Promise<Project | undefined>;
+    setProjectSettings(
+        projectId: string,
+        settings: ProjectSettingsUpdate,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined;
     clearProjectAvatar(projectId: string): Project | undefined;
     registerSecret(request: RegisterSecretRequest): SecretSummary;
     /** The agents a scope covers and when each of them worked, waited, or asked. */

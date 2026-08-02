@@ -99,6 +99,7 @@ function catalog(sessions: readonly SessionSummary[], cursor = OLD_VERSION): Glo
                 orderKey: "a",
                 path: "/work",
                 presence: "present",
+                settings: {},
                 updatedAt: 1,
                 version: 3,
                 worktreeSupport: "supported",

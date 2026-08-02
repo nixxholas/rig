@@ -22,6 +22,7 @@ function project(id: string, overrides: Partial<Project> = {}): Project {
         orderKey: id,
         path: `/work/${id}`,
         presence: "present",
+        settings: {},
         updatedAt: 1,
         version: 1,
         worktreeSupport: "supported",

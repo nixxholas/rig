@@ -11,6 +11,7 @@ import {
     migrateSessionDatabase,
 } from "../migrateSessionDatabase.js";
 import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
+import { projectComputeGeneration } from "../migrations/12-project-compute-generation.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
 import * as schema from "../schema.js";
 
@@ -65,6 +66,7 @@ describe("migrateSessionDatabase", () => {
         opened.database.run(sql.raw("PRAGMA user_version = 9"));
         opened.database.run(sql.raw("CREATE TABLE unrelated_data (value TEXT NOT NULL)"));
         opened.database.run(sql.raw("INSERT INTO unrelated_data (value) VALUES ('keep me')"));
+        opened.database.run(sql.raw("CREATE TABLE projects (id TEXT NOT NULL PRIMARY KEY)"));
         opened.database.run(
             sql.raw(`
                 CREATE TABLE webapps (
@@ -211,6 +213,41 @@ describe("migrateSessionDatabase", () => {
             }
         }
 
+        opened.client.close();
+    });
+
+    it("starts existing project compute settings at generation one", () => {
+        const opened = openTestDatabase();
+        opened.database.run(
+            sql.raw(`
+                CREATE TABLE projects (
+                    id TEXT NOT NULL PRIMARY KEY,
+                    default_compute TEXT,
+                    default_docker_image TEXT
+                )
+            `),
+        );
+        opened.database.run(
+            sql.raw(`
+                INSERT INTO projects (id, default_compute, default_docker_image)
+                VALUES
+                    ('docker', 'docker', 'rig-dev:latest'),
+                    ('local', 'local', NULL),
+                    ('unset', NULL, NULL)
+            `),
+        );
+
+        projectComputeGeneration(opened.database);
+
+        expect(
+            opened.database.all<{ default_compute_generation: number; id: string }>(
+                sql.raw("SELECT id, default_compute_generation FROM projects ORDER BY id"),
+            ),
+        ).toEqual([
+            { default_compute_generation: 1, id: "docker" },
+            { default_compute_generation: 1, id: "local" },
+            { default_compute_generation: 0, id: "unset" },
+        ]);
         opened.client.close();
     });
 

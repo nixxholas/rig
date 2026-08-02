@@ -104,6 +104,7 @@ import {
     globalSecurityPolicySchema,
     RIG_PROTOCOL_VERSION,
     SESSION_DRAFT_MAX_LENGTH,
+    updateProjectSettingsRequestSchema,
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
@@ -248,6 +249,9 @@ export function createProtocolHttpServer(
     const store =
         options.store ??
         new InMemorySessionStore({
+            ...(options.defaultDocker === undefined
+                ? {}
+                : { defaultDocker: options.defaultDocker }),
             modelCatalog,
             ...(options.secrets === undefined ? {} : { secrets: options.secrets }),
         });
@@ -1183,6 +1187,61 @@ async function handleRequest(
         }
     }
 
+    if (route.name === "project-settings" && request.method === "PUT") {
+        const project = store.getProject(route.projectId);
+        if (project === undefined) {
+            sendJson(response, 404, { error: "Project not found" });
+            return;
+        }
+        const body = await readJson<unknown>(request);
+        if (!Value.Check(updateProjectSettingsRequestSchema, body)) {
+            sendJson(response, 400, {
+                error: "Project settings are invalid. Choose local compute, a Docker image, or leave the default unset.",
+            });
+            return;
+        }
+        const completed =
+            body.mutationId === undefined
+                ? undefined
+                : store.globalEventQueue
+                      .list()
+                      ?.find(
+                          (entry) =>
+                              entry.event.type === "project_updated" &&
+                              entry.event.projectId === project.id &&
+                              entry.event.data.mutationId === body.mutationId,
+                      );
+        if (completed !== undefined) {
+            sendJson<ProjectResponse>(response, 200, {
+                project: store.getProject(project.id)!,
+            });
+            return;
+        }
+        const expectedVersion = parseEntityVersion(request.headers["if-match"]);
+        if (expectedVersion === undefined) {
+            sendJson(response, 400, { error: "The project version is invalid." });
+            return;
+        }
+        try {
+            const { mutationId, ...settings } = body;
+            sendJson<ProjectResponse>(response, 200, {
+                project: store.setProjectSettings(
+                    project.id,
+                    settings,
+                    expectedVersion,
+                    mutationId,
+                )!,
+            });
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            sendJson(response, 409, {
+                error: errorToMessage(error),
+                project: store.getProject(project.id),
+            });
+        }
+        return;
+    }
+
     if (route.name === "git-watch" && request.method === "POST") {
         const tracker = runtimeConfig.gitStateTracker;
         if (tracker === undefined) {
@@ -1910,7 +1969,9 @@ async function handleRequest(
             return;
         }
         try {
-            const sessionRequest = configureSessionRequest(body, defaultDocker);
+            const sessionRequest = configureSessionRequest(body, defaultDocker, () =>
+                store.queryProjectSettings(body.cwd),
+            );
             const session =
                 body.id === undefined
                     ? store.create(sessionRequest)
@@ -3018,6 +3079,7 @@ function matchRoute(pathname: string):
               | "project-git"
               | "project-refresh"
               | "project-reorder"
+              | "project-settings"
               | "project-workspaces";
           projectId: string;
           sessionId?: undefined;
@@ -3223,6 +3285,9 @@ function matchRoute(pathname: string):
         }
         if (globalParts.length === 3 && globalParts[2] === "reorder") {
             return { name: "project-reorder", projectId };
+        }
+        if (globalParts.length === 3 && globalParts[2] === "settings") {
+            return { name: "project-settings", projectId };
         }
         if (globalParts.length === 3 && globalParts[2] === "terminals") {
             return { name: "project-terminals", projectId };

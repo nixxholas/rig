@@ -6,6 +6,8 @@ import { openSessionDatabase } from "../../database/openSessionDatabase.js";
 import { projectAvatarAssets, projects, projectWorkspaces } from "../../database/schema.js";
 import { inTx } from "../../inTx.js";
 import { projectSetAvatar } from "../projectSetAvatar.js";
+import { projectSetSettings } from "../projectSetSettings.js";
+import { queryProject } from "../queryProject.js";
 import { workspaceReserve } from "../workspaceReserve.js";
 
 describe("project persistence", () => {
@@ -55,6 +57,78 @@ describe("project persistence", () => {
         ).toThrow("fail after workspace");
 
         expect(opened.database.select().from(projectWorkspaces).all()).toEqual([]);
+        opened.client.close();
+    });
+
+    it("stores and clears the default workspace compute atomically", () => {
+        const opened = databaseWithProject();
+
+        expect(
+            projectSetSettings(
+                opened.database,
+                "project-1",
+                { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
+                2,
+                1,
+            ),
+        ).toBe(1);
+        expect(queryProject(opened.database, "project-1")).toMatchObject({
+            settings: {
+                defaultWorkspaceCompute: {
+                    generation: 1,
+                    image: "rig-dev:latest",
+                    type: "docker",
+                },
+            },
+            version: 2,
+        });
+
+        expect(
+            projectSetSettings(
+                opened.database,
+                "project-1",
+                { defaultWorkspaceCompute: { image: "rig-dev:latest", type: "docker" } },
+                3,
+                2,
+            ),
+        ).toBe(1);
+        expect(queryProject(opened.database, "project-1")).toMatchObject({
+            settings: {
+                defaultWorkspaceCompute: {
+                    generation: 1,
+                    image: "rig-dev:latest",
+                    type: "docker",
+                },
+            },
+            version: 3,
+        });
+        expect(
+            projectSetSettings(
+                opened.database,
+                "project-1",
+                { defaultWorkspaceCompute: { type: "local" } },
+                4,
+                3,
+            ),
+        ).toBe(1);
+        expect(queryProject(opened.database, "project-1")).toMatchObject({
+            settings: {
+                defaultWorkspaceCompute: {
+                    generation: 2,
+                    type: "local",
+                },
+            },
+            version: 4,
+        });
+        expect(() =>
+            projectSetSettings(
+                opened.database,
+                "project-1",
+                { defaultWorkspaceCompute: { image: "invalid image", type: "docker" } },
+                5,
+                4,
+            ),
+        ).toThrow("must not contain whitespace");
         opened.client.close();
     });
 });

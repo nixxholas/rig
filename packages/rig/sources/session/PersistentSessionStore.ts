@@ -14,6 +14,7 @@ import type {
     GitRepositoryFacts,
     ModelCatalog,
     Project,
+    ProjectSettingsUpdate,
     ProjectWorkspace,
     ReorderRequest,
     GlobalEvent,
@@ -56,7 +57,11 @@ import type { DurableWait, ScheduledMessage } from "../scheduling/index.js";
 import type { GitCommandRunner } from "../git/types.js";
 import { InMemoryGlobalEventQueue } from "../global-event/InMemoryGlobalEventQueue.js";
 import { LiveGlobalEventQueue } from "../global-event/LiveGlobalEventQueue.js";
-import { ProjectRepository, type ProjectAvatarAsset } from "../project/ProjectRepository.js";
+import {
+    ProjectRepository,
+    type ProjectAvatarAsset,
+    type ProjectSessionSettings,
+} from "../project/ProjectRepository.js";
 import { shouldPublishGlobalEvent } from "../global-event/shouldPublishGlobalEvent.js";
 import { generateKeyBetween } from "../utils/fractionalIndexing.js";
 import { orderKeyAfter } from "../utils/orderKeyAfter.js";
@@ -104,7 +109,6 @@ import { queryNextPendingScheduledMessage } from "../persistence/scheduling/quer
 import { queryExternalToolCalls } from "../persistence/session/queryExternalToolCalls.js";
 import { queryFirstRootSessionIdForWorkspace } from "../persistence/session/queryFirstRootSessionIdForWorkspace.js";
 import { queryInterruptedSessionCandidates } from "../persistence/session/queryInterruptedSessionCandidates.js";
-import { queryLatestSessionDocker } from "../persistence/session/queryLatestSessionDocker.js";
 import { queryProjectSecretIds } from "../persistence/session/queryProjectSecretIds.js";
 import { queryRootSessionIdsForProject } from "../persistence/session/queryRootSessionIdsForProject.js";
 import { queryWorkspaceSessions } from "../persistence/session/queryWorkspaceSessions.js";
@@ -136,6 +140,8 @@ import { WebappStore } from "../webapps/index.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
+import type { DockerExecutionConfig } from "../execution/index.js";
+import { configureSessionRequest } from "./configureSessionRequest.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
 const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
@@ -143,6 +149,7 @@ const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
 export interface PersistentSessionStoreOptions {
     createRuntime?: InMemorySessionOptions["createRuntime"];
     databasePath: string;
+    defaultDocker?: DockerExecutionConfig;
     durableGlobalEventQueue?: boolean;
     mcpToolProvider?: McpToolProvider;
     modelCatalog?: ModelCatalog;
@@ -164,6 +171,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #agentManager: AgentSessionManager;
     #client: ReturnType<typeof openSessionDatabase>["client"];
     #createRuntime: InMemorySessionOptions["createRuntime"];
+    readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #createPresenceEventId = createEventIdFactory();
     readonly #createTerminalEventId = createEventIdFactory();
     #database: SessionDatabase;
@@ -214,6 +222,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.#secrets = new SecretRegistry();
         this.#modelCatalog = options.modelCatalog ?? createModelCatalog();
         this.#createRuntime = options.createRuntime;
+        this.#defaultDocker = options.defaultDocker;
         this.#mcpToolProvider = options.mcpToolProvider;
         this.#now = options.now ?? Date.now;
         this.#onSessionAccess = options.onSessionAccess;
@@ -292,6 +301,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         : this.#archiveWorkspace(projectId, workspaceId),
                 createOwnedWorkspace: (ownerSessionId, projectId, request) =>
                     this.#projects.createWorkspace(projectId, request, ownerSessionId),
+                configureWorkspaceRequest: (request) => this.#configureWorkspaceRequest(request),
                 createSubagent: (request, metadata, contextMessages) =>
                     this.#createSession(request, metadata, contextMessages),
                 createDelegatedSession: (request, metadata, id) =>
@@ -402,6 +412,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         this.liveEvents.close();
         this.#globalEventQueue.deactivate();
         this.#client.close();
+    }
+
+    #configureWorkspaceRequest(request: CreateSessionRequest): CreateSessionRequest {
+        const { docker: _docker, local: _local, ...base } = request;
+        return configureSessionRequest(base, this.#defaultDocker, () =>
+            this.#projects.queryProjectSettings(request.cwd),
+        );
     }
 
     create(request: CreateSessionRequest): InMemorySession {
@@ -557,6 +574,16 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                         request.cwd,
                         request.workspaceId,
                         request.projectId,
+                    );
+                }
+                if (
+                    request.workspaceId !== undefined &&
+                    request.workspaceId !== inherited.workspaceId
+                ) {
+                    return this.#projects.resolve(
+                        request.cwd,
+                        request.workspaceId,
+                        inherited.projectId,
                     );
                 }
                 const project = this.#projects.getProject(inherited.projectId);
@@ -775,6 +802,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         mutationId?: string,
     ): Project | undefined {
         return this.#projects.renameProject(projectId, name, expectedVersion, mutationId);
+    }
+
+    queryProjectSettings(cwd: string): ProjectSessionSettings | undefined {
+        return this.#projects.queryProjectSettings(cwd);
+    }
+
+    setProjectSettings(
+        projectId: string,
+        settings: ProjectSettingsUpdate,
+        expectedVersion?: number,
+        mutationId?: string,
+    ): Project | undefined {
+        return this.#projects.setProjectSettings(projectId, settings, expectedVersion, mutationId);
     }
 
     refreshProject(projectId: string): Project | undefined {
@@ -1471,9 +1511,12 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (workspace !== undefined && workspace.status !== "ready") {
             throw new Error("Only ready workspaces can open terminals.");
         }
-        const docker = queryLatestSessionDocker(this.#tx(), scope.projectId, scope.workspaceId);
+        const cwd = workspace?.path ?? project.path;
+        const docker = configureSessionRequest({ cwd }, this.#defaultDocker, () =>
+            this.#projects.queryProjectSettings(cwd),
+        ).docker;
         return {
-            cwd: workspace?.path ?? project.path,
+            cwd,
             ...(docker === undefined ? {} : { docker }),
         };
     }

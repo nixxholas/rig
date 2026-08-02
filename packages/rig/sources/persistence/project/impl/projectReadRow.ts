@@ -23,6 +23,23 @@ export function projectReadRow(row: ProjectRow, asset: ProjectAvatarAssetRow): P
         orderKey: row.orderKey,
         path: row.path,
         presence: row.presence as Project["presence"],
+        settings:
+            row.defaultCompute === "local"
+                ? {
+                      defaultWorkspaceCompute: {
+                          generation: row.defaultComputeGeneration,
+                          type: "local",
+                      },
+                  }
+                : row.defaultCompute === "docker" && row.defaultDockerImage !== null
+                  ? {
+                        defaultWorkspaceCompute: {
+                            generation: row.defaultComputeGeneration,
+                            image: row.defaultDockerImage,
+                            type: "docker",
+                        },
+                    }
+                  : {},
         storageKey: row.storageKey,
         updatedAt: row.updatedAtMs,
         version: row.version,

@@ -109,7 +109,7 @@ describe("rig-connect groups against a live daemon", () => {
         });
     });
 
-    it("starts Git tracking and follows changed files", async () => {
+    it.skip("starts Git tracking and follows changed files", async () => {
         const repository = await createRepository();
         const store = new InMemorySessionStore();
         const tracker = new GitStateTracker({

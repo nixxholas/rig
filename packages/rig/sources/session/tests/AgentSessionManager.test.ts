@@ -1936,6 +1936,11 @@ describe("AgentSessionManager", () => {
             recordSubagentChanged: vi.fn(),
             requestForSubagent: () => ({
                 cwd: "/project",
+                docker: {
+                    image: "parent:latest",
+                    name: "rig-project-project-1-1",
+                    workingDirectory: "/workspace",
+                },
                 modelId: "openai/gpt-5.6-sol",
                 permissionMode: "auto",
                 providerId: "codex",
@@ -1943,8 +1948,17 @@ describe("AgentSessionManager", () => {
             snapshot: () => ({ projectId: "project-1" }),
         } as unknown as InMemorySession;
         const createSubagent = vi.fn(() => child);
+        const configureWorkspaceRequest = vi.fn((request: CreateSessionRequest) => ({
+            ...request,
+            docker: {
+                image: "workspace:latest",
+                name: "rig-workspace-workspace-1-1",
+                workingDirectory: "/workspace",
+            },
+        }));
         const manager = new AgentSessionManager({
             repository: {
+                configureWorkspaceRequest,
                 createSubagent,
                 get: (id) => (id === parent.id ? parent : undefined),
                 listByRoot: () => [],
@@ -1974,6 +1988,9 @@ describe("AgentSessionManager", () => {
         expect(createSubagent).toHaveBeenCalledWith(
             expect.objectContaining({
                 cwd: "/workspaces/parser",
+                docker: expect.objectContaining({
+                    name: "rig-workspace-workspace-1-1",
+                }),
                 workspaceId: "workspace-1",
             }),
             expect.objectContaining({
@@ -1981,6 +1998,7 @@ describe("AgentSessionManager", () => {
                 type: "subagent",
             }),
         );
+        expect(configureWorkspaceRequest).toHaveBeenCalledOnce();
         await expect(
             manager.spawnInWorkspace(parent.id, {
                 description: "Invade",

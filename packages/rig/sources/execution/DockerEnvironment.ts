@@ -5,6 +5,7 @@ import type { DockerExecutionConfig } from "./DockerExecutionConfig.js";
 import { isDockerNotFoundError } from "./isDockerNotFoundError.js";
 
 const DEFAULT_DOCKER_SOCKET = "/var/run/docker.sock";
+const managedContainerCreations = new Map<string, Promise<Dockerode.Container>>();
 
 export class DockerEnvironment {
     readonly config: DockerExecutionConfig;
@@ -73,6 +74,21 @@ export class DockerEnvironment {
             return existing;
         }
 
+        const creationKey = `${this.config.socketPath ?? DEFAULT_DOCKER_SOCKET}\0${name}`;
+        const activeCreation = managedContainerCreations.get(creationKey);
+        if (activeCreation !== undefined) return activeCreation;
+        const creation = this.#createManagedContainer(image, name);
+        managedContainerCreations.set(creationKey, creation);
+        try {
+            return await creation;
+        } finally {
+            if (managedContainerCreations.get(creationKey) === creation) {
+                managedContainerCreations.delete(creationKey);
+            }
+        }
+    }
+
+    async #createManagedContainer(image: string, name: string): Promise<Dockerode.Container> {
         const container = await this.#docker
             .createContainer({
                 name,
