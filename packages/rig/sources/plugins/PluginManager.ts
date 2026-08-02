@@ -48,6 +48,12 @@ interface PluginRuntimeState {
     updatedAt: number;
 }
 
+interface PluginCatalog {
+    failures: readonly { error: string; folder: string }[];
+    plugins: readonly PluginSummary[];
+    version: EventId;
+}
+
 /**
  * Owns every installed plugin's lifecycle.
  *
@@ -59,6 +65,7 @@ export class PluginManager {
     readonly directory: string;
 
     readonly #appRegistry: PluginAppRegistry;
+    #catalog: { promise: Promise<PluginCatalog>; version: EventId } | undefined;
     readonly #createEventId = createEventIdFactory();
     #catalogVersion: EventId = this.#createEventId();
     readonly #daemonLog: DaemonLog;
@@ -195,44 +202,56 @@ export class PluginManager {
     }
 
     /** Every installed plugin, with the ones currently running marked. */
-    async list(): Promise<{
-        failures: readonly { error: string; folder: string }[];
-        plugins: readonly PluginSummary[];
-        version: EventId;
-    }> {
+    async list(): Promise<PluginCatalog> {
         for (;;) {
             const version = this.#catalogVersion;
-            const discovery = await discoverPlugins(this.directory);
-            const catalog = {
-                failures: discovery.failures.map((failure) => ({
-                    error: failure.error,
-                    folder: failure.folderName,
-                })),
-                plugins: discovery.plugins.map((plugin) => {
-                    const state = this.#states.get(plugin.folderName) ?? {
-                        status: "stopped" as const,
-                        updatedAt: this.#now(),
-                    };
-                    return {
-                        apps:
-                            state.status === "running"
-                                ? this.#appRegistry.list(plugin.folderName)
-                                : [],
-                        dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
-                        description: plugin.manifest.description,
-                        directory: plugin.directory,
-                        ...(state.error === undefined ? {} : { error: state.error }),
-                        folder: plugin.folderName,
-                        logAvailable: state.error !== undefined || state.logPath !== undefined,
-                        name: plugin.manifest.name,
-                        status: state.status,
-                        version: plugin.manifest.version,
-                    };
-                }),
-                version,
-            };
+            const cached =
+                this.#catalog?.version === version
+                    ? this.#catalog
+                    : {
+                          promise: this.#readCatalog(version),
+                          version,
+                      };
+            this.#catalog = cached;
+            let catalog: PluginCatalog;
+            try {
+                catalog = await cached.promise;
+            } catch (error) {
+                if (this.#catalog === cached) this.#catalog = undefined;
+                throw error;
+            }
             if (version === this.#catalogVersion) return catalog;
         }
+    }
+
+    async #readCatalog(version: EventId): Promise<PluginCatalog> {
+        const discovery = await discoverPlugins(this.directory);
+        return {
+            failures: discovery.failures.map((failure) => ({
+                error: failure.error,
+                folder: failure.folderName,
+            })),
+            plugins: discovery.plugins.map((plugin) => {
+                const state = this.#states.get(plugin.folderName) ?? {
+                    status: "stopped" as const,
+                    updatedAt: this.#now(),
+                };
+                return {
+                    apps:
+                        state.status === "running" ? this.#appRegistry.list(plugin.folderName) : [],
+                    dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
+                    description: plugin.manifest.description,
+                    directory: plugin.directory,
+                    ...(state.error === undefined ? {} : { error: state.error }),
+                    folder: plugin.folderName,
+                    logAvailable: state.error !== undefined || state.logPath !== undefined,
+                    name: plugin.manifest.name,
+                    status: state.status,
+                    version: plugin.manifest.version,
+                };
+            }),
+            version,
+        };
     }
 
     /** Reads at most the current plugin log's fixed retention bound. */
@@ -330,6 +349,7 @@ export class PluginManager {
                 ...(this.#listProviderUsage === undefined
                     ? {}
                     : { listProviderUsage: this.#listProviderUsage }),
+                listPlugins: async () => (await this.list()).plugins,
                 ...(this.#mcpRegistry === undefined ? {} : { mcpRegistry: this.#mcpRegistry }),
                 store: this.#store,
             });

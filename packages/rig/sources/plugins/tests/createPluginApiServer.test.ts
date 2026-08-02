@@ -2,12 +2,18 @@ import { request as requestHttp } from "node:http";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import { createHappyPluginClient, defineMcpTool, Type } from "happy-plugins";
+import {
+    createHappyPluginClient,
+    defineMcpTool,
+    HAPPY_PLUGIN_MAX_LIST_ITEMS,
+    Type,
+} from "happy-plugins";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createPluginApiServer } from "../createPluginApiServer.js";
+import { MAX_INSTALLED_PLUGINS } from "../discoverPlugins.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
 
 const cleanup: (() => Promise<void> | void)[] = [];
@@ -31,6 +37,8 @@ describe("plugin API server", () => {
         });
         cleanup.push(() => store.close());
         const server = createPluginApiServer({
+            listPlugins: async () => [],
+            pluginFolder: "test-plugin",
             pluginName: "Test Plugin",
             store,
             token: "private-plugin-token",
@@ -59,6 +67,106 @@ describe("plugin API server", () => {
         await expect(unauthorizedStatus(socketPath)).resolves.toBe(401);
     });
 
+    it("lists the manager snapshot with plugin states and the caller marked by folder", async () => {
+        expect(MAX_INSTALLED_PLUGINS).toBeLessThanOrEqual(HAPPY_PLUGIN_MAX_LIST_ITEMS);
+        const longDisplayName = "R".repeat(129);
+        const directory = await createTestSocketDirectory();
+        cleanup.push(() => rm(directory, { force: true, recursive: true }));
+        const socketPath = join(directory, "api.sock");
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: "",
+                defaultProviderId: "",
+                models: [],
+                providers: [],
+            },
+        });
+        cleanup.push(() => store.close());
+        const server = createPluginApiServer({
+            listPlugins: async () => [
+                {
+                    apps: [],
+                    dataDirectory: "/plugin-data/reports",
+                    description: "Writes reports.",
+                    directory: "/plugins/reports",
+                    folder: "reports",
+                    logAvailable: true,
+                    name: longDisplayName,
+                    status: "build_failed",
+                    version: "0.0.0",
+                },
+                {
+                    apps: [],
+                    dataDirectory: "/plugin-data/archive",
+                    description: "Archives work.",
+                    directory: "/plugins/archive",
+                    folder: "archive",
+                    logAvailable: false,
+                    name: "Archive",
+                    status: "stopped",
+                    version: "0.0.0",
+                },
+                ...Array.from({ length: MAX_INSTALLED_PLUGINS - 2 }, (_, index) => ({
+                    apps: [],
+                    dataDirectory: `/plugin-data/filler-${String(index)}`,
+                    description: "Fills the bounded catalog.",
+                    directory: `/plugins/filler-${String(index)}`,
+                    folder: `filler-${String(index)}`,
+                    logAvailable: false,
+                    name: `Filler ${String(index)}`,
+                    status: "stopped" as const,
+                    version: "0.0.0",
+                })),
+                {
+                    apps: [],
+                    dataDirectory: "/plugin-data/clock",
+                    description: "Keeps time.",
+                    directory: "/plugins/clock",
+                    folder: "clock",
+                    logAvailable: true,
+                    name: "Clock",
+                    status: "running",
+                    version: "1.2.3",
+                },
+            ],
+            pluginFolder: "clock",
+            pluginName: "Clock",
+            store,
+            token: "private-plugin-token",
+        });
+        cleanup.push(() => closeServer(server));
+        await listen(server, socketPath);
+
+        const plugins = await createHappyPluginClient({
+            socketPath,
+            token: "private-plugin-token",
+        }).plugins.list();
+        expect(plugins).toHaveLength(MAX_INSTALLED_PLUGINS);
+        expect(plugins.slice(0, 2)).toEqual([
+            {
+                folder: "reports",
+                isSelf: false,
+                name: longDisplayName,
+                state: "build_failed",
+                version: "0.0.0",
+            },
+            {
+                folder: "archive",
+                isSelf: false,
+                name: "Archive",
+                state: "stopped",
+                version: "0.0.0",
+            },
+        ]);
+        expect(plugins.at(-1)).toEqual({
+            folder: "clock",
+            isSelf: true,
+            name: "Clock",
+            state: "running",
+            version: "1.2.3",
+        });
+    });
+
     it("forwards SDK-registered MCP calls over the same authenticated socket", async () => {
         const directory = await createTestSocketDirectory();
         cleanup.push(() => rm(directory, { force: true, recursive: true }));
@@ -76,7 +184,9 @@ describe("plugin API server", () => {
         cleanup.push(() => registry.close());
         const mcp = registry.createConnection({ folder: "projects", name: "Projects" });
         let server = createPluginApiServer({
+            listPlugins: async () => [],
             mcp,
+            pluginFolder: "projects",
             pluginName: "Projects",
             store,
             token: "private-plugin-token",
@@ -136,7 +246,9 @@ describe("plugin API server", () => {
         await expect.poll(() => contribution.failure, { timeout: 2_000 }).toContain("ENOENT");
 
         server = createPluginApiServer({
+            listPlugins: async () => [],
             mcp,
+            pluginFolder: "projects",
             pluginName: "Projects",
             store,
             token: "private-plugin-token",
@@ -168,7 +280,9 @@ describe("plugin API server", () => {
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const server = createPluginApiServer({
+            listPlugins: async () => [],
             mcp: registry.createConnection({ folder: "projects", name: "Projects" }),
+            pluginFolder: "projects",
             pluginName: "Projects",
             store,
             token: "private-plugin-token",
@@ -247,7 +361,9 @@ describe("plugin API server", () => {
         const registry = new PluginMcpRegistry();
         cleanup.push(() => registry.close());
         const server = createPluginApiServer({
+            listPlugins: async () => [],
             mcp: registry.createConnection({ folder: "projects", name: "Projects" }),
+            pluginFolder: "projects",
             pluginName: "Projects",
             store,
             token: "private-plugin-token",

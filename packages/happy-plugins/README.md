@@ -217,6 +217,27 @@ import { happy } from "happy-plugins";
 
 All methods return promises. Inputs and daemon responses are validated with TypeBox at runtime.
 
+### Plugins
+
+```ts
+const plugins = await happy.plugins.list();
+const current = plugins.find((plugin) => plugin.isSelf);
+```
+
+Each entry contains the installed folder, human-readable name, current daemon state, normalized
+manifest version, and whether it represents the calling plugin. A manifest without a version is
+reported as `0.0.0`:
+
+```ts
+type HappyPlugin = {
+    folder: string;
+    isSelf: boolean;
+    name: string;
+    state: "running" | "stopped" | "build_failed";
+    version: string;
+};
+```
+
 ### Projects
 
 ```ts

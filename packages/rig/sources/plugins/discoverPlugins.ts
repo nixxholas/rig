@@ -5,7 +5,8 @@ import { errorToMessage } from "../errorToMessage.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { PluginDiscovery } from "./types.js";
 
-const MAX_INSTALLED_PLUGINS = 64;
+// Must stay in sync with HAPPY_PLUGIN_MAX_LIST_ITEMS in happy-plugins.
+export const MAX_INSTALLED_PLUGINS = 64;
 
 export async function discoverPlugins(directory: string): Promise<PluginDiscovery> {
     await mkdir(directory, { mode: 0o755, recursive: true });

@@ -36,6 +36,7 @@ export interface StartPluginOptions extends BuildPluginOptions {
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
     environment?: NodeJS.ProcessEnv;
+    listPlugins: CreatePluginApiServerOptions["listPlugins"];
     listProviderUsage?: CreatePluginApiServerOptions["listProviderUsage"];
     mcpRegistry?: PluginMcpRegistry;
     store: SessionStore;
@@ -83,7 +84,9 @@ export async function startPlugin(
         ...(options.listProviderUsage === undefined
             ? {}
             : { listProviderUsage: options.listProviderUsage }),
+        listPlugins: options.listPlugins,
         ...(mcp === undefined ? {} : { mcp }),
+        pluginFolder: plugin.folderName,
         pluginName: plugin.manifest.name,
         store: options.store,
         token,

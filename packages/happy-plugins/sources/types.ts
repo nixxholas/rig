@@ -3,6 +3,9 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 const exact = { additionalProperties: false } as const;
 const nonEmptyText = Type.String({ minLength: 1 });
 
+// Must stay in sync with MAX_INSTALLED_PLUGINS in Rig's plugin discovery.
+export const HAPPY_PLUGIN_MAX_LIST_ITEMS = 64;
+
 export const happyProjectSchema = Type.Object(
     {
         archivedAt: Type.Optional(Type.Number()),
@@ -372,6 +375,32 @@ export const happyPluginManifestSchema = Type.Object(
 );
 export type HappyPluginManifest = Static<typeof happyPluginManifestSchema>;
 
+export const happyPluginStateSchema = Type.Union([
+    Type.Literal("build_failed"),
+    Type.Literal("running"),
+    Type.Literal("stopped"),
+]);
+export type HappyPluginState = Static<typeof happyPluginStateSchema>;
+
+export const happyPluginSchema = Type.Object(
+    {
+        folder: Type.String({ maxLength: 255, minLength: 1 }),
+        isSelf: Type.Boolean(),
+        name: nonEmptyText,
+        state: happyPluginStateSchema,
+        version: happyPluginVersionSchema,
+    },
+    exact,
+);
+export type HappyPlugin = Static<typeof happyPluginSchema>;
+
+export const listPluginsResponseSchema = Type.Object(
+    {
+        plugins: Type.Array(happyPluginSchema, { maxItems: HAPPY_PLUGIN_MAX_LIST_ITEMS }),
+    },
+    exact,
+);
+
 export const happyPluginAppResourceSummarySchema = Type.Object(
     {
         mimeType: Type.String(),
@@ -497,6 +526,9 @@ export const listHappyProviderUsageResponseSchema = Type.Object(
 
 export const happyPluginTestSeedSchema = Type.Object(
     {
+        plugins: Type.Optional(
+            Type.Array(happyPluginSchema, { maxItems: HAPPY_PLUGIN_MAX_LIST_ITEMS }),
+        ),
         providerUsage: Type.Optional(Type.Array(happyProviderUsageEntrySchema)),
         projects: Type.Optional(Type.Array(happyProjectSchema)),
         sessions: Type.Optional(Type.Array(happySessionSchema)),
@@ -543,6 +575,10 @@ export interface HappyPluginClient {
     /** Contribute MCP tools to ordinary Happy agent sessions. */
     readonly mcp: {
         startServer(options: StartHappyMcpServerOptions): Promise<HappyMcpServer>;
+    };
+    /** Inspect plugins registered with the owning Happy daemon. */
+    readonly plugins: {
+        list(): Promise<readonly HappyPlugin[]>;
     };
     /** Inspect provider-neutral account usage held by the local daemon. */
     readonly providers: {

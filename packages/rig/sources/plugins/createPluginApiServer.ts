@@ -4,6 +4,7 @@ import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type {
     AgentMessageDelivery,
+    HappyPlugin,
     HappyProviderUsageEntry,
     HappyProject,
     HappySession,
@@ -23,19 +24,27 @@ import {
 import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
-import type { Project, ProjectWorkspace, SessionSummary } from "../protocol/index.js";
+import type {
+    PluginSummary,
+    Project,
+    ProjectWorkspace,
+    SessionSummary,
+} from "../protocol/index.js";
 import { configureSessionRequest } from "../session/configureSessionRequest.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import { isAuthorizedProtocolRequest } from "../server/isAuthorizedProtocolRequest.js";
 import { sendJson } from "../server/sendJson.js";
 import type { PluginMcpConnection } from "./PluginMcpRegistry.js";
+import { MAX_INSTALLED_PLUGINS } from "./discoverPlugins.js";
 
 const MAX_REQUEST_BYTES = 1024 * 1024;
 
 export interface CreatePluginApiServerOptions {
     defaultDocker?: DockerExecutionConfig;
+    listPlugins: () => Promise<readonly PluginSummary[]>;
     listProviderUsage?: () => readonly HappyProviderUsageEntry[];
     mcp?: PluginMcpConnection;
+    pluginFolder: string;
     pluginName: string;
     store: SessionStore;
     token: string;
@@ -111,6 +120,25 @@ async function handleRequest(
         sendJson<{ providers: readonly HappyProviderUsageEntry[] }>(response, 200, {
             providers: options.listProviderUsage?.() ?? [],
         });
+        return;
+    }
+    if (request.method === "GET" && url.pathname === "/plugins") {
+        const snapshot = await options.listPlugins();
+        const bounded = snapshot.slice(0, MAX_INSTALLED_PLUGINS);
+        const self = snapshot.find((plugin) => plugin.folder === options.pluginFolder);
+        if (self !== undefined && !bounded.includes(self)) {
+            bounded[bounded.length - 1] = self;
+        }
+        const plugins = bounded.map(
+            (plugin): HappyPlugin => ({
+                folder: plugin.folder,
+                isSelf: plugin.folder === options.pluginFolder,
+                name: plugin.name,
+                state: plugin.status,
+                version: plugin.version,
+            }),
+        );
+        sendJson<{ plugins: readonly HappyPlugin[] }>(response, 200, { plugins });
         return;
     }
 

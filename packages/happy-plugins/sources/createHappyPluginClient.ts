@@ -13,6 +13,7 @@ import {
     createWorkspaceInputSchema,
     listProjectsResponseSchema,
     listHappyProviderUsageResponseSchema,
+    listPluginsResponseSchema,
     listSessionsResponseSchema,
     listWorkspacesInputSchema,
     listWorkspacesResponseSchema,
@@ -96,6 +97,9 @@ export function createHappyPluginClient(
                         return token();
                     },
                 }),
+        },
+        plugins: {
+            list: async () => (await request("GET", "/plugins", listPluginsResponseSchema)).plugins,
         },
         providers: {
             usage: async () =>

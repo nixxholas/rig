@@ -18,6 +18,7 @@ import {
 import type {
     HappyMcpServerRegistration,
     HappyMcpToolResult,
+    HappyPlugin,
     HappyPluginClient,
     HappyPluginTestRequest,
     HappyPluginTestSeed,
@@ -121,6 +122,7 @@ export async function createHappyPluginTestHost(
     const workspaces: HappyWorkspace[] = structuredClone(seed.workspaces ?? []);
     const sessions: HappySession[] = structuredClone(seed.sessions ?? []);
     const providerUsage = structuredClone(seed.providerUsage ?? []);
+    const plugins: HappyPlugin[] = structuredClone(seed.plugins ?? []);
     const requests: HappyPluginTestRequest[] = [];
     const registrations = new Map<string, TestRegistration>();
     const calls = new Map<string, TestCall<HappyMcpToolResult>>();
@@ -179,6 +181,10 @@ export async function createHappyPluginTestHost(
             }
             if (request.method === "GET" && url.pathname === "/provider-usage") {
                 send(response, 200, { providers: providerUsage });
+                return;
+            }
+            if (request.method === "GET" && url.pathname === "/plugins") {
+                send(response, 200, { plugins });
                 return;
             }
             if (request.method === "POST" && url.pathname === "/sessions") {

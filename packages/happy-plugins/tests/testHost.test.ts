@@ -25,6 +25,49 @@ describe("Happy plugin test host", () => {
         );
     });
 
+    it("seeds the plugin catalog for SDK tests", async () => {
+        const host = await createHappyPluginTestHost(
+            {
+                plugins: [
+                    {
+                        folder: "catalog",
+                        isSelf: true,
+                        name: "Catalog",
+                        state: "running",
+                        version: "2.0.0",
+                    },
+                    {
+                        folder: "broken",
+                        isSelf: false,
+                        name: "Broken",
+                        state: "build_failed",
+                        version: "0.0.0",
+                    },
+                ],
+            },
+            { temporaryDirectory: process.cwd() },
+        );
+        hosts.push(host);
+
+        await expect(host.client.plugins.list()).resolves.toEqual([
+            {
+                folder: "catalog",
+                isSelf: true,
+                name: "Catalog",
+                state: "running",
+                version: "2.0.0",
+            },
+            {
+                folder: "broken",
+                isSelf: false,
+                name: "Broken",
+                state: "build_failed",
+                version: "0.0.0",
+            },
+        ]);
+        expect(host.requests).toContainEqual({ method: "GET", path: "/plugins" });
+    });
+
     it("seeds Rig data, observes SDK requests, lists MCP tools, and calls one", async () => {
         const observed: string[] = [];
         const host = await createHappyPluginTestHost(
