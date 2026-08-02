@@ -41,6 +41,7 @@ import type {
     FileSearchResult,
     EventId,
     McpServerSummary,
+    PluginSummary,
     PresenceSnapshot,
     PresenceSummary,
     RunShellCommandResult,
@@ -152,6 +153,11 @@ const INPUT_PROMPT = "› ";
 const INPUT_LINE_INDENT = "  ";
 const PENDING_TOOL_CALL_TITLE = "Working";
 const ACTIVITY_ANIMATION_MS = 120;
+const PLUGIN_STATUS_LABELS = {
+    failed: "Failed",
+    running: "Running",
+    stopped: "Stopped",
+} satisfies Record<PluginSummary["status"], string>;
 const REASONING_DOWN_RAW_KEYS = new Set(["\x1b,", "\x1b[1;2B"]);
 const REASONING_UP_RAW_KEYS = new Set(["\x1b.", "\x1b[1;2A"]);
 const MODEL_MENU_RAW_KEYS = new Set(["\x1bm", "\x1bM"]);
@@ -2374,7 +2380,7 @@ export class CodingAssistantApp implements Component, Focusable {
                     : text;
             this.#appendEntry({
                 role: "event",
-                title: `${log.name} · ${log.status.replace("_", " ")}`,
+                title: `${log.name} · ${PLUGIN_STATUS_LABELS[log.status]}`,
                 text:
                     displayText.length === 0
                         ? "This plugin has not written any output."
@@ -2387,7 +2393,7 @@ export class CodingAssistantApp implements Component, Focusable {
         const lines = [
             ...result.plugins.map(
                 (plugin) =>
-                    `${plugin.name}: ${plugin.status.replace("_", " ")}${plugin.error === undefined ? "" : ` — ${plugin.error}`}`,
+                    `${plugin.name}: ${PLUGIN_STATUS_LABELS[plugin.status]}${plugin.error === undefined ? "" : ` — ${plugin.error}`}`,
             ),
             ...result.failures.map(
                 (failure) => `${failure.folder}: could not register — ${failure.error}`,

@@ -121,7 +121,9 @@ describe("plugin HTTP protocol", () => {
 
     it("returns stable management failures without replacing them with generic server errors", async () => {
         const plugins = context();
-        vi.mocked(plugins.install).mockRejectedValueOnce(new Error("The plugin does not compile."));
+        vi.mocked(plugins.install).mockRejectedValueOnce(
+            new Error("The plugin main entry point is missing."),
+        );
         vi.mocked(plugins.uninstall).mockRejectedValueOnce(
             new PluginNotFoundError("No plugin named Missing is installed."),
         );
@@ -136,7 +138,7 @@ describe("plugin HTTP protocol", () => {
         });
         expect(install.status).toBe(422);
         expect(JSON.parse(install.body)).toEqual({
-            error: { code: "install_failed", message: "The plugin does not compile." },
+            error: { code: "install_failed", message: "The plugin main entry point is missing." },
         });
 
         const uninstall = await request(port, {

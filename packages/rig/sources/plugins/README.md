@@ -1,8 +1,8 @@
 # Plugins
 
-This module owns locally installed Rig plugins: finding them, validating their manifests and icons,
-compiling their TypeScript against Rig's SDK, running each plugin in the existing command sandbox,
-and serving the private API socket it uses.
+This module owns locally installed Rig plugins: finding them, validating their manifests, icons,
+and declared entry points, running each plugin in the existing command sandbox, and serving the
+private API socket it uses. Plugins arrive ready to run; Rig never compiles or rewrites them.
 
 A plugin lives in two places. Its code and everything Rig generates for it stay in Rig's managed
 home, out of the way. Everything the plugin writes while it runs goes to a folder a person can open.
@@ -13,16 +13,30 @@ home, out of the way. Everything the plugin writes while it runs goes to a folde
   +-- happy.plugin.json
   +-- icon.png
   +-- index.ts
-  +-- .build/
-       +-- build/                         TypeScript output
-       +-- node_modules/happy-plugins/    SDK shipped by this Rig
-       +-- plugin.log                     bounded current-run output
+  +-- plugin.log                          bounded current-run output
 
 ~/Happy/Plugins/<folder>                  the plugin's writable folder
   |                                       (Linux: ~/happy/plugins/<folder>)
   +-- .runtime/plugin.sock                per-plugin API socket
   +-- whatever the plugin keeps
 ```
+
+The manifest's required `main` field names a JavaScript or TypeScript file inside the installed
+folder. Rig launches it with `process.execPath`, the same Node executable that is running Rig. The
+supported Node runtime strips erasable TypeScript syntax natively, so `.ts`, `.mts`, and `.cts`
+entry points need no compiler or loader flag. TypeScript constructs that require JavaScript
+generation rather than type stripping are not supported. JavaScript entry points run according to
+normal Node module rules; use `.mjs` or a local `"type": "module"` package declaration for ESM.
+
+Rig ships the built `happy-plugins` SDK under its own `plugin-sdk` distribution folder. Startup
+passes one `--import` module to Node. That module registers a synchronous ESM resolution hook which
+maps the exact `happy-plugins` and `happy-plugins/internal` specifiers to Rig's shipped files.
+Nothing is copied into the plugin and the plugin does not need to vendor the SDK. This loader hook
+is the only SDK-resolution mechanism; `NODE_PATH` is not used because it does not resolve ESM
+imports.
+
+Rig provides only `happy-plugins` at runtime. A plugin must bundle every other third-party
+dependency into its own installed files; `node_modules` is never copied during installation.
 
 The plugin process runs with its writable folder as the working directory and receives that path as
 `HAPPY_PLUGIN_DIRECTORY`. The socket sits there too, because the sandbox that confines the plugin
@@ -49,16 +63,16 @@ resolve canonically and reject traversal and symbolic-link escapes. The result i
 `generated/<name>` locator served by the existing authenticated generated-media route; it does not
 create a session attachment because attachment delivery is owned by an agent turn.
 
-`PluginManager` is the daemon lifecycle boundary. Registration and compilation are separate
-functions so a bad plugin can be reported without preventing other plugins or the daemon
-from starting.
+`PluginManager` is the daemon lifecycle boundary. Registration validates each manifest, PNG icon,
+and `main` file so a bad plugin can be reported without preventing other plugins or the daemon from
+starting.
 
-Registration is immediate. `install` copies a folder in, compiles it, and starts the plugin before
-it returns; `uninstall` stops the plugin before removing its code and always keeps the folder the
+Registration is immediate. `install` copies and validates a folder, then starts the plugin before it
+returns; `uninstall` stops the plugin before removing its code and always keeps the folder the
 plugin writes to. Every change — including a plugin that exits on its own — publishes a live
 `plugins_changed` event carrying the whole current set, so clients never poll and never wait for a
-restart. A plugin is staged in a hidden folder and compiled there, so a plugin that fails to build
-is never installed and never replaces a working one.
+restart. A plugin is validated in a hidden staging folder, so an invalid replacement is never
+installed and never displaces a working one.
 
 Manifest versions use Semantic Versioning and default to `0.0.0` when omitted. Installing over an
 existing folder is classified as an upgrade, downgrade, or reinstall by comparing versions; the
@@ -82,11 +96,11 @@ routes require both, so replacement, exit, disconnect, restart, or uninstall ret
 Resource, bundle, registration-body, tool-call body, storage, and concurrent-call limits keep
 memory and work bounded.
 
-The build snapshots at most 8 apps, 64 resources per app, 256 KiB per resource, and 1 MiB per app.
-It ignores hidden authoring debris, validates every published path and contribution against the
-public TypeBox schemas, and rejects symlinks, traversal, unsupported media, and incomplete pages or
-icons. Plugin-private storage is JSON-only and bounded to 1,024 safe keys, 64 KiB per value, and
-5 MiB total. Atomic-write leftovers are removed on the next storage operation.
+Startup snapshots at most 8 apps, 64 resources per app, 256 KiB per resource, and 1 MiB per app. It
+ignores hidden authoring debris, validates every published path and contribution against the public
+TypeBox schemas, and rejects symlinks, traversal, unsupported media, and incomplete pages or icons.
+Plugin-private storage is JSON-only and bounded to 1,024 safe keys, 64 KiB per value, and 5 MiB
+total. Atomic-write leftovers are removed on the next storage operation.
 
 The `/plugins` snapshot and `plugins_changed` events carry the same ordered catalog version in
 addition to the global cursor. The manager assigns it synchronously when state changes and retries
@@ -96,11 +110,11 @@ metadata on an event is best-effort: if another catalog change supersedes that e
 published, the newer whole-catalog event may omit the installation result.
 
 The manager records one authoritative state for every registered plugin: `running`, `stopped`, or
-`build_failed`. The current-run file retains the most recent 1 MiB and resets for each process
-generation. `readLog` returns its newest 16 KiB, or the newest 16 KiB of the build diagnostic, and
-marks the snapshot when that read bound omitted older output. The daemon protocol serves these
-through `GET /plugins` and `GET /plugins/<name>/log`; `/plugins`, the `plugin_logs` agent tool, and
-`rig-connect` consume that boundary without polling.
+`failed`. The current-run file retains the most recent 1 MiB and resets for each process
+generation. `readLog` returns its newest 16 KiB, or the bounded startup diagnostic when no process
+started, and marks the snapshot when that read bound omitted older output. The daemon protocol
+serves these through `GET /plugins` and `GET /plugins/<name>/log`; `/plugins`, the `plugin_logs`
+agent tool, and `rig-connect` consume that boundary without polling.
 
 ## GitHub repository catalogs
 
@@ -135,4 +149,5 @@ Rig validates the complete index before returning any catalog entries. Repositor
 `owner/repo` form, and callers may select a branch, tag, or commit; omitting the ref uses the
 repository's default branch. Discovery reads at most 1 MiB and times out after 10 seconds.
 Installation downloads a bounded GitHub tarball, extracts only the indexed subdirectory into a
-temporary staging folder, and then uses the same local installation path as every other plugin.
+temporary staging folder, and then uses the same copy-and-validate installation path as every other
+plugin.

@@ -54,7 +54,7 @@ cursor resume reuses the catalog; a gap reloads it. `state.connection` is `conne
 
 `listPlugins()` remains available for one-shot diagnostics. `readPluginLog()` returns the newest
 bounded 16 KiB snapshot, its source, and whether older output was omitted. Installed plugin
-`status` is `running`, `stopped`, or `build_failed`.
+`status` is `running`, `stopped`, or `failed`.
 
 Plugin management uses the same authenticated connection:
 
@@ -63,13 +63,13 @@ const installed = await rig.installPlugin("/Users/steve/Developer/plugins/packag
 await rig.uninstallPlugin(installed.name);
 ```
 
-The install path is an absolute source-folder path on the machine running the Rig daemon. It is
-not a browser upload and is not resolved on the client machine. Rig stages and compiles the source
-before replacing an existing installation, starts the accepted plugin before the call returns, and
-announces the resulting catalog through `connectPlugins()`. Uninstall stops the plugin, removes its
-managed code, and keeps its writable data folder. Both operations accept `{ signal }` and reject
-with `PluginManagementRequestError`, whose `code`, `status`, and message are safe for a client to
-present.
+The install path is an absolute ready-to-run plugin folder on the machine running the Rig daemon.
+It is not a browser upload and is not resolved on the client machine. Rig stages and validates the
+folder before replacing an existing installation, starts the accepted plugin before the call
+returns, and announces the resulting catalog through `connectPlugins()`. Uninstall stops the
+plugin, removes its managed code, and keeps its writable data folder. Both operations accept
+`{ signal }` and reject with `PluginManagementRequestError`, whose `code`, `status`, and message are
+safe for a client to present.
 
 MCP App mounting is a host concern. To make clicking instant, prefetch every declared resource
 by generation as soon as it enters the catalog, then expose navigation only when that bounded

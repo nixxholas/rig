@@ -393,10 +393,10 @@ export interface PluginSummary {
     directory: string;
     folder: string;
     /** Why the current plugin generation is or is not available. */
-    status: "build_failed" | "running" | "stopped";
-    /** Present for a failed build or process failure. */
+    status: "failed" | "running" | "stopped";
+    /** Present for a startup or process failure. */
     error?: string;
-    /** Whether a bounded current-run or build diagnostic is available. */
+    /** Whether a bounded current-run log or startup diagnostic is available. */
     logAvailable: boolean;
     name: string;
     /** The manifest version, normalized to 0.0.0 when the author omitted it. */
@@ -409,7 +409,7 @@ export interface PluginLogSnapshot {
     error?: string;
     folder: string;
     name: string;
-    source: "build" | "current_run";
+    source: "current_run" | "error";
     status: PluginSummary["status"];
     text: string;
     truncated: boolean;

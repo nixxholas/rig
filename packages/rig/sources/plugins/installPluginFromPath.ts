@@ -2,23 +2,22 @@ import { basename, join } from "node:path";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
 import type { InstalledPluginSummary, PluginInstallClassification } from "../protocol/index.js";
-import { buildPlugin } from "./buildPlugin.js";
 import { comparePluginVersions } from "./comparePluginVersions.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import { PLUGIN_MANIFEST_FILE_NAME } from "./types.js";
 
-/** Generated state never travels with a plugin; Rig rebuilds it for the installed copy. */
-const EXCLUDED_ENTRIES = new Set([".build", ".git", ".runtime", "node_modules"]);
+/** Local and generated state never travels with a plugin. */
+const EXCLUDED_ENTRIES = new Set([".git", ".runtime", "node_modules", "plugin.log"]);
 const MAX_SOURCE_FILES = 2_000;
 const MAX_SOURCE_BYTES = 32 * 1024 * 1024;
 
 export type InstalledPlugin = InstalledPluginSummary;
 
 /**
- * Copies a plugin's sources into Rig's managed plugins folder and compiles them there.
+ * Copies a prebuilt plugin into Rig's managed plugins folder and validates it there.
  *
- * The copy lands in a hidden staging folder first, so a plugin that fails to build never becomes
- * visible to discovery and never replaces a working installation.
+ * The copy lands in a hidden staging folder first, so an invalid plugin never becomes visible to
+ * discovery and never replaces a working installation.
  */
 export async function installPluginFromPath(options: {
     fs: FileSystemContext;
@@ -44,10 +43,9 @@ export async function installPluginFromPath(options: {
     await fs.mkdir(stagingDirectory, { recursive: true });
     try {
         await copyTree(fs, sourceDirectory, stagingDirectory, signal);
-        // Registration and compilation both run against the staged copy, so an invalid manifest,
-        // an escaping asset, or a type error is reported before anything is installed.
+        // Registration runs against the staged copy, so an invalid manifest or escaping or missing
+        // asset is reported before anything is installed.
         const staged = await readPluginManifest(stagingDirectory);
-        await buildPlugin(staged);
         signal?.throwIfAborted();
 
         const directory = join(pluginsDirectory, folder);
@@ -75,7 +73,7 @@ async function classifyInstall(
 ): Promise<PluginInstallClassification> {
     if (!(await fs.exists(directory))) return "fresh-install";
     // Version comparison is metadata, not a repair gate. A damaged or schema-outdated installed
-    // copy must remain replaceable after the staged replacement has already built successfully.
+    // copy must remain replaceable after the staged replacement has already validated successfully.
     const previousVersion = await readPluginManifest(directory)
         .then((plugin) => plugin.manifest.version)
         .catch(() => undefined);

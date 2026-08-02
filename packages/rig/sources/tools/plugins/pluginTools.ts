@@ -64,7 +64,7 @@ export const pluginInstallTool = defineTool({
     name: "plugin_install",
     label: "Install plugin",
     description:
-        "Install a plugin from a folder on this machine or from a plugin listed by a GitHub repository. Rig copies the sources into its managed plugins folder, compiles them, and starts the plugin right away; a plugin that fails to build is not installed.",
+        "Install a prebuilt plugin from a folder on this machine or from a plugin listed by a GitHub repository. Rig copies and validates the plugin folder, then starts its declared JavaScript or TypeScript entry point right away.",
     arguments: Type.Object(
         {
             path: Type.Optional(
@@ -100,14 +100,14 @@ export const pluginInstallTool = defineTool({
             source.plugin === undefined &&
             source.ref === undefined
         ) {
-            return `install the plugin at ${quoteVisibleExact(resolvePluginSource(source.path, context))} into ${quoteVisibleExact(getPluginsDirectory())}, compiling its TypeScript and running it. ${OUTSIDE_WORKSPACE}`;
+            return `install the prebuilt plugin at ${quoteVisibleExact(resolvePluginSource(source.path, context))} into ${quoteVisibleExact(getPluginsDirectory())}, validating and running it. ${OUTSIDE_WORKSPACE}`;
         }
         if (
             source.path === undefined &&
             source.repository !== undefined &&
             source.plugin !== undefined
         ) {
-            return `download the indexed plugin ${quoteVisibleExact(source.plugin)} from ${quoteVisibleExact(source.repository)} on GitHub at ${quoteVisibleExact(source.ref ?? "the default branch")}, install it into ${quoteVisibleExact(getPluginsDirectory())}, compile its TypeScript, and run it. ${GITHUB_ACCESS}. ${OUTSIDE_WORKSPACE}`;
+            return `download the indexed prebuilt plugin ${quoteVisibleExact(source.plugin)} from ${quoteVisibleExact(source.repository)} on GitHub at ${quoteVisibleExact(source.ref ?? "the default branch")}, install it into ${quoteVisibleExact(getPluginsDirectory())}, validating and running it. ${GITHUB_ACCESS}. ${OUTSIDE_WORKSPACE}`;
         }
         return `attempt to install a plugin from an invalid source into ${quoteVisibleExact(getPluginsDirectory())}. ${GITHUB_ACCESS}. ${OUTSIDE_WORKSPACE}`;
     },
@@ -192,7 +192,7 @@ export const pluginListTool = defineTool({
                 logAvailable: Type.Boolean(),
                 name: Type.String(),
                 status: Type.Union([
-                    Type.Literal("build_failed"),
+                    Type.Literal("failed"),
                     Type.Literal("running"),
                     Type.Literal("stopped"),
                 ]),
@@ -222,7 +222,7 @@ export const pluginLogsTool = defineTool({
     name: "plugin_logs",
     label: "Read plugin logs",
     description:
-        "Read the bounded current log for one installed plugin, including whether it is running, stopped, or failed to build.",
+        "Read the bounded current log or startup diagnostic for one installed plugin, including whether it is running, stopped, or failed.",
     arguments: Type.Object(
         { name: Type.String({ description: "Installed plugin name or folder name." }) },
         { additionalProperties: false },
@@ -232,9 +232,9 @@ export const pluginLogsTool = defineTool({
             error: Type.Optional(Type.String()),
             folder: Type.String(),
             name: Type.String(),
-            source: Type.Union([Type.Literal("build"), Type.Literal("current_run")]),
+            source: Type.Union([Type.Literal("current_run"), Type.Literal("error")]),
             status: Type.Union([
-                Type.Literal("build_failed"),
+                Type.Literal("failed"),
                 Type.Literal("running"),
                 Type.Literal("stopped"),
             ]),
@@ -250,7 +250,7 @@ export const pluginLogsTool = defineTool({
     execute: ({ name }, context) => requirePlugins(context).readLog(name),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
-        `Read the ${result.status === "build_failed" ? "build diagnostics" : "current log"} for ${result.name}.`,
+        `Read the ${result.status === "failed" ? "startup diagnostic" : "current log"} for ${result.name}.`,
     locks: [],
 });
 

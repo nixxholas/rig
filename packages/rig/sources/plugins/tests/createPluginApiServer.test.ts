@@ -315,7 +315,7 @@ describe("plugin API server", () => {
                     folder: "reports",
                     logAvailable: true,
                     name: longDisplayName,
-                    status: "build_failed",
+                    status: "failed",
                     version: "0.0.0",
                 },
                 {
@@ -370,7 +370,7 @@ describe("plugin API server", () => {
                 folder: "reports",
                 isSelf: false,
                 name: longDisplayName,
-                state: "build_failed",
+                state: "failed",
                 version: "0.0.0",
             },
             {

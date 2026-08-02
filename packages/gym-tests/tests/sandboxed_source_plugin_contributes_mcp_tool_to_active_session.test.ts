@@ -14,8 +14,8 @@ const APP_ONLY_TOOL_NAME = "mcp__Project_Tools___Catalog__refresh_app";
 const PLUGIN_MANIFEST = `${JSON.stringify(
     {
         description: "Contributes a project catalog tool.",
-        entry: "index.ts",
         icon: "icon.png",
+        main: "index.ts",
         name: "Project Tools",
     },
     null,

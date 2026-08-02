@@ -9,7 +9,6 @@ import type { LiveGlobalEventEntry } from "../../global-event/LiveGlobalEventQue
 import type { PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
-import { PluginBuildError } from "../PluginBuildError.js";
 import { PluginManager } from "../PluginManager.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
@@ -138,17 +137,17 @@ describe("plugin registration", () => {
         });
     });
 
-    it("keeps a running plugin when a replacement fails to build", async () => {
+    it("keeps a running plugin when a replacement has no main entry point", async () => {
         const harness = await createHarness();
         await harness.manager.start();
         const source = join(harness.workspace, "clock");
         await createPluginSource(source);
         await harness.manager.install({ fs: harness.fs, sourceDirectory: source });
 
-        await writeFile(join(source, "index.ts"), 'const ticks: number = "not a number";\n');
+        await rm(join(source, "index.ts"));
         await expect(
             harness.manager.install({ fs: harness.fs, sourceDirectory: source }),
-        ).rejects.toThrow(/could not build/iu);
+        ).rejects.toThrow('The plugin main entry point "index.ts" does not exist.');
 
         const listed = await harness.manager.list();
         expect(listed.plugins).toMatchObject([{ name: "Clock", status: "running" }]);
@@ -174,12 +173,12 @@ describe("plugin registration", () => {
         ).rejects.toThrow("shutting down");
     });
 
-    it("exposes bounded build diagnostics as an explicit plugin state", async () => {
+    it("exposes bounded startup diagnostics as an explicit failed state", async () => {
         const diagnostics = `${"x".repeat(
             MAXIMUM_PLUGIN_LOG_READ_BYTES,
-        )}\nTypeScript: value is not assignable.`;
+        )}\nThe plugin runtime could not start.`;
         const harness = await createHarness({
-            startError: new PluginBuildError("Broken", diagnostics),
+            startError: new Error(diagnostics),
         });
         await createPluginSource(join(harness.manager.directory, "broken"));
 
@@ -188,23 +187,23 @@ describe("plugin registration", () => {
         expect(await harness.manager.list()).toMatchObject({
             plugins: [
                 {
-                    error: expect.stringContaining("TypeScript: value is not assignable."),
+                    error: expect.stringContaining("The plugin runtime could not start."),
                     logAvailable: true,
-                    status: "build_failed",
+                    status: "failed",
                 },
             ],
         });
         const log = await harness.manager.readLog("Broken");
         expect(log).toMatchObject({
-            source: "build",
-            status: "build_failed",
-            text: expect.stringContaining("TypeScript: value is not assignable."),
+            source: "error",
+            status: "failed",
+            text: expect.stringContaining("The plugin runtime could not start."),
             truncated: true,
         });
         expect(Buffer.byteLength(log.text)).toBe(MAXIMUM_PLUGIN_LOG_READ_BYTES);
     });
 
-    it("reports non-build startup failures as stopped", async () => {
+    it("reports startup failures as failed", async () => {
         const harness = await createHarness({
             startError: new Error("The sandbox did not start."),
         });
@@ -213,11 +212,12 @@ describe("plugin registration", () => {
         await harness.manager.start();
 
         expect(await harness.manager.list()).toMatchObject({
-            plugins: [{ error: "The sandbox did not start.", status: "stopped" }],
+            plugins: [{ error: "The sandbox did not start.", status: "failed" }],
         });
         await expect(harness.manager.readLog("Broken")).resolves.toMatchObject({
             error: "The sandbox did not start.",
-            status: "stopped",
+            source: "error",
+            status: "failed",
         });
     });
 });
@@ -274,8 +274,7 @@ async function createHarness(options: { startError?: Error } = {}): Promise<{
             }>((resolve) => {
                 finish = () => resolve({ code: 0, signal: null });
             });
-            const logPath = join(plugin.directory, ".build", "plugin.log");
-            await mkdir(join(plugin.directory, ".build"), { recursive: true });
+            const logPath = join(plugin.directory, "plugin.log");
             await writeFile(logPath, "[stdout] ready\n");
             return {
                 completion,
@@ -315,8 +314,8 @@ async function createPluginSource(directory: string, version?: string): Promise<
             `${JSON.stringify(
                 {
                     description: "A small clock.",
-                    entry: "index.ts",
                     icon: "icon.png",
+                    main: "index.ts",
                     name: "Clock",
                     ...(version === undefined ? {} : { version }),
                 },

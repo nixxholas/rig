@@ -1381,7 +1381,7 @@ export interface PluginSummary {
     error?: string;
     logAvailable: boolean;
     name: string;
-    status: "build_failed" | "running" | "stopped";
+    status: "failed" | "running" | "stopped";
     version: string;
 }
 
@@ -1389,7 +1389,7 @@ export interface PluginLogSnapshot {
     error?: string;
     folder: string;
     name: string;
-    source: "build" | "current_run";
+    source: "current_run" | "error";
     status: PluginSummary["status"];
     text: string;
     truncated: boolean;

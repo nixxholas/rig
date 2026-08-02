@@ -3,7 +3,12 @@ import { isAbsolute, relative, resolve } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
 
-import { PLUGIN_MANIFEST_FILE_NAME, pluginManifestSchema, type RegisteredPlugin } from "./types.js";
+import {
+    fileSystemErrorSchema,
+    PLUGIN_MANIFEST_FILE_NAME,
+    pluginManifestSchema,
+    type RegisteredPlugin,
+} from "./types.js";
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 export async function readPluginManifest(directory: string): Promise<RegisteredPlugin> {
@@ -33,14 +38,21 @@ export async function readPluginManifest(directory: string): Promise<RegisteredP
         version: normalized.version!,
     };
 
-    const entryPath = resolveOwnedPath(directory, manifest.entry, "entry");
+    const entryPath = resolveOwnedPath(directory, manifest.main, "main entry point");
     const iconPath = resolveOwnedPath(directory, manifest.icon, "icon");
     const [entryInfo, iconInfo, iconHeader] = await Promise.all([
-        lstat(entryPath),
+        lstat(entryPath).catch((error: unknown) => {
+            if (Value.Check(fileSystemErrorSchema, error) && error.code === "ENOENT") {
+                throw new Error(
+                    `The plugin main entry point ${JSON.stringify(manifest.main)} does not exist.`,
+                );
+            }
+            throw error;
+        }),
         lstat(iconPath),
         readFile(iconPath).then((bytes) => bytes.subarray(0, PNG_SIGNATURE.length)),
     ]);
-    if (!entryInfo.isFile()) throw new Error("The plugin entry must be a file.");
+    if (!entryInfo.isFile()) throw new Error("The plugin main entry point must be a file.");
     if (!iconInfo.isFile()) throw new Error("The plugin icon must be a file.");
     if (!iconHeader.equals(PNG_SIGNATURE)) {
         throw new Error("The plugin icon is not a valid PNG image.");

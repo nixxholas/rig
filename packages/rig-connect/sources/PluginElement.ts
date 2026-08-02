@@ -47,7 +47,7 @@ export interface LocalPlugin {
     id: string;
     logAvailable: boolean;
     name: string;
-    status: "build_failed" | "running" | "stopped";
+    status: "failed" | "running" | "stopped";
     version: string;
 }
 

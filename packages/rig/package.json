@@ -79,7 +79,6 @@
         "sharp": "^0.35.3",
         "ssh2": "^1.17.0",
         "thumbhash": "^0.1.1",
-        "typescript-7": "npm:typescript@^7.0.2",
         "zod": "^4.4.3"
     },
     "devDependencies": {

@@ -3,7 +3,7 @@ import { isAbsolute, join, resolve } from "node:path";
 
 import { getRigHome } from "../config/getRigHome.js";
 
-/** The managed root that holds every installed plugin's code and generated build state. */
+/** The managed root that holds every installed plugin and its bounded current-run log. */
 export function getPluginsDirectory(
     environment: NodeJS.ProcessEnv = process.env,
     homeDirectory: string = homedir(),

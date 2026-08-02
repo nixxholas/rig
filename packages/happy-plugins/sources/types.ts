@@ -691,8 +691,10 @@ export const happyPluginManifestSchema = Type.Object(
             }),
         ),
         description: Type.String({ minLength: 1 }),
-        entry: Type.String({ pattern: "^(?!.*\\.d\\.ts$).+\\.ts$" }),
         icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
+        main: Type.String({
+            pattern: "^(?!.*\\.[dD]\\.[cCmM]?[tT][sS]$).+\\.(?:[cCmM]?[jJ][sS]|[cCmM]?[tT][sS])$",
+        }),
         name: Type.String({ minLength: 1 }),
         version: Type.Optional(happyPluginVersionSchema),
     },
@@ -701,7 +703,7 @@ export const happyPluginManifestSchema = Type.Object(
 export type HappyPluginManifest = Static<typeof happyPluginManifestSchema>;
 
 export const happyPluginStateSchema = Type.Union([
-    Type.Literal("build_failed"),
+    Type.Literal("failed"),
     Type.Literal("running"),
     Type.Literal("stopped"),
 ]);

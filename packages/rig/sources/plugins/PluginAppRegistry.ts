@@ -17,7 +17,7 @@ import {
     happyPluginAppContributionSchema,
 } from "happy-plugins";
 
-import type { BuiltPlugin, PluginAppSnapshot } from "./types.js";
+import type { PluginAppSnapshot, PluginRuntimeSnapshot } from "./types.js";
 import {
     PluginMcpCallTimeoutError,
     PluginMcpNotRunningError,
@@ -79,7 +79,7 @@ export class PluginAppRegistry {
         this.mcp = mcp;
     }
 
-    register(plugin: BuiltPlugin, generation: string, dataDirectory: string): () => void {
+    register(plugin: PluginRuntimeSnapshot, generation: string, dataDirectory: string): () => void {
         const owned: string[] = [];
         for (const app of plugin.apps) {
             const id = appIdentity(plugin.folderName, app.id);

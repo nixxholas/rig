@@ -69,7 +69,7 @@ describe("plugin management", () => {
                     {
                         error: {
                             code: "install_failed",
-                            message: "The plugin does not compile.",
+                            message: "The plugin main entry point is missing.",
                         },
                     },
                     { status: 422 },
@@ -82,7 +82,7 @@ describe("plugin management", () => {
         expect(failure).toBeInstanceOf(PluginManagementRequestError);
         expect(failure).toMatchObject({
             code: "install_failed",
-            message: "The plugin does not compile.",
+            message: "The plugin main entry point is missing.",
             status: 422,
         });
         await expect(rig.uninstallPlugin("Broken")).rejects.toThrow(

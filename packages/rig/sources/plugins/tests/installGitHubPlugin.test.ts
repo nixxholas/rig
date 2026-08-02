@@ -31,8 +31,8 @@ describe("installing an indexed GitHub plugin", () => {
             "repository-root/plugins/clock/happy.plugin.json": `${JSON.stringify(
                 {
                     description: "A small clock.",
-                    entry: "index.ts",
                     icon: "icon.png",
+                    main: "index.ts",
                     name: "Clock",
                     version: "1.2.0",
                 },
@@ -79,9 +79,9 @@ describe("installing an indexed GitHub plugin", () => {
             name: "Clock",
             version: "1.2.0",
         });
-        await expect(
-            readFile(join(installed.directory, ".build", "build", "index.js"), "utf8"),
-        ).resolves.toContain("ready");
+        await expect(readFile(join(installed.directory, "index.ts"), "utf8")).resolves.toContain(
+            "ready",
+        );
         await expect(fs.readdir(pluginsDirectory)).resolves.toEqual(["clock"]);
         expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
             "https://raw.githubusercontent.com/happy-dev/plugins/release/1.2.0/happy-plugins.json",

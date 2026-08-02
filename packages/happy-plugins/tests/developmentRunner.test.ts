@@ -97,8 +97,8 @@ describe("happy-plugin development runner", () => {
                     },
                 ],
                 description: "Development fixture",
-                entry: "index.ts",
                 icon: "icon.png",
+                main: "index.ts",
                 name: "Development fixture",
             }),
         );
@@ -122,8 +122,8 @@ describe("happy-plugin development runner", () => {
                     },
                 ],
                 description: "Development fixture",
-                entry: "index.ts",
                 icon: "icon.png",
+                main: "index.ts",
                 name: "Development fixture",
             }),
         );

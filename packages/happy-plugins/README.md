@@ -50,13 +50,21 @@ Install the published package while authoring for editor completion and local ty
 pnpm add --save-dev happy-plugins typescript@^7.0.2 @types/node
 ```
 
-This installation is an authoring dependency. At runtime, Happy compiles the plugin with
-TypeScript 7 and substitutes the copy of `happy-plugins` shipped with that Happy installation. The
-daemon's build is the final compatibility check. A plugin cannot accidentally run against a
-different SDK from the one its daemon implements.
+This installation is an authoring dependency. Happy does not compile plugins. At runtime it starts
+the manifest's declared JavaScript or TypeScript entry point with the same Node executable running
+Happy. Current Happy releases use Node's native type stripping for TypeScript, with no compiler or
+extra flag.
+
+Happy registers one ESM loader hook with `--import`. The hook maps `happy-plugins` and
+`happy-plugins/internal` to the built SDK shipped with that Happy installation. The plugin does not
+need a runtime SDK dependency and cannot accidentally import a different SDK version. Happy does
+not use `NODE_PATH`, which does not resolve ESM imports.
 
 Happy itself does not require a plugin to have a `package.json` or its own SDK installation. A
 TypeScript entry file, manifest, and PNG icon are enough.
+
+Happy provides only `happy-plugins` at runtime. Bundle every other third-party dependency into the
+plugin's own files; Happy does not copy `node_modules` when it installs a plugin.
 
 ## Create a plugin
 
@@ -69,7 +77,8 @@ A plugin is installed into its own folder inside Happy's managed home:
 └── index.ts
 ```
 
-Happy keeps everything it generates for the plugin under `.build/` in that same folder.
+Happy copies this folder into its managed plugin directory unchanged and validates the manifest,
+icon, and declared entry point before installing it.
 
 The installation root can be overridden with the absolute `HAPPY_PLUGINS_DIRECTORY` environment
 variable.
@@ -83,7 +92,7 @@ The manifest is intentionally small and exact:
     "name": "Project Counter",
     "description": "Reports how many projects Happy knows about.",
     "version": "1.0.0",
-    "entry": "index.ts",
+    "main": "index.ts",
     "icon": "icon.png",
     "apps": [
         {
@@ -97,20 +106,20 @@ The manifest is intentionally small and exact:
 }
 ```
 
-`name`, `description`, `entry`, and `icon` are required. `version` and `apps` are optional. Extra
+`name`, `description`, `main`, and `icon` are required. `version` and `apps` are optional. Extra
 fields are rejected.
 
 - `name`: a non-empty human-readable name.
 - `description`: a non-empty explanation of the plugin.
 - `version`: a Semantic Versioning string. An omitted version is treated as `0.0.0`.
-- `entry`: a relative path to a `.ts` file inside the plugin folder.
+- `main`: a relative path to a runnable JavaScript or TypeScript file inside the plugin folder.
 - `icon`: a relative path to a PNG file inside the plugin folder.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
   sidebar metadata, and optional image icon.
 
-Entry and icon paths must remain inside the plugin folder. The entry and icon themselves must be
-ordinary files rather than symbolic links. Happy does not register a plugin whose manifest or
-icon is invalid.
+Main and icon paths must remain inside the plugin folder. The main entry point and icon themselves
+must be ordinary files rather than symbolic links. Happy does not register a plugin whose
+manifest, icon, or main entry point is invalid.
 
 ### `index.ts`
 
@@ -128,11 +137,14 @@ await new Promise<void>((resolve) => {
 });
 ```
 
-The entry is an ES module and may use top-level `await`. Relative TypeScript imports are supported.
+The TypeScript entry may use top-level `await` and relative `.ts` imports. Node strips erasable
+TypeScript syntax directly; constructs that require JavaScript generation, such as enums with
+runtime values, are not supported. For JavaScript ESM, use an `.mjs` entry point or include a
+`package.json` with `"type": "module"`.
 
-Ask an agent to install the folder and Happy validates the manifest, compiles the TypeScript, and
-starts the plugin right away. Uninstalling stops it and keeps the folder it writes to. Happy also
-loads every installed plugin when the daemon starts.
+Ask an agent to install the folder and Happy validates it, copies it unchanged, and starts the
+declared entry point right away. Uninstalling stops it and keeps the folder it writes to. Happy
+also loads every installed plugin when the daemon starts.
 
 ## Develop without Docker
 
@@ -222,14 +234,14 @@ Happy injects these environment variables:
 Normal plugin code should use the exported `happy` client and does not need to read the socket or
 token directly.
 
-Happy captures stdout and stderr for the current run in `.build/plugin.log` inside the installed
-plugin folder. That file retains the most recent 1 MiB rather than freezing at its earliest output,
-and it resets when a new plugin process starts. Generated runtime state below `.build/` and
-`.runtime/` should not be edited or distributed.
+Happy captures stdout and stderr for the current run in `plugin.log` inside the installed plugin
+folder. That file retains the most recent 1 MiB rather than freezing at its earliest output, and it
+resets when a new plugin process starts. Runtime socket state below `.runtime/` in the plugin's
+writable data folder should not be edited or distributed.
 
 Rig exposes the newest useful 16 KiB snapshot through `/plugins <name>`, the `plugin_logs` agent
 tool, the local protocol, and `rig-connect`, with `truncated` set when older retained output was
-omitted. A plugin is reported explicitly as running, stopped, or failed to build; logs are
+omitted. A plugin is reported explicitly as running, stopped, or failed; logs are
 snapshots, not an unbounded stream or polling API.
 
 ## API
@@ -256,7 +268,7 @@ type HappyPlugin = {
     folder: string;
     isSelf: boolean;
     name: string;
-    state: "running" | "stopped" | "build_failed";
+    state: "failed" | "running" | "stopped";
     version: string;
 };
 ```
@@ -665,14 +677,16 @@ The explicit client uses the same API and runtime validation as `happy`.
 
 ## Distribution checklist
 
-Distribute the plugin folder, excluding the generated `.build/` folder and local `node_modules/`.
-Before sharing it:
+Distribute the ready-to-run plugin folder, excluding local `node_modules/` and `plugin.log`. Happy
+provides `happy-plugins` at runtime, but every other third-party dependency must already be bundled
+into the plugin's own files because `node_modules` is not copied during installation. Before
+sharing it:
 
 1. Install the current `happy-plugins` package for local type checking.
 2. Keep the manifest paths relative and inside the plugin folder.
-3. Include the TypeScript sources and required PNG icon.
-4. Start it with the oldest Happy version you intend to support; the daemon build is the compatibility
-   test.
-5. Check `.build/plugin.log` for startup or runtime errors.
+3. Include the declared JavaScript or TypeScript entry point and required PNG icon.
+4. Type-check and test the plugin before distribution; Happy does not compile it during install.
+5. Start it with the oldest Happy version you intend to support.
+6. Check `plugin.log` for startup or runtime errors.
 
 The SDK package is MIT licensed. Plugins choose their own license.

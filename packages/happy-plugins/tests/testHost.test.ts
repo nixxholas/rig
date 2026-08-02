@@ -41,7 +41,7 @@ describe("Happy plugin test host", () => {
                         folder: "broken",
                         isSelf: false,
                         name: "Broken",
-                        state: "build_failed",
+                        state: "failed",
                         version: "0.0.0",
                     },
                 ],
@@ -62,7 +62,7 @@ describe("Happy plugin test host", () => {
                 folder: "broken",
                 isSelf: false,
                 name: "Broken",
-                state: "build_failed",
+                state: "failed",
                 version: "0.0.0",
             },
         ]);

@@ -1,20 +1,16 @@
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { buildPlugin } from "../buildPlugin.js";
 import { discoverPlugins } from "../discoverPlugins.js";
-import { PluginBuildError } from "../PluginBuildError.js";
 import { PluginLog } from "../PluginLog.js";
 import { getPluginDataDirectory } from "../getPluginDataDirectory.js";
 import { getPluginsDirectory } from "../getPluginsDirectory.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "../readBoundedPluginLog.js";
 import { readPluginManifest } from "../readPluginManifest.js";
 
-const require = createRequire(import.meta.url);
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const temporaryDirectories: string[] = [];
 
@@ -73,8 +69,8 @@ describe("plugins", () => {
         await createPluginFixture(join(root, "broken"), {
             manifest: {
                 description: "Has an unexpected field",
-                entry: "index.ts",
                 icon: "icon.png",
+                main: "index.ts",
                 name: "Broken",
                 permission: "all",
             },
@@ -122,7 +118,7 @@ describe("plugins", () => {
         await symlink(externalEntry, join(directory, "index.ts"));
 
         await expect(readPluginManifest(directory)).rejects.toThrow(
-            "The plugin entry must be a file.",
+            "The plugin main entry point must be a file.",
         );
     });
 
@@ -168,36 +164,40 @@ describe("plugins", () => {
         expect(snapshot.text).not.toContain("�");
     });
 
-    it("builds with TypeScript 7 against Rig's SDK and rejects incompatible calls", async () => {
+    it("registers JavaScript and TypeScript main entry points without building them", async () => {
         const root = await temporaryDirectory();
-        const directory = join(root, "builder");
-        await createPluginFixture(directory, {
-            source: [
-                'import { happy } from "happy-plugins";',
-                "const projects = await happy.projects.list();",
-                'console.log(projects.map((project) => project.name).join(","));',
-                "",
-            ].join("\n"),
-        });
-        const plugin = await readPluginManifest(directory);
-        const sdkModuleDirectory = dirname(require.resolve("happy-plugins"));
-        const built = await buildPlugin(plugin, { sdkModuleDirectory });
-        await expect(readFile(built.builtEntryPath, "utf8")).resolves.toContain(
-            'from "happy-plugins"',
-        );
-        expect(built.runtimeDirectory).toBe(join(directory, ".build"));
+        const typescript = join(root, "typescript");
+        const javascript = join(root, "javascript");
+        await Promise.all([
+            createPluginFixture(typescript, {}),
+            createPluginFixture(javascript, {
+                manifest: pluginManifest({ main: "index.mjs" }),
+                sourceFile: "index.mjs",
+            }),
+        ]);
 
-        await writeFile(
-            plugin.entryPath,
-            [
-                'import { happy } from "happy-plugins";',
-                'await happy.workspaces.create({ name: 42, projectId: "project" });',
-                "",
-            ].join("\n"),
-        );
-        await expect(buildPlugin(plugin, { sdkModuleDirectory })).rejects.toBeInstanceOf(
-            PluginBuildError,
-        );
+        await expect(readPluginManifest(typescript)).resolves.toMatchObject({
+            entryPath: join(typescript, "index.ts"),
+        });
+        await expect(readPluginManifest(javascript)).resolves.toMatchObject({
+            entryPath: join(javascript, "index.mjs"),
+        });
+    });
+
+    it("reports a missing main entry point as a clear registration failure", async () => {
+        const root = await temporaryDirectory();
+        await createPluginFixture(join(root, "missing"), {});
+        await rm(join(root, "missing", "index.ts"));
+
+        await expect(discoverPlugins(root)).resolves.toMatchObject({
+            failures: [
+                {
+                    error: 'The plugin main entry point "index.ts" does not exist.',
+                    folderName: "missing",
+                },
+            ],
+            plugins: [],
+        });
     });
 });
 
@@ -212,6 +212,7 @@ async function createPluginFixture(
     options: {
         manifest?: Record<string, unknown>;
         source?: string;
+        sourceFile?: string;
     },
 ): Promise<void> {
     await mkdir(directory, { recursive: true });
@@ -221,8 +222,8 @@ async function createPluginFixture(
             `${JSON.stringify(
                 options.manifest ?? {
                     description: "A small clock.",
-                    entry: "index.ts",
                     icon: "icon.png",
+                    main: "index.ts",
                     name: "Clock",
                 },
                 null,
@@ -230,15 +231,18 @@ async function createPluginFixture(
             )}\n`,
         ),
         writeFile(join(directory, "icon.png"), PNG_SIGNATURE),
-        writeFile(join(directory, "index.ts"), options.source ?? 'console.log("ready");\n'),
+        writeFile(
+            join(directory, options.sourceFile ?? "index.ts"),
+            options.source ?? 'console.log("ready");\n',
+        ),
     ]);
 }
 
 function pluginManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
         description: "A small clock.",
-        entry: "index.ts",
         icon: "icon.png",
+        main: "index.ts",
         name: "Clock",
         ...overrides,
     };

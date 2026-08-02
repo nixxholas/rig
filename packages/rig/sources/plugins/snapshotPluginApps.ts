@@ -18,7 +18,7 @@ import type {
     RegisteredPlugin,
 } from "./types.js";
 
-/** Reads and validates the immutable UI snapshot that belongs to this plugin build. */
+/** Reads and validates the immutable UI snapshot for one plugin process generation. */
 export async function snapshotPluginApps(
     plugin: RegisteredPlugin,
 ): Promise<readonly PluginAppSnapshot[]> {

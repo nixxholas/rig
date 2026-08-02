@@ -40,7 +40,7 @@ async function main(): Promise<void> {
             );
         },
     });
-    const child = spawn(process.execPath, ["--experimental-strip-types", resolve(options.entry)], {
+    const child = spawn(process.execPath, [resolve(options.entry)], {
         env: { ...process.env, ...host.environment },
         stdio: "inherit",
     });

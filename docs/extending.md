@@ -8,7 +8,7 @@ There are five extension surfaces, ordered by how much they let you change:
 
 | Surface                        | What it adds                                                                            | Who writes it         |
 | ------------------------------ | --------------------------------------------------------------------------------------- | --------------------- |
-| **Plugins**                    | A TypeScript process that talks to Rig, contributes MCP tools and local UI applications | You, inside Rig       |
+| **Plugins**                    | A JavaScript or TypeScript process that contributes MCP tools and local UI applications | You, inside Rig       |
 | **Skills**                     | Instructions a model loads on demand from a `SKILL.md` file                             | You or the user       |
 | **MCP servers**                | Tools, resources, and prompts from an external process or HTTP service                  | The user, in config   |
 | **Rig Connect / integrations** | External apps that read Rig's live state and drive it                                   | An application author |
@@ -18,11 +18,11 @@ There are five extension surfaces, ordered by how much they let you change:
 
 ## Plugins
 
-A local plugin is the general-purpose extension mechanism. It is TypeScript that
-Rig compiles and runs as its own sandboxed process, connected back to the daemon
-over a private Unix socket. From there it can create workspaces, send messages to
-agents, read provider usage, contribute MCP tools, and contribute a small local
-UI application.
+A local plugin is the general-purpose extension mechanism. It is ready-to-run
+JavaScript or TypeScript that Rig runs as its own sandboxed process, connected
+back to the daemon over a private Unix socket. From there it can create
+workspaces, send messages to agents, read provider usage, contribute MCP tools,
+and contribute a small local UI application.
 
 ### What a plugin folder contains
 
@@ -32,19 +32,19 @@ Three files are enough. Rig does not require a `package.json`.
 project-counter/
 ├── happy.plugin.json    manifest — required
 ├── icon.png             PNG icon — required
-└── index.ts             entry — required
+└── index.ts             main entry point — required
 ```
 
 ### The manifest
 
-`happy.plugin.json` is validated against a strict schema. It has exactly four
-fields, all required, and **extra fields are rejected**:
+`happy.plugin.json` is validated against a strict schema and **extra fields are
+rejected**:
 
 ```json
 {
     "name": "Project Counter",
     "description": "Reports how many projects Rig knows about.",
-    "entry": "index.ts",
+    "main": "index.ts",
     "icon": "icon.png"
 }
 ```
@@ -53,19 +53,21 @@ fields, all required, and **extra fields are rejected**:
 | ------------- | ------------------------------------------------------------------------------------- |
 | `name`        | Non-empty string. Human-readable; also used to derive the agent-facing MCP tool name. |
 | `description` | Non-empty string explaining what the plugin does.                                     |
-| `entry`       | Relative path ending in `.ts`, and not `.d.ts`.                                       |
+| `main`        | Relative path to a JavaScript or TypeScript file, excluding declaration files.        |
 | `icon`        | Relative path ending in `.png` (any capitalization of the extension).                 |
+| `version`     | Optional Semantic Versioning string; an omission becomes `0.0.0`.                     |
+| `apps`        | Optional list of bounded static MCP App manifests.                                    |
 
 Additional rules Rig enforces when it reads the manifest:
 
-- `entry` and `icon` must be relative and must resolve **inside** the plugin
+- `main` and `icon` must be relative and must resolve **inside** the plugin
   folder.
 - Both must be ordinary files, not symbolic links.
 - The icon must begin with the real PNG signature. A renamed JPEG, an SVG, a
   placeholder string, or a URL is rejected and the plugin does not register.
 
-Do not invent manifest fields. There are no `version`, `permissions`,
-`contributes`, or `main` fields; adding one makes the manifest invalid.
+Do not invent manifest fields such as `permissions` or `contributes`; adding one
+makes the manifest invalid.
 
 ### The icon
 
@@ -79,8 +81,11 @@ plugin folder, and point `icon` at that relative path.
 
 ### The entry file
 
-The entry is an ES module and may use top-level `await`. Relative TypeScript
-imports work.
+Rig starts `main` with the same Node executable that runs Rig. Node strips
+erasable TypeScript syntax without a compile step or extra flag, so TypeScript
+may use top-level `await` and relative `.ts` imports. Constructs that require
+JavaScript generation are not supported. Use `.mjs` or a local
+`"type": "module"` package declaration for JavaScript ESM.
 
 ```ts
 import { happy } from "happy-plugins";
@@ -97,7 +102,13 @@ await new Promise<void>((resolve) => {
 
 Plugin code never opens a connection, finds credentials, or speaks Rig's
 protocol. The `happy` singleton reads the socket path and token that the daemon
-injects and connects for you.
+injects and connects for you. Rig registers one ESM loader hook with `--import`
+to map `happy-plugins` and `happy-plugins/internal` to the SDK shipped with Rig;
+the plugin does not vendor a runtime SDK.
+
+Rig provides only `happy-plugins` at runtime. Bundle every other third-party
+dependency into the plugin's own files; Rig does not copy `node_modules` when
+it installs a plugin.
 
 ### The SDK surface
 
@@ -187,18 +198,15 @@ PNG, SVG, WebP, CSS, HTML, and JavaScript.
 
 ### Where things live
 
-Plugin code and everything Rig generates stay in Rig's managed home; everything
-the plugin writes at runtime goes to a folder a person can open.
+Plugin code and Rig's bounded log stay in Rig's managed home; everything the
+plugin writes at runtime goes to a folder a person can open.
 
 ```text
 ~/.happy/rig/plugins/<folder>/          installed code, managed by Rig
 ├── happy.plugin.json
 ├── icon.png
 ├── index.ts
-└── .build/
-    ├── build/                          compiled JavaScript
-    ├── node_modules/happy-plugins/     the SDK shipped by this Rig
-    └── plugin.log                      bounded current-run output
+└── plugin.log                          bounded current-run output
 
 ~/Happy/Plugins/<folder>/               the plugin's writable folder (macOS)
 ~/happy/plugins/<folder>/               the same on Linux
@@ -233,9 +241,9 @@ Four agent tools drive the lifecycle:
 
 | Tool               | Arguments                                      | What it does                                                                                                              |
 | ------------------ | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `plugin_install`   | `path` — folder containing `happy.plugin.json` | Copies the sources into the managed plugins folder, compiles them, and starts the plugin before returning.                |
+| `plugin_install`   | `path` — folder containing `happy.plugin.json` | Copies and validates the ready-to-run folder, then starts the plugin before returning.                                    |
 | `plugin_list`      | none                                           | Returns every installed plugin with `status`, `directory`, `dataDirectory`, `logAvailable`, plus registration `failures`. |
-| `plugin_logs`      | `name` — plugin name or folder name            | Returns the newest bounded log snapshot with `status`, `source` (`current_run` or `build`), and `truncated`.              |
+| `plugin_logs`      | `name` — plugin name or folder name            | Returns the newest bounded log or startup diagnostic with `status`, `source` (`current_run` or `error`), and `truncated`. |
 | `plugin_uninstall` | `name`                                         | Stops the plugin, removes its installed code, and keeps its writable folder.                                              |
 
 Plugins live outside the workspace, so all four are reviewed in Auto mode;
@@ -243,16 +251,16 @@ Plugins live outside the workspace, so all four are reviewed in Auto mode;
 access override because they must write outside the sandbox. A denial is a real
 answer: do not retry the same action by another route.
 
-Installation is staged. The sources are copied into a hidden folder, the manifest
-is validated there, and the TypeScript is compiled there against the copy of
-`happy-plugins` this Rig ships. A plugin that fails to build is never installed
-and never replaces a working one. `.build`, `.git`, `.runtime`, and
-`node_modules` are excluded from the copy, and the copy is bounded to 2,000 files
-and 32 MiB.
+Installation is staged. The plugin is copied into a hidden folder and its
+manifest, icon, and main entry point are validated there. An invalid plugin is
+never installed and never replaces a working one. `.git`, `.runtime`,
+`node_modules`, and `plugin.log` are excluded from the copy, and the copy is
+bounded to 2,000 files and 32 MiB. Rig provides `happy-plugins` at runtime; all
+other third-party dependencies must be bundled into the plugin's own files.
 
 Every change publishes a live `plugins_changed` event carrying the whole current
 set, so clients never poll and never wait for a daemon restart. The daemon also loads every installed plugin at startup. A
-plugin's authoritative state is one of `running`, `stopped`, or `build_failed`.
+plugin's authoritative state is one of `running`, `stopped`, or `failed`.
 
 For the user, `/plugins` shows the installed set and `/plugins <name>` prints
 that plugin's current log.
@@ -267,11 +275,10 @@ Building a plugin from inside Rig, end to end:
 3. Write `index.ts` against the `happy` singleton.
 4. Generate `icon.png` using the bundled `local-plugin-icon` skill; verify it is
    a real square PNG.
-5. Call `plugin_install` with the absolute path to the folder. Rig validates,
-   compiles, and starts it.
+5. Type-check and test the plugin, then call `plugin_install` with the absolute
+   path to the folder. Rig validates, copies, and starts it without compiling.
 6. Call `plugin_list` to confirm `status: "running"`, and `plugin_logs` if it is
-   `build_failed` or `stopped` — the build diagnostics come back through the same
-   tool.
+   `failed` or `stopped` — startup diagnostics come back through the same tool.
 7. If it contributes MCP tools, they become available to sessions under the
    `mcp__…` name above.
 

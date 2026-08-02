@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { PluginAppError, PluginAppRegistry } from "../PluginAppRegistry.js";
 import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
-import type { BuiltPlugin } from "../types.js";
+import type { PluginRuntimeSnapshot } from "../types.js";
 
 const roots: string[] = [];
 afterEach(async () => Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true }))));
@@ -206,7 +206,7 @@ function tool(name: string, visibility: ("app" | "model")[]) {
     };
 }
 
-function plugin(): BuiltPlugin {
+function plugin(): PluginRuntimeSnapshot {
     return {
         apps: [
             {
@@ -224,8 +224,6 @@ function plugin(): BuiltPlugin {
                 title: "Usage",
             },
         ],
-        buildDirectory: "/plugin/.build/build",
-        builtEntryPath: "/plugin/.build/build/index.js",
         directory: "/plugin",
         entryPath: "/plugin/index.ts",
         folderName: "usage",
@@ -241,13 +239,12 @@ function plugin(): BuiltPlugin {
                 },
             ],
             description: "Usage",
-            entry: "index.ts",
             icon: "icon.png",
+            main: "index.ts",
             name: "Usage",
             version: "0.0.0",
         },
         manifestPath: "/plugin/happy.plugin.json",
-        runtimeDirectory: "/plugin/.build",
     };
 }
 

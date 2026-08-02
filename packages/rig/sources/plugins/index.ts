@@ -1,5 +1,5 @@
-export { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
 export { comparePluginVersions } from "./comparePluginVersions.js";
+export { createPluginNodeRuntime, type PluginNodeRuntime } from "./createPluginNodeRuntime.js";
 export {
     createPluginApiServer,
     type CreatePluginApiServerOptions,
@@ -13,7 +13,6 @@ export {
 } from "./fetchBoundedGitHubResource.js";
 export { getPluginDataDirectory, getPluginDataRoot } from "./getPluginDataDirectory.js";
 export { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
-export { PluginBuildError } from "./PluginBuildError.js";
 export { PluginLog } from "./PluginLog.js";
 export {
     PluginAppError,
@@ -50,10 +49,10 @@ export {
     PLUGIN_MANIFEST_FILE_NAME,
     pluginManifestSchema,
     pluginVersionSchema,
-    type BuiltPlugin,
     type PluginDiscovery,
     type PluginManifest,
     type PluginRegistrationFailure,
+    type PluginRuntimeSnapshot,
     type RegisteredPluginManifest,
     type RegisteredPlugin,
 } from "./types.js";

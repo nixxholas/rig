@@ -20,7 +20,6 @@ import type {
 } from "./githubPluginCatalog.js";
 import { installGitHubPlugin } from "./installGitHubPlugin.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
-import { PluginBuildError } from "./PluginBuildError.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { RegisteredPlugin } from "./types.js";
@@ -318,9 +317,9 @@ export class PluginManager {
             updatedAt: this.#now(),
         };
         const output =
-            state.status === "build_failed"
+            state.status === "failed"
                 ? {
-                      text: state.error ?? "The plugin build failed.",
+                      text: state.error ?? "The plugin failed to start.",
                       truncated: state.logTruncated ?? false,
                   }
                 : state.logPath === undefined
@@ -330,7 +329,7 @@ export class PluginManager {
             ...(state.error === undefined ? {} : { error: state.error }),
             folder: plugin.folderName,
             name: plugin.manifest.name,
-            source: state.status === "build_failed" ? "build" : "current_run",
+            source: state.status === "failed" ? "error" : "current_run",
             status: state.status,
             text: output.text,
             truncated: output.truncated,
@@ -459,12 +458,11 @@ export class PluginManager {
                 },
             );
         } catch (error) {
-            const status = error instanceof PluginBuildError ? "build_failed" : "stopped";
             const diagnostic = boundPluginLogText(errorToMessage(error));
             this.#states.set(folderName, {
                 error: diagnostic.text,
                 logTruncated: diagnostic.truncated,
-                status,
+                status: "failed",
                 updatedAt: this.#now(),
             });
             this.#daemonLog.record(

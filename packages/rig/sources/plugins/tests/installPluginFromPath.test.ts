@@ -18,7 +18,7 @@ afterEach(async () => {
 });
 
 describe("installing a plugin from a folder", () => {
-    it("compiles the installed copy and leaves generated state behind", async () => {
+    it("copies and validates a prebuilt plugin without generating build output", async () => {
         const { fs, pluginsDirectory, workspace } = await createHarness();
         await createPluginSource(join(workspace, "clock"));
 
@@ -36,12 +36,13 @@ describe("installing a plugin from a folder", () => {
             name: "Clock",
             version: "0.0.0",
         });
-        await expect(
-            readFile(join(installed.directory, ".build", "build", "index.js"), "utf8"),
-        ).resolves.toContain("ready");
+        await expect(readFile(join(installed.directory, "index.ts"), "utf8")).resolves.toContain(
+            "ready",
+        );
+        await expect(fs.exists(join(installed.directory, ".build"))).resolves.toBe(false);
     });
 
-    it("installs nothing when the sources do not compile", async () => {
+    it("installs TypeScript as-is without running a compiler", async () => {
         const { fs, pluginsDirectory, workspace } = await createHarness();
         await createPluginSource(join(workspace, "broken"), {
             source: 'const ticks: number = "not a number";\n',
@@ -53,8 +54,21 @@ describe("installing a plugin from a folder", () => {
                 pluginsDirectory,
                 sourceDirectory: join(workspace, "broken"),
             }),
-        ).rejects.toThrow(/could not build/iu);
-        // Neither the plugin nor its staging folder survives a failed install.
+        ).resolves.toMatchObject({ name: "Clock" });
+        await expect(readFile(join(pluginsDirectory, "broken", "index.ts"), "utf8")).resolves.toBe(
+            'const ticks: number = "not a number";\n',
+        );
+    });
+
+    it("rejects a missing main entry point without installing a partial plugin", async () => {
+        const { fs, pluginsDirectory, workspace } = await createHarness();
+        const source = join(workspace, "missing");
+        await createPluginSource(source);
+        await rm(join(source, "index.ts"));
+
+        await expect(
+            installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
+        ).rejects.toThrow('The plugin main entry point "index.ts" does not exist.');
         await expect(fs.readdir(pluginsDirectory)).resolves.toEqual([]);
     });
 
@@ -76,16 +90,16 @@ describe("installing a plugin from a folder", () => {
         await expect(fs.exists(pluginsDirectory)).resolves.toBe(false);
     });
 
-    it("keeps the previous installation when a replacement fails to build", async () => {
+    it("keeps the previous installation when a replacement has no main entry point", async () => {
         const { fs, pluginsDirectory, workspace } = await createHarness();
         const source = join(workspace, "clock");
         await createPluginSource(source);
         await installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source });
 
-        await writeFile(join(source, "index.ts"), 'const ticks: number = "not a number";\n');
+        await rm(join(source, "index.ts"));
         await expect(
             installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
-        ).rejects.toThrow(/could not build/iu);
+        ).rejects.toThrow('The plugin main entry point "index.ts" does not exist.');
 
         await expect(
             readFile(join(pluginsDirectory, "clock", "index.ts"), "utf8"),
@@ -210,8 +224,8 @@ async function createPluginSource(
             `${JSON.stringify(
                 {
                     description: "A small clock.",
-                    entry: "index.ts",
                     icon: "icon.png",
+                    main: "index.ts",
                     name: "Clock",
                     ...(options.version === undefined ? {} : { version: options.version }),
                 },

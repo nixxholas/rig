@@ -10,7 +10,7 @@ import { createToolEnvironment } from "../agent/context/createToolEnvironment.js
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { GeneratedMediaStore } from "../generated-media/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
-import { buildPlugin, type BuildPluginOptions } from "./buildPlugin.js";
+import { createPluginNodeRuntime } from "./createPluginNodeRuntime.js";
 import {
     createPluginApiServer,
     type CreatePluginApiServerOptions,
@@ -20,6 +20,7 @@ import { PluginLog } from "./PluginLog.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import type { PluginAppRegistry } from "./PluginAppRegistry.js";
 import { fileSystemErrorSchema, type RegisteredPlugin } from "./types.js";
+import { snapshotPluginApps } from "./snapshotPluginApps.js";
 
 const STOP_GRACE_MS = 2_000;
 
@@ -32,7 +33,7 @@ export interface RunningPlugin {
     close(): Promise<void>;
 }
 
-export interface StartPluginOptions extends BuildPluginOptions {
+export interface StartPluginOptions {
     appRegistry?: PluginAppRegistry;
     dataDirectory?: string;
     defaultDocker?: DockerExecutionConfig;
@@ -48,7 +49,10 @@ export async function startPlugin(
     plugin: RegisteredPlugin,
     options: StartPluginOptions,
 ): Promise<RunningPlugin> {
-    const built = await buildPlugin(plugin, options);
+    const runtime = {
+        ...plugin,
+        apps: await snapshotPluginApps(plugin),
+    };
     const environment = options.environment ?? process.env;
     // The plugin's code lives in Rig's managed folder, so everything it writes at runtime — its own
     // state and the socket it connects back through — belongs in the folder a person can open.
@@ -56,7 +60,7 @@ export async function startPlugin(
         options.dataDirectory ?? getPluginDataDirectory(plugin.folderName, environment);
     const runtimeSocketDirectory = join(dataDirectory, ".runtime");
     const socketPath = join(runtimeSocketDirectory, "plugin.sock");
-    const logPath = join(built.runtimeDirectory, "plugin.log");
+    const logPath = join(plugin.directory, "plugin.log");
     await mkdir(dataDirectory, { mode: 0o755, recursive: true });
     await mkdir(runtimeSocketDirectory, { mode: 0o700, recursive: true });
     await chmod(runtimeSocketDirectory, 0o700);
@@ -76,7 +80,7 @@ export async function startPlugin(
         unregisterApps =
             mcp === undefined
                 ? undefined
-                : options.appRegistry?.register(built, mcp.generation, dataDirectory);
+                : options.appRegistry?.register(runtime, mcp.generation, dataDirectory);
     } catch (error) {
         mcp?.close();
         throw error;
@@ -115,9 +119,10 @@ export async function startPlugin(
     let child: ChildProcess;
     const log = new PluginLog({ path: logPath });
     try {
+        const node = await createPluginNodeRuntime({ entryPath: plugin.entryPath });
         const command = await createSandboxedCommand({
-            argv: [process.execPath, built.builtEntryPath],
-            command: process.execPath,
+            argv: [...node.argv],
+            command: node.executable,
             commandCwd: dataDirectory,
             cwd: dataDirectory,
             mode: "workspace_write",

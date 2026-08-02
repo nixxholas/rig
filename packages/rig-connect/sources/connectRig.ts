@@ -412,7 +412,7 @@ export interface RigConnection {
         failures: readonly { error: string; folder: string }[];
         plugins: readonly PluginSummary[];
     }>;
-    /** Reads one bounded current-run or build-failure log snapshot. */
+    /** Reads one bounded current-run log or startup-failure diagnostic snapshot. */
     readPluginLog: (name: string, options?: { signal?: AbortSignal }) => Promise<PluginLogSnapshot>;
     /**
      * Installs and starts a plugin from an absolute source-folder path on the machine running Rig.

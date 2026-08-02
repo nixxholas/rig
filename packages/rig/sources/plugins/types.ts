@@ -57,9 +57,6 @@ export interface PluginDiscovery {
     failures: readonly PluginRegistrationFailure[];
 }
 
-export interface BuiltPlugin extends RegisteredPlugin {
+export interface PluginRuntimeSnapshot extends RegisteredPlugin {
     apps: readonly PluginAppSnapshot[];
-    buildDirectory: string;
-    builtEntryPath: string;
-    runtimeDirectory: string;
 }
