@@ -19,6 +19,7 @@ import {
     type SlotsChangedEvent,
     type UpdateSlotEntryRequest,
 } from "../protocol/SlotProtocol.js";
+import { allowedSlotScopes, describeAllowedScopesForSlot } from "../protocol/SlotScopeRules.js";
 import { SlotEntryInvalidError } from "./SlotEntryInvalidError.js";
 import { SlotEntryNotFoundError } from "./SlotEntryNotFoundError.js";
 
@@ -60,6 +61,7 @@ export class SlotEntryStore {
         if (!Value.Check(createSlotEntryRequestSchema, request)) {
             throw new SlotEntryInvalidError(describeInvalid(createSlotEntryRequestSchema, request));
         }
+        requireAllowedSlotScope(request.slot, request.scope);
         const now = this.#now();
         const entry: SlotEntry = {
             id: createId(),
@@ -116,6 +118,9 @@ export class SlotEntryStore {
                 ...(request.purpose === undefined ? {} : { purpose: request.purpose }),
                 updatedAt: this.#now(),
             };
+            if (request.slot !== undefined) {
+                requireAllowedSlotScope(entry.slot, entry.scope);
+            }
             slotEntryUpdate(tx, entry);
             return entry;
         });
@@ -188,4 +193,9 @@ function describeInvalid(schema: Parameters<typeof Value.Errors>[0], value: unkn
     if (first === undefined) return "The slot entry is invalid.";
     const where = first.path === "" ? "" : ` at ${first.path}`;
     return `The slot entry is invalid${where}: ${first.message}.`;
+}
+
+function requireAllowedSlotScope(slot: SlotEntry["slot"], scope: SlotEntry["scope"]): void {
+    if (allowedSlotScopes[slot].some((allowedScope) => allowedScope === scope)) return;
+    throw new SlotEntryInvalidError(describeAllowedScopesForSlot(slot));
 }

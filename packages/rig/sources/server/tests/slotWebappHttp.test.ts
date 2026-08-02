@@ -29,6 +29,32 @@ afterEach(async () => {
 });
 
 describe("slot HTTP protocol", () => {
+    it("surfaces an incompatible slot scope as a typed invalid-entry error", async () => {
+        const port = await startServer();
+
+        const response = await request(port, {
+            body: JSON.stringify({
+                authorSessionId: "session-1",
+                content: { markdown: "Session shortcut", type: "text" },
+                description: "Session shortcut",
+                purpose: "Keep this session visible",
+                scope: "session",
+                sessionId: "session-1",
+                slot: "sidebar",
+            }),
+            method: "POST",
+            path: "/slots",
+        });
+
+        expect(response.status).toBe(400);
+        expect(JSON.parse(response.body)).toEqual({
+            error: {
+                code: "invalid_entry",
+                message: "The sidebar slot allows only the everywhere scope.",
+            },
+        });
+    });
+
     it("creates, lists, updates, and removes entries with typed rejections", async () => {
         const port = await startServer();
 

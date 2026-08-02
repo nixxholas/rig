@@ -4,6 +4,9 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { createSessionDatabaseFixture } from "../../persistence/database/tests/createSessionDatabaseFixture.js";
+import { openSessionDatabase } from "../../persistence/database/openSessionDatabase.js";
+import { slotEntryCreate } from "../../persistence/slots/slotEntryCreate.js";
 import type { GlobalLiveEvent } from "../../protocol/index.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
 import { SlotEntryInvalidError } from "../SlotEntryInvalidError.js";
@@ -135,9 +138,121 @@ describe("slot entry store", () => {
                 ...valid,
                 scope: "everywhere",
                 sessionId: "some-session",
-                slot: "title",
+                slot: "status-line",
             }),
         ).toThrow(SlotEntryInvalidError);
+    });
+
+    it("accepts and rejects representative slot and scope combinations", async () => {
+        const databasePath = await createDatabasePath();
+        createSessionDatabaseFixture(databasePath);
+        const store = new PersistentSessionStore({ databasePath });
+        cleanups.push(() => store.close());
+        const common = {
+            authorSessionId: "session-1",
+            content: { markdown: "hi", type: "text" },
+            description: "d",
+            purpose: "p",
+        } as const;
+
+        expect(
+            store.slots.create({
+                ...common,
+                scope: "everywhere",
+                slot: "sidebar",
+            }),
+        ).toMatchObject({ scope: "everywhere", slot: "sidebar" });
+        expect(
+            store.slots.create({
+                ...common,
+                projectId: "project-1",
+                scope: "project",
+                slot: "title",
+            }),
+        ).toMatchObject({ scope: "project", slot: "title" });
+        expect(
+            store.slots.create({
+                ...common,
+                scope: "session",
+                sessionId: "session-1",
+                slot: "status-line",
+            }),
+        ).toMatchObject({ scope: "session", slot: "status-line" });
+        expect(
+            store.slots.create({
+                ...common,
+                projectId: "project-1",
+                scope: "project",
+                slot: "above-composer",
+            }),
+        ).toMatchObject({ scope: "project", slot: "above-composer" });
+
+        expect(() =>
+            store.slots.create({
+                ...common,
+                scope: "session",
+                sessionId: "session-1",
+                slot: "sidebar",
+            }),
+        ).toThrow("The sidebar slot allows only the everywhere scope.");
+        expect(() =>
+            store.slots.create({
+                ...common,
+                scope: "everywhere",
+                slot: "title",
+            }),
+        ).toThrow("The title slot allows only the project and workspace scopes.");
+    });
+
+    it("rejects moving an entry to a slot incompatible with its fixed scope", async () => {
+        const databasePath = await createDatabasePath();
+        createSessionDatabaseFixture(databasePath);
+        const store = new PersistentSessionStore({ databasePath });
+        cleanups.push(() => store.close());
+        const entry = store.slots.create({
+            authorSessionId: "session-1",
+            content: { markdown: "hi", type: "text" },
+            description: "d",
+            purpose: "p",
+            scope: "session",
+            sessionId: "session-1",
+            slot: "status-line",
+        });
+
+        expect(() => store.slots.update(entry.id, { slot: "sidebar" })).toThrow(
+            "The sidebar slot allows only the everywhere scope.",
+        );
+        expect(store.slots.list()).toEqual([entry]);
+    });
+
+    it("allows description-only updates of legacy entries with incompatible slot scopes", async () => {
+        const databasePath = await createDatabasePath();
+        createSessionDatabaseFixture(databasePath);
+        const opened = openSessionDatabase(databasePath);
+        slotEntryCreate(opened.database, {
+            authorSessionId: "session-1",
+            content: { markdown: "hi", type: "text" },
+            createdAt: 1,
+            description: "old description",
+            id: "legacy-entry",
+            purpose: "p",
+            scope: "session",
+            sessionId: "session-1",
+            slot: "sidebar",
+            updatedAt: 1,
+        });
+        opened.client.close();
+        const store = new PersistentSessionStore({ databasePath });
+        cleanups.push(() => store.close());
+
+        expect(
+            store.slots.update("legacy-entry", { description: "new description" }),
+        ).toMatchObject({
+            description: "new description",
+            id: "legacy-entry",
+            scope: "session",
+            slot: "sidebar",
+        });
     });
 
     it("updates and removes entries and publishes the whole set on every change", async () => {

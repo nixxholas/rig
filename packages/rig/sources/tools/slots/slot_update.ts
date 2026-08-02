@@ -2,14 +2,14 @@ import { Type } from "@sinclair/typebox";
 
 import { defineTool } from "../../agent/types.js";
 import { slotContentSchema, slotEntrySchema, slotNameSchema } from "../../protocol/SlotProtocol.js";
+import { slotScopeMatrixDescription } from "../../protocol/SlotScopeRules.js";
 import { describeSlotUpdatePermissionAction } from "./describeSlotPermissionAction.js";
 import { requireSlots } from "./requireSlots.js";
 
 export const slotUpdateTool = defineTool({
     name: "slot_update",
     label: "Update slot entry",
-    description:
-        "Update an existing slot entry's slot, content, description, or purpose. The entry's scope is fixed at creation; remove and recreate an entry that should move.",
+    description: `Update an existing slot entry's slot, content, description, or purpose. The entry's scope is fixed at creation, so a new slot must allow that scope. ${slotScopeMatrixDescription} Remove and recreate an entry whose scope should change.`,
     arguments: Type.Object(
         {
             id: Type.String({ description: "The slot entry to update." }),

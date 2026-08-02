@@ -6,6 +6,14 @@ import { slotRemoveTool } from "./slot_remove.js";
 import { slotUpdateTool } from "./slot_update.js";
 
 describe("slot tools", () => {
+    it("teaches models the allowed scopes for each slot", () => {
+        const matrix =
+            "Allowed scopes by slot: sidebar — everywhere; title — project or workspace; status line — everywhere, project, workspace, or session; above composer — everywhere, project, workspace, or session.";
+
+        expect(slotCreateTool.description).toContain(matrix);
+        expect(slotUpdateTool.description).toContain(matrix);
+    });
+
     it("describes every slot mutation that requires Auto review", () => {
         const context = {} as AgentContext;
         const createArgs = {
