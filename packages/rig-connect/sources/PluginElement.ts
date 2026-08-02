@@ -3,6 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 import type { ConnectionState } from "./ChatElement.js";
 import {
     pluginAppContributionSchema,
+    type PluginManagementErrorCode,
     type PluginAppContribution,
     type PluginSummary,
 } from "./protocol.js";
@@ -62,6 +63,17 @@ export class PluginAppRequestError extends Error {
     ) {
         super(message);
         this.name = "PluginAppRequestError";
+    }
+}
+
+export class PluginManagementRequestError extends Error {
+    constructor(
+        readonly code: PluginManagementErrorCode,
+        readonly status: number,
+        message: string,
+    ) {
+        super(message);
+        this.name = "PluginManagementRequestError";
     }
 }
 

@@ -346,6 +346,46 @@ export interface PluginLogResponse {
     log: PluginLogSnapshot;
 }
 
+export interface InstalledPluginSummary {
+    description: string;
+    directory: string;
+    folder: string;
+    name: string;
+}
+
+export interface UninstalledPluginSummary {
+    dataDirectory: string;
+    folder: string;
+    name: string;
+}
+
+export interface InstallPluginRequest {
+    /** Absolute path on the machine running Rig. */
+    sourceDirectory: string;
+}
+
+export interface InstallPluginResponse {
+    plugin: InstalledPluginSummary;
+}
+
+export interface UninstallPluginResponse {
+    plugin: UninstalledPluginSummary;
+}
+
+export type PluginManagementErrorCode =
+    | "install_failed"
+    | "invalid_request"
+    | "plugin_not_found"
+    | "plugins_unavailable"
+    | "uninstall_failed";
+
+export interface PluginManagementErrorResponse {
+    error: {
+        code: PluginManagementErrorCode;
+        message: string;
+    };
+}
+
 /**
  * The installed plugins changed, or one of them started or stopped. It is live-only and carries
  * the whole current set: plugins are folders on disk, so a client that reconnects reads them again

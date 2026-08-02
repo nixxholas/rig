@@ -27,7 +27,11 @@ export type {
     TerminalPresence,
     UserInputAnswers,
 } from "./connectRig.js";
-export { PluginAppRequestError, PluginStore } from "./PluginElement.js";
+export {
+    PluginAppRequestError,
+    PluginManagementRequestError,
+    PluginStore,
+} from "./PluginElement.js";
 export type {
     LocalPlugin,
     PluginApp,
@@ -36,6 +40,11 @@ export type {
     PluginsState,
     ReadPluginAppResourceResult,
 } from "./PluginElement.js";
+export type {
+    InstalledPluginSummary,
+    PluginManagementErrorCode,
+    UninstalledPluginSummary,
+} from "./protocol.js";
 export { InboxStore } from "./InboxStore.js";
 export { ProviderUsageStore } from "./ProviderUsageStore.js";
 export type { ProviderUsageDelta, ProviderUsageState } from "./ProviderUsageElement.js";

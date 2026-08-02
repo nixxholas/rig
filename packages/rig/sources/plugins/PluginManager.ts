@@ -12,6 +12,7 @@ import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { getPluginsDirectory } from "./getPluginsDirectory.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 import { PluginBuildError } from "./PluginBuildError.js";
+import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { RegisteredPlugin } from "./types.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
@@ -128,12 +129,14 @@ export class PluginManager {
     /** Installs a plugin from a folder on this machine and starts it. */
     async install(options: {
         fs: FileSystemContext;
+        signal?: AbortSignal;
         sourceDirectory: string;
     }): Promise<InstalledPlugin> {
         this.#assertOpen();
         const installed = await installPluginFromPath({
             fs: options.fs,
             pluginsDirectory: this.directory,
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
             sourceDirectory: options.sourceDirectory,
         });
         // Replacing an installed plugin retires the process built from the previous code.
@@ -144,8 +147,13 @@ export class PluginManager {
     }
 
     /** Stops a plugin and removes its installed code, keeping the folder it writes to. */
-    async uninstall(options: { fs: FileSystemContext; name: string }): Promise<UninstalledPlugin> {
+    async uninstall(options: {
+        fs: FileSystemContext;
+        name: string;
+        signal?: AbortSignal;
+    }): Promise<UninstalledPlugin> {
         this.#assertOpen();
+        options.signal?.throwIfAborted();
         const discovery = await discoverPlugins(this.directory);
         const wanted = options.name.trim().toLowerCase();
         const installed = discovery.plugins.find(
@@ -155,12 +163,13 @@ export class PluginManager {
         );
         if (installed === undefined) {
             const known = discovery.plugins.map((plugin) => plugin.manifest.name);
-            throw new Error(
+            throw new PluginNotFoundError(
                 known.length === 0
                     ? `No plugin named ${options.name} is installed. No plugins are installed.`
                     : `No plugin named ${options.name} is installed. Installed plugins: ${known.join(", ")}.`,
             );
         }
+        options.signal?.throwIfAborted();
         await this.#stopRunning(installed.folderName);
         await options.fs.rm(join(this.directory, installed.folderName), {
             force: true,

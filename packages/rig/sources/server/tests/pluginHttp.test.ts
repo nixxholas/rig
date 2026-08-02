@@ -1,8 +1,8 @@
 import { request as requestHttp } from "node:http";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PluginAppError } from "../../plugins/index.js";
+import { PluginAppError, PluginNotFoundError } from "../../plugins/index.js";
 import type { PluginContext } from "../../agent/context/PluginContext.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -31,6 +31,122 @@ describe("plugin HTTP protocol", () => {
         });
         await expect(requestJson(port, "/plugins/Clock/log")).resolves.toMatchObject({
             log: { name: "Clock", text: "[stdout] tick\n" },
+        });
+    });
+
+    it("authenticates and validates source-folder installation and uninstallation", async () => {
+        const plugins = context();
+        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        servers.push(server);
+        const port = await listen(server);
+
+        expect(
+            (
+                await request(port, {
+                    body: JSON.stringify({ sourceDirectory: "/plugins/source" }),
+                    method: "POST",
+                    path: "/plugins",
+                    token: "wrong",
+                })
+            ).status,
+        ).toBe(401);
+        await expect(
+            requestJson(port, "/plugins", { sourceDirectory: "/plugins/source" }),
+        ).resolves.toEqual({
+            plugin: {
+                description: "A clock.",
+                directory: "/managed/clock",
+                folder: "clock",
+                name: "Clock",
+            },
+        });
+        expect(plugins.install).toHaveBeenCalledWith(
+            expect.objectContaining({
+                signal: expect.any(AbortSignal),
+                sourceDirectory: "/plugins/source",
+            }),
+        );
+
+        const relative = await request(port, {
+            body: JSON.stringify({ sourceDirectory: "plugins/source" }),
+            method: "POST",
+            path: "/plugins",
+        });
+        expect(relative.status).toBe(400);
+        expect(JSON.parse(relative.body)).toEqual({
+            error: {
+                code: "invalid_request",
+                message:
+                    "Plugin sourceDirectory must be an absolute path on the machine running Rig.",
+            },
+        });
+        const malformed = await request(port, {
+            body: JSON.stringify({ sourceDirectory: "/plugins/source", unexpected: true }),
+            method: "POST",
+            path: "/plugins",
+        });
+        expect(malformed.status).toBe(400);
+        expect(JSON.parse(malformed.body)).toEqual({
+            error: {
+                code: "invalid_request",
+                message: "Plugin installation settings are invalid.",
+            },
+        });
+        const invalidJson = await request(port, {
+            body: "{",
+            method: "POST",
+            path: "/plugins",
+        });
+        expect(invalidJson.status).toBe(400);
+        expect(JSON.parse(invalidJson.body)).toEqual({
+            error: {
+                code: "invalid_request",
+                message: "Plugin installation settings must be valid JSON.",
+            },
+        });
+
+        await expect(requestJson(port, "/plugins/Clock", undefined, "DELETE")).resolves.toEqual({
+            plugin: {
+                dataDirectory: "/data/clock",
+                folder: "clock",
+                name: "Clock",
+            },
+        });
+        expect(plugins.uninstall).toHaveBeenCalledWith(
+            expect.objectContaining({ name: "Clock", signal: expect.any(AbortSignal) }),
+        );
+    });
+
+    it("returns stable management failures without replacing them with generic server errors", async () => {
+        const plugins = context();
+        vi.mocked(plugins.install).mockRejectedValueOnce(new Error("The plugin does not compile."));
+        vi.mocked(plugins.uninstall).mockRejectedValueOnce(
+            new PluginNotFoundError("No plugin named Missing is installed."),
+        );
+        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        servers.push(server);
+        const port = await listen(server);
+
+        const install = await request(port, {
+            body: JSON.stringify({ sourceDirectory: "/plugins/broken" }),
+            method: "POST",
+            path: "/plugins",
+        });
+        expect(install.status).toBe(422);
+        expect(JSON.parse(install.body)).toEqual({
+            error: { code: "install_failed", message: "The plugin does not compile." },
+        });
+
+        const uninstall = await request(port, {
+            method: "DELETE",
+            path: "/plugins/Missing",
+        });
+        expect(uninstall.status).toBe(404);
+        expect(JSON.parse(uninstall.body)).toEqual({
+            error: {
+                code: "plugin_not_found",
+                message: "No plugin named Missing is installed.",
+            },
         });
     });
 
@@ -92,6 +208,7 @@ describe("plugin HTTP protocol", () => {
 function context(): Pick<
     PluginContext,
     | "callAppTool"
+    | "install"
     | "list"
     | "readAppResource"
     | "readLog"
@@ -99,6 +216,7 @@ function context(): Pick<
     | "storageGet"
     | "storageList"
     | "storageSet"
+    | "uninstall"
 > {
     return {
         async callAppTool(_id, generation, _server, tool, input) {
@@ -113,6 +231,12 @@ function context(): Pick<
                 ],
             };
         },
+        install: vi.fn(async () => ({
+            description: "A clock.",
+            directory: "/managed/clock",
+            folder: "clock",
+            name: "Clock",
+        })),
         async list() {
             return {
                 failures: [],
@@ -155,6 +279,11 @@ function context(): Pick<
             return [];
         },
         async storageSet() {},
+        uninstall: vi.fn(async () => ({
+            dataDirectory: "/data/clock",
+            folder: "clock",
+            name: "Clock",
+        })),
     };
 }
 
@@ -165,9 +294,15 @@ async function listen(server: ReturnType<typeof createProtocolHttpServer>): Prom
     return address.port;
 }
 
-function requestJson(port: number, path: string, body?: unknown): Promise<unknown> {
+function requestJson(
+    port: number,
+    path: string,
+    body?: unknown,
+    method?: string,
+): Promise<unknown> {
     return request(port, {
-        ...(body === undefined ? {} : { body: JSON.stringify(body), method: "POST" }),
+        ...(body === undefined ? {} : { body: JSON.stringify(body), method: method ?? "POST" }),
+        ...(method === undefined ? {} : { method }),
         path,
     }).then((response) => JSON.parse(response.body) as unknown);
 }

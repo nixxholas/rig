@@ -90,6 +90,16 @@ type _PluginSummary = Assignable<local.PluginSummary, daemon.PluginSummary>;
 type _PluginLog = Assignable<local.PluginLogSnapshot, daemon.PluginLogSnapshot>;
 type _PluginList = Assignable<local.ListPluginsResponse, daemon.ListPluginsResponse>;
 type _PluginLogResponse = Assignable<local.PluginLogResponse, daemon.PluginLogResponse>;
+type _InstallPluginRequest = Assignable<daemon.InstallPluginRequest, local.InstallPluginRequest>;
+type _InstallPluginResponse = Assignable<local.InstallPluginResponse, daemon.InstallPluginResponse>;
+type _UninstallPluginResponse = Assignable<
+    local.UninstallPluginResponse,
+    daemon.UninstallPluginResponse
+>;
+type _PluginManagementErrorResponse = Assignable<
+    local.PluginManagementErrorResponse,
+    daemon.PluginManagementErrorResponse
+>;
 type _TimelineScope = Assignable<local.TimelineScope, daemon.TimelineScope>;
 type _TimelineSpan = Assignable<local.TimelineSpan, daemon.TimelineSpan>;
 type _TimelineSpanKind = Assignable<local.TimelineSpanKind, daemon.TimelineSpanKind>;

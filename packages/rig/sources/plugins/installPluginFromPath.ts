@@ -26,9 +26,11 @@ export interface InstalledPlugin {
 export async function installPluginFromPath(options: {
     fs: FileSystemContext;
     pluginsDirectory: string;
+    signal?: AbortSignal;
     sourceDirectory: string;
 }): Promise<InstalledPlugin> {
-    const { fs, pluginsDirectory, sourceDirectory } = options;
+    const { fs, pluginsDirectory, signal, sourceDirectory } = options;
+    signal?.throwIfAborted();
     const sourceInfo = await fs.stat(sourceDirectory).catch(() => undefined);
     if (sourceInfo === undefined || !sourceInfo.isDirectory) {
         throw new Error(`${sourceDirectory} is not a folder that Rig can install a plugin from.`);
@@ -44,11 +46,12 @@ export async function installPluginFromPath(options: {
     await fs.rm(stagingDirectory, { force: true, recursive: true });
     await fs.mkdir(stagingDirectory, { recursive: true });
     try {
-        await copyTree(fs, sourceDirectory, stagingDirectory);
+        await copyTree(fs, sourceDirectory, stagingDirectory, signal);
         // Registration and compilation both run against the staged copy, so an invalid manifest,
         // an escaping asset, or a type error is reported before anything is installed.
         const staged = await readPluginManifest(stagingDirectory);
         await buildPlugin(staged);
+        signal?.throwIfAborted();
 
         const directory = join(pluginsDirectory, folder);
         await fs.rm(directory, { force: true, recursive: true });
@@ -77,9 +80,14 @@ function toFolderName(value: string): string {
     return folder;
 }
 
-async function copyTree(fs: FileSystemContext, source: string, destination: string): Promise<void> {
+async function copyTree(
+    fs: FileSystemContext,
+    source: string,
+    destination: string,
+    signal?: AbortSignal,
+): Promise<void> {
     const budget = { bytes: 0, files: 0 };
-    await copyDirectory(fs, source, destination, budget);
+    await copyDirectory(fs, source, destination, budget, signal);
 }
 
 async function copyDirectory(
@@ -87,9 +95,12 @@ async function copyDirectory(
     source: string,
     destination: string,
     budget: { bytes: number; files: number },
+    signal?: AbortSignal,
 ): Promise<void> {
+    signal?.throwIfAborted();
     await fs.mkdir(destination, { recursive: true });
     for (const entry of await fs.readdir(source)) {
+        signal?.throwIfAborted();
         if (EXCLUDED_ENTRIES.has(entry)) continue;
         const sourcePath = join(source, entry);
         const info = await fs.lstat(sourcePath);
@@ -99,7 +110,7 @@ async function copyDirectory(
             );
         }
         if (info.isDirectory) {
-            await copyDirectory(fs, sourcePath, join(destination, entry), budget);
+            await copyDirectory(fs, sourcePath, join(destination, entry), budget, signal);
             continue;
         }
         if (!info.isFile) continue;

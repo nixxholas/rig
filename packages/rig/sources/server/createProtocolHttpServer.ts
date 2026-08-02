@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { isAbsolute } from "node:path";
 
 import { isCuid } from "@paralleldrive/cuid2";
 import { Type } from "@sinclair/typebox";
@@ -36,6 +37,8 @@ import type {
     ListExternalToolCallsResponse,
     ListSecretsResponse,
     HealthResponse,
+    InstallPluginRequest,
+    InstallPluginResponse,
     GitStateResponse,
     GitWatchResponse,
     GoalSessionResponse,
@@ -82,6 +85,7 @@ import type {
     SubmitMessageResponse,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
+    UninstallPluginResponse,
     UnregisterSecretResponse,
     UpdateDaemonConfigRequest,
     UpdateDaemonConfigResponse,
@@ -161,7 +165,7 @@ import type {
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
-import { PluginAppError } from "../plugins/index.js";
+import { PluginAppError, PluginNotFoundError } from "../plugins/index.js";
 import { isAuthorizedProtocolRequest } from "./isAuthorizedProtocolRequest.js";
 import { attachRemoteTerminalWebSocketServer } from "./attachRemoteTerminalWebSocketServer.js";
 import { SessionTerminalTracker } from "../session/SessionTerminalTracker.js";
@@ -200,6 +204,7 @@ export interface ProtocolHttpServerOptions {
     plugins?: Pick<
         PluginContext,
         | "callAppTool"
+        | "install"
         | "list"
         | "readAppResource"
         | "readLog"
@@ -207,6 +212,7 @@ export interface ProtocolHttpServerOptions {
         | "storageGet"
         | "storageList"
         | "storageSet"
+        | "uninstall"
     >;
     store?: SessionStore;
     taskDrain?: TaskDrain;
@@ -316,6 +322,7 @@ interface ProtocolServerRuntimeConfig {
         | Pick<
               PluginContext,
               | "callAppTool"
+              | "install"
               | "list"
               | "readAppResource"
               | "readLog"
@@ -323,6 +330,7 @@ interface ProtocolServerRuntimeConfig {
               | "storageGet"
               | "storageList"
               | "storageSet"
+              | "uninstall"
           >
         | undefined;
 }
@@ -347,6 +355,12 @@ const pluginAppToolCallBodySchema = Type.Object(
 );
 const pluginAppStorageBodySchema = Type.Object(
     { key: Type.String({ minLength: 1 }), value: Type.Optional(Type.Unknown()) },
+    { additionalProperties: false },
+);
+const installPluginRequestSchema = Type.Object(
+    {
+        sourceDirectory: Type.String({ maxLength: 16_384, minLength: 1 }),
+    },
     { additionalProperties: false },
 );
 const emptyObjectSchema = Type.Object({}, { additionalProperties: false });
@@ -405,6 +419,121 @@ async function handleRequest(
         }
         const cursor = store.liveEvents.cursor();
         sendJson(response, 200, { cursor, ...(await runtimeConfig.plugins.list()) });
+        return;
+    }
+    if (request.method === "POST" && route.name === "plugins") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendPluginManagementError(
+                response,
+                503,
+                "plugins_unavailable",
+                "Plugins are unavailable while Rig is starting.",
+            );
+            return;
+        }
+        let body: InstallPluginRequest;
+        try {
+            body = Value.Decode(
+                installPluginRequestSchema,
+                await readJson<unknown>(request, 64 * 1024),
+            );
+            if (!isAbsolute(body.sourceDirectory)) {
+                sendPluginManagementError(
+                    response,
+                    400,
+                    "invalid_request",
+                    "Plugin sourceDirectory must be an absolute path on the machine running Rig.",
+                );
+                return;
+            }
+        } catch (error) {
+            if (error instanceof InvalidJsonBodyError) {
+                sendPluginManagementError(
+                    response,
+                    400,
+                    "invalid_request",
+                    "Plugin installation settings must be valid JSON.",
+                );
+                return;
+            }
+            if (error instanceof RequestBodyTooLargeError) {
+                sendPluginManagementError(
+                    response,
+                    413,
+                    "invalid_request",
+                    "Plugin installation settings are larger than the allowed limit.",
+                );
+                return;
+            }
+            sendPluginManagementError(
+                response,
+                400,
+                "invalid_request",
+                "Plugin installation settings are invalid.",
+            );
+            return;
+        }
+        const operation = requestOperationSignal(request, response);
+        try {
+            const plugin = await plugins.install({
+                fs: createNodeFileSystemContext(body.sourceDirectory, {
+                    permissionMode: () => "full_access",
+                }),
+                signal: operation.signal,
+                sourceDirectory: body.sourceDirectory,
+            });
+            if (!response.destroyed) {
+                sendJson<InstallPluginResponse>(response, 201, { plugin });
+            }
+        } catch (error) {
+            if (!response.destroyed && !operation.signal.aborted) {
+                sendPluginManagementError(response, 422, "install_failed", errorToMessage(error));
+            }
+        } finally {
+            operation.detach();
+        }
+        return;
+    }
+    if (request.method === "DELETE" && route.name === "plugin-uninstall") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendPluginManagementError(
+                response,
+                503,
+                "plugins_unavailable",
+                "Plugins are unavailable while Rig is starting.",
+            );
+            return;
+        }
+        const operation = requestOperationSignal(request, response);
+        try {
+            const plugin = await plugins.uninstall({
+                fs: createNodeFileSystemContext(process.cwd(), {
+                    permissionMode: () => "full_access",
+                }),
+                name: route.pluginName,
+                signal: operation.signal,
+            });
+            if (!response.destroyed) {
+                sendJson<UninstallPluginResponse>(response, 200, { plugin });
+            }
+        } catch (error) {
+            if (!response.destroyed && !operation.signal.aborted) {
+                if (error instanceof PluginNotFoundError) {
+                    sendPluginManagementError(response, 404, "plugin_not_found", error.message);
+                } else {
+                    sendPluginManagementError(
+                        response,
+                        500,
+                        "uninstall_failed",
+                        errorToMessage(error),
+                    );
+                }
+            }
+        } finally {
+            operation.detach();
+        }
         return;
     }
     if (request.method === "GET" && route.name === "plugin-log") {
@@ -2575,7 +2704,11 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
       }
     | { assetHash: string; name: "project-asset"; sessionId?: undefined }
-    | { name: "plugin-log"; pluginName: string; sessionId?: undefined }
+    | {
+          name: "plugin-log" | "plugin-uninstall";
+          pluginName: string;
+          sessionId?: undefined;
+      }
     | {
           appId: string;
           generation: string;
@@ -2727,6 +2860,10 @@ function matchRoute(pathname: string):
         globalParts[2] === "log"
     ) {
         return { name: "plugin-log", pluginName: decodeURIComponent(globalParts[1]) };
+    }
+    if (globalParts.length === 2 && globalParts[0] === "plugins" && globalParts[1] !== undefined) {
+        const pluginName = decodeUrlComponent(globalParts[1]);
+        return pluginName === undefined ? undefined : { name: "plugin-uninstall", pluginName };
     }
     if (
         globalParts.length === 2 &&
@@ -2956,6 +3093,40 @@ function sendPluginAppError(response: ServerResponse, error: unknown): void {
     throw error;
 }
 
+function sendPluginManagementError(
+    response: ServerResponse,
+    status: number,
+    code:
+        | "install_failed"
+        | "invalid_request"
+        | "plugin_not_found"
+        | "plugins_unavailable"
+        | "uninstall_failed",
+    message: string,
+): void {
+    sendJson(response, status, { error: { code, message } });
+}
+
+function requestOperationSignal(
+    request: IncomingMessage,
+    response: ServerResponse,
+): { detach: () => void; signal: AbortSignal } {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const abortIfIncomplete = () => {
+        if (!response.writableEnded) controller.abort();
+    };
+    request.once("aborted", abort);
+    response.once("close", abortIfIncomplete);
+    return {
+        detach: () => {
+            request.off("aborted", abort);
+            response.off("close", abortIfIncomplete);
+        },
+        signal: controller.signal,
+    };
+}
+
 function isSessionMutation(routeName: string, method: string | undefined): boolean {
     return (
         (method === "PATCH" && routeName === "session") ||
@@ -3001,6 +3172,8 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "debug-inspector") return request.method === "POST";
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
+    if (route.name === "plugins") return request.method === "POST";
+    if (route.name === "plugin-uninstall") return request.method === "DELETE";
     if (route.name === "plugin-app-tool-call" || route.name === "plugin-app-storage") {
         return request.method === "POST";
     }

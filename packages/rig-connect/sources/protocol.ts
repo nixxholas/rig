@@ -1312,6 +1312,46 @@ export interface PluginLogResponse {
     log: PluginLogSnapshot;
 }
 
+export interface InstalledPluginSummary {
+    description: string;
+    directory: string;
+    folder: string;
+    name: string;
+}
+
+export interface UninstalledPluginSummary {
+    dataDirectory: string;
+    folder: string;
+    name: string;
+}
+
+export interface InstallPluginRequest {
+    /** Absolute path on the machine running Rig. */
+    sourceDirectory: string;
+}
+
+export interface InstallPluginResponse {
+    plugin: InstalledPluginSummary;
+}
+
+export interface UninstallPluginResponse {
+    plugin: UninstalledPluginSummary;
+}
+
+export type PluginManagementErrorCode =
+    | "install_failed"
+    | "invalid_request"
+    | "plugin_not_found"
+    | "plugins_unavailable"
+    | "uninstall_failed";
+
+export interface PluginManagementErrorResponse {
+    error: {
+        code: PluginManagementErrorCode;
+        message: string;
+    };
+}
+
 /** The catalog snapshot returned by `GET /catalog`. */
 export interface GlobalStreamHello {
     catalog: ModelCatalog;

@@ -19,7 +19,12 @@ export type {
     GlobalLiveEventDelivery,
     GlobalStreamHello,
     PluginsChangedEvent,
+    InstalledPluginSummary,
+    InstallPluginRequest,
+    InstallPluginResponse,
     ListPluginsResponse,
+    PluginManagementErrorCode,
+    PluginManagementErrorResponse,
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
@@ -55,6 +60,8 @@ export type {
     ReorderRequest,
     TrimGlobalEventsRequest,
     TrimGlobalEventsResponse,
+    UninstalledPluginSummary,
+    UninstallPluginResponse,
 } from "./ProjectProtocol.js";
 export {
     writeProjectFileRequestSchema,

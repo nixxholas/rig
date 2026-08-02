@@ -20,6 +20,7 @@ export {
     type PluginMcpRegistryOptions,
 } from "./PluginMcpRegistry.js";
 export { PluginManager, type PluginManagerOptions } from "./PluginManager.js";
+export { PluginNotFoundError } from "./PluginNotFoundError.js";
 export { getPluginsDirectory } from "./getPluginsDirectory.js";
 export { readPluginManifest } from "./readPluginManifest.js";
 export { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "./readBoundedPluginLog.js";

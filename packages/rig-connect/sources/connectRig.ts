@@ -1,4 +1,4 @@
-import { Type } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import type {
@@ -26,7 +26,11 @@ import type {
     PluginsState,
     ReadPluginAppResourceResult,
 } from "./PluginElement.js";
-import { PluginAppRequestError, PluginStore } from "./PluginElement.js";
+import {
+    PluginAppRequestError,
+    PluginManagementRequestError,
+    PluginStore,
+} from "./PluginElement.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -56,12 +60,14 @@ import type {
     GlobalStreamHello,
     GetTimelineResponse,
     ListProviderUsageResponse,
+    InstalledPluginSummary,
     ListPluginsResponse,
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
     SessionStateResponse,
     TimelineScope,
+    UninstalledPluginSummary,
 } from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
 import { endpointUrl } from "./endpointUrl.js";
@@ -105,6 +111,49 @@ const pluginAppStorageListResponseSchema = Type.Object(
     { additionalProperties: false },
 );
 const emptyResponseSchema = Type.Object({}, { additionalProperties: false });
+const installedPluginSummarySchema = Type.Object(
+    {
+        description: Type.String(),
+        directory: Type.String(),
+        folder: Type.String(),
+        name: Type.String(),
+    },
+    { additionalProperties: false },
+);
+const uninstalledPluginSummarySchema = Type.Object(
+    {
+        dataDirectory: Type.String(),
+        folder: Type.String(),
+        name: Type.String(),
+    },
+    { additionalProperties: false },
+);
+const installPluginResponseSchema = Type.Object(
+    { plugin: installedPluginSummarySchema },
+    { additionalProperties: false },
+);
+const uninstallPluginResponseSchema = Type.Object(
+    { plugin: uninstalledPluginSummarySchema },
+    { additionalProperties: false },
+);
+const pluginManagementErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            {
+                code: Type.Union([
+                    Type.Literal("install_failed"),
+                    Type.Literal("invalid_request"),
+                    Type.Literal("plugin_not_found"),
+                    Type.Literal("plugins_unavailable"),
+                    Type.Literal("uninstall_failed"),
+                ]),
+                message: Type.String(),
+            },
+            { additionalProperties: false },
+        ),
+    },
+    { additionalProperties: false },
+);
 
 export interface ConnectRigOptions {
     endpoint: string;
@@ -362,6 +411,20 @@ export interface RigConnection {
     }>;
     /** Reads one bounded current-run or build-failure log snapshot. */
     readPluginLog: (name: string, options?: { signal?: AbortSignal }) => Promise<PluginLogSnapshot>;
+    /**
+     * Installs and starts a plugin from an absolute source-folder path on the machine running Rig.
+     *
+     * The source folder belongs to the daemon machine, not to the browser or other remote client.
+     */
+    installPlugin: (
+        sourceDirectory: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<InstalledPluginSummary>;
+    /** Stops a plugin, removes its managed code, and keeps its writable data folder. */
+    uninstallPlugin: (
+        name: string,
+        options?: { signal?: AbortSignal },
+    ) => Promise<UninstalledPluginSummary>;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -3279,6 +3342,47 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return ((await response.json()) as PluginLogResponse).log;
     };
 
+    const installPlugin: RigConnection["installPlugin"] = async (
+        sourceDirectory,
+        operationOptions = {},
+    ) => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const response = await request(endpointUrl(options.endpoint, "plugins"), {
+            body: JSON.stringify({ sourceDirectory }),
+            headers: {
+                accept: "application/json",
+                authorization: `Bearer ${options.token}`,
+                "content-type": "application/json",
+            },
+            method: "POST",
+            ...(operationOptions.signal === undefined ? {} : { signal: operationOptions.signal }),
+        });
+        const payload = await readPluginManagementResponse(response, installPluginResponseSchema);
+        return payload.plugin;
+    };
+
+    const uninstallPlugin: RigConnection["uninstallPlugin"] = async (
+        name,
+        operationOptions = {},
+    ) => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const response = await request(
+            endpointUrl(options.endpoint, `plugins/${encodeURIComponent(name)}`),
+            {
+                headers: {
+                    accept: "application/json",
+                    authorization: `Bearer ${options.token}`,
+                },
+                method: "DELETE",
+                ...(operationOptions.signal === undefined
+                    ? {}
+                    : { signal: operationOptions.signal }),
+            },
+        );
+        const payload = await readPluginManagementResponse(response, uninstallPluginResponseSchema);
+        return payload.plugin;
+    };
+
     // Finish notifications are told from the catalog, so a caller that wants
     // them gets it loaded and followed without opening a view of its own.
     if (options.onSessionFinished !== undefined) startGroupEntry(createGroupEntry());
@@ -3348,6 +3452,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         createSession,
         detachSecret,
         forkSession,
+        installPlugin,
         readBackgroundProcess,
         readPluginLog,
         recordActivity,
@@ -3370,6 +3475,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         stopBackgroundProcesses,
         stopWorkflow,
         switchModel,
+        uninstallPlugin,
     };
 }
 
@@ -3533,6 +3639,30 @@ function responseError(status: number, body: Uint8Array): Error {
         // A non-JSON refusal still gets a deterministic host-facing fallback.
     }
     return new Error(`Rig rejected the MCP App request (${String(status)}).`);
+}
+
+async function readPluginManagementResponse<TSchema_ extends TSchema>(
+    response: Response,
+    schema: TSchema_,
+): Promise<Static<TSchema_>> {
+    const body = await readBoundedResponseBytes(response, 64 * 1024);
+    if (!response.ok) throw pluginManagementResponseError(response.status, body);
+    try {
+        return Value.Decode(schema, JSON.parse(new TextDecoder().decode(body)) as unknown);
+    } catch {
+        throw new Error("Rig returned an invalid plugin management response.");
+    }
+}
+
+function pluginManagementResponseError(status: number, body: Uint8Array): Error {
+    const text = new TextDecoder().decode(body);
+    try {
+        const payload = Value.Decode(pluginManagementErrorResponseSchema, JSON.parse(text));
+        return new PluginManagementRequestError(payload.error.code, status, payload.error.message);
+    } catch {
+        // The stable fallback below covers malformed and non-JSON daemon refusals.
+    }
+    return new Error(`Rig rejected the plugin management request (${String(status)}).`);
 }
 
 class MutationHttpError extends Error {

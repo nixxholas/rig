@@ -1,19 +1,12 @@
-import type { EventId, PluginLogSnapshot, PluginSummary } from "../../protocol/index.js";
+import type {
+    EventId,
+    InstalledPluginSummary,
+    PluginLogSnapshot,
+    PluginSummary,
+    UninstalledPluginSummary,
+} from "../../protocol/index.js";
 import type { PluginAppResource } from "../../plugins/PluginAppRegistry.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
-
-export interface InstalledPluginSummary {
-    description: string;
-    directory: string;
-    folder: string;
-    name: string;
-}
-
-export interface UninstalledPluginSummary {
-    dataDirectory: string;
-    folder: string;
-    name: string;
-}
 
 /**
  * Managing the plugins installed on this machine.
@@ -24,6 +17,7 @@ export interface UninstalledPluginSummary {
 export interface PluginContext {
     install(options: {
         fs: FileSystemContext;
+        signal?: AbortSignal;
         sourceDirectory: string;
     }): Promise<InstalledPluginSummary>;
     list(): Promise<{
@@ -58,5 +52,9 @@ export interface PluginContext {
         value: unknown,
     ): Promise<void>;
     readLog(name: string): Promise<PluginLogSnapshot>;
-    uninstall(options: { fs: FileSystemContext; name: string }): Promise<UninstalledPluginSummary>;
+    uninstall(options: {
+        fs: FileSystemContext;
+        name: string;
+        signal?: AbortSignal;
+    }): Promise<UninstalledPluginSummary>;
 }

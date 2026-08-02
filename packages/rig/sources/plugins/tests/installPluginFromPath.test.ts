@@ -56,6 +56,24 @@ describe("installing a plugin from a folder", () => {
         await expect(fs.readdir(pluginsDirectory)).resolves.toEqual([]);
     });
 
+    it("stops before staging when installation is already cancelled", async () => {
+        const { fs, pluginsDirectory, workspace } = await createHarness();
+        const source = join(workspace, "clock");
+        await createPluginSource(source);
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(
+            installPluginFromPath({
+                fs,
+                pluginsDirectory,
+                signal: controller.signal,
+                sourceDirectory: source,
+            }),
+        ).rejects.toMatchObject({ name: "AbortError" });
+        await expect(fs.exists(pluginsDirectory)).resolves.toBe(false);
+    });
+
     it("keeps the previous installation when a replacement fails to build", async () => {
         const { fs, pluginsDirectory, workspace } = await createHarness();
         const source = join(workspace, "clock");
