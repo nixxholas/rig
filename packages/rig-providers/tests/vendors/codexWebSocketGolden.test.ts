@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const websocket = vi.hoisted(() => ({
     beforeOutputFailures: 0,
     closeBeforeSendOnce: false,
+    closedConnectionsOnCreate: 0,
     connectionHeaders: [] as Record<string, string>[],
     emitCustomToolResponse: false,
     failMidstreamOnce: false,
@@ -14,6 +15,7 @@ const websocket = vi.hoisted(() => ({
     failTerminalOnce: false,
     holdWarmupOpenOnce: false,
     instances: [] as Array<{
+        closeWithoutEvent: () => void;
         emitError: (error: Error) => void;
         errorListenerCount: () => number;
     }>,
@@ -72,8 +74,15 @@ vi.mock("openai/resources/responses/ws", () => ({
         private resolveNext: ((result: IteratorResult<any, undefined>) => void) | undefined;
 
         constructor(_client: unknown, options?: { headers?: Record<string, string> }) {
+            if (websocket.closedConnectionsOnCreate > 0) {
+                websocket.closedConnectionsOnCreate -= 1;
+                this.socket.readyState = 3;
+            }
             websocket.connectionHeaders.push(structuredClone(options?.headers ?? {}));
             websocket.instances.push({
+                closeWithoutEvent: () => {
+                    this.socket.readyState = 3;
+                },
                 emitError: (error) => this.emitError(error),
                 errorListenerCount: () => this.errorListeners.size,
             });
@@ -452,6 +461,7 @@ describe("Codex CLI mode WebSocket goldens", () => {
     beforeEach(() => {
         websocket.beforeOutputFailures = 0;
         websocket.closeBeforeSendOnce = false;
+        websocket.closedConnectionsOnCreate = 0;
         websocket.connectionHeaders.splice(0);
         websocket.emitCustomToolResponse = false;
         websocket.failMidstreamOnce = false;
@@ -792,7 +802,51 @@ describe("Codex CLI mode WebSocket goldens", () => {
         session.destroy();
     });
 
-    it("retries on a fresh WebSocket when the cached connection closes between turns", async () => {
+    it("silently reconnects when an idle cached WebSocket closes before the next request", async () => {
+        const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
+        const session = await codexProvider("websocket", 0).session("<SESSION_ID>", {
+            instructions: prompt.instructions,
+            tools: codexCliTools("gpt-5.6-sol"),
+        });
+        const first = { role: "user" as const, content: "first" };
+        await drain(
+            session.run({
+                context: { messages: [first] },
+                effort: "low",
+            }),
+        );
+
+        websocket.instances[0]!.closeWithoutEvent();
+        const events = [];
+        for await (const event of session.run({
+            context: {
+                messages: [first, { role: "user", content: "second" }],
+            },
+            effort: "low",
+        })) {
+            events.push(event);
+        }
+
+        expect(blockLifecycle(events)).toEqual(["block_start", "block_stop", "done"]);
+        expect(events).not.toContainEqual(expect.objectContaining({ type: "retrying" }));
+        expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
+        expect(websocket.connectionHeaders).toHaveLength(2);
+        expect(websocket.sent).toHaveLength(3);
+        expect(websocket.sent[2]!.previous_response_id).toBeUndefined();
+        expect(websocket.sent[2]!.input).toContainEqual({
+            type: "message",
+            role: "user",
+            content: "first",
+        });
+        expect(websocket.sent[2]!.input).toContainEqual({
+            type: "message",
+            role: "user",
+            content: "second",
+        });
+        session.destroy();
+    });
+
+    it("uses the normal retry path when the silent reconnect is also closed", async () => {
         const prompt = codexCliPrompt("gpt-5.6-sol", "websocket");
         const session = await codexProvider("websocket", 1).session("<SESSION_ID>", {
             instructions: prompt.instructions,
@@ -806,7 +860,8 @@ describe("Codex CLI mode WebSocket goldens", () => {
             }),
         );
 
-        websocket.closeBeforeSendOnce = true;
+        websocket.instances[0]!.closeWithoutEvent();
+        websocket.closedConnectionsOnCreate = 1;
         const events = [];
         for await (const event of session.run({
             context: {
@@ -825,15 +880,19 @@ describe("Codex CLI mode WebSocket goldens", () => {
             "block_stop",
             "done",
         ]);
+        expect(events).toContainEqual({
+            type: "retrying",
+            attempt: 1,
+            reason:
+                "Stream disconnected; reconnecting: " +
+                "The Codex WebSocket closed before the request could be sent.",
+        });
         expect(events.at(-1)).toEqual({ type: "done", state: "normal" });
-        expect(websocket.connectionHeaders).toHaveLength(2);
+        expect(websocket.connectionHeaders).toHaveLength(3);
         expect(websocket.sent).toHaveLength(3);
         expect(websocket.sent[2]!.previous_response_id).toBeUndefined();
-        expect(websocket.sent[2]!.input).toContainEqual({
-            type: "message",
-            role: "user",
-            content: "second",
-        });
+        expect(JSON.stringify(websocket.sent[2]!.input)).toContain("first");
+        expect(JSON.stringify(websocket.sent[2]!.input)).toContain("second");
         session.destroy();
     });
 

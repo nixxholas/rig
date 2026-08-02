@@ -278,10 +278,13 @@ items support full-context replay; they do not restore the in-memory response ch
 After process restart, reconnection, terminal stream failure, or abort, Rig must reconstruct a
 complete request from the caller-provided context. The durable transcript is the authority.
 
-The OpenAI SDK reports a send on an already-closed cached socket through its `error` event rather
-than by throwing from `send()`. Rig binds that error to the active provider stream so the normal
-rollback and retry path creates a fresh connection; it must never escape as an unhandled process
-rejection.
+An idle Responses socket can close without an active stream observing it. Rig checks the cached
+socket before the next send, and also binds the OpenAI SDK's synchronously emitted send error to
+the active provider stream. When either path proves the request was not sent, an established
+session silently opens a fresh socket and replays the complete durable context once without
+consuming an inference retry. Failures before the socket is warmed, repeated pre-send failures,
+and any failure after a request may have been sent stay on the normal rollback and retry path. The
+SDK error must never escape as an unhandled process rejection.
 
 If the backend rejects a cached ID with `previous_response_not_found`, Rig discards that response
 chain and retries once with the complete durable context. The failed request has produced no

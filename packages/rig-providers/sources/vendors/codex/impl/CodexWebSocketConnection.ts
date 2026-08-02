@@ -13,7 +13,10 @@ import {
 } from "@/protocol/responsesLite/createResponsesLiteRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 import type { CodexTurnState } from "@/vendors/codex/impl/CodexTurnState.js";
-import { createCodexWebSocketStream } from "@/vendors/codex/impl/createCodexWebSocketStream.js";
+import {
+    CodexWebSocketClosedBeforeRequestError,
+    createCodexWebSocketStream,
+} from "@/vendors/codex/impl/createCodexWebSocketStream.js";
 import { getCodexIncrementalInput } from "@/vendors/codex/impl/getCodexIncrementalInput.js";
 import { setCodexRequestKind } from "@/vendors/codex/impl/setCodexRequestKind.js";
 import { toCodexToolDefinitions } from "@/vendors/codex/impl/toCodexToolDefinitions.js";
@@ -25,6 +28,12 @@ import { withCodexStreamIdleTimeout } from "@/vendors/codex/impl/codexRetry.js";
  * idle limit rejection cannot become an unhandled process crash.
  */
 export const CODEX_WEBSOCKET_MAX_AGE_MS = 55 * 60 * 1000;
+
+interface CodexWebSocketStreamOptions {
+    request: CodexResponseRequest;
+    signal?: AbortSignal;
+    tools: readonly SessionTool[];
+}
 
 /**
  * The Codex WebSocket, which is a conversation rather than a request.
@@ -54,11 +63,39 @@ export class CodexWebSocketConnection {
         },
     ) {}
 
-    async *stream(options: {
-        request: CodexResponseRequest;
-        signal?: AbortSignal;
-        tools: readonly SessionTool[];
-    }): AsyncGenerator<ResponseStreamEvent> {
+    async *stream(options: CodexWebSocketStreamOptions): AsyncGenerator<ResponseStreamEvent> {
+        let preRequestReconnects = 0;
+        let yieldedResponseEvent = false;
+        for (;;) {
+            try {
+                for await (const event of this.streamAttempt(options)) {
+                    yieldedResponseEvent = true;
+                    yield event;
+                }
+                return;
+            } catch (error) {
+                // A warmed socket can be dropped while it is idle without its close event winning
+                // the race before the next send. When the transport proves that no request frame
+                // was sent, one immediate replay on a fresh socket is safe and needs no visible
+                // inference retry. Anything ambiguous, initial, or repeated stays on the session's
+                // normal rollback and retry path.
+                if (
+                    !(error instanceof CodexWebSocketClosedBeforeRequestError) ||
+                    yieldedResponseEvent ||
+                    !this.started ||
+                    preRequestReconnects >= 1
+                ) {
+                    throw error;
+                }
+                preRequestReconnects += 1;
+                this.reset("websocket closed before request");
+            }
+        }
+    }
+
+    private async *streamAttempt(
+        options: CodexWebSocketStreamOptions,
+    ): AsyncGenerator<ResponseStreamEvent> {
         const { request, signal, tools } = options;
         const turnState = this.options.turnState;
         const client = this.options.client();
@@ -189,7 +226,7 @@ export class CodexWebSocketConnection {
     ): AsyncIterable<ResponseStreamEvent> {
         const socket = this.socket;
         if (socket === undefined) {
-            throw new Error("The Codex WebSocket closed before the request could be sent.");
+            throw new CodexWebSocketClosedBeforeRequestError();
         }
         const turnState = this.options.turnState.value;
         return withCodexStreamIdleTimeout({

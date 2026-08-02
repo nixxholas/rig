@@ -5,6 +5,13 @@ import type { ResponsesWS } from "openai/resources/responses/ws";
 import { stampCodexWebSocketRequest } from "@/vendors/codex/impl/stampCodexWebSocketRequest.js";
 import type { CodexResponseRequest } from "@/vendors/codex/impl/CodexResponseRequest.js";
 
+export class CodexWebSocketClosedBeforeRequestError extends Error {
+    constructor(cause?: unknown) {
+        super("The Codex WebSocket closed before the request could be sent.", { cause });
+        this.name = "CodexWebSocketClosedBeforeRequestError";
+    }
+}
+
 export async function* createCodexWebSocketStream(options: {
     client: OpenAI;
     request: CodexResponseRequest;
@@ -13,8 +20,7 @@ export async function* createCodexWebSocketStream(options: {
     turnState?: string;
 }): AsyncGenerator<ResponseStreamEvent> {
     if (options.signal?.aborted) throw new DOMException("Request was aborted", "AbortError");
-    if (options.socket.socket.readyState >= 2)
-        throw new Error("Codex WebSocket closed before the request could be sent.");
+    if (options.socket.socket.readyState >= 2) throw new CodexWebSocketClosedBeforeRequestError();
     const iterator = options.socket[Symbol.asyncIterator]();
     const abort = (): void => options.socket.close({ code: 1000, reason: "aborted" });
     options.signal?.addEventListener("abort", abort, { once: true });
@@ -34,7 +40,11 @@ export async function* createCodexWebSocketStream(options: {
         } finally {
             options.socket.off("error", onSendError);
         }
-        if (sendError !== undefined) throw sendError;
+        if (sendError !== undefined) {
+            if (options.socket.socket.readyState >= 2)
+                throw new CodexWebSocketClosedBeforeRequestError(sendError);
+            throw sendError;
+        }
         for (;;) {
             const item = await iterator.next();
             if (item.done) return;
