@@ -50,6 +50,14 @@ describe("createBundledDocsInstructions", () => {
         expect(instructions).toContain("only when the user asks about Rig or Happy themselves");
         expect(instructions).toContain("not the current working directory");
     });
+
+    it("points at the design specification for Happy webapp and plugin UI work", () => {
+        const instructions = createBundledDocsInstructions("/happy/docs");
+
+        expect(instructions).toContain("`/happy/docs/DESIGN.md`");
+        expect(instructions).toContain("design specification for Happy plugin apps and webapps");
+        expect(instructions).toContain("before designing or building a Happy webapp or plugin UI");
+    });
 });
 
 describe("createAvailableModelsInstructions", () => {
