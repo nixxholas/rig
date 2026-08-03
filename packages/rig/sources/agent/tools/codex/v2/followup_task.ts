@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import { applySubagentReadOnlyOverride } from "../../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../../types.js";
-import { managedSubagentSchema } from "../impl/subagentSchemas.js";
+import { managedSubagentSchema, toCodexManagedSubagentResult } from "../impl/subagentSchemas.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
 
 export const codexFollowupTaskTool = defineTool({
@@ -18,7 +18,9 @@ Prefer this native tool for compatible GPT agents because it preserves Codex's e
 Send follow-up work to an existing subagent, including one that completed or was stopped earlier. Its saved session and full context are reused. If it is idle, this starts another turn; if it is busy, the work is queued.`,
     arguments: Type.Object(
         {
-            target: Type.String({ description: "Agent id, task name, or full task path." }),
+            target: Type.String({
+                description: "Stable Agent ID (preferred) or canonical task path.",
+            }),
             message: Type.String({
                 description: "Message text to send to the target agent.",
                 encrypted: true,
@@ -38,11 +40,13 @@ Send follow-up work to an existing subagent, including one that completed or was
         const { message, read_only, target } = args;
         const subagents = requireSubagentContext(context);
         await applySubagentReadOnlyOverride(subagents, target, read_only);
-        return subagents.encryptedMessages === true
-            ? subagents.followUp(target, "", undefined, message)
-            : subagents.followUp(target, message);
+        const agent =
+            subagents.encryptedMessages === true
+                ? subagents.followUp(target, "", undefined, message)
+                : subagents.followUp(target, message);
+        return toCodexManagedSubagentResult(agent);
     },
-    toLLM: () => [{ type: "text", text: "" }],
-    toUI: (result) => `Sent follow-up work to ${result.description}.`,
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+    toUI: (result) => `Sent follow-up work to ${result.path}.`,
     locks: [],
 });

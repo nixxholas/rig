@@ -7,15 +7,27 @@ import { isDatabaseFailure } from "../../persistence/isDatabaseFailure.js";
 export const grokKillCommandOrSubagentTool = defineTool({
     name: "kill_command_or_subagent",
     label: "kill_command_or_subagent",
-    description: "Terminate a running background command or subagent by task ID.",
+    description:
+        "Terminate a running background command or subagent by task ID. For a subagent, use its Agent ID (preferred) or canonical task path.",
     arguments: Type.Object({
-        task_id: Type.String({ description: "The task ID to terminate." }),
+        task_id: Type.String({
+            description:
+                "The task ID to terminate. A subagent accepts its Agent ID (preferred) or canonical task path.",
+        }),
     }),
-    returnType: Type.Object({
-        task_id: Type.String(),
-        outcome: Type.String(),
-        message: Type.String(),
-    }),
+    returnType: Type.Union([
+        Type.Object({
+            task_id: Type.String(),
+            outcome: Type.String(),
+            message: Type.String(),
+        }),
+        Type.Object({
+            agent_id: Type.String(),
+            path: Type.String(),
+            outcome: Type.String(),
+            message: Type.String(),
+        }),
+    ]),
     shouldReviewInAutoMode: () => false,
     execute: async ({ task_id }, context) => {
         const terminalId = Number(task_id);
@@ -32,7 +44,8 @@ export const grokKillCommandOrSubagentTool = defineTool({
         try {
             const stopped = context.subagents.interrupt(task_id);
             return {
-                task_id: stopped.sessionId,
+                agent_id: stopped.agentId,
+                path: stopped.path,
                 outcome: "killed",
                 message: `Subagent ${stopped.description} was stopped.`,
             };

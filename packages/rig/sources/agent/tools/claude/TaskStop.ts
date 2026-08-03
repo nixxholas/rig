@@ -7,10 +7,14 @@ import { parseBackgroundTaskId } from "../../../tools/claude/parseBackgroundTask
 export const claudeTaskStopTool = defineTool({
     name: "TaskStop",
     label: "TaskStop",
-    description: "Stop a running background shell task, agent, or workflow by its identifier.",
+    description:
+        "Stop a running background shell task, agent, or workflow by its identifier. For an agent, prefer its stable Agent ID; its canonical path is also accepted.",
     arguments: Type.Object(
         {
-            task_id: Type.String({ description: "The background task identifier." }),
+            task_id: Type.String({
+                description:
+                    "The background task identifier. For an agent, use its stable Agent ID (preferred) or canonical path.",
+            }),
         },
         { additionalProperties: false },
     ),
@@ -28,9 +32,9 @@ export const claudeTaskStopTool = defineTool({
             task_type: Type.Literal("workflow"),
         }),
         Type.Object({
-            command: Type.String(),
+            agentId: Type.String(),
             message: Type.String(),
-            task_id: Type.String(),
+            path: Type.String(),
             task_type: Type.Literal("local_agent"),
         }),
     ]),
@@ -41,11 +45,11 @@ export const claudeTaskStopTool = defineTool({
             if (agent.status !== "running" && agent.status !== "suspended") {
                 throw new Error("The background agent is not running.");
             }
-            context.subagents.interrupt(agent.sessionId);
+            context.subagents.interrupt(agent.agentId);
             return {
-                command: agent.description,
+                agentId: agent.agentId,
                 message: "The background agent was stopped.",
-                task_id: agent.sessionId,
+                path: agent.path,
                 task_type: "local_agent" as const,
             };
         }

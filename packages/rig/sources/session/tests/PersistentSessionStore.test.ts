@@ -1710,13 +1710,27 @@ describe("PersistentSessionStore", () => {
             });
             database.close();
 
+            let restartNotification: string | undefined;
             for (let open = 0; open < 2; open += 1) {
                 const restored = new PersistentSessionStore({
                     databasePath,
                     modelCatalog: testModelCatalog(),
                 });
+                restartNotification ??= restored
+                    .get("session-1")
+                    ?.snapshot()
+                    .snapshot.messages.flatMap((message) =>
+                        message.blocks.flatMap((block) =>
+                            block.type === "text" ? [block.text] : [],
+                        ),
+                    )
+                    .find((text) => text.includes("<subagent-notification>"));
                 restored.close();
             }
+            expect(restartNotification).toContain("Agent ID: subagent-agent");
+            expect(restartNotification).toContain("Path: /root/subagent-agent");
+            expect(restartNotification).not.toContain("Task:");
+            expect(restartNotification).not.toContain("subagent-1");
 
             const verify = new DatabaseSync(databasePath);
             try {
@@ -2781,7 +2795,7 @@ describe("PersistentSessionStore", () => {
                                   {
                                       arguments: {
                                           message: "Continue the persisted investigation.",
-                                          target: "persisted_worker",
+                                          target: "/root/persisted_worker",
                                       },
                                       id: "follow-up-persisted-worker",
                                       name: "followup_task",

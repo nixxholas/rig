@@ -19,7 +19,8 @@ describe("background subagent completion routes to its parent", () => {
     it("reports deterministic child work and leaves the parent terminal usable", async () => {
         let childRunId: string | undefined;
         let parentInitialRunId: string | undefined;
-        let spawnedTaskName: string | undefined;
+        let spawnedAgentId: string | undefined;
+        let spawnedPath: string | undefined;
         let parentObservedCompletion = false;
         let parentObservedSpawnResult = false;
         const gym = await createGym({
@@ -95,20 +96,22 @@ describe("background subagent completion routes to its parent", () => {
                         toolName: "spawn_agent",
                     });
                     const parsed = JSON.parse(spawnResultText) as {
-                        nickname: string | null;
-                        task_name: string;
+                        agent_id: string;
+                        path: string;
                     };
-                    expect(parsed).toEqual({
-                        nickname: null,
-                        task_name: "/root/inspect_workspace",
-                    });
-                    spawnedTaskName = parsed.task_name;
+                    expect(parsed.agent_id).toBeTypeOf("string");
+                    expect(parsed.path).toBe("/root/inspect_workspace");
+                    expect(Object.keys(parsed).sort()).toEqual(["agent_id", "path"]);
+                    spawnedAgentId = parsed.agent_id;
+                    spawnedPath = parsed.path;
                     parentObservedSpawnResult = true;
                 }
 
                 if (lastText.includes("<subagent-notification>")) {
                     expect(lastMessage).toMatchObject({ role: "user" });
-                    expect(lastText).toContain("Task: inspect_workspace");
+                    expect(lastText).toContain(`Agent ID: ${spawnedAgentId}`);
+                    expect(lastText).toContain(`Path: ${spawnedPath}`);
+                    expect(lastText).not.toContain("Task:");
                     expect(lastText).toContain("Status: completed");
                     expect(lastText).toContain("Result: CHILD_DETERMINISTIC_RESULT");
                     parentObservedCompletion = true;
@@ -169,7 +172,8 @@ describe("background subagent completion routes to its parent", () => {
         expect(parentObservedSpawnResult).toBe(true);
         expect(parentObservedCompletion).toBe(true);
         expect(childRunId).toBeTypeOf("string");
-        expect(spawnedTaskName).toBe("/root/inspect_workspace");
+        expect(spawnedAgentId).toBeTypeOf("string");
+        expect(spawnedPath).toBe("/root/inspect_workspace");
         expect(completed.rows).toHaveLength(28);
         expect(completed.scroll.visibleRows).toBe(28);
         expect(completed.scroll.bottomDepartureCount).toBe(baseline.bottomDepartureCount);

@@ -81,17 +81,17 @@ export const readAgentHistoryTool = defineTool({
         target: Type.Optional(
             Type.String({
                 description:
-                    "Agent task path, task name, or session ID. Omit for the current agent. Use /root for the parent.",
+                    "Stable Agent ID (preferred) or canonical path. Omit for the current agent. Use /root for the parent.",
             }),
         ),
     }),
     returnType: Type.Object({
         agents: Type.Array(
             Type.Object({
+                agent_id: Type.String(),
                 description: Type.Optional(Type.String()),
                 message_count: Type.Integer(),
                 path: Type.String(),
-                session_id: Type.String(),
                 status: Type.String(),
             }),
         ),
@@ -159,10 +159,10 @@ export const readAgentHistoryTool = defineTool({
             formatted.startIndex > 0 ? page.messages[0]?.position : page.previousCursor;
         return {
             agents: page.agents.map((agent) => ({
+                agent_id: agent.agentId,
                 ...(agent.description === undefined ? {} : { description: agent.description }),
                 message_count: agent.messageCount,
                 path: agent.path,
-                session_id: agent.sessionId,
                 status: agent.status,
             })),
             cursor: returnedCursor,

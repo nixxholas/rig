@@ -1,5 +1,6 @@
 import type { AgentContext } from "../../agent/index.js";
-import { readGrokTask, type GrokTaskResult } from "./read_grok_task.js";
+import type { GrokTaskResult } from "./grokTaskResultSchema.js";
+import { readGrokTask } from "./read_grok_task.js";
 
 export async function waitForGrokTasks(options: {
     context: AgentContext;

@@ -7,9 +7,11 @@ export const claudeSendMessageTool = defineTool({
     name: "SendMessage",
     label: "SendMessage",
     description:
-        "Send follow-up work to a previously spawned subagent by its task name, path, or agent id. The agent resumes with its full context preserved.",
+        "Send follow-up work to a previously spawned subagent by stable Agent ID (preferred) or canonical path. The agent resumes with its full context preserved.",
     arguments: Type.Object({
-        to: Type.String({ description: "The target subagent's task name, path, or agent id." }),
+        to: Type.String({
+            description: "The target subagent's stable Agent ID (preferred) or canonical path.",
+        }),
         summary: Type.Optional(
             Type.String({
                 description: "A short human-readable summary of the follow-up.",
@@ -31,9 +33,10 @@ export const claudeSendMessageTool = defineTool({
         ),
     }),
     returnType: Type.Object({
+        agentId: Type.String(),
         message: Type.String(),
+        path: Type.String(),
         success: Type.Boolean(),
-        target: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
     execute: async ({ effort, message, read_only, summary, to }, context) => {
@@ -43,12 +46,13 @@ export const claudeSendMessageTool = defineTool({
         await applySubagentReadOnlyOverride(context.subagents, to, read_only);
         const target = context.subagents.followUp(to, message, effort);
         return {
+            agentId: target.agentId,
             message:
                 summary === undefined
                     ? `Follow-up work was sent to ${target.description}.`
                     : `${summary}: follow-up work was sent to ${target.description}.`,
+            path: target.path,
             success: true,
-            target: target.path,
         };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],

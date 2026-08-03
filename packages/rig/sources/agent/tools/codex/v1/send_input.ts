@@ -18,7 +18,7 @@ export const codexV1SendInputTool = defineTool({
     arguments: Type.Object(
         {
             target: Type.String({
-                description: "Agent id to message (from spawn_agent).",
+                description: "Stable Agent ID (preferred) or canonical task path.",
             }),
             message: Type.Optional(
                 Type.String({
@@ -38,6 +38,8 @@ export const codexV1SendInputTool = defineTool({
         { additionalProperties: false },
     ),
     returnType: Type.Object({
+        agent_id: Type.String(),
+        path: Type.String(),
         submission_id: Type.String({
             description: "Identifier for the queued input submission.",
         }),
@@ -50,18 +52,21 @@ export const codexV1SendInputTool = defineTool({
         if (message.length === 0) throw new Error("send_input requires message or items.");
         const subagents = requireSubagentContext(context);
         await applySubagentReadOnlyOverride(subagents, args.target, args.read_only);
-        if (args.interrupt === true) {
-            subagents.interrupt(args.target);
-            subagents.followUp(args.target, message);
-        } else {
-            const sendMessage = subagents.sendMessage;
-            if (sendMessage === undefined) {
-                subagents.followUp(args.target, message);
-            } else {
-                sendMessage(args.target, message);
+        const agent = (() => {
+            if (args.interrupt === true) {
+                subagents.interrupt(args.target);
+                return subagents.followUp(args.target, message);
             }
-        }
-        return { submission_id: execution.toolCallId ?? args.target };
+            const sendMessage = subagents.sendMessage;
+            return sendMessage === undefined
+                ? subagents.followUp(args.target, message)
+                : sendMessage(args.target, message);
+        })();
+        return {
+            agent_id: agent.agentId,
+            path: agent.path,
+            submission_id: execution.toolCallId ?? args.target,
+        };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: () => "Sent input to the subagent.",

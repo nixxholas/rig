@@ -7,24 +7,24 @@ describe("read_agent_history", () => {
     it("reads a selected subagent and lists the complete session tree", () => {
         const page: ChatHistoryPage = {
             agent: {
+                agentId: "child-agent-id",
                 description: "Inspect history",
                 messageCount: 1,
                 path: "/root/audit",
-                sessionId: "child",
                 status: "completed",
             },
             agents: [
                 {
+                    agentId: "root-agent-id",
                     messageCount: 4,
                     path: "/root",
-                    sessionId: "root",
                     status: "idle",
                 },
                 {
+                    agentId: "child-agent-id",
                     description: "Inspect history",
                     messageCount: 1,
                     path: "/root/audit",
-                    sessionId: "child",
                     status: "completed",
                 },
             ],
@@ -84,8 +84,8 @@ describe("read_agent_history", () => {
         });
         expect(result).toMatchObject({
             agents: [
-                { path: "/root", session_id: "root" },
-                { path: "/root/audit", session_id: "child" },
+                { agent_id: "root-agent-id", path: "/root" },
+                { agent_id: "child-agent-id", path: "/root/audit" },
             ],
             history: expect.stringContaining("Subagent result."),
             matched_messages: 1,

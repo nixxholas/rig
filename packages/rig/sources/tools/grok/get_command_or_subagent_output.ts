@@ -3,15 +3,9 @@ import { Type } from "@sinclair/typebox";
 
 import { MAX_SUBAGENT_WAIT_TIMEOUT_MS } from "../../agent/context/subagentWaitTimeouts.js";
 import { defineTool } from "../../agent/types.js";
+import { grokTaskResultSchema } from "./grokTaskResultSchema.js";
 import { readGrokTask } from "./read_grok_task.js";
 import { waitForGrokTasks } from "./waitForGrokTasks.js";
-
-const taskResultSchema = Type.Object({
-    task_id: Type.String(),
-    status: Type.String(),
-    exit_code: Type.Optional(Type.Number()),
-    output: Type.Optional(Type.String()),
-});
 
 export const grokGetCommandOrSubagentOutputTool = defineTool({
     name: "get_command_or_subagent_output",
@@ -21,7 +15,7 @@ export const grokGetCommandOrSubagentOutputTool = defineTool({
     arguments: Type.Object({
         task_ids: Type.Array(Type.String(), {
             description:
-                "Task IDs to query. For one task, pass a one-element array. At most 20 IDs.",
+                "Task IDs to query. For a subagent, use its Agent ID (preferred) or canonical task path. For one task, pass a one-element array. At most 20 IDs.",
             maxItems: 20,
             minItems: 1,
         }),
@@ -34,7 +28,7 @@ export const grokGetCommandOrSubagentOutputTool = defineTool({
             }),
         ),
     }),
-    returnType: Type.Object({ results: Type.Array(taskResultSchema) }),
+    returnType: Type.Object({ results: Type.Array(grokTaskResultSchema) }),
     interruptionMessage: "Waiting for background task output was interrupted by new input.",
     shouldReviewInAutoMode: () => false,
     steerable: true,

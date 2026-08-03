@@ -16,9 +16,13 @@ export const codexInterruptAgentTool = defineTool({
     description:
         "Stop an existing subagent's current turn. The agent remains available for later follow-up work.",
     arguments: Type.Object({
-        target: Type.String({ description: "Agent id, task name, or full task path." }),
+        target: Type.String({
+            description: "Stable Agent ID (preferred) or canonical task path.",
+        }),
     }),
     returnType: Type.Object({
+        agent_id: Type.String(),
+        path: Type.String(),
         previous_status: codexAgentStatusSchema,
     }),
     shouldReviewInAutoMode: () => false,
@@ -26,7 +30,12 @@ export const codexInterruptAgentTool = defineTool({
         const subagents = requireSubagentContext(context);
         const previous = findManagedSubagent(subagents, target);
         subagents.interrupt(target);
-        return { previous_status: toCodexAgentStatus(previous) };
+        if (previous === undefined) throw new Error(`Subagent '${target}' was not found.`);
+        return {
+            agent_id: previous.agentId,
+            path: previous.path,
+            previous_status: toCodexAgentStatus(previous),
+        };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: () => "Interrupted the subagent's current turn.",

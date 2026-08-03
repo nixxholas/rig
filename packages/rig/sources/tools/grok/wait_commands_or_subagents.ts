@@ -7,6 +7,7 @@ import {
     MIN_SUBAGENT_WAIT_TIMEOUT_MS,
 } from "../../agent/context/subagentWaitTimeouts.js";
 import { defineTool } from "../../agent/types.js";
+import { grokTaskResultSchema } from "./grokTaskResultSchema.js";
 import { waitForGrokTasks } from "./waitForGrokTasks.js";
 
 export const grokWaitCommandsOrSubagentsTool = defineTool({
@@ -16,7 +17,8 @@ export const grokWaitCommandsOrSubagentsTool = defineTool({
         "Wait until any or all specified background commands or subagents reach a terminal state. Omit timeout_ms so the wait lasts a full hour. A background subagent that finishes notifies you anyway, even while you are idle, so repeated short waits only spend another full model turn to learn nothing. Use get_command_or_subagent_output for a single non-blocking peek.",
     arguments: Type.Object({
         task_ids: Type.Array(Type.String(), {
-            description: "Task IDs to wait for.",
+            description:
+                "Task IDs to wait for. For a subagent, use its Agent ID (preferred) or canonical task path.",
             maxItems: 20,
             minItems: 1,
         }),
@@ -33,14 +35,7 @@ export const grokWaitCommandsOrSubagentsTool = defineTool({
     }),
     returnType: Type.Object({
         mode: Type.String(),
-        results: Type.Array(
-            Type.Object({
-                task_id: Type.String(),
-                status: Type.String(),
-                exit_code: Type.Optional(Type.Number()),
-                output: Type.Optional(Type.String()),
-            }),
-        ),
+        results: Type.Array(grokTaskResultSchema),
     }),
     interruptionMessage: "Waiting for background tasks was interrupted by new input.",
     shouldReviewInAutoMode: () => false,

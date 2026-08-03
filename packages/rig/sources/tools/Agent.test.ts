@@ -7,6 +7,7 @@ describe("Agent tool", () => {
     it("starts a managed subagent and forwards the tool call identity", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "unguessable-agent-1",
             output: "The delegated task is complete.",
             path: "/root/inspect_tests",
             sessionId: "subagent-1",
@@ -37,7 +38,14 @@ describe("Agent tool", () => {
             { toolCallId: "tool-1" },
         );
 
-        expect(result).toMatchObject({ sessionId: "subagent-1", status: "completed" });
+        expect(result).toMatchObject({
+            agentId: "unguessable-agent-1",
+            path: "/root/inspect_tests",
+            status: "completed",
+        });
+        expect(claudeAgentTool.toLLM(result)).toEqual([
+            { text: JSON.stringify(result), type: "text" },
+        ]);
         expect(spawn).toHaveBeenCalledWith(
             {
                 description: "Inspect the tests",
@@ -82,6 +90,7 @@ describe("Agent tool", () => {
     it("forwards the requested provider to the session manager", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "unguessable-agent-1",
             output: "The subagent is running in the background.",
             path: "/root/inspect_tests",
             sessionId: "subagent-1",
@@ -120,6 +129,7 @@ describe("Agent tool", () => {
     it("maps the requested priority service tier to fast", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "unguessable-agent-1",
             output: "The subagent is running in the background.",
             path: "/root/inspect_tests",
             sessionId: "subagent-1",
@@ -159,6 +169,7 @@ describe("Agent tool", () => {
     it("launches an Agent in the background by default", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "unguessable-agent-1",
             output: "The subagent is running in the background.",
             path: "/root/inspect_tests",
             sessionId: "subagent-1",
@@ -189,12 +200,9 @@ describe("Agent tool", () => {
                 { toolCallId: "tool-1" },
             ),
         ).resolves.toEqual({
-            agentId: "subagent-1",
-            description: "Inspect the tests",
+            agentId: "unguessable-agent-1",
             path: "/root/inspect_tests",
-            prompt: "Review the test suite.",
             status: "async_launched",
-            taskName: "inspect_tests",
         });
         expect(spawn).toHaveBeenCalledWith(
             expect.objectContaining({ background: true }),
@@ -212,6 +220,7 @@ describe("Agent tool", () => {
             list: () => [],
             maxDepth: 3,
             spawn: async () => ({
+                agentId: "unguessable-agent-1",
                 output: "The delegated check failed.",
                 path: "/root/run_check",
                 sessionId: "subagent-1",

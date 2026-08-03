@@ -31,6 +31,7 @@ describeLive("configured Codex provider live", () => {
     it("accepts Rig's provider-neutral agent namespace", async () => {
         let spawnCount = 0;
         const managed = {
+            agentId: "live-rig-agent",
             description: "Live Rig probe",
             path: "/root/live_rig_probe",
             sessionId: "live-rig-subagent",
@@ -71,6 +72,7 @@ describeLive("configured Codex provider live", () => {
 
     it("sends priority inference with the exact reserved collaboration schema", async () => {
         const managed = {
+            agentId: "live-agent",
             description: "Live probe",
             path: "/root/live_probe",
             sessionId: "live-subagent",

@@ -3264,8 +3264,7 @@ export class InMemorySession {
         this.#saveSession();
     }
 
-    recordSubagentStoppedAfterRestart(subagent: SubagentSummary): void {
-        const taskName = subagent.taskName ?? subagent.id;
+    recordSubagentStoppedAfterRestart(subagent: SubagentSummary, path: string): void {
         const runId = `restart:${subagent.id}`;
         const displayText = `Background work "${subagent.description}" stopped when the local server restarted.`;
         const message: UserMessage = {
@@ -3274,10 +3273,11 @@ export class InMemorySession {
                     type: "text",
                     text: [
                         "<subagent-notification>",
-                        `Task: ${taskName}`,
+                        `Agent ID: ${subagent.agentId}`,
+                        `Path: ${path}`,
                         "Status: suspended",
                         "Result: The subagent stopped working when the local server restarted. It remains suspended and will not resume automatically.",
-                        `Use followup_task with target ${JSON.stringify(taskName)} to continue it, or interrupt_agent to leave it stopped.`,
+                        `Use followup_task with target ${JSON.stringify(subagent.agentId)} to continue it, or interrupt_agent to leave it stopped.`,
                         "</subagent-notification>",
                     ].join("\n"),
                 },

@@ -7,20 +7,16 @@ import {
 import { defineTool } from "../../types.js";
 
 const completedAgentResultSchema = Type.Object({
+    agentId: Type.String(),
     output: Type.String(),
     path: Type.String(),
-    sessionId: Type.String(),
     status: Type.Literal("completed"),
-    taskName: Type.String(),
 });
 
 const backgroundAgentResultSchema = Type.Object({
     agentId: Type.String(),
-    description: Type.String(),
     path: Type.String(),
-    prompt: Type.String(),
     status: Type.Literal("async_launched"),
-    taskName: Type.String(),
 });
 
 export const claudeAgentTool = defineTool({
@@ -114,31 +110,22 @@ export const claudeAgentTool = defineTool({
         );
         if (result.status === "running") {
             return {
-                agentId: result.sessionId,
-                description,
+                agentId: result.agentId,
                 path: result.path,
-                prompt,
                 status: "async_launched",
-                taskName: result.taskName,
             };
         }
         if (result.status !== "completed") {
             throw new Error(result.output);
         }
         return {
+            agentId: result.agentId,
             output: result.output,
             path: result.path,
-            sessionId: result.sessionId,
             status: "completed",
-            taskName: result.taskName,
         };
     },
-    toLLM: (result) => [
-        {
-            type: "text",
-            text: result.status === "async_launched" ? JSON.stringify(result) : result.output,
-        },
-    ],
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result, args) =>
         result.status === "async_launched"
             ? `Running in background: ${args.description}`

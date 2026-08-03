@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import { applySubagentReadOnlyOverride } from "../../../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../../../types.js";
-import { managedSubagentSchema } from "../../impl/subagentSchemas.js";
+import { managedSubagentSchema, toCodexManagedSubagentResult } from "../../impl/subagentSchemas.js";
 import { requireSubagentContext } from "../../impl/requireSubagentContext.js";
 
 export const codexExtendedFollowupTaskTool = defineTool({
@@ -19,7 +19,7 @@ Send plaintext follow-up work to an existing subagent and trigger another turn w
     arguments: Type.Object(
         {
             target: Type.String({
-                description: "Agent id, task name, or full task path.",
+                description: "Stable Agent ID (preferred) or canonical task path.",
             }),
             message: Type.String({
                 description: "Plain-text follow-up task for the target agent.",
@@ -45,9 +45,9 @@ Send plaintext follow-up work to an existing subagent and trigger another turn w
         const { message, read_only, reasoning_effort, target } = args;
         const subagents = requireSubagentContext(context);
         await applySubagentReadOnlyOverride(subagents, target, read_only);
-        return subagents.followUp(target, message, reasoning_effort);
+        return toCodexManagedSubagentResult(subagents.followUp(target, message, reasoning_effort));
     },
-    toLLM: () => [{ type: "text", text: "" }],
-    toUI: (result) => `Sent follow-up work to ${result.description}.`,
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+    toUI: (result) => `Sent follow-up work to ${result.path}.`,
     locks: [],
 });

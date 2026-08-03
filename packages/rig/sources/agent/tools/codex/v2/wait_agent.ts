@@ -6,7 +6,9 @@ import {
     MIN_SUBAGENT_WAIT_TIMEOUT_MS,
 } from "../../../context/subagentWaitTimeouts.js";
 import { defineTool } from "../../../types.js";
+import { codexAgentStatusSchema } from "../impl/codexAgentStatusSchema.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
+import { toCodexAgentStatus } from "../impl/toCodexAgentStatus.js";
 
 export const codexWaitAgentTool = defineTool({
     name: "wait_agent",
@@ -27,6 +29,13 @@ export const codexWaitAgentTool = defineTool({
         ),
     }),
     returnType: Type.Object({
+        agents: Type.Array(
+            Type.Object({
+                agent_id: Type.String(),
+                path: Type.String(),
+                status: codexAgentStatusSchema,
+            }),
+        ),
         message: Type.String(),
         timed_out: Type.Boolean(),
     }),
@@ -39,6 +48,11 @@ export const codexWaitAgentTool = defineTool({
             execution.signal,
         );
         return {
+            agents: result.agents.map((agent) => ({
+                agent_id: agent.agentId,
+                path: agent.path,
+                status: toCodexAgentStatus(agent),
+            })),
             message: result.timedOut
                 ? "Wait timed out."
                 : result.agents.length === 0

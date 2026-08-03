@@ -194,6 +194,7 @@ describe("AgentSessionManager", () => {
         const deliverAgentMessage = vi.fn();
         const encryptedAgentTransportScope = vi.fn(() => '["codex",null]');
         const child = {
+            agentIdentity: () => ({ agentId: "child-agent", folder: "workspace" }),
             agentMetadata: () => ({
                 depth: 1,
                 parentSessionId: "root-1",
@@ -206,6 +207,7 @@ describe("AgentSessionManager", () => {
             encryptedAgentTransportScope,
             deliverAgentMessage,
             subagentSummary: () => ({
+                agentId: "child-agent",
                 description: "Audit",
                 status: "completed" as const,
                 taskName: "audit",
@@ -214,6 +216,7 @@ describe("AgentSessionManager", () => {
             waitForRun: () => new Promise(() => undefined),
         } as unknown as InMemorySession;
         const parent = {
+            agentIdentity: () => ({ agentId: "parent-agent", folder: "workspace" }),
             agentMetadata: () => ({ depth: 0, rootSessionId: "root-1", type: "primary" }),
             id: "root-1",
             encryptedAgentTransportScope: () => '["codex",null]',
@@ -228,31 +231,33 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        expect(manager.followUp(parent.id, "audit", "", undefined, "opaque-task")).toMatchObject({
-            sessionId: child.id,
+        expect(
+            manager.followUp(parent.id, "/root/audit", "", undefined, "opaque-task"),
+        ).toMatchObject({
+            agentId: "child-agent",
         });
         expect(submit).toHaveBeenCalledWith({
             agentMessageTriggerTurn: true,
-            displayText: "Follow-up task for audit",
+            displayText: "Follow-up task",
             encryptedAgentMessage: {
                 author: "/root",
                 recipient: "/root/audit",
-                header: "Message Type: NEW_TASK\nTask name: /root/audit\nSender: /root\nPayload:\n",
+                header: "Message Type: NEW_TASK\nRecipient Agent ID: child-agent\nRecipient path: /root/audit\nSender Agent ID: parent-agent\nSender path: /root\nPayload:\n",
                 encryptedContent: "opaque-task",
             },
             provenance: "agent",
             text: "",
         });
 
-        expect(manager.sendMessage(parent.id, "audit", "", "opaque-message")).toMatchObject({
-            sessionId: child.id,
+        expect(manager.sendMessage(parent.id, "/root/audit", "", "opaque-message")).toMatchObject({
+            agentId: "child-agent",
         });
         expect(deliverAgentMessage).toHaveBeenCalledWith({
             blocks: [],
             encryptedAgentMessage: {
                 author: "/root",
                 recipient: "/root/audit",
-                header: "Message Type: MESSAGE\nTask name: /root/audit\nSender: /root\nPayload:\n",
+                header: "Message Type: MESSAGE\nRecipient Agent ID: child-agent\nRecipient path: /root/audit\nSender Agent ID: parent-agent\nSender path: /root\nPayload:\n",
                 encryptedContent: "opaque-message",
             },
             id: expect.any(String),
@@ -261,17 +266,19 @@ describe("AgentSessionManager", () => {
         });
 
         encryptedAgentTransportScope.mockReturnValue('["bedrock","us-east-1"]');
-        expect(() => manager.followUp(parent.id, "audit", "", undefined, "opaque-task")).toThrow(
+        expect(() =>
+            manager.followUp(parent.id, "/root/audit", "", undefined, "opaque-task"),
+        ).toThrow(
             "Native encrypted collaboration only works within the same compatible provider and region. Retry with `rig.followup_task` and provide the task normally.",
         );
-        expect(() => manager.sendMessage(parent.id, "audit", "", "opaque-message")).toThrow(
+        expect(() => manager.sendMessage(parent.id, "/root/audit", "", "opaque-message")).toThrow(
             "Native encrypted collaboration only works within the same compatible provider and region.",
         );
         expect(submit).toHaveBeenCalledOnce();
 
-        expect(manager.followUp(parent.id, "audit", "Plain cross-provider task")).toMatchObject({
-            sessionId: child.id,
-        });
+        expect(
+            manager.followUp(parent.id, "/root/audit", "Plain cross-provider task"),
+        ).toMatchObject({ agentId: "child-agent" });
         expect(submit).toHaveBeenLastCalledWith({
             agentMessageTriggerTurn: true,
             provenance: "agent",
@@ -329,7 +336,7 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        expect(() => manager.followUp(root.id, "idle", "Continue.")).toThrow(
+        expect(() => manager.followUp(root.id, "/root/idle", "Continue.")).toThrow(
             "No more than 3 subagents can run at once.",
         );
     });
@@ -405,18 +412,22 @@ describe("AgentSessionManager", () => {
         const page = manager.readChatHistory(root.id, {
             cursor: 1,
             limit: 1,
-            target: "/root/audit",
+            target: "agent-child-1",
         });
 
         expect(page).toMatchObject({
-            agent: { path: "/root/audit", sessionId: "child-1" },
+            agent: { agentId: "agent-child-1", path: "/root/audit" },
             agents: [
-                { messageCount: 2, path: "/root", sessionId: "root-1" },
-                { messageCount: 3, path: "/root/audit", sessionId: "child-1" },
+                { agentId: "agent-root-1", messageCount: 2, path: "/root" },
                 {
+                    agentId: "agent-child-1",
+                    messageCount: 3,
+                    path: "/root/audit",
+                },
+                {
+                    agentId: "agent-nested-1",
                     messageCount: 1,
                     path: "/root/audit/details",
-                    sessionId: "nested-1",
                 },
             ],
             cursor: 1,
@@ -429,6 +440,24 @@ describe("AgentSessionManager", () => {
             message: { blocks: [{ text: "child-two", type: "text" }] },
             position: 1,
         });
+        expect(() =>
+            manager.readChatHistory(root.id, {
+                limit: 1,
+                target: child.id,
+            }),
+        ).toThrow("was not found");
+        expect(() =>
+            manager.readChatHistory(root.id, {
+                limit: 1,
+                target: "audit",
+            }),
+        ).toThrow("was not found");
+        expect(() =>
+            manager.readChatHistory(root.id, {
+                limit: 1,
+                target: "current",
+            }),
+        ).toThrow("was not found");
     });
 
     it("filters full stored content and navigates filtered matches from either end", () => {
@@ -986,10 +1015,10 @@ describe("AgentSessionManager", () => {
             },
         });
 
-        await manager.setSubagentReadOnly(parent.id, "inspect_code", true);
-        manager.followUp(parent.id, "inspect_code", "Inspect first.");
-        await manager.setSubagentReadOnly(parent.id, "inspect_code", false);
-        manager.followUp(parent.id, "inspect_code", "Now make the fix.");
+        await manager.setSubagentReadOnly(parent.id, "/root/inspect_code", true);
+        manager.followUp(parent.id, "/root/inspect_code", "Inspect first.");
+        await manager.setSubagentReadOnly(parent.id, "/root/inspect_code", false);
+        manager.followUp(parent.id, "/root/inspect_code", "Now make the fix.");
 
         expect(changePermissionMode).toHaveBeenNthCalledWith(
             1,
@@ -1106,6 +1135,7 @@ describe("AgentSessionManager", () => {
         const abort = vi.fn(() => ({ aborted: true }));
         const waitForRun = vi.fn(() => completion);
         const child = {
+            agentIdentity: () => ({ agentId: "agent-2", folder: "workspace" }),
             abort,
             agentMetadata: () => ({
                 depth: 1,
@@ -1180,13 +1210,16 @@ describe("AgentSessionManager", () => {
                 taskName: "inspect_code",
             }),
         ).resolves.toMatchObject({
+            agentId: "agent-2",
             path: "/root/inspect_code",
-            sessionId: "child-1",
             status: "running",
-            taskName: "inspect_code",
         });
         expect(manager.list("root-1")).toEqual([
-            expect.objectContaining({ path: "/root/inspect_code", status: "running" }),
+            expect.objectContaining({
+                agentId: "agent-2",
+                path: "/root/inspect_code",
+                status: "running",
+            }),
         ]);
 
         status = "completed";
@@ -1194,24 +1227,31 @@ describe("AgentSessionManager", () => {
         await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledOnce());
         expect(deliverNotification).toHaveBeenCalledWith({
             displayText: 'Background work "Inspect code" completed.',
-            text: expect.stringContaining("The inspection is complete."),
+            text: expect.stringMatching(
+                /Agent ID: agent-2\nPath: \/root\/inspect_code\nStatus: completed\nResult: The inspection is complete\./u,
+            ),
         });
-        expect(manager.inspect("root-1", "inspect_code")).toMatchObject({
+        expect(manager.inspect("root-1", "agent-2")).toMatchObject({
+            agentId: "agent-2",
             output: "The inspection is complete.",
-            sessionId: "child-1",
             status: "completed",
         });
+        expect(() => manager.inspect("root-1", "child-1")).toThrow(
+            "Subagent 'child-1' was not found.",
+        );
+        expect(() => manager.inspect("root-1", "inspect_code")).toThrow(
+            "Subagent 'inspect_code' was not found.",
+        );
         status = "error";
-        expect(manager.inspect("root-1", "inspect_code")).toMatchObject({
+        expect(manager.inspect("root-1", "/root/inspect_code")).toMatchObject({
             output: "The child provider rejected the request.",
-            sessionId: "child-1",
             status: "error",
         });
         status = "completed";
 
         expect(
-            manager.followUp("root-1", "inspect_code", "Check one more file.", "high"),
-        ).toMatchObject({ sessionId: "child-1" });
+            manager.followUp("root-1", "/root/inspect_code", "Check one more file.", "high"),
+        ).toMatchObject({ agentId: "agent-2" });
         expect(childSubmit).toHaveBeenLastCalledWith({
             agentMessageTriggerTurn: true,
             effort: "high",
@@ -1222,7 +1262,7 @@ describe("AgentSessionManager", () => {
             throw new Error("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
         });
         expect(() =>
-            manager.followUp("root-1", "inspect_code", "Try unsupported effort.", "ultra"),
+            manager.followUp("root-1", "/root/inspect_code", "Try unsupported effort.", "ultra"),
         ).toThrow("Model 'openai/gpt-5.5' does not support 'ultra' reasoning.");
         expect(childSubmit).toHaveBeenCalledTimes(3);
         await vi.waitFor(() => expect(waitForRun).toHaveBeenCalledTimes(2));
@@ -1232,7 +1272,12 @@ describe("AgentSessionManager", () => {
         });
         expect(abort).toHaveBeenCalledOnce();
         await expect(manager.wait("root-1", 0)).resolves.toMatchObject({
-            agents: [expect.objectContaining({ taskName: "inspect_code" })],
+            agents: [
+                expect.objectContaining({
+                    agentId: "agent-2",
+                    path: "/root/inspect_code",
+                }),
+            ],
             timedOut: false,
         });
     });
@@ -1416,7 +1461,7 @@ describe("AgentSessionManager", () => {
         controller.abort();
 
         await expect(run).resolves.toMatchObject({
-            sessionId: "subagent-1",
+            agentId: "agent-2",
             status: "aborted",
         });
         expect(abort).toHaveBeenCalledOnce();
@@ -1455,6 +1500,7 @@ describe("AgentSessionManager", () => {
                 recordSubagentChanged: vi.fn(),
                 snapshot: () => ({ snapshot: { messages: [] } }),
                 subagentSummary: () => ({
+                    agentId: `${id}-agent`,
                     description: taskName,
                     id,
                     parentSessionId,
@@ -1489,12 +1535,12 @@ describe("AgentSessionManager", () => {
         expect(grandchild.abort).not.toHaveBeenCalled();
         expect(grandchild.clearSuspension).toHaveBeenCalledOnce();
         expect(manager.list(root.id)).toEqual([
-            expect.objectContaining({ sessionId: child.session.id, status: "aborted" }),
-            expect.objectContaining({ sessionId: grandchild.session.id, status: "aborted" }),
+            expect.objectContaining({ agentId: "child-1-agent", status: "aborted" }),
+            expect.objectContaining({ agentId: "grandchild-1-agent", status: "aborted" }),
         ]);
 
-        expect(manager.followUp(root.id, "audit_code", "Inspect one more file.")).toEqual(
-            expect.objectContaining({ sessionId: child.session.id, status: "running" }),
+        expect(manager.followUp(root.id, "/root/audit_code", "Inspect one more file.")).toEqual(
+            expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
         );
         expect(child.submit).toHaveBeenCalledWith({
             agentMessageTriggerTurn: true,
@@ -1588,17 +1634,17 @@ describe("AgentSessionManager", () => {
         expect(grandchild.suspendByParent).toHaveBeenCalledOnce();
         expect(completed.abort).not.toHaveBeenCalled();
         expect(manager.list(root.id)).toEqual([
-            expect.objectContaining({ sessionId: child.session.id, status: "suspended" }),
-            expect.objectContaining({ sessionId: grandchild.session.id, status: "suspended" }),
-            expect.objectContaining({ sessionId: completed.session.id, status: "completed" }),
+            expect.objectContaining({ agentId: "child-1-agent", status: "suspended" }),
+            expect.objectContaining({ agentId: "grandchild-1-agent", status: "suspended" }),
+            expect.objectContaining({ agentId: "child-2-agent", status: "completed" }),
         ]);
         expect(root.recordSubagentsSuspended).toHaveBeenCalledWith([
-            expect.objectContaining({ sessionId: child.session.id, status: "suspended" }),
-            expect.objectContaining({ sessionId: grandchild.session.id, status: "suspended" }),
+            expect.objectContaining({ agentId: "child-1-agent", status: "suspended" }),
+            expect.objectContaining({ agentId: "grandchild-1-agent", status: "suspended" }),
         ]);
 
-        expect(manager.followUp(root.id, "audit_code", "Continue the audit.")).toEqual(
-            expect.objectContaining({ sessionId: child.session.id, status: "running" }),
+        expect(manager.followUp(root.id, "/root/audit_code", "Continue the audit.")).toEqual(
+            expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
         );
 
         expect(child.submit).toHaveBeenCalledWith({
@@ -1609,9 +1655,9 @@ describe("AgentSessionManager", () => {
         expect(grandchild.submit).not.toHaveBeenCalled();
         expect(completed.submit).not.toHaveBeenCalled();
         expect(manager.list(root.id)).toEqual([
-            expect.objectContaining({ sessionId: child.session.id, status: "running" }),
-            expect.objectContaining({ sessionId: grandchild.session.id, status: "suspended" }),
-            expect.objectContaining({ sessionId: completed.session.id, status: "completed" }),
+            expect.objectContaining({ agentId: "child-1-agent", status: "running" }),
+            expect.objectContaining({ agentId: "grandchild-1-agent", status: "suspended" }),
+            expect.objectContaining({ agentId: "child-2-agent", status: "completed" }),
         ]);
     });
 
@@ -1709,7 +1755,7 @@ describe("AgentSessionManager", () => {
         activeStatus = "completed";
 
         await expect(waiting).resolves.toEqual({
-            agents: [expect.objectContaining({ sessionId: "child-2", status: "completed" })],
+            agents: [expect.objectContaining({ agentId: "child-2-agent", status: "completed" })],
             timedOut: false,
         });
     });
@@ -1882,7 +1928,6 @@ describe("AgentSessionManager", () => {
         await expect(spawning).resolves.toMatchObject({
             output: "Queued result",
             status: "completed",
-            taskName: "queued_task",
         });
         expect(createSubagent).toHaveBeenCalledOnce();
     });
@@ -2280,6 +2325,7 @@ function historySession(options: {
     metadata: SessionAgentMetadata;
 }): InMemorySession {
     return {
+        agentIdentity: () => ({ agentId: `agent-${options.id}`, folder: options.id }),
         agentMetadata: () => options.metadata,
         id: options.id,
         isSubagent: () => options.metadata.type === "subagent",
@@ -2303,6 +2349,7 @@ function historyMessageSession(options: {
     metadata: SessionAgentMetadata;
 }): InMemorySession {
     return {
+        agentIdentity: () => ({ agentId: `agent-${options.id}`, folder: options.id }),
         agentMetadata: () => options.metadata,
         id: options.id,
         isSubagent: () => options.metadata.type === "subagent",

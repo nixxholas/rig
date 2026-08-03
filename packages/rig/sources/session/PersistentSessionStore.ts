@@ -1117,7 +1117,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
                 const parent =
                     parentSessionId === undefined ? undefined : this.get(parentSessionId);
                 this.#agentManager.recordChanged(session);
-                parent?.recordSubagentStoppedAfterRestart(session.subagentSummary());
+                if (parent !== undefined) {
+                    const subagent = session.subagentSummary();
+                    const path = this.#agentManager.inspect(parent.id, subagent.agentId).path;
+                    parent.recordSubagentStoppedAfterRestart(subagent, path);
+                }
                 continue;
             }
             session.markInterrupted({

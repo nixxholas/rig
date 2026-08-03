@@ -45,6 +45,7 @@ describe("workspace tools", () => {
     it("starts a hidden subagent in the selected owned workspace", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "child-agent-1",
             output: "The subagent is running in the background.",
             path: "/root/parser",
             sessionId: "child-1",
@@ -53,7 +54,7 @@ describe("workspace tools", () => {
         }));
         harness.context.workspaces = workspaceContext({ spawn });
 
-        await spawnWorkspaceAgentTool.execute(
+        const result = await spawnWorkspaceAgentTool.execute(
             {
                 background: true,
                 description: "Fix parser",
@@ -66,6 +67,12 @@ describe("workspace tools", () => {
             { toolCallId: "tool-1" },
         );
 
+        expect(result).toEqual({
+            agentId: "child-agent-1",
+            output: "The subagent is running in the background.",
+            path: "/root/parser",
+            status: "running",
+        });
         expect(spawn).toHaveBeenCalledWith(
             {
                 background: true,
@@ -84,6 +91,7 @@ describe("workspace tools", () => {
     it("passes workspace-agent overrides and parent context to the child", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "child-agent-1",
             output: "The subagent is running in the background.",
             path: "/root/parser",
             sessionId: "child-1",

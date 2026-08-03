@@ -127,14 +127,13 @@ export const spawnWorkspaceAgentTool = defineTool({
         { additionalProperties: false },
     ),
     returnType: Type.Object({
+        agentId: Type.String(),
         output: Type.String(),
         path: Type.String(),
-        sessionId: Type.String(),
         status: Type.String(),
-        taskName: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
-    execute: (
+    execute: async (
         {
             background = true,
             context: contextMode = "task",
@@ -149,8 +148,8 @@ export const spawnWorkspaceAgentTool = defineTool({
         },
         context,
         execution,
-    ) =>
-        requireWorkspaces(context).spawn(
+    ) => {
+        const result = await requireWorkspaces(context).spawn(
             {
                 background,
                 contextMode,
@@ -170,9 +169,16 @@ export const spawnWorkspaceAgentTool = defineTool({
                     : { parentToolCallId: execution.toolCallId }),
             },
             execution.signal,
-        ),
+        );
+        return {
+            agentId: result.agentId,
+            output: result.output,
+            path: result.path,
+            status: result.status,
+        };
+    },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
-    toUI: (result) => `Started workspace agent ${result.taskName}.`,
+    toUI: (result) => `Started workspace agent ${result.path}.`,
     locks: [],
 });
 

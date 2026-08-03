@@ -96,14 +96,16 @@ describe("subagent observability across a nested lifecycle", () => {
                 }
 
                 if (lastText.includes("<subagent-notification>")) {
-                    if (lastText.includes("Task: nested_observer")) {
+                    expect(lastText).toContain("Agent ID:");
+                    expect(lastText).not.toContain("Task:");
+                    if (lastText.includes("Path: /root/top_observer/nested_observer")) {
                         expect(lastText).toContain("NESTED_OBSERVER_DONE");
                         return {
                             content: [{ text: "TOP_ACKNOWLEDGED_NESTED", type: "text" }],
                             usage: usage(1_700, 1_200),
                         };
                     }
-                    expect(lastText).toContain("Task: top_observer");
+                    expect(lastText).toContain("\nPath: /root/top_observer\n");
                     return {
                         content: [{ text: "PARENT_ACKNOWLEDGED_TOP", type: "text" }],
                     };

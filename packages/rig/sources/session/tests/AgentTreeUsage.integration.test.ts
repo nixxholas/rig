@@ -48,7 +48,7 @@ describe("agent tree usage session wiring", () => {
                 prompt: "Inspect it.",
                 taskName: "inspect_memory",
             });
-            const firstSession = requiredSession(store, first.sessionId);
+            const firstSession = requiredAgent(store, first.agentId);
             sessions.push(firstSession);
             const nested = await firstSession.externalControlContext().subagents!.spawn({
                 background: false,
@@ -56,36 +56,39 @@ describe("agent tree usage session wiring", () => {
                 prompt: "Inspect it again.",
                 taskName: "inspect_nested_memory",
             });
-            sessions.push(requiredSession(store, nested.sessionId));
+            const nestedSession = requiredAgent(store, nested.agentId);
+            sessions.push(nestedSession);
 
             const usage = await getAgentTreeUsageTool.execute(
                 {},
                 root.externalControlContext(),
                 {},
             );
+            const rootAgentId = root.agentIdentity().agentId;
             expect(usage.totalTokens).toBe(22);
             expect(usage.sessions).toEqual([
                 expect.objectContaining({
+                    agentId: rootAgentId,
+                    path: "/root",
                     relation: "root",
-                    sessionId: root.id,
                     totalTokens: 0,
                 }),
                 expect.objectContaining({
+                    agentId: first.agentId,
                     description: "Inspect the in-memory path",
-                    parentSessionId: root.id,
+                    parentAgentId: rootAgentId,
+                    path: "/root/inspect_memory",
                     relation: "subagent",
-                    sessionId: first.sessionId,
                     status: "completed",
-                    taskName: "inspect_memory",
                     totalTokens: 11,
                 }),
                 expect.objectContaining({
+                    agentId: nested.agentId,
                     description: "Inspect the nested path",
-                    parentSessionId: first.sessionId,
+                    parentAgentId: first.agentId,
+                    path: "/root/inspect_memory/inspect_nested_memory",
                     relation: "subagent",
-                    sessionId: nested.sessionId,
                     status: "completed",
-                    taskName: "inspect_nested_memory",
                     totalTokens: 11,
                 }),
             ]);
@@ -156,7 +159,8 @@ describe("agent tree usage session wiring", () => {
                 prompt: "Review persistence.",
                 taskName: "hidden_persistence_review",
             });
-            loadedSessions.push(requiredSession(store, hidden.sessionId));
+            const hiddenSession = requiredAgent(store, hidden.agentId);
+            loadedSessions.push(hiddenSession);
 
             const workspace = await rootContext.workspaces!.create({
                 name: "Visible review",
@@ -180,47 +184,50 @@ describe("agent tree usage session wiring", () => {
                 prompt: "Review the delegated result.",
                 taskName: "nested_delegated_review",
             });
-            loadedSessions.push(requiredSession(store, nested.sessionId));
+            const nestedSession = requiredAgent(store, nested.agentId);
+            loadedSessions.push(nestedSession);
             await waitFor(
                 () => root.lifetimeTotalTokens(),
                 (totalTokens) => totalTokens === 33,
             );
 
             const usage = await getAgentTreeUsageTool.execute({}, rootContext, {});
+            const rootAgentId = root.agentIdentity().agentId;
             expect(usage.totalTokens).toBe(66);
-            expect(usage.sessions.map((session) => session.sessionId)).toEqual(
+            expect(usage.sessions.map((session) => session.agentId)).toEqual(
                 expect.arrayContaining([
-                    root.id,
-                    hidden.sessionId,
-                    delegated.sessionId,
-                    nested.sessionId,
+                    rootAgentId,
+                    hidden.agentId,
+                    delegated.agentId,
+                    nested.agentId,
                 ]),
             );
             expect(usage.sessions).toHaveLength(4);
-            expect(rowFor(usage.sessions, root.id)).toMatchObject({
+            expect(rowFor(usage.sessions, rootAgentId)).toMatchObject({
+                path: "/root",
                 relation: "root",
                 totalTokens: 33,
             });
-            expect(rowFor(usage.sessions, hidden.sessionId)).toMatchObject({
+            expect(rowFor(usage.sessions, hidden.agentId)).toMatchObject({
                 description: "Hidden persistence reviewer",
-                parentSessionId: root.id,
+                parentAgentId: rootAgentId,
+                path: "/root/hidden_persistence_review",
                 relation: "subagent",
                 status: "completed",
-                taskName: "hidden_persistence_review",
                 totalTokens: 11,
             });
-            expect(rowFor(usage.sessions, delegated.sessionId)).toMatchObject({
-                parentSessionId: root.id,
+            expect(rowFor(usage.sessions, delegated.agentId)).toMatchObject({
+                parentAgentId: rootAgentId,
+                path: "/root",
                 relation: "delegated",
-                title: "Visible workspace reviewer",
                 totalTokens: 11,
             });
-            expect(rowFor(usage.sessions, nested.sessionId)).toMatchObject({
+            expect(rowFor(usage.sessions, nested.agentId)).toMatchObject({
                 description: "Nested delegated reviewer",
-                parentSessionId: delegated.sessionId,
+                parentAgentId: delegated.agentId,
+                path: "/root/nested_delegated_review",
                 relation: "subagent",
                 status: "completed",
-                taskName: "nested_delegated_review",
                 totalTokens: 11,
             });
 
@@ -241,8 +248,8 @@ describe("agent tree usage session wiring", () => {
             expect(withoutStatuses(restoredUsage.sessions)).toEqual(
                 withoutStatuses(usage.sessions),
             );
-            expect(rowFor(restoredUsage.sessions, hidden.sessionId).status).toBe("completed");
-            expect(rowFor(restoredUsage.sessions, nested.sessionId).status).toBe("completed");
+            expect(rowFor(restoredUsage.sessions, hidden.agentId).status).toBe("completed");
+            expect(rowFor(restoredUsage.sessions, nested.agentId).status).toBe("completed");
         } finally {
             await Promise.allSettled(loadedSessions.map((session) => session.beginShutdown()));
             store?.close();
@@ -359,9 +366,20 @@ function requiredSession(
     return session;
 }
 
-function rowFor<T extends { sessionId: string }>(sessions: readonly T[], sessionId: string): T {
-    const session = sessions.find((candidate) => candidate.sessionId === sessionId);
-    if (session === undefined) throw new Error(`Expected usage for session '${sessionId}'.`);
+function requiredAgent(
+    store:
+        | Pick<InMemorySessionStore, "findByAgentId">
+        | Pick<PersistentSessionStore, "findByAgentId">,
+    agentId: string,
+): InMemorySession {
+    const session = store.findByAgentId(agentId);
+    if (session === undefined) throw new Error(`Expected agent '${agentId}'.`);
+    return session;
+}
+
+function rowFor<T extends { agentId: string }>(sessions: readonly T[], agentId: string): T {
+    const session = sessions.find((candidate) => candidate.agentId === agentId);
+    if (session === undefined) throw new Error(`Expected usage for agent '${agentId}'.`);
     return session;
 }
 

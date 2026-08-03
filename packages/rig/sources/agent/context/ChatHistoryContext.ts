@@ -4,10 +4,10 @@ import type { ChatHistoryStats } from "../summarizeChatHistory.js";
 export type ChatHistoryRole = "assistant" | "error" | "system" | "user";
 
 export interface ChatHistoryAgentSummary {
+    agentId: string;
     description?: string;
     messageCount: number;
     path: string;
-    sessionId: string;
     status: string;
 }
 

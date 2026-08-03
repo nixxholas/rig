@@ -427,7 +427,7 @@ export class AgentSessionManager {
         request: WorkspaceAgentRequest,
         signal?: AbortSignal,
     ): Promise<SpawnSubagentResult> {
-        const parent = this.#repository.get(parentSessionId);
+        const parent = this.#current(parentSessionId);
         const resolveWorkspace = this.#repository.ownedWorkspace;
         if (parent === undefined || resolveWorkspace === undefined) {
             throw new Error("This session cannot start workspace agents.");
@@ -559,7 +559,7 @@ export class AgentSessionManager {
         encryptedMessage?: string,
     ): ManagedSubagent {
         const child = this.#resolveTarget(parentSessionId, target);
-        const parent = this.#repository.get(parentSessionId);
+        const parent = this.#current(parentSessionId);
         if (encryptedMessage !== undefined) {
             const parentTransportScope = parent?.encryptedAgentTransportScope();
             if (
@@ -578,7 +578,7 @@ export class AgentSessionManager {
         if (childStatus === "suspended") child.clearSuspension();
         this.#stoppedExplicitly.delete(child.id);
         const childPath = this.#pathFor(child);
-        const parentPath = parent === undefined ? "/root" : this.#pathFor(parent);
+        const parentPath = this.#pathFor(parent);
         const submitted = child.submit({
             agentMessageTriggerTurn: true,
             ...(this.#repository.get(parentSessionId)?.activeRunDebug?.() === true
@@ -591,10 +591,16 @@ export class AgentSessionManager {
                       encryptedAgentMessage: {
                           author: parentPath,
                           recipient: childPath,
-                          header: `Message Type: NEW_TASK\nTask name: ${childPath}\nSender: ${parentPath}\nPayload:\n`,
+                          header: agentMessageHeader(
+                              parent,
+                              parentPath,
+                              child,
+                              childPath,
+                              "NEW_TASK",
+                          ),
                           encryptedContent: encryptedMessage,
                       },
-                      displayText: `Follow-up task for ${child.subagentSummary().taskName}`,
+                      displayText: "Follow-up task",
                   }),
             provenance: "agent",
             text: message,
@@ -612,7 +618,7 @@ export class AgentSessionManager {
         encryptedMessage?: string,
     ): ManagedSubagent {
         const child = this.#resolveTarget(parentSessionId, target);
-        const parent = this.#repository.get(parentSessionId);
+        const parent = this.#current(parentSessionId);
         if (encryptedMessage !== undefined) {
             const parentTransportScope = parent?.encryptedAgentTransportScope();
             if (
@@ -625,7 +631,7 @@ export class AgentSessionManager {
             }
         }
         const childPath = this.#pathFor(child);
-        const parentPath = parent === undefined ? "/root" : this.#pathFor(parent);
+        const parentPath = this.#pathFor(parent);
         child.deliverAgentMessage({
             blocks: message.length === 0 ? [] : [{ type: "text", text: message }],
             id: crypto.randomUUID(),
@@ -637,7 +643,13 @@ export class AgentSessionManager {
                       encryptedAgentMessage: {
                           author: parentPath,
                           recipient: childPath,
-                          header: `Message Type: MESSAGE\nTask name: ${childPath}\nSender: ${parentPath}\nPayload:\n`,
+                          header: agentMessageHeader(
+                              parent,
+                              parentPath,
+                              child,
+                              childPath,
+                              "MESSAGE",
+                          ),
                           encryptedContent: encryptedMessage,
                       },
                   }),
@@ -763,20 +775,17 @@ export class AgentSessionManager {
         const root = this.#rootFor(currentSessionId);
         const sessions = [root, ...this.#repository.listByRoot(root.id)];
         const target = (() => {
-            if (options.target === undefined || options.target === "current") return current;
-            const matches = sessions.filter((session) => {
-                const metadata = session.agentMetadata();
-                return (
-                    session.id === options.target ||
-                    metadata.taskName === options.target ||
-                    this.#pathFor(session) === options.target
-                );
-            });
+            if (options.target === undefined) return current;
+            const agentIdMatch = sessions.find(
+                (session) => session.agentIdentity().agentId === options.target,
+            );
+            if (agentIdMatch !== undefined) return agentIdMatch;
+            const matches = sessions.filter((session) => this.#pathFor(session) === options.target);
             if (matches.length === 0) {
                 throw new Error(`Agent '${options.target}' was not found in this session tree.`);
             }
             if (matches.length > 1) {
-                throw new Error(`Agent name '${options.target}' is ambiguous. Use its full path.`);
+                throw new Error(`Agent path '${options.target}' is ambiguous. Use its Agent ID.`);
             }
             return matches[0] as InMemorySession;
         })();
@@ -787,16 +796,18 @@ export class AgentSessionManager {
                     ...(snapshot.agent.description === undefined
                         ? {}
                         : { description: snapshot.agent.description }),
+                    agentId: session.agentIdentity().agentId,
                     messageCount: snapshot.snapshot.messages.length,
                     path: this.#pathFor(session),
-                    sessionId: session.id,
                     status: snapshot.status,
                 };
             })
             .sort((left, right) => left.path.localeCompare(right.path));
         const messages = target.snapshot().snapshot.messages;
         return {
-            agent: agents.find((agent) => agent.sessionId === target.id) as (typeof agents)[number],
+            agent: agents.find(
+                (agent) => agent.agentId === target.agentIdentity().agentId,
+            ) as (typeof agents)[number],
             agents,
             ...selectChatHistoryPage(messages, options),
         };
@@ -902,10 +913,16 @@ export class AgentSessionManager {
                           encryptedAgentMessage: {
                               author: parentPath,
                               recipient: childPath,
-                              header: `Message Type: NEW_TASK\nTask name: ${childPath}\nSender: ${parentPath}\nPayload:\n`,
+                              header: agentMessageHeader(
+                                  parent,
+                                  parentPath,
+                                  child,
+                                  childPath,
+                                  "NEW_TASK",
+                              ),
                               encryptedContent: request.encryptedPrompt,
                           },
-                          displayText: `Delegated task ${taskName}`,
+                          displayText: "Delegated task",
                       }),
                 provenance: "agent",
                 text: request.prompt,
@@ -918,11 +935,10 @@ export class AgentSessionManager {
         if (request.background === true) {
             this.#startBackgroundMonitor(parent, child, submitted.runId);
             return {
+                agentId: child.subagentSummary().agentId,
                 output: "The subagent is running in the background.",
                 path: this.#pathFor(child),
-                sessionId: child.id,
                 status: "running",
-                taskName,
             };
         }
 
@@ -936,11 +952,10 @@ export class AgentSessionManager {
             const completion = await child.waitForRun(submitted.runId);
             this.recordChanged(child);
             return {
+                agentId: child.subagentSummary().agentId,
                 output: this.#completionOutput(child, completion.status, completion.errorMessage),
                 path: this.#pathFor(child),
-                sessionId: child.id,
                 status: completion.status,
-                taskName,
             };
         } catch (error) {
             void Promise.resolve(child.abort()).catch(rethrowDatabaseFailure);
@@ -1227,7 +1242,7 @@ export class AgentSessionManager {
             return { agents: terminal, timedOut: false };
         }
 
-        const runningSessionIds = new Set(running.map((agent) => agent.sessionId));
+        const runningAgentIds = new Set(running.map((agent) => agent.agentId));
         const deadline = Date.now() + Math.max(0, timeoutMs);
         while (Date.now() < deadline) {
             if (signal?.aborted) throw new Error("Waiting for subagents was cancelled.");
@@ -1236,7 +1251,7 @@ export class AgentSessionManager {
             );
             const current = this.list(parentSessionId);
             const changed = current.filter(
-                (agent) => runningSessionIds.has(agent.sessionId) && agent.status !== "running",
+                (agent) => runningAgentIds.has(agent.agentId) && agent.status !== "running",
             );
             if (changed.length > 0) return { agents: changed, timedOut: false };
         }
@@ -1260,11 +1275,10 @@ export class AgentSessionManager {
     #managedSubagent(child: InMemorySession): ManagedSubagent {
         const summary = child.subagentSummary();
         return {
+            agentId: summary.agentId,
             description: summary.description,
             path: this.#pathFor(child),
-            sessionId: child.id,
             status: this.#runStatus(summary.status),
-            taskName: child.agentMetadata().taskName ?? child.id,
         };
     }
 
@@ -1291,7 +1305,6 @@ export class AgentSessionManager {
                 status,
                 status === completion.status ? completion.errorMessage : undefined,
             );
-            const taskName = child.agentMetadata().taskName ?? child.id;
             const description = child.subagentSummary().description;
             const outcome =
                 status === "completed"
@@ -1303,7 +1316,8 @@ export class AgentSessionManager {
                 displayText: `Background work "${description}" ${outcome}.`,
                 text: [
                     "<subagent-notification>",
-                    `Task: ${taskName}`,
+                    `Agent ID: ${child.subagentSummary().agentId}`,
+                    `Path: ${this.#pathFor(child)}`,
                     `Status: ${status}`,
                     `Result: ${output}`,
                     "</subagent-notification>",
@@ -1383,7 +1397,7 @@ export class AgentSessionManager {
         let current: InMemorySession | undefined = child;
         while (current !== undefined && current.isSubagent()) {
             const metadata = current.agentMetadata();
-            names.unshift(metadata.taskName ?? current.id);
+            names.unshift(metadata.taskName ?? current.agentIdentity().agentId);
             current =
                 metadata.parentSessionId === undefined
                     ? undefined
@@ -1394,18 +1408,17 @@ export class AgentSessionManager {
 
     #resolveTarget(parentSessionId: string, target: string): InMemorySession {
         const root = this.#rootFor(parentSessionId);
-        const matches = this.#repository.listByRoot(root.id).filter((session) => {
-            if (!session.isSubagent()) return false;
-            const metadata = session.agentMetadata();
-            return (
-                session.id === target ||
-                metadata.taskName === target ||
-                this.#pathFor(session) === target
-            );
-        });
+        const subagents = this.#repository
+            .listByRoot(root.id)
+            .filter((session) => session.isSubagent());
+        const agentIdMatch = subagents.find(
+            (session) => session.agentIdentity?.().agentId === target,
+        );
+        if (agentIdMatch !== undefined) return agentIdMatch;
+        const matches = subagents.filter((session) => this.#pathFor(session) === target);
         if (matches.length === 0) throw new Error(`Subagent '${target}' was not found.`);
         if (matches.length > 1) {
-            throw new Error(`Subagent name '${target}' is ambiguous. Use its full task path.`);
+            throw new Error(`Subagent path '${target}' is ambiguous. Use its Agent ID.`);
         }
         return matches[0] as InMemorySession;
     }
@@ -1464,4 +1477,22 @@ export class AgentSessionManager {
         }
         return candidate;
     }
+}
+
+function agentMessageHeader(
+    sender: InMemorySession,
+    senderPath: string,
+    recipient: InMemorySession,
+    recipientPath: string,
+    messageType: "MESSAGE" | "NEW_TASK",
+): string {
+    return [
+        `Message Type: ${messageType}`,
+        `Recipient Agent ID: ${recipient.agentIdentity().agentId}`,
+        `Recipient path: ${recipientPath}`,
+        `Sender Agent ID: ${sender.agentIdentity().agentId}`,
+        `Sender path: ${senderPath}`,
+        "Payload:",
+        "",
+    ].join("\n");
 }

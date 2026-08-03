@@ -1,11 +1,6 @@
 import type { AgentContext, BashSessionSnapshot, ManagedSubagent } from "../../agent/index.js";
-
-export interface GrokTaskResult {
-    exit_code?: number;
-    output?: string;
-    status: string;
-    task_id: string;
-}
+import { findManagedSubagent } from "../../agent/context/findManagedSubagent.js";
+import type { GrokTaskResult } from "./grokTaskResultSchema.js";
 
 export async function readGrokTask(options: {
     context: AgentContext;
@@ -26,14 +21,10 @@ export async function readGrokTask(options: {
         return fromTerminalSnapshot(snapshot);
     }
 
-    const subagent = options.context.subagents
-        ?.list()
-        .find(
-            (candidate) =>
-                candidate.sessionId === options.taskId ||
-                candidate.taskName === options.taskId ||
-                candidate.path === options.taskId,
-        );
+    const subagent =
+        options.context.subagents === undefined
+            ? undefined
+            : findManagedSubagent(options.context.subagents, options.taskId);
     return subagent === undefined
         ? { status: "not_found", task_id: options.taskId }
         : fromManagedSubagent(subagent);
@@ -59,7 +50,8 @@ function fromTerminalSnapshot(snapshot: BashSessionSnapshot): GrokTaskResult {
 
 function fromManagedSubagent(subagent: ManagedSubagent): GrokTaskResult {
     return {
-        task_id: subagent.sessionId,
+        agent_id: subagent.agentId,
+        path: subagent.path,
         status: subagent.status,
         output:
             subagent.status === "running"

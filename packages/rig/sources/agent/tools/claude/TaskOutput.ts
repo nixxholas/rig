@@ -44,8 +44,9 @@ const workflowTaskSchema = Type.Object({
 });
 
 const agentTaskSchema = Type.Object({
-    description: Type.String(),
+    agentId: Type.String(),
     output: Type.String(),
+    path: Type.String(),
     status: Type.Union([
         Type.Literal("aborted"),
         Type.Literal("completed"),
@@ -53,7 +54,6 @@ const agentTaskSchema = Type.Object({
         Type.Literal("running"),
         Type.Literal("suspended"),
     ]),
-    task_id: Type.String(),
     task_type: Type.Literal("local_agent"),
 });
 
@@ -75,7 +75,10 @@ export const claudeTaskOutputTool = defineTool({
     description:
         "Read output from a running or completed background shell task, agent, or workflow. When the task is an agent, omit timeout so the wait lasts a full hour: a background agent that finishes notifies you anyway, even while you are idle, so repeated short waits only spend another full model turn to learn nothing.",
     arguments: Type.Object({
-        task_id: Type.String({ description: "The background task identifier." }),
+        task_id: Type.String({
+            description:
+                "The background task identifier. For an agent, use its stable Agent ID (preferred) or canonical path.",
+        }),
         block: Type.Optional(
             Type.Boolean({
                 default: true,
@@ -117,10 +120,10 @@ export const claudeTaskOutputTool = defineTool({
                         : ("not_ready" as const)
                     : ("success" as const),
                 task: {
-                    description: agent.description,
+                    agentId: agent.agentId,
                     output: agent.output ?? "",
+                    path: agent.path,
                     status: agent.status,
-                    task_id: agent.sessionId,
                     task_type: "local_agent" as const,
                 },
             };

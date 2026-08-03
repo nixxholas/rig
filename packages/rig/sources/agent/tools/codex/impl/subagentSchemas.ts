@@ -1,9 +1,10 @@
 import { Type } from "@sinclair/typebox";
 
+import type { ManagedSubagent } from "../../../context/SubagentContext.js";
+
 export const managedSubagentSchema = Type.Object({
-    description: Type.String(),
+    agent_id: Type.String({ description: "Stable unguessable Agent ID." }),
     path: Type.String(),
-    sessionId: Type.String(),
     status: Type.Union([
         Type.Literal("aborted"),
         Type.Literal("completed"),
@@ -11,5 +12,12 @@ export const managedSubagentSchema = Type.Object({
         Type.Literal("running"),
         Type.Literal("suspended"),
     ]),
-    taskName: Type.String(),
 });
+
+export function toCodexManagedSubagentResult(agent: ManagedSubagent) {
+    return {
+        agent_id: agent.agentId,
+        path: agent.path,
+        status: agent.status,
+    };
+}

@@ -6,7 +6,6 @@ import {
     SUBAGENT_MODEL_ARGUMENT_DESCRIPTION,
 } from "../../agent/context/subagentSelectionDescriptions.js";
 import { defineTool } from "../../agent/types.js";
-import { humanizeTaskName } from "../../agent/tools/codex/impl/humanizeTaskName.js";
 import { requireSubagentContext } from "../../agent/tools/codex/impl/requireSubagentContext.js";
 
 export const grokSpawnSubagentTool = defineTool({
@@ -50,7 +49,7 @@ export const grokSpawnSubagentTool = defineTool({
         background: Type.Optional(
             Type.Boolean({
                 description:
-                    "Return immediately with a subagent_id. Defaults to true; use the output tool to inspect status.",
+                    "Return immediately with the Agent ID and canonical path. Defaults to true; use the output tool to inspect status.",
             }),
         ),
         service_tier: Type.Optional(
@@ -61,8 +60,8 @@ export const grokSpawnSubagentTool = defineTool({
         ),
     }),
     returnType: Type.Object({
-        subagent_id: Type.String(),
-        task_name: Type.String(),
+        agent_id: Type.String(),
+        path: Type.String(),
         status: Type.String(),
         output: Type.Optional(Type.String()),
     }),
@@ -110,15 +109,15 @@ export const grokSpawnSubagentTool = defineTool({
             throw new Error(result.output);
         }
         return {
-            subagent_id: result.sessionId,
-            task_name: result.taskName,
+            agent_id: result.agentId,
+            path: result.path,
             status: result.status,
             ...(result.output.length === 0 ? {} : { output: result.output }),
         };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result, args) => {
-        const description = args.description.trim() || humanizeTaskName(result.task_name);
+        const description = args.description.trim() || "Delegated task";
         const punctuation = /[.!?]$/u.test(description) ? "" : ".";
         return `Started a subagent: ${description}${punctuation}`;
     },

@@ -9,11 +9,10 @@ describe("Claude background-agent task tools", () => {
     it("waits for a background Agent and returns its final output", async () => {
         const harness = createJustBashToolHarness();
         let agent: ManagedSubagent = {
+            agentId: "unguessable-agent-1",
             description: "Inspect tests",
             path: "/root/inspect_tests",
-            sessionId: "subagent-1",
             status: "running",
-            taskName: "inspect_tests",
         };
         const wait = vi.fn(async () => {
             agent = {
@@ -38,30 +37,29 @@ describe("Claude background-agent task tools", () => {
         await expect(
             harness.runTool(claudeTaskOutputTool, {
                 block: true,
-                task_id: "subagent-1",
+                task_id: "unguessable-agent-1",
                 timeout: 1_000,
             }),
         ).resolves.toEqual({
             retrieval_status: "success",
             task: {
-                description: "Inspect tests",
+                agentId: "unguessable-agent-1",
                 output: "The test audit is complete.",
+                path: "/root/inspect_tests",
                 status: "completed",
-                task_id: "subagent-1",
                 task_type: "local_agent",
             },
         });
         expect(wait).toHaveBeenCalledOnce();
     });
 
-    it("stops a running background Agent by task name", async () => {
+    it("stops a running background Agent by canonical path", async () => {
         const harness = createJustBashToolHarness();
         const agent: ManagedSubagent = {
+            agentId: "unguessable-agent-1",
             description: "Inspect tests",
             path: "/root/inspect_tests",
-            sessionId: "subagent-1",
             status: "running",
-            taskName: "inspect_tests",
         };
         const interrupt = vi.fn(() => ({ ...agent, status: "aborted" as const }));
         harness.context.subagents = {
@@ -77,13 +75,13 @@ describe("Claude background-agent task tools", () => {
         };
 
         await expect(
-            harness.runTool(claudeTaskStopTool, { task_id: "inspect_tests" }),
+            harness.runTool(claudeTaskStopTool, { task_id: "/root/inspect_tests" }),
         ).resolves.toEqual({
-            command: "Inspect tests",
+            agentId: "unguessable-agent-1",
             message: "The background agent was stopped.",
-            task_id: "subagent-1",
+            path: "/root/inspect_tests",
             task_type: "local_agent",
         });
-        expect(interrupt).toHaveBeenCalledWith("subagent-1");
+        expect(interrupt).toHaveBeenCalledWith("unguessable-agent-1");
     });
 });

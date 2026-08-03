@@ -7,9 +7,9 @@ describe("formatChatHistoryPage", () => {
     it("prioritizes conversation and thinking while bounding tool details", () => {
         const page: ChatHistoryPage = {
             agent: {
+                agentId: "root-agent-id",
                 messageCount: 2,
                 path: "/root",
-                sessionId: "root",
                 status: "idle",
             },
             agents: [],
@@ -96,7 +96,12 @@ describe("formatChatHistoryPage", () => {
             position,
         }));
         const page: ChatHistoryPage = {
-            agent: { messageCount: 8, path: "/root", sessionId: "root", status: "idle" },
+            agent: {
+                agentId: "root-agent-id",
+                messageCount: 8,
+                path: "/root",
+                status: "idle",
+            },
             agents: [],
             cursor: 0,
             matchedMessages: 8,
@@ -116,7 +121,12 @@ describe("formatChatHistoryPage", () => {
 
     it("includes truncation metadata without exceeding the per-block text limit", () => {
         const page: ChatHistoryPage = {
-            agent: { messageCount: 1, path: "/root", sessionId: "root", status: "idle" },
+            agent: {
+                agentId: "root-agent-id",
+                messageCount: 1,
+                path: "/root",
+                status: "idle",
+            },
             agents: [],
             cursor: 0,
             matchedMessages: 1,

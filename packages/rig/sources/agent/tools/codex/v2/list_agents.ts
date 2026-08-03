@@ -22,8 +22,9 @@ export const codexListAgentsTool = defineTool({
         agents: Type.Array(
             Type.Object(
                 {
-                    agent_name: Type.String(),
+                    agent_id: Type.String(),
                     agent_status: codexAgentStatusSchema,
+                    path: Type.String(),
                 },
                 { additionalProperties: false },
             ),
@@ -32,8 +33,9 @@ export const codexListAgentsTool = defineTool({
     shouldReviewInAutoMode: () => false,
     execute: ({ path_prefix }, context) => ({
         agents: Array.from(requireSubagentContext(context).list(path_prefix), (agent) => ({
-            agent_name: agent.path || agent.sessionId,
+            agent_id: agent.agentId,
             agent_status: toCodexAgentStatus(agent),
+            path: agent.path,
         })),
     }),
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],

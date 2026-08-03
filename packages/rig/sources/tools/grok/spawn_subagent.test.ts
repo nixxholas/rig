@@ -22,9 +22,9 @@ describe("grokSpawnSubagentTool", () => {
         expect(
             grokSpawnSubagentTool.toUI(
                 {
+                    agent_id: "unguessable-agent-1",
+                    path: "/root/fix_the_login_bug",
                     status: "running",
-                    subagent_id: "agent-1",
-                    task_name: "fix_the_login_bug",
                 },
                 {
                     background: true,
@@ -42,9 +42,9 @@ describe("grokSpawnSubagentTool", () => {
         expect(
             grokSpawnSubagentTool.toUI(
                 {
+                    agent_id: "unguessable-agent-1",
+                    path: "/root/delegated_task",
                     status: "running",
-                    subagent_id: "agent-1",
-                    task_name: "delegated_task",
                 },
                 {
                     description: "  ",
@@ -60,6 +60,7 @@ describe("grokSpawnSubagentTool", () => {
     it("forwards the requested model and effort to the managed subagent", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "unguessable-agent-1",
             output: "Complete.",
             path: "/root/inspect_code",
             sessionId: "agent-1",
@@ -77,7 +78,7 @@ describe("grokSpawnSubagentTool", () => {
             wait: async () => ({ agents: [], timedOut: false }),
         };
 
-        await grokSpawnSubagentTool.execute(
+        const result = await grokSpawnSubagentTool.execute(
             {
                 background: false,
                 description: "Inspect code",
@@ -92,6 +93,10 @@ describe("grokSpawnSubagentTool", () => {
             { toolCallId: "tool-1" },
         );
 
+        expect(result).toMatchObject({
+            agent_id: "unguessable-agent-1",
+            path: "/root/inspect_code",
+        });
         expect(spawn).toHaveBeenCalledWith(
             expect.objectContaining({
                 effort: "low",
@@ -115,6 +120,7 @@ describe("grokSpawnSubagentTool", () => {
             list: () => [],
             maxDepth: 3,
             spawn: async () => ({
+                agentId: "unguessable-agent-1",
                 output: "The subagent ran out of tokens before returning a response.",
                 path: "/root/empty_response",
                 sessionId: "agent-1",
@@ -143,6 +149,7 @@ describe("grokSpawnSubagentTool", () => {
     it("forwards parent context messages to the managed subagent", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async () => ({
+            agentId: "unguessable-agent-1",
             output: "Complete.",
             path: "/root/inspect_code",
             sessionId: "agent-1",
@@ -211,13 +218,52 @@ describe("grokSpawnSubagentTool", () => {
         };
 
         await expect(
-            grokKillCommandOrSubagentTool.execute({ task_id: "agent-1" }, harness.context, {}),
+            grokKillCommandOrSubagentTool.execute(
+                { task_id: "unguessable-agent-1" },
+                harness.context,
+                {},
+            ),
         ).rejects.toBe(databaseError);
+    });
+
+    it("returns an Agent ID and canonical path when stopping a subagent", async () => {
+        const harness = createJustBashToolHarness();
+        const interrupt = vi.fn(() => ({
+            agentId: "unguessable-agent-1",
+            description: "Inspect code",
+            path: "/root/inspect_code",
+            sessionId: "agent-1",
+            status: "running" as const,
+            taskName: "inspect_code",
+        }));
+        harness.context.subagents = {
+            canSpawn: true,
+            depth: 0,
+            followUp: vi.fn(),
+            interrupt,
+            list: () => [],
+            maxDepth: 3,
+            spawn: vi.fn(),
+            wait: async () => ({ agents: [], timedOut: false }),
+        };
+
+        await expect(
+            grokKillCommandOrSubagentTool.execute(
+                { task_id: "unguessable-agent-1" },
+                harness.context,
+                {},
+            ),
+        ).resolves.toMatchObject({
+            agent_id: "unguessable-agent-1",
+            path: "/root/inspect_code",
+        });
+        expect(interrupt).toHaveBeenCalledWith("unguessable-agent-1");
     });
 
     it("follows up a retained subagent at the requested effort", async () => {
         const harness = createJustBashToolHarness();
         const followUp = vi.fn(() => ({
+            agentId: "unguessable-agent-1",
             description: "Inspect code",
             path: "/root/inspect_code",
             sessionId: "agent-1",
@@ -240,12 +286,19 @@ describe("grokSpawnSubagentTool", () => {
                 {
                     effort: "high",
                     prompt: "Inspect the final diff.",
-                    target: "inspect_code",
+                    target: "unguessable-agent-1",
                 },
                 harness.context,
                 {},
             ),
-        ).resolves.toMatchObject({ subagent_id: "agent-1" });
-        expect(followUp).toHaveBeenCalledWith("inspect_code", "Inspect the final diff.", "high");
+        ).resolves.toMatchObject({
+            agent_id: "unguessable-agent-1",
+            path: "/root/inspect_code",
+        });
+        expect(followUp).toHaveBeenCalledWith(
+            "unguessable-agent-1",
+            "Inspect the final diff.",
+            "high",
+        );
     });
 });

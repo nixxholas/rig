@@ -8,5 +8,5 @@ export function resolveManagedSubagent(
     if (subagents === undefined) return undefined;
     const listed = findManagedSubagent(subagents, target);
     if (listed === undefined) return undefined;
-    return subagents.inspect?.(target) ?? listed;
+    return subagents.inspect?.(listed.agentId) ?? listed;
 }

@@ -22,8 +22,10 @@ You can decide how much context you want to propagate to your sub-agents with th
 You will receive messages in the analysis channel in the form:
 \`\`\`
 Message Type: MESSAGE | FINAL_ANSWER
-Task name: <recipient>
-Sender: <author>
+Recipient Agent ID: <recipient-agent-id>
+Recipient path: <recipient-path>
+Sender Agent ID: <sender-agent-id>
+Sender path: <sender-path>
 Payload:
 <payload text>
 \`\`\`
@@ -35,8 +37,10 @@ You cannot spawn additional sub-agents at this depth. Use the available collabor
 You will receive messages in the analysis channel in the form:
 \`\`\`
 Message Type: MESSAGE | FINAL_ANSWER
-Task name: <recipient>
-Sender: <author>
+Recipient Agent ID: <recipient-agent-id>
+Recipient path: <recipient-path>
+Sender Agent ID: <sender-agent-id>
+Sender path: <sender-path>
 Payload:
 <payload text>
 \`\`\`
@@ -53,8 +57,10 @@ When you provide a response in the final channel, that content is immediately de
 You will receive messages in the analysis channel in the form:
 \`\`\`
 Message Type: NEW_TASK | MESSAGE | FINAL_ANSWER
-Task name: <recipient>
-Sender: <author>
+Recipient Agent ID: <recipient-agent-id>
+Recipient path: <recipient-path>
+Sender Agent ID: <sender-agent-id>
+Sender path: <sender-path>
 Payload:
 <payload text>
 \`\`\`
@@ -68,8 +74,10 @@ When you provide a response in the final channel, that content is immediately de
 You will receive messages in the analysis channel in the form:
 \`\`\`
 Message Type: NEW_TASK | MESSAGE | FINAL_ANSWER
-Task name: <recipient>
-Sender: <author>
+Recipient Agent ID: <recipient-agent-id>
+Recipient path: <recipient-path>
+Sender Agent ID: <sender-agent-id>
+Sender path: <sender-path>
 Payload:
 <payload text>
 \`\`\`
@@ -81,6 +89,8 @@ You may also see them addressed as to=/root/..., which indicates your identity i
         ? "`to=functions.collaboration.spawn_agent`"
         : "`to=functions.collaboration.send_message`";
     const sharedHint = `Note that collaboration tools cannot be called from inside \`functions.exec\`. Call ${directTools} only as direct tool calls using the recipient shown in their tool definitions, such as ${directToolExample}, since they are intentionally absent from the \`functions.exec\` \`tools.*\` namespace. Available tools in \`functions.exec\` are explicitly described with a \`tools\` namespace in the developer message.
+
+Subagent results and completion notifications provide both a stable unguessable Agent ID and a canonical task path. Prefer the Agent ID when targeting an existing subagent; the canonical path is also accepted.
 
 All agents share the same directory. In detail:
 - All agents have access to the same container and filesystem as you.

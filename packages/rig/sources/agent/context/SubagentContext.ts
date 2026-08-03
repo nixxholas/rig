@@ -18,12 +18,11 @@ export interface DisabledSubagentProvider {
 }
 
 export interface ManagedSubagent {
+    agentId: string;
     description: string;
     output?: string;
     path: string;
-    sessionId: string;
     status: SubagentRunStatus;
-    taskName: string;
 }
 
 export interface SpawnSubagentRequest {
@@ -48,11 +47,10 @@ export interface SpawnSubagentRequest {
 }
 
 export interface SpawnSubagentResult {
+    agentId: string;
     output: string;
     path: string;
-    sessionId: string;
     status: SubagentRunStatus;
-    taskName: string;
 }
 
 export interface WaitForSubagentResult {

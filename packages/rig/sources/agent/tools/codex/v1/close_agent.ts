@@ -18,20 +18,27 @@ export const codexV1CloseAgentTool = defineTool({
     arguments: Type.Object(
         {
             target: Type.String({
-                description: "Agent id to close (from spawn_agent).",
+                description: "Stable Agent ID (preferred) or canonical task path.",
             }),
         },
         { additionalProperties: false },
     ),
     returnType: Type.Object({
+        agent_id: Type.String(),
+        path: Type.String(),
         previous_status: codexAgentStatusSchema,
     }),
     shouldReviewInAutoMode: () => false,
     execute: ({ target }, context) => {
         const subagents = requireSubagentContext(context);
         const previous = findManagedSubagent(subagents, target);
+        if (previous === undefined) throw new Error(`Subagent '${target}' was not found.`);
         subagents.interrupt(target);
-        return { previous_status: toCodexAgentStatus(previous) };
+        return {
+            agent_id: previous.agentId,
+            path: previous.path,
+            previous_status: toCodexAgentStatus(previous),
+        };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: () => "Closed the subagent.",

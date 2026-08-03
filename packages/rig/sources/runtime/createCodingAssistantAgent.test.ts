@@ -565,6 +565,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("exposes the Agent tool only while another nested level is available", () => {
         const spawn = async () => ({
+            agentId: "test-agent",
             output: "done",
             path: "/root/test",
             sessionId: "subagent-1",
@@ -771,6 +772,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("keeps V2 child guidance at maximum depth and excludes Luna", async () => {
         const managed = {
+            agentId: "test-agent",
             description: "Test",
             path: "/root/test",
             sessionId: "test",
@@ -883,6 +885,7 @@ describe("createCodingAssistantAgent", () => {
 
     it("uses plaintext multi-agent v1 tools for Bedrock OpenAI models", () => {
         const managed = {
+            agentId: "test-agent",
             description: "Test",
             path: "/root/test",
             sessionId: "test",

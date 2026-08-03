@@ -17,13 +17,17 @@ describe("get_command_or_subagent_output", () => {
         harness.context.subagents = subagentContext(() => completed);
 
         const result = await grokGetCommandOrSubagentOutputTool.execute(
-            { task_ids: ["agent-1"], timeout_ms: 500 },
+            { task_ids: ["unguessable-agent-1"], timeout_ms: 500 },
             harness.context,
             {},
         );
 
         expect(result.results).toEqual([
-            expect.objectContaining({ status: "completed", task_id: "agent-1" }),
+            expect.objectContaining({
+                agent_id: "unguessable-agent-1",
+                path: "/root/test_subagent",
+                status: "completed",
+            }),
         ]);
         expect(grokGetCommandOrSubagentOutputTool.steerable).toBe(true);
         expect(
@@ -39,7 +43,7 @@ describe("get_command_or_subagent_output", () => {
         harness.context.subagents = subagentContext(() => false);
         const controller = new AbortController();
         const reading = grokGetCommandOrSubagentOutputTool.execute(
-            { task_ids: ["agent-1"], timeout_ms: 500 },
+            { task_ids: ["/root/test_subagent"], timeout_ms: 500 },
             harness.context,
             { signal: controller.signal },
         );
@@ -64,11 +68,10 @@ describe("get_command_or_subagent_output", () => {
 
 function subagentContext(completed: () => boolean): SubagentContext {
     const agent = (): ManagedSubagent => ({
+        agentId: "unguessable-agent-1",
         description: "Test subagent",
         path: "/root/test_subagent",
-        sessionId: "agent-1",
         status: completed() ? "completed" : "running",
-        taskName: "test_subagent",
     });
     return {
         canSpawn: true,

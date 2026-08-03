@@ -22,8 +22,7 @@ export const codexV1WaitAgentTool = defineTool({
     arguments: Type.Object(
         {
             targets: Type.Array(Type.String(), {
-                description:
-                    "Agent ids to wait on. Pass multiple ids to wait for whichever finishes first.",
+                description: "Stable Agent IDs (preferred) or canonical task paths to wait on.",
             }),
             timeout_ms: Type.Optional(
                 Type.Number({
@@ -36,6 +35,13 @@ export const codexV1WaitAgentTool = defineTool({
         { additionalProperties: false },
     ),
     returnType: Type.Object({
+        agents: Type.Array(
+            Type.Object({
+                agent_id: Type.String(),
+                path: Type.String(),
+                status: codexAgentStatusSchema,
+            }),
+        ),
         status: Type.Record(Type.String(), codexAgentStatusSchema),
         timed_out: Type.Boolean(),
     }),
@@ -49,21 +55,31 @@ export const codexV1WaitAgentTool = defineTool({
             const remaining = Math.max(0, deadline - Date.now());
             const result = await subagents.wait(remaining, execution.signal);
             const agents = result.agents.filter(
-                (agent) =>
-                    targetSet.has(agent.sessionId) ||
-                    targetSet.has(agent.path) ||
-                    targetSet.has(agent.taskName),
+                (agent) => targetSet.has(agent.agentId) || targetSet.has(agent.path),
             );
             if (agents.length > 0) {
                 return {
+                    agents: agents.map((agent) => ({
+                        agent_id: agent.agentId,
+                        path: agent.path,
+                        status: toCodexAgentStatus(agent),
+                    })),
                     status: Object.fromEntries(
-                        agents.map((agent) => [agent.sessionId, toCodexAgentStatus(agent)]),
+                        agents.map((agent) => [agent.agentId, toCodexAgentStatus(agent)]),
                     ),
                     timed_out: false,
                 };
             }
             if (result.timedOut || remaining === 0) {
-                return { status: {}, timed_out: true };
+                return {
+                    agents: [] as {
+                        agent_id: string;
+                        path: string;
+                        status: ReturnType<typeof toCodexAgentStatus>;
+                    }[],
+                    status: {},
+                    timed_out: true,
+                };
             }
         }
     },

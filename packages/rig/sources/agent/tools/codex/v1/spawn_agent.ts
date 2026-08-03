@@ -67,7 +67,7 @@ export const codexV1SpawnAgentTool = defineTool({
     ),
     returnType: Type.Object({
         agent_id: Type.String(),
-        nickname: Type.Union([Type.String(), Type.Null()]),
+        path: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
     execute: async (args, context, execution) => {
@@ -96,9 +96,9 @@ export const codexV1SpawnAgentTool = defineTool({
             prompt,
             ...(args.service_tier === "priority" ? { serviceTier: "fast" as const } : {}),
         });
-        return { agent_id: result.sessionId, nickname: result.taskName };
+        return { agent_id: result.agentId, path: result.path };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
-    toUI: (result) => `Started background task ${result.nickname ?? result.agent_id}.`,
+    toUI: (result) => `Started background task ${result.path}.`,
     locks: [],
 });

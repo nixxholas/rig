@@ -24,7 +24,8 @@ Spawn a background subagent with an explicit provider and model.`,
     arguments: Type.Object(
         {
             task_name: Type.String({
-                description: "Lowercase task name using letters, numbers, and underscores.",
+                description:
+                    "Lowercase canonical-path leaf using letters, numbers, and underscores.",
             }),
             message: Type.String({
                 description: "Initial plain-text task for the new agent.",
@@ -60,8 +61,8 @@ Spawn a background subagent with an explicit provider and model.`,
         { additionalProperties: false },
     ),
     returnType: Type.Object({
-        task_name: Type.String(),
-        nickname: Type.Union([Type.String(), Type.Null()]),
+        agent_id: Type.String(),
+        path: Type.String(),
     }),
     shouldReviewInAutoMode: () => false,
     execute: async (args, context, execution) => {
@@ -108,9 +109,12 @@ Spawn a background subagent with an explicit provider and model.`,
             },
             execution.signal,
         );
-        return { task_name: result.path, nickname: null };
+        return {
+            agent_id: result.agentId,
+            path: result.path,
+        };
     },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
-    toUI: (result) => `Started background task ${humanizeTaskName(result.task_name)}.`,
+    toUI: (_result, args) => `Started background task ${humanizeTaskName(args.task_name)}.`,
     locks: [],
 });

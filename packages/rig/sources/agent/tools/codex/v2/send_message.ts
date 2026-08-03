@@ -2,7 +2,7 @@ import { Type } from "@sinclair/typebox";
 
 import { applySubagentReadOnlyOverride } from "../../../context/applySubagentReadOnlyOverride.js";
 import { defineTool } from "../../../types.js";
-import { managedSubagentSchema } from "../impl/subagentSchemas.js";
+import { managedSubagentSchema, toCodexManagedSubagentResult } from "../impl/subagentSchemas.js";
 import { requireSubagentContext } from "../impl/requireSubagentContext.js";
 
 export const codexSendMessageTool = defineTool({
@@ -12,10 +12,13 @@ export const codexSendMessageTool = defineTool({
         name: "collaboration",
         description: "Tools for spawning and managing sub-agents.",
     },
-    description: "Send a message to an existing subagent without starting another turn.",
+    description:
+        "Send a message to an existing subagent without starting another turn. Target it by stable Agent ID (preferred) or canonical task path.",
     arguments: Type.Object(
         {
-            target: Type.String(),
+            target: Type.String({
+                description: "Stable Agent ID (preferred) or canonical task path.",
+            }),
             message: Type.String({
                 description: "Message text to queue on the target agent.",
                 encrypted: true,
@@ -37,11 +40,13 @@ export const codexSendMessageTool = defineTool({
         const sendMessage = subagents.sendMessage;
         if (sendMessage === undefined) throw new Error("Subagent messaging is unavailable.");
         await applySubagentReadOnlyOverride(subagents, target, read_only);
-        return subagents.encryptedMessages === true
-            ? sendMessage(target, "", message)
-            : sendMessage(target, message);
+        const agent =
+            subagents.encryptedMessages === true
+                ? sendMessage(target, "", message)
+                : sendMessage(target, message);
+        return toCodexManagedSubagentResult(agent);
     },
-    toLLM: () => [{ type: "text", text: "" }],
-    toUI: (result) => `Sent a message to ${result.description}.`,
+    toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
+    toUI: (result) => `Sent a message to ${result.path}.`,
     locks: [],
 });

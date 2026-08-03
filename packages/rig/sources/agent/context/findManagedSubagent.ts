@@ -4,10 +4,9 @@ export function findManagedSubagent(
     subagents: SubagentContext,
     target: string,
 ): ManagedSubagent | undefined {
-    return subagents
-        .list()
-        .find(
-            (agent) =>
-                agent.sessionId === target || agent.path === target || agent.taskName === target,
-        );
+    const agents = subagents.list();
+    return (
+        agents.find((agent) => agent.agentId === target) ??
+        agents.find((agent) => agent.path === target)
+    );
 }

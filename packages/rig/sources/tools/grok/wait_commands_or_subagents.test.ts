@@ -44,6 +44,8 @@ describe("wait_commands_or_subagents", () => {
         expect(result.results).toEqual([
             expect.objectContaining({ status: "completed", task_id: "1" }),
         ]);
+        expect(result.results[0]).not.toHaveProperty("agent_id");
+        expect(result.results[0]).not.toHaveProperty("path");
         expect(readSession.mock.calls.length).toBeGreaterThan(1);
     });
 
@@ -61,14 +63,22 @@ describe("wait_commands_or_subagents", () => {
         harness.context.subagents = subagentContext(() => subagentCompleted);
 
         const result = await grokWaitCommandsOrSubagentsTool.execute(
-            { mode: "wait_all", task_ids: ["1", "agent-1"], timeout_ms: 500 },
+            {
+                mode: "wait_all",
+                task_ids: ["1", "unguessable-agent-1"],
+                timeout_ms: 500,
+            },
             harness.context,
             {},
         );
 
         expect(result.results).toEqual([
             expect.objectContaining({ status: "completed", task_id: "1" }),
-            expect.objectContaining({ status: "completed", task_id: "agent-1" }),
+            expect.objectContaining({
+                agent_id: "unguessable-agent-1",
+                path: "/root/test_subagent",
+                status: "completed",
+            }),
         ]);
     });
 });
@@ -90,11 +100,10 @@ function commandSnapshot(completed: boolean) {
 
 function subagentContext(completed: () => boolean): SubagentContext {
     const agent = (): ManagedSubagent => ({
+        agentId: "unguessable-agent-1",
         description: "Test subagent",
         path: "/root/test_subagent",
-        sessionId: "agent-1",
         status: completed() ? "completed" : "running",
-        taskName: "test_subagent",
     });
     return {
         canSpawn: true,

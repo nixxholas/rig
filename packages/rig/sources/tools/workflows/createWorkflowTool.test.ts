@@ -9,6 +9,7 @@ describe("createWorkflowTool", () => {
     it("forwards the parent transcript to children that request parent context", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async (request: SpawnSubagentRequest) => ({
+            agentId: `${request.taskName ?? "child"}-agent`,
             output: "Complete.",
             path: `/root/${request.taskName}`,
             sessionId: request.taskName ?? "child",

@@ -71,18 +71,16 @@ describe("Codex collaboration tools", () => {
     it("exposes background spawn and lifecycle controls", async () => {
         const harness = createJustBashToolHarness();
         const agent: ManagedSubagent = {
+            agentId: "unguessable-agent-1",
             description: "Inspect code",
             path: "/root/inspect_code",
-            sessionId: "agent-1",
             status: "running",
-            taskName: "inspect_code",
         };
         const spawn = vi.fn(async () => ({
+            agentId: agent.agentId,
             output: "The subagent is running in the background.",
             path: agent.path,
-            sessionId: agent.sessionId,
             status: "running" as const,
-            taskName: agent.taskName,
         }));
         const followUp = vi.fn(() => agent);
         const interrupt = vi.fn(() => agent);
@@ -112,8 +110,8 @@ describe("Codex collaboration tools", () => {
                 { toolCallId: "tool-1" },
             ),
         ).resolves.toEqual({
-            nickname: null,
-            task_name: "/root/inspect_code",
+            agent_id: "unguessable-agent-1",
+            path: "/root/inspect_code",
         });
         expect(spawn).toHaveBeenCalledWith(
             {
@@ -131,38 +129,67 @@ describe("Codex collaboration tools", () => {
 
         await expect(
             codexFollowupTaskTool.execute(
-                { message: "Check the tests too.", target: "inspect_code" },
+                { message: "Check the tests too.", target: "unguessable-agent-1" },
                 harness.context,
                 {},
             ),
-        ).resolves.toEqual(agent);
-        expect(followUp).toHaveBeenCalledWith("inspect_code", "Check the tests too.");
+        ).resolves.toEqual({
+            agent_id: "unguessable-agent-1",
+            path: "/root/inspect_code",
+            status: "running",
+        });
+        expect(followUp).toHaveBeenCalledWith("unguessable-agent-1", "Check the tests too.");
         await expect(
             claudeSendMessageTool.execute(
                 {
                     effort: "low",
                     message: "Review the final diff.",
                     summary: "Review final changes",
-                    to: "inspect_code",
+                    to: "/root/inspect_code",
                 },
                 harness.context,
                 {},
             ),
         ).resolves.toEqual({
+            agentId: "unguessable-agent-1",
             message: "Review final changes: follow-up work was sent to Inspect code.",
+            path: "/root/inspect_code",
             success: true,
-            target: "/root/inspect_code",
         });
-        expect(followUp).toHaveBeenLastCalledWith("inspect_code", "Review the final diff.", "low");
-        expect(codexListAgentsTool.execute({}, harness.context, {})).toEqual({
-            agents: [{ agent_name: "/root/inspect_code", agent_status: "running" }],
-        });
-        expect(codexInterruptAgentTool.execute({ target: "agent-1" }, harness.context, {})).toEqual(
-            { previous_status: "running" },
+        expect(followUp).toHaveBeenLastCalledWith(
+            "/root/inspect_code",
+            "Review the final diff.",
+            "low",
         );
+        expect(codexListAgentsTool.execute({}, harness.context, {})).toEqual({
+            agents: [
+                {
+                    agent_id: "unguessable-agent-1",
+                    agent_status: "running",
+                    path: "/root/inspect_code",
+                },
+            ],
+        });
+        expect(
+            codexInterruptAgentTool.execute({ target: "unguessable-agent-1" }, harness.context, {}),
+        ).toEqual({
+            agent_id: "unguessable-agent-1",
+            path: "/root/inspect_code",
+            previous_status: "running",
+        });
         await expect(
             codexWaitAgentTool.execute({ timeout_ms: 300_000 }, harness.context, {}),
-        ).resolves.toEqual({ message: "Wait completed.", timed_out: false });
+        ).resolves.toEqual({
+            agents: [
+                {
+                    agent_id: "unguessable-agent-1",
+                    path: "/root/inspect_code",
+                    status: "running",
+                },
+            ],
+            message: "Wait completed.",
+            timed_out: false,
+        });
         expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 300_000 })).toBe(true);
         expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 3_600_001 })).toBe(false);
         expect(codexWaitAgentTool.steerable).toBe(true);
@@ -190,6 +217,40 @@ describe("Codex collaboration tools", () => {
         expect(requestedTimeout).toBe(3_600_000);
         expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 30_000 })).toBe(false);
         expect(Value.Check(codexWaitAgentTool.arguments, { timeout_ms: 60_000 })).toBe(true);
+    });
+
+    it("targets a stable Agent ID without consulting legacy aliases", () => {
+        const harness = createJustBashToolHarness();
+        const alias: ManagedSubagent = {
+            agentId: "alias-agent",
+            description: "Alias",
+            path: "/root/alias",
+            status: "running",
+        };
+        const identified: ManagedSubagent = {
+            agentId: "stable-target",
+            description: "Identified",
+            path: "/root/identified",
+            status: "running",
+        };
+        harness.context.subagents = {
+            canSpawn: true,
+            depth: 0,
+            followUp: vi.fn(),
+            interrupt: vi.fn(() => identified),
+            list: vi.fn(() => [alias, identified]),
+            maxDepth: 3,
+            spawn: vi.fn(),
+            wait: vi.fn(),
+        };
+
+        expect(
+            codexInterruptAgentTool.execute({ target: "stable-target" }, harness.context, {}),
+        ).toEqual({
+            agent_id: "stable-target",
+            path: "/root/identified",
+            previous_status: "running",
+        });
     });
 
     it("requires an explicit model and reasoning effort for every spawned agent", () => {
@@ -224,6 +285,7 @@ describe("Codex collaboration tools", () => {
     it("spawns a plaintext v2 subagent through an explicit non-GPT provider", async () => {
         const harness = createJustBashToolHarness();
         const spawn = vi.fn(async (_request: SpawnSubagentRequest, _signal?: AbortSignal) => ({
+            agentId: "unguessable-agent-claude",
             output: "The subagent is running in the background.",
             path: "/root/review_claude",
             sessionId: "agent-claude",
@@ -231,11 +293,10 @@ describe("Codex collaboration tools", () => {
             taskName: "review_claude",
         }));
         const managed: ManagedSubagent = {
+            agentId: "unguessable-agent-claude",
             description: "Review claude",
             path: "/root/review_claude",
-            sessionId: "agent-claude",
             status: "completed",
-            taskName: "review_claude",
         };
         const followUp = vi.fn(() => managed);
         harness.context.subagents = {
@@ -288,8 +349,8 @@ describe("Codex collaboration tools", () => {
                 },
             ),
         ).resolves.toEqual({
-            nickname: null,
-            task_name: "/root/review_claude",
+            agent_id: "unguessable-agent-claude",
+            path: "/root/review_claude",
         });
         expect(spawn).toHaveBeenCalledWith(
             {
@@ -318,7 +379,11 @@ describe("Codex collaboration tools", () => {
                 harness.context,
                 {},
             ),
-        ).resolves.toEqual(managed);
+        ).resolves.toEqual({
+            agent_id: "unguessable-agent-claude",
+            path: "/root/review_claude",
+            status: "completed",
+        });
         expect(followUp).toHaveBeenCalledWith(
             "/root/review_claude",
             "Check the final diff.",
@@ -329,18 +394,16 @@ describe("Codex collaboration tools", () => {
     it("passes native Codex collaboration messages through encrypted envelopes", async () => {
         const harness = createJustBashToolHarness();
         const agent: ManagedSubagent = {
+            agentId: "unguessable-agent-1",
             description: "Inspect code",
             path: "/root/inspect_code",
-            sessionId: "agent-1",
             status: "running",
-            taskName: "inspect_code",
         };
         const spawn = vi.fn(async () => ({
+            agentId: agent.agentId,
             output: "The subagent is running in the background.",
             path: agent.path,
-            sessionId: agent.sessionId,
             status: "running" as const,
-            taskName: agent.taskName,
         }));
         const followUp = vi.fn(() => agent);
         const sendMessage = vi.fn(() => agent);
@@ -384,14 +447,14 @@ describe("Codex collaboration tools", () => {
             {
                 message: "opaque-followup-ciphertext",
                 read_only: true,
-                target: "inspect_code",
+                target: "unguessable-agent-1",
             },
             harness.context,
             {},
         );
-        expect(setReadOnly).toHaveBeenCalledWith("inspect_code", true);
+        expect(setReadOnly).toHaveBeenCalledWith("unguessable-agent-1", true);
         expect(followUp).toHaveBeenCalledWith(
-            "inspect_code",
+            "unguessable-agent-1",
             "",
             undefined,
             "opaque-followup-ciphertext",
@@ -401,20 +464,24 @@ describe("Codex collaboration tools", () => {
             {
                 message: "opaque-message-ciphertext",
                 read_only: false,
-                target: "inspect_code",
+                target: "/root/inspect_code",
             },
             harness.context,
             {},
         );
-        expect(setReadOnly).toHaveBeenLastCalledWith("inspect_code", false);
-        expect(sendMessage).toHaveBeenCalledWith("inspect_code", "", "opaque-message-ciphertext");
+        expect(setReadOnly).toHaveBeenLastCalledWith("/root/inspect_code", false);
+        expect(sendMessage).toHaveBeenCalledWith(
+            "/root/inspect_code",
+            "",
+            "opaque-message-ciphertext",
+        );
         expect(codexFollowupTaskTool.shouldReviewInAutoMode).toBeDefined();
         expect(
             await codexFollowupTaskTool.shouldReviewInAutoMode?.(
                 {
                     message: "No escalation.",
                     read_only: false,
-                    target: "inspect_code",
+                    target: "unguessable-agent-1",
                 },
                 harness.context,
             ),
@@ -427,6 +494,7 @@ describe("Codex collaboration tools", () => {
         const spawn = vi.fn(async (request: SpawnSubagentRequest) => {
             observedRequest = request;
             return {
+                agentId: "unguessable-agent-1",
                 output: "The subagent is running in the background.",
                 path: "/root/delegated_task",
                 sessionId: "agent-1",
@@ -460,7 +528,10 @@ describe("Codex collaboration tools", () => {
                 harness.context,
                 { toolCallId: "tool-v1" },
             ),
-        ).resolves.toEqual({ agent_id: "agent-1", nickname: "delegated_task" });
+        ).resolves.toEqual({
+            agent_id: "unguessable-agent-1",
+            path: "/root/delegated_task",
+        });
         expect(spawn).toHaveBeenCalledWith(
             expect.objectContaining({
                 contextMode: "task",
@@ -476,18 +547,16 @@ describe("Codex collaboration tools", () => {
     it("keeps waiting when Bedrock v1 receives an unrelated agent update", async () => {
         const harness = createJustBashToolHarness();
         const unrelated: ManagedSubagent = {
+            agentId: "unguessable-other",
             description: "Other task",
             path: "/root/other",
-            sessionId: "agent-other",
             status: "completed",
-            taskName: "other",
         };
         const target: ManagedSubagent = {
+            agentId: "unguessable-target",
             description: "Target task",
             path: "/root/target",
-            sessionId: "agent-target",
             status: "completed",
-            taskName: "target",
         };
         const wait = vi
             .fn()
@@ -506,12 +575,19 @@ describe("Codex collaboration tools", () => {
 
         await expect(
             codexV1WaitAgentTool.execute(
-                { targets: ["agent-target"], timeout_ms: 30_000 },
+                { targets: ["unguessable-target"], timeout_ms: 30_000 },
                 harness.context,
                 {},
             ),
         ).resolves.toEqual({
-            status: { "agent-target": { completed: null } },
+            agents: [
+                {
+                    agent_id: "unguessable-target",
+                    path: "/root/target",
+                    status: { completed: null },
+                },
+            ],
+            status: { "unguessable-target": { completed: null } },
             timed_out: false,
         });
         expect(wait).toHaveBeenCalledTimes(2);

@@ -33,7 +33,30 @@ describe("get_agent_tree_usage", () => {
         const context = { agentTreeUsage: { read } } as unknown as AgentContext;
 
         const result = await getAgentTreeUsageTool.execute({}, context, {});
-        expect(result).toEqual(usage);
+        expect(result).toEqual({
+            sessions: [
+                {
+                    agentId: "agent-root",
+                    modelId: "openai/gpt-5.6-sol",
+                    path: "/root",
+                    providerId: "codex",
+                    relation: "root",
+                    status: "idle",
+                    totalTokens: 100,
+                },
+                {
+                    agentId: "agent-child",
+                    modelId: "anthropic/sonnet-5",
+                    parentAgentId: "agent-root",
+                    path: "/root",
+                    providerId: "claude",
+                    relation: "delegated",
+                    status: "completed",
+                    totalTokens: 40,
+                },
+            ],
+            totalTokens: 140,
+        });
         expect(read).toHaveBeenCalledOnce();
         expect(getAgentTreeUsageTool.shouldReviewInAutoMode({}, context)).toBe(false);
         expect(getAgentTreeUsageTool.requiresAutoOrFullAccess).toBe(false);
