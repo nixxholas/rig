@@ -42,6 +42,11 @@ export function formatRigInspection(inspection: RigCliInstallationInspection): r
         lines.push("Rig data has not been created.");
     } else if (inspection.data.status === "uninitialized") {
         lines.push("Rig data exists but has not been initialized.");
+    } else if (inspection.data.status === "upgrade_required") {
+        lines.push(
+            inspection.data.message,
+            `Rig data schema version: ${String(inspection.data.schemaVersion)}`,
+        );
     } else if (inspection.data.status === "initialized") {
         lines.push(
             "Rig data is initialized.",

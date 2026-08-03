@@ -34,10 +34,13 @@ those SQLite files may remain after inspection. They are database bookkeeping, n
 lifecycle state.
 
 The inspection contract distinguishes absent data, present but uninitialized data, initialized
-data on the current schema, initialized data that needs an ordinary upgrade, data from an
-incompatible newer schema, and data that is temporarily or permanently unavailable to inspect.
+data on the current schema, initialized data that needs an ordinary upgrade, recognized
+pre-identity Rig data that needs its first identity migration, data from an incompatible newer
+schema, and data that is temporarily or permanently unavailable to inspect.
 `uninitialized` is reserved for an empty or recognized data state that normal startup can
 initialize safely. Garbage, corruption, or a broken committed identity is `unavailable` and must
 not be presented as safe to initialize or reset.
 For a valid SQLite database with a foreign application identity, safe initialization means the
 normal startup transaction deliberately discards its foreign tables before creating Rig's schema.
+Recognized Rig schemas from before migration 20 are `upgrade_required` with reason `pre_identity`;
+they have existing Rig data but cannot expose an epoch until normal daemon migration commits one.

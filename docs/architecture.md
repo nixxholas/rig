@@ -71,8 +71,14 @@ holds no agent logic; if it dies, the session keeps running.
 ### The terminal UI
 
 The CLI parses the command line and picks a mode: interactive app, headless
-`exec`, monitor, daemon control (`rig daemon start|stop|status|reload`), or
-`--server` for the daemon itself.
+`exec`, monitor, daemon control (`rig daemon start|stop|status|reload`), offline
+installation inspection (`rig inspect [--json]`), or `--server` for the daemon
+itself.
+
+Inspection is the exception to the daemon-starting path below. It reads installation, CLI version,
+and protocol compatibility facts without starting or contacting the daemon. A clean or
+upgradeable inspection exits 0; incompatible, damaged, busy, or unreadable data exits 2 after
+printing the same complete human or JSON result.
 
 Before doing anything else, an interactive or headless run finds a running
 daemon, checks that its identity matches the current build, and spawns one when

@@ -167,6 +167,32 @@ describe("discoverRigInstallation", () => {
         expect(cancelled).toBe(true);
     });
 
+    it("cancels a response whose declared content length exceeds the 16 KB limit", async () => {
+        let cancelled = false;
+        const body = new ReadableStream<Uint8Array>({
+            cancel() {
+                cancelled = true;
+            },
+            start(controller) {
+                controller.enqueue(new TextEncoder().encode("{}"));
+            },
+        });
+
+        await expect(
+            discoverRigInstallation({
+                endpoint: "http://daemon.test",
+                fetch: async () =>
+                    new Response(body, {
+                        headers: {
+                            "content-length": String(MAXIMUM_INSTALLATION_RESPONSE_BYTES + 1),
+                        },
+                    }),
+                token: "secret",
+            }),
+        ).rejects.toThrow("Rig returned an installation response larger than 16 KB.");
+        expect(cancelled).toBe(true);
+    });
+
     it("cancels and releases a reader that fails while reading the response", async () => {
         const reader = {
             cancel: vi.fn().mockResolvedValue(undefined),

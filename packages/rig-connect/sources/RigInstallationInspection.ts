@@ -21,6 +21,15 @@ export const rigInitializedDataSchema = Type.Object(
 export const rigInstallationCliDataSchema = Type.Union([
     Type.Object({ status: Type.Literal("absent") }, { additionalProperties: false }),
     Type.Object({ status: Type.Literal("uninitialized") }, { additionalProperties: false }),
+    Type.Object(
+        {
+            message: messageSchema,
+            reason: Type.Literal("pre_identity"),
+            schemaVersion: schemaVersionSchema,
+            status: Type.Literal("upgrade_required"),
+        },
+        exact,
+    ),
     rigInitializedDataSchema,
     Type.Object(
         {

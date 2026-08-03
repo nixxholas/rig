@@ -8,8 +8,13 @@ import type {
     RigCliInstallationInspection,
     RigInstallationData,
 } from "../protocol/InstallationProtocol.js";
-import { migrateSessionDatabase } from "../persistence/database/migrateSessionDatabase.js";
+import {
+    migrateSessionDatabase,
+    RIG_DATA_IDENTITY_MIGRATION_INDEX,
+} from "../persistence/database/migrateSessionDatabase.js";
 import { openSessionDatabase } from "../persistence/database/openSessionDatabase.js";
+import { PersistentSessionStore } from "../session/PersistentSessionStore.js";
+import { sql } from "drizzle-orm";
 import {
     formatRigInspection,
     rigInspectionExitCode,
@@ -72,6 +77,48 @@ describe("runRigInspection", () => {
         ]);
     });
 
+    it("reports a populated released v16 database as a recognized epoch-less upgrade", () => {
+        const root = testDirectory();
+        const databasePath = join(root, "sessions.sqlite");
+        const store = new PersistentSessionStore({ databasePath });
+        store.create({ cwd: root });
+        store.close();
+        const database = openSessionDatabase(databasePath);
+        expect(
+            database.database.get<{ count: number }>(
+                sql.raw("SELECT COUNT(*) AS count FROM sessions"),
+            ),
+        ).toEqual({ count: 1 });
+        database.database.run(sql.raw("DROP TABLE rig_data_identity"));
+        database.database.run(
+            sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
+        );
+        database.client.close();
+        const output: string[] = [];
+
+        const result = runRigInspection({
+            databasePath,
+            log: (line) => output.push(line),
+            rigVersion: "1.2.3",
+        });
+
+        expect(result.data).toEqual({
+            message:
+                "Existing Rig data needs an upgrade before its stable data identity is available.",
+            reason: "pre_identity",
+            schemaVersion: RIG_DATA_IDENTITY_MIGRATION_INDEX,
+            status: "upgrade_required",
+        });
+        expect(result.data).not.toHaveProperty("epoch");
+        expect(rigInspectionExitCode(result)).toBe(0);
+        expect(output).toEqual([
+            "Installed Rig CLI version: 1.2.3",
+            expect.stringMatching(/^Installed Rig CLI protocol version: \d+$/u),
+            "Existing Rig data needs an upgrade before its stable data identity is available.",
+            `Rig data schema version: ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`,
+        ]);
+    });
+
     it.each([
         {
             data: { status: "absent" },
@@ -82,6 +129,20 @@ describe("runRigInspection", () => {
             data: { status: "uninitialized" },
             exitCode: 0,
             lines: ["Rig data exists but has not been initialized."],
+        },
+        {
+            data: {
+                message:
+                    "Existing Rig data needs an upgrade before its stable data identity is available.",
+                reason: "pre_identity",
+                schemaVersion: 16,
+                status: "upgrade_required",
+            },
+            exitCode: 0,
+            lines: [
+                "Existing Rig data needs an upgrade before its stable data identity is available.",
+                "Rig data schema version: 16",
+            ],
         },
         {
             data: {

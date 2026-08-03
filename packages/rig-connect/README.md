@@ -44,7 +44,8 @@ bodies are cancelled before any non-success response is reported.
 Local launchers parse `rig inspect --json` with the separate
 `rigCliInstallationInspectionSchema` / `RigCliInstallationInspection` contract. Unlike daemon
 discovery, inspection may report `absent`, `uninitialized`, `initialized` (including
-`upgrade_required`), `incompatible`, or `unavailable` without starting or contacting the daemon.
+`schemaCompatibility: "upgrade_required"`), epoch-less `upgrade_required` with reason
+`pre_identity`, `incompatible`, or `unavailable` without starting or contacting the daemon.
 The daemon contract is separately exported as
 `rigDaemonInstallationDiscoverySchema` / `RigDaemonInstallationDiscovery`.
 The command exits with status 0 for a completed safe inspection and status 2 when the result is

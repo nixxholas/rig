@@ -41,6 +41,15 @@ export function queryRigInstallationData(
         const applicationId = opened.client.pragma("application_id", { simple: true }) as number;
         const schemaVersion = opened.client.pragma("user_version", { simple: true }) as number;
         if (applicationId !== SESSION_DATABASE_APPLICATION_ID) return { status: "uninitialized" };
+        if (schemaVersion > 0 && schemaVersion < RIG_DATA_IDENTITY_SCHEMA_VERSION) {
+            return {
+                message:
+                    "Existing Rig data needs an upgrade before its stable data identity is available.",
+                reason: "pre_identity",
+                schemaVersion,
+                status: "upgrade_required",
+            };
+        }
         if (schemaVersion < RIG_DATA_IDENTITY_SCHEMA_VERSION) {
             return { status: "uninitialized" };
         }

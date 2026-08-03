@@ -259,6 +259,26 @@ describe("protocol conformance", () => {
             daemonRigDaemonInstallationDiscoverySchema,
         );
 
+        const preIdentityUpgradeRequired = {
+            message: "Existing Rig data must be opened by a newer Rig before it has an identity.",
+            reason: "pre_identity",
+            schemaVersion: 16,
+            status: "upgrade_required",
+        };
+        expect(Value.Check(rigInstallationCliDataSchema, preIdentityUpgradeRequired)).toBe(true);
+        expect(Value.Check(daemonRigInstallationDataSchema, preIdentityUpgradeRequired)).toBe(true);
+        for (const invalidPreIdentityUpgradeRequired of [
+            { ...preIdentityUpgradeRequired, epoch: "must-not-exist" },
+            { ...preIdentityUpgradeRequired, unexpected: true },
+        ]) {
+            expect(
+                Value.Check(rigInstallationCliDataSchema, invalidPreIdentityUpgradeRequired),
+            ).toBe(false);
+            expect(
+                Value.Check(daemonRigInstallationDataSchema, invalidPreIdentityUpgradeRequired),
+            ).toBe(false);
+        }
+
         const invalidDiscoveryValues = [
             {
                 daemonProtocolVersion: 5,
