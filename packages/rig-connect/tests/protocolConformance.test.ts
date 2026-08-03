@@ -5,7 +5,10 @@ import { describe, expect, it } from "vitest";
 // step and no published type surface. It is a type-only import in a test, so
 // nothing from the daemon reaches this library's bundle.
 import type * as daemon from "../../rig/sources/protocol/index.js";
-import { systemNoticePayloadSchema as daemonSystemNoticePayloadSchema } from "../../rig/sources/protocol/index.js";
+import {
+    PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
+    systemNoticePayloadSchema as daemonSystemNoticePayloadSchema,
+} from "../../rig/sources/protocol/index.js";
 // Presentation is owned by the agent layer rather than the protocol module, but
 // it travels on the wire all the same, so it is checked the same way.
 import type * as daemonAgent from "../../rig/sources/agent/index.js";
@@ -100,9 +103,9 @@ type _ProjectRegistrationErrorCode = Assignable<
 >;
 type _Workspace = Assignable<local.ProjectWorkspace, daemon.ProjectWorkspace>;
 type _WorkspaceExact = Assignable<daemon.ProjectWorkspace, local.ProjectWorkspace>;
-type _WorkspaceError = Assignable<
-    daemon.ProjectWorkspace["error"],
-    local.ProjectWorkspace["error"]
+type _WorkspaceErrorMaxLength = Assignable<
+    typeof PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
+    typeof DAEMON_PROJECT_ERROR_MAX_LENGTH
 >;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
@@ -232,7 +235,16 @@ describe("protocol conformance", () => {
             version: 3,
         };
 
+        expect(PROJECT_WORKSPACE_ERROR_MAX_LENGTH).toBe(DAEMON_PROJECT_ERROR_MAX_LENGTH);
+        expect(Value.Check(projectWorkspaceSchema, workspace)).toBe(true);
         expect(Value.Decode(projectWorkspaceSchema, workspace)).toEqual(workspace);
+        expect(
+            Value.Check(projectWorkspaceSchema, {
+                ...workspace,
+                error: `${workspace.error}x`,
+            }),
+        ).toBe(false);
+        expect(Value.Check(projectWorkspaceSchema, { ...workspace, unexpected: true })).toBe(false);
         expect(() =>
             Value.Decode(projectWorkspaceSchema, {
                 ...workspace,

@@ -1,4 +1,5 @@
 export type { EventId } from "./EventId.js";
+export { PROJECT_ERROR_MAX_LENGTH } from "./ProjectProtocol.js";
 export {
     computePreparationNoticeSchema,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,

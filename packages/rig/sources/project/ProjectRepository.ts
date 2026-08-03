@@ -19,6 +19,7 @@ import sharp from "sharp";
 
 import {
     createEventIdFactory,
+    PROJECT_ERROR_MAX_LENGTH,
     type CreateProjectWorkspaceRequest,
     type GitRepositoryFacts,
     type Project,
@@ -107,7 +108,6 @@ import { runWorkspaceSetupCommands } from "./runWorkspaceSetupCommands.js";
 const AVATAR_GARBAGE_DELAY_MS = 24 * 60 * 60 * 1_000;
 const GIT_PROBE_CONCURRENCY = 4;
 const MAX_AVATAR_BYTES = 8 * 1024 * 1024;
-const PROJECT_ERROR_LENGTH = 500;
 const IMAGE_EXTENSIONS = new Set([".gif", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"]);
 const SKIPPED_DIRECTORIES = new Set([
     ".git",
@@ -476,7 +476,7 @@ export class ProjectRepository {
                 tx,
                 projectId,
                 targetWorkspaceId,
-                failure.message.slice(0, PROJECT_ERROR_LENGTH),
+                failure.message.slice(0, PROJECT_ERROR_MAX_LENGTH),
                 this.#now(),
             );
             if (changed > 0) this.#publishedWorkspace(projectId, targetWorkspaceId);
@@ -1236,7 +1236,7 @@ export class ProjectRepository {
                 const changed = projectMarkInitializationFailed(
                     tx,
                     projectId,
-                    errorToMessage(error).slice(0, PROJECT_ERROR_LENGTH),
+                    errorToMessage(error).slice(0, PROJECT_ERROR_MAX_LENGTH),
                     this.#now(),
                 );
                 if (changed > 0) this.#publishedProject(projectId);
@@ -1596,7 +1596,7 @@ export class ProjectRepository {
                 tx,
                 workspace.projectId,
                 workspace.id,
-                error.slice(0, PROJECT_ERROR_LENGTH),
+                error.slice(0, PROJECT_ERROR_MAX_LENGTH),
                 this.#now(),
             );
             if (changed > 0) this.#publishedWorkspace(workspace.projectId, workspace.id);

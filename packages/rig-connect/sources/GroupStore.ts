@@ -802,7 +802,7 @@ export class GroupStore {
                 path: project.path,
                 presence: project.presence,
                 sessions: (sessionsByProject.get(project.id) ?? []).sort(byOrderKey),
-                terminals: this.#projectTerminals.get(project.id) ?? [],
+                terminals: this.#projectTerminals.get(project.id) ?? EMPTY_TERMINALS,
                 unread: unreadOf(sessionsByProject.get(project.id) ?? []),
                 usage: usageOf([
                     ...(sessionsByProject.get(project.id) ?? []),

@@ -758,6 +758,7 @@ interface PendingMutation {
     applyOptimistic: (publish: boolean) => () => void;
     attemptController?: AbortController;
     entityKey: string;
+    expectsWorkspaceResponse?: boolean;
     id: MutationId;
     matchesAuthoritative?: (data: unknown) => boolean;
     prepare: () => MutationRequest;
@@ -1331,6 +1332,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 try {
                     const data = await performMutation(mutation, controller.controller.signal);
                     if (closed) return;
+                    if (mutation.expectsWorkspaceResponse === true && !isWorkspaceResponse(data)) {
+                        queue.shift();
+                        rejectMutation(
+                            mutation,
+                            "Rig returned an invalid workspace response.",
+                            data,
+                        );
+                        retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+                        continue;
+                    }
                     recordAcceptedResponse(mutation, data);
                     // A successful response commits the prediction. It stays
                     // visible in the store, but is no longer an overlay that a
@@ -1342,6 +1353,21 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (closed) return;
                     if (mutation.acknowledged) {
                         queue.shift();
+                        retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+                        continue;
+                    }
+                    if (
+                        error instanceof MutationHttpError &&
+                        error.status === 409 &&
+                        mutation.expectsWorkspaceResponse === true &&
+                        !isWorkspaceResponse(error.data)
+                    ) {
+                        queue.shift();
+                        rejectMutation(
+                            mutation,
+                            "Rig returned an invalid workspace response.",
+                            error.data,
+                        );
                         retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
                         continue;
                     }
@@ -1554,6 +1580,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             throw error;
         }
         if (version !== entry.bootstrapVersion) return;
+        if (
+            !hello.workspaces.every((workspace) => Value.Check(projectWorkspaceSchema, workspace))
+        ) {
+            throw new Error("Rig returned an invalid workspace catalog.");
+        }
         const catalogCompatibility = serverCompatibility(hello.protocolVersion);
         if (catalogCompatibility.status !== "compatible") {
             throw new Error(describeServerCompatibility(catalogCompatibility));
@@ -1593,22 +1624,24 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         queueGitWatchSync();
     };
 
+    const reportCatalogError = (entry: GroupEntry, error: unknown): void => {
+        if (closed || entry.controller.signal.aborted) return;
+        publishGroups(entry, entry.store.setConnection("closed"));
+        for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+        if (inboxEntry !== undefined) {
+            publishInbox(inboxEntry.store.setConnection("closed"));
+            for (const subscriber of [...inboxEntry.subscribers]) {
+                subscriber.onError?.(error);
+            }
+        }
+    };
+
     const startGroupEntry = (entry: GroupEntry): void => {
         if (entry.started) return;
         entry.started = true;
         ensureLiveStream();
         if (!liveStreamOpen) return;
-        void loadCatalog(entry).catch((error: unknown) => {
-            if (closed || entry.controller.signal.aborted) return;
-            publishGroups(entry, entry.store.setConnection("closed"));
-            for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
-            if (inboxEntry !== undefined) {
-                publishInbox(inboxEntry.store.setConnection("closed"));
-                for (const subscriber of [...inboxEntry.subscribers]) {
-                    subscriber.onError?.(error);
-                }
-            }
-        });
+        void loadCatalog(entry).catch((error: unknown) => reportCatalogError(entry, error));
     };
 
     const createPluginsEntry = (): PluginsEntry => {
@@ -1878,12 +1911,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 gitWatchTimer = undefined;
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
-                    void loadCatalog(groups).catch((error: unknown) => {
-                        if (closed || groups.controller.signal.aborted) return;
-                        for (const subscriber of [...groups.subscribers]) {
-                            subscriber.onError?.(error);
-                        }
-                    });
+                    void loadCatalog(groups).catch((error: unknown) =>
+                        reportCatalogError(groups, error),
+                    );
                 }
                 const plugins = pluginsEntry;
                 if (plugins !== undefined && plugins.started) {
@@ -1923,6 +1953,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 return true;
             },
             onEvent: (event, cursor) => {
+                if (!isValidWorkspaceEvent(event)) return;
                 rememberGlobalIdentity(event);
                 if (event.type === "murmur_friendship_changed") {
                     const entry = murmurFriendsEntry;
@@ -3009,6 +3040,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const key = workspaceKey(input.projectId, id);
         const createdAt = now();
         const optimistic: ProjectWorkspace = {
+            // gitCommonDir and storageKey are empty placeholders: both are daemon-owned and
+            // unknown until the authoritative answer replaces this row.
             ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
             createdAt,
             gitCommonDir: "",
@@ -3034,6 +3067,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 return changed.undo;
             },
             entityKey: key,
+            expectsWorkspaceResponse: true,
             id,
             matchesAuthoritative: (data) => responseEntity(data, "workspace")?.id === id,
             prepare: () => ({
@@ -3070,6 +3104,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 return changed.undo;
             },
             entityKey: groupKey(target),
+            expectsWorkspaceResponse: true,
             id,
             matchesAuthoritative: (data) => {
                 const workspace = responseEntity(data, "workspace");
@@ -3868,6 +3903,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             acknowledged: false,
             action: "rename_group",
             entityKey: key,
+            ...(target.kind === "workspace" ? { expectsWorkspaceResponse: true } : {}),
             id,
             undo: () => undefined,
             applyOptimistic: (publish) => {
@@ -4385,6 +4421,17 @@ function responseEntity(
     return entity !== null && typeof entity === "object"
         ? (entity as Record<string, unknown>)
         : undefined;
+}
+
+function isWorkspaceResponse(data: unknown): boolean {
+    const workspace = responseEntity(data, "workspace");
+    return workspace !== undefined && Value.Check(projectWorkspaceSchema, workspace);
+}
+
+function isValidWorkspaceEvent(event: GlobalEvent): boolean {
+    if (event.type !== "workspace_created" && event.type !== "workspace_updated") return true;
+    const workspace = responseEntity(event.data, "workspace");
+    return workspace !== undefined && Value.Check(projectWorkspaceSchema, workspace);
 }
 
 function isProtocolSessionResponse(

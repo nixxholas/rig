@@ -477,6 +477,20 @@ describe("GroupStore", () => {
 
         store.apply(
             event(
+                "workspace_created",
+                {
+                    workspace: workspace("w3", "p1", {
+                        error: "Creation failed.",
+                        status: "failed",
+                    }),
+                },
+                { projectId: "p1", workspaceId: "w3" },
+            ),
+        );
+        expect(store.projects()[0]?.workspaces[2]?.error).toBe("Creation failed.");
+
+        store.apply(
+            event(
                 "workspace_updated",
                 {
                     workspace: workspace("w1", "p1", {
@@ -493,19 +507,56 @@ describe("GroupStore", () => {
         expect(changed[0]?.workspaces[0]).not.toBe(initialFailed);
         expect(changed[0]?.workspaces[1]).toBe(initialReady);
 
+        store.apply(
+            event(
+                "workspace_updated",
+                { workspace: workspace("w1", "p1", { status: "ready", version: 3 }) },
+                { projectId: "p1", workspaceId: "w1" },
+            ),
+        );
+        const cleared = store.projects();
+        const clearedWorkspace = cleared[0]?.workspaces[0];
+        expect(clearedWorkspace?.error).toBeUndefined();
+        expect(cleared[0]?.workspaces[1]).toBe(initialReady);
+
+        const stale = store.apply(
+            event(
+                "workspace_updated",
+                {
+                    workspace: workspace("w1", "p1", {
+                        error: "Stale failure.",
+                        status: "failed",
+                        version: 2,
+                    }),
+                },
+                { projectId: "p1", workspaceId: "w1" },
+            ),
+        );
+        expect(stale).toEqual([]);
+        expect(store.projects()[0]?.workspaces[0]).toBe(clearedWorkspace);
+        expect(store.projects()[0]?.workspaces[0]?.error).toBeUndefined();
+
         store.applyHello(
             hello({
                 projects: [project("p1")],
                 sessions: [],
                 workspaces: [
-                    workspace("w1", "p1", { status: "ready", version: 3 }),
+                    workspace("w1", "p1", {
+                        error: "Reconnect failed.",
+                        status: "failed",
+                        version: 4,
+                    }),
                     workspace("w2", "p1"),
+                    workspace("w3", "p1", {
+                        error: "Creation failed.",
+                        status: "failed",
+                    }),
                 ],
             }),
         );
         const rebuilt = store.projects();
-        expect(rebuilt[0]?.workspaces[0]?.error).toBeUndefined();
-        expect(rebuilt[0]?.workspaces[0]).not.toBe(changed[0]?.workspaces[0]);
+        expect(rebuilt[0]?.workspaces[0]?.error).toBe("Reconnect failed.");
+        expect(rebuilt[0]?.workspaces[0]).not.toBe(clearedWorkspace);
         expect(rebuilt[0]?.workspaces[1]).toBe(initialReady);
     });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { ChatDelta } from "@/ChatElement.js";
+import type { ChatDelta, MutationRejectedDelta } from "@/ChatElement.js";
 import { connectRig, ProjectRegistrationError, ProjectRegistrationProtocolError } from "@/index.js";
 import type { SessionFinished } from "@/connectRig.js";
 import type {
@@ -165,6 +165,7 @@ function daemonWorkspace(id: string) {
     return {
         baseRef: "main",
         createdAt: 2,
+        gitCommonDir: "/work/.git",
         id,
         kind: "git_worktree" as const,
         name: "Feature",
@@ -173,6 +174,7 @@ function daemonWorkspace(id: string) {
         presence: "present" as const,
         projectId: "project-1",
         status: "ready" as const,
+        storageKey: id,
         updatedAt: 2,
         version: 1,
     };
@@ -1611,6 +1613,259 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("rolls back an optimistic workspace when creation returns an invalid entity", async () => {
+        const stream = streamResponse();
+        const rejections: MutationRejectedDelta[] = [];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(groupsCatalog()), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                const body = JSON.parse(String(init?.body)) as { id: string };
+                return Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            workspace: {
+                                ...daemonWorkspace(body.id),
+                                error: "x".repeat(501),
+                                status: "failed",
+                            },
+                        }),
+                        { status: 200 },
+                    ),
+                );
+            },
+            onMutationRejected: (rejection) => rejections.push(rejection),
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const mutationId = rig.createWorkspace({
+                name: "Feature",
+                projectId: "project-1",
+            });
+            expect(connection.projects()[0]?.workspaces.map((workspace) => workspace.id)).toEqual([
+                mutationId,
+            ]);
+
+            await settle();
+            expect(connection.projects()[0]?.workspaces).toEqual([]);
+            expect(rejections).toContainEqual({
+                action: "create_workspace",
+                message: "Rig returned an invalid workspace response.",
+                mutationId,
+                type: "mutation_rejected",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("restores a workspace rename when the update response is schema-invalid", async () => {
+        const stream = streamResponse();
+        const rejections: MutationRejectedDelta[] = [];
+        const workspace = daemonWorkspace("workspace-1");
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...groupsCatalog(),
+                                workspaces: [workspace],
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                return Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            workspace: {
+                                ...workspace,
+                                name: "Renamed",
+                                unexpected: true,
+                                version: 2,
+                            },
+                        }),
+                        { status: 409 },
+                    ),
+                );
+            },
+            onMutationRejected: (rejection) => rejections.push(rejection),
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const mutationId = rig.renameGroup(
+                { kind: "workspace", projectId: "project-1", workspaceId: workspace.id },
+                "Renamed",
+            );
+            expect(connection.projects()[0]?.workspaces[0]?.name).toBe("Renamed");
+
+            await settle();
+            expect(connection.projects()[0]?.workspaces).toHaveLength(1);
+            expect(connection.projects()[0]?.workspaces[0]?.name).toBe("Feature");
+            expect(rejections).toContainEqual({
+                action: "rename_group",
+                message: "Rig returned an invalid workspace response.",
+                mutationId,
+                type: "mutation_rejected",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("skips an invalid live workspace entity and keeps following the stream", async () => {
+        const stream = streamResponse();
+        const workspace = daemonWorkspace("workspace-1");
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...groupsCatalog(),
+                                workspaces: [workspace],
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                return Promise.resolve(
+                    new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                );
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            stream.write(
+                globalEvent(
+                    "workspace_updated",
+                    {
+                        workspace: {
+                            ...workspace,
+                            error: "x".repeat(501),
+                            status: "failed",
+                            version: 2,
+                        },
+                    },
+                    { projectId: "project-1", workspaceId: workspace.id },
+                ),
+            );
+            stream.write(
+                globalEvent(
+                    "workspace_updated",
+                    {
+                        workspace: {
+                            ...workspace,
+                            error: "Authoritative failure.",
+                            status: "failed",
+                            version: 3,
+                        },
+                    },
+                    { projectId: "project-1", workspaceId: workspace.id },
+                    "01900000-0000-7000-8000-000000000004",
+                ),
+            );
+            await settle();
+
+            expect(connection.projects()[0]?.workspaces[0]).toMatchObject({
+                error: "Authoritative failure.",
+                status: "failed",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("rejects an invalid workspace catalog before it reaches the projection", async () => {
+        const stream = streamResponse();
+        const errors: unknown[] = [];
+        const reported = deferred<unknown>();
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                return Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            ...groupsCatalog(),
+                            workspaces: [
+                                {
+                                    ...daemonWorkspace("workspace-1"),
+                                    unexpected: true,
+                                },
+                            ],
+                        }),
+                        { status: 200 },
+                    ),
+                );
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({
+            onChange: () => undefined,
+            onError: (error) => {
+                errors.push(error);
+                reported.resolve(error);
+            },
+        });
+        try {
+            stream.write(liveHello());
+            await reported.promise;
+
+            expect(connection.projects()).toEqual([]);
+            expect(connection.state().connection).toBe("closed");
+            expect(errors).toEqual([
+                expect.objectContaining({ message: "Rig returned an invalid workspace catalog." }),
+            ]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("shows one workspace for one creation, and never brings an archived one back", async () => {
         const stream = streamResponse();
         let catalogWorkspaces: unknown[] = [];
@@ -1632,7 +1887,19 @@ describe("connectRig mutations", () => {
                     );
                 }
                 if (url.pathname.endsWith("/archive")) {
-                    return Promise.resolve(new Response("{}", { status: 200 }));
+                    const workspaceId = url.pathname.split("/").at(-2) as string;
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                workspace: {
+                                    ...daemonWorkspace(workspaceId),
+                                    status: "archiving",
+                                    version: 2,
+                                },
+                            }),
+                            { status: 200 },
+                        ),
+                    );
                 }
                 // Held, because the stream is what usually announces the new
                 // workspace first; the answer to the request only confirms it.

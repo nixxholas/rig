@@ -209,6 +209,8 @@ export interface Project {
 
 export type ProjectWorkspaceKind = "git_worktree";
 export type ProjectWorkspaceStatus = "initializing" | "ready" | "failed" | "archiving" | "archived";
+/** Maximum human-readable failure detail persisted and sent for one project or workspace. */
+export const PROJECT_ERROR_MAX_LENGTH = 500;
 
 export interface ProjectWorkspace {
     archivedAt?: number;
