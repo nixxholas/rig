@@ -20,7 +20,9 @@ export function selectCodexForkMessages(
                   boundaries[Math.max(0, boundaries.length - lastNTurns)] ?? messages.length,
               );
     return selected.flatMap((message): readonly Message[] => {
-        if (message.role === "system") return [message];
+        if (message.role === "system") {
+            return isExcludedFromModelContext(message) ? [] : [message];
+        }
         if (message.role === "user") {
             return message.provenance === "agent" || message.encryptedAgentMessage !== undefined
                 ? []

@@ -16,6 +16,7 @@ import type { ToolResultPresentation } from "./ToolResultPresentation.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { UnansweredUserInput, UserInputResponse } from "../user-input/types.js";
 import type { Attachment } from "../protocol/Attachment.js";
+import type { ServiceNotice } from "../protocol/ServiceNotice.js";
 
 /** Plain text content. */
 export interface TextBlock {
@@ -97,6 +98,10 @@ export interface SystemMessage {
     role: "system";
     id: string;
     blocks: readonly ContentBlock[];
+    /** Visible service metadata that clients may render more richly than the fallback blocks. */
+    structured?: ServiceNotice;
+    /** Visible service notices that must not become model context use this value. */
+    context?: "excluded";
     /** Durable model context that must never be presented as transcript content. */
     internal?: true;
 }

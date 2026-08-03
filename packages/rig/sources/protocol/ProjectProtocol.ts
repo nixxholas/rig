@@ -511,10 +511,7 @@ export interface PluginsChangedEvent {
 
 export type ComputePreparationPhase = HappyComputePreparationPhase;
 
-/**
- * Durable compute materialization progress. A future session integration can forward these same
- * human-readable events into a chat timeline without inventing another lifecycle channel.
- */
+/** Durable compute materialization progress, also projected into attributed session timelines. */
 export interface ComputePreparationEvent {
     computeInstanceId: string;
     createdAt: number;

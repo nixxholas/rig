@@ -1,4 +1,14 @@
 export type { EventId } from "./EventId.js";
+export {
+    computePreparationNoticeSchema,
+    SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
+    SERVICE_NOTICE_TEXT_MAX_LENGTH,
+    serviceNoticeSchema,
+    systemNoticePayloadSchema,
+    type ComputePreparationNotice,
+    type ServiceNotice,
+    type SystemNoticePayload,
+} from "./ServiceNotice.js";
 export type {
     BaseProjectEvent,
     BaseProjectWorkspaceEvent,
@@ -230,6 +240,7 @@ export type {
     SessionStreamHello,
     SessionTranscriptTurn,
     SessionTranscriptGroup,
+    SessionTranscriptNotice,
     SessionTranscriptWindow,
     SessionResetEvent,
     SessionStatusChangedEvent,
@@ -241,6 +252,7 @@ export type {
     SessionUnreadReason,
     SessionUnreadState,
     SessionWorkspaceArchivedEvent,
+    SystemNoticeEvent,
     SessionConfigurationChangedEvent,
     SessionConfigurationField,
     SessionTitleChangedEvent,
@@ -333,6 +345,7 @@ export { RIG_PROTOCOL_VERSION } from "./ProtocolVersion.js";
 export {
     SESSION_DRAFT_MAX_CLOCK_SKEW_MS,
     SESSION_DRAFT_MAX_LENGTH,
+    SESSION_TRANSCRIPT_NOTICE_LIMIT,
     SESSION_STREAM_TURN_LIMIT,
     transferSessionRequestSchema,
 } from "./SessionProtocol.js";

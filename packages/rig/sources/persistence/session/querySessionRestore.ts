@@ -71,7 +71,7 @@ export function querySessionRestore(tx: TX, sessionId: string): SessionRestore |
     const interruptionJson = readOptionalString(row, "interruption_json");
     const sessionTokenCountJson = readOptionalString(row, "session_token_count_json");
     const persistedUsage = parsePersistedUsage(readOptionalString(row, "usage_json"));
-    const transcriptMessages = querySessionTranscriptPage(tx, sessionId, 80) ?? [];
+    const transcriptMessages = querySessionTranscriptPage(tx, sessionId, 80)?.messages ?? [];
     const messages = [...transcriptMessages, ...querySessionPartialMessages(tx, sessionId)].sort(
         (left, right) => left.position - right.position,
     );

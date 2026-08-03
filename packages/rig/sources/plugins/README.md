@@ -271,12 +271,21 @@ the last known phase and update time remain visible instead.
 Rig publishes durable `compute_preparation` events for preparing, provider phases, verification,
 success, retryable failure, terminal failure, and cancellation. Every attempt publishes a final
 event whose state is `ready`, `unprovisioned`, `failed`, or `stopped`; terminalization emits from
-the single lifecycle transition, so concurrent cleanup cannot double-publish. Messages are
-deliberately suitable for a future session integration to forward unchanged into chat timelines;
-session wiring remains out of scope. A failed attempt emits a typed `preparing_compute` error in
-its failure event, resets the handle to `unprovisioned`, and lets the next use start a fresh
-single-flight attempt. It becomes terminally failed only after materialization if its provider
-generation dies.
+the single lifecycle transition, so concurrent cleanup cannot double-publish. The durable global
+stream retains every provider progress report, including percent-only updates within one phase.
+Phase or state transitions are also appended as service notices to every active, already-loaded
+session whose normalized `cwd` exactly matches the retained local-directory
+`workspaceSource.path`; sessions in other workspaces receive nothing, and cold sessions are not
+hydrated merely to receive progress. Each row keeps a required text fallback and optional
+structured compute detail. Same-phase percent updates remain global-stream events but do not add
+chat history; ready and failure always add final rows. Session-side phase coalescing is bounded
+and process-local, so restarting Rig during preparation—or evicting state under extreme
+concurrency—may repeat the current phase once. Notices
+use a dedicated durable service lane: they are ordered at their append position without changing
+agent activity, unread state, or conversational turn budgets. A failed attempt emits a typed
+`preparing_compute` error in its failure event, resets the handle to `unprovisioned`, and lets the
+next use start a fresh single-flight attempt. It becomes terminally failed only after
+materialization if its provider generation dies.
 
 Event consumers must use the daemon-owned `state` as the authoritative lifecycle signal and treat
 `phase` as display text only. The progress schema reserves `preparing_compute`,

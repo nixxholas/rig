@@ -1,7 +1,8 @@
-import type { Message } from "../agent/types.js";
+import type { Message, SystemMessage } from "../agent/types.js";
 import type {
     EventId,
     SessionTranscriptGroup,
+    SessionTranscriptNotice,
     SessionTranscriptTurn,
     SessionTranscriptWindow,
 } from "../protocol/index.js";
@@ -27,6 +28,16 @@ export interface TranscriptEntry {
     message: Message;
     runId?: string;
     steeredAt?: number;
+}
+
+export function isTranscriptNoticeEntry<TEntry extends { message: Message; runId?: string }>(
+    entry: TEntry,
+): entry is TEntry & { message: SystemMessage; runId?: undefined } {
+    return (
+        entry.runId === undefined &&
+        entry.message.role === "system" &&
+        entry.message.context === "excluded"
+    );
 }
 
 export function transcriptRunFacts(
@@ -217,6 +228,7 @@ export function sessionTranscriptWindow(
     // creating a second fragment whose completion would render before its reply.
     for (const entry of entries) {
         if (entry.message.internal === true) continue;
+        if (isTranscriptNoticeEntry(entry)) continue;
         const runId = entry.runId ?? `orphan:${entry.message.id}`;
         const group = groupByRunId.get(runId);
         if (group !== undefined) {
@@ -243,8 +255,16 @@ export function sessionTranscriptWindow(
     const keptRunIds = new Set(kept.map((group) => group.runId));
     const keptEntries = entries.filter((entry) => {
         if (entry.message.internal === true) return false;
+        if (isTranscriptNoticeEntry(entry)) return false;
         return keptRunIds.has(entry.runId ?? `orphan:${entry.message.id}`);
     });
+    const notices = entries
+        .filter(isTranscriptNoticeEntry)
+        .flatMap((entry): SessionTranscriptNotice[] =>
+            entry.createdAt !== undefined && entry.eventId !== undefined
+                ? [{ createdAt: entry.createdAt, eventId: entry.eventId, message: entry.message }]
+                : [],
+        );
     const turns: SessionTranscriptTurn[] = kept.map((group) => {
         const facts = runFacts.get(group.runId);
         return {
@@ -303,6 +323,7 @@ export function sessionTranscriptWindow(
         ...(Object.keys(messageBoundaryGroupId).length === 0 ? {} : { messageBoundaryGroupId }),
         ...(Object.keys(messageGroupId).length === 0 ? {} : { messageGroupId }),
         messages: keptEntries.map((entry) => entry.message),
+        ...(notices.length === 0 ? {} : { notices }),
         turns,
     };
 }

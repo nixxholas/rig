@@ -44,6 +44,7 @@ import {
 import type {
     ContentBlock,
     BackgroundProcessSnapshot,
+    ComputePreparationEvent,
     ExternalToolCallResolution,
     GitChangeSnapshot,
     GitWatchResponse,
@@ -3679,6 +3680,9 @@ function groupKey(target: GroupTarget): string {
 }
 
 function globalEventKey(event: GlobalEvent): string {
+    if (event.type === "compute_preparation") {
+        return `compute:${(event as ComputePreparationEvent).computeInstanceId}`;
+    }
     if ("sessionId" in event && typeof event.sessionId === "string") {
         return sessionKey(event.sessionId);
     }
@@ -4029,7 +4033,7 @@ async function fetchSessionState(
 ): Promise<SessionStateResponse> {
     const query = new URLSearchParams();
     if (turnLimit !== undefined) query.set("turns", String(turnLimit));
-    // The newest message already held, so the daemon sends only what follows it.
+    // The newest transcript row already held, so the daemon sends only what follows it.
     if (after !== undefined) query.set("after", after);
     const path = `sessions/${encodeURIComponent(sessionId)}/state`;
     const url = endpointUrl(endpoint, query.size === 0 ? path : `${path}?${query.toString()}`);
@@ -4107,6 +4111,9 @@ function newestMessageEventId(transcript: SessionTranscriptWindow): string | und
     for (const message of transcript.messages) {
         const eventId = transcript.messageEventId?.[message.id];
         if (eventId !== undefined && (newest === undefined || eventId > newest)) newest = eventId;
+    }
+    for (const notice of transcript.notices ?? []) {
+        if (newest === undefined || notice.eventId > newest) newest = notice.eventId;
     }
     return newest;
 }

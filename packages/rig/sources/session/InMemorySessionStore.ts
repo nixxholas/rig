@@ -533,6 +533,10 @@ export class InMemorySessionStore implements SessionStore {
         return options.limit === undefined ? sessions : sessions.slice(0, options.limit);
     }
 
+    loadedSessions(): readonly InMemorySession[] {
+        return [...this.#sessions.values()];
+    }
+
     listExternalToolCalls(
         options: { limit?: number; status?: ExternalToolCall["status"] } = {},
     ): readonly ExternalToolCall[] {

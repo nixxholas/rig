@@ -20,6 +20,7 @@ import type {
     SessionTask,
     SessionTokenCount,
     SessionUsageSnapshot,
+    ServiceNotice,
     ShellCommandState,
     SubagentSummary,
     Usage,
@@ -85,6 +86,8 @@ export interface UserMessageElement extends BaseChatElement {
 /** A non-internal system message intended for the person reading the transcript. */
 export interface SystemNoticeElement extends BaseChatElement {
     kind: "system_notice";
+    /** Optional machine-readable detail; `text` is always the complete fallback. */
+    structured?: ServiceNotice;
     text: string;
 }
 

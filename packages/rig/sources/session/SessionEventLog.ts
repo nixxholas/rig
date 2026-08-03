@@ -220,7 +220,11 @@ export class SessionEventLog {
             }
             return;
         }
-        if (event.type === "message_submitted" || event.type === "agent_message") {
+        if (
+            event.type === "message_submitted" ||
+            event.type === "agent_message" ||
+            event.type === "system_notice"
+        ) {
             if (!this.#messageCreatedAt.has(event.data.message.id)) {
                 this.#messageCreatedAt.set(event.data.message.id, event.createdAt);
                 this.#messageEventId.set(event.data.message.id, event.id);
@@ -263,7 +267,11 @@ export class SessionEventLog {
     }
 
     #forgetEventIndexes(event: SessionEvent): void {
-        if (event.type === "message_submitted" || event.type === "agent_message") {
+        if (
+            event.type === "message_submitted" ||
+            event.type === "agent_message" ||
+            event.type === "system_notice"
+        ) {
             const messageId = event.data.message.id;
             if (
                 event.type === "message_submitted" &&

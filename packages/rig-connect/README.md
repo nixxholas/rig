@@ -129,6 +129,15 @@ message that produced it, so a consumer renders the list in order and never walk
 | `inference`     | An inference that has started but produced nothing yet.                       |
 | `group_end`     | The final element of an inference group.                                      |
 
+Every `system_notice` has complete human-readable `text`. Notices Rig understands structurally
+also carry optional `structured` detail so an application can customize the row while an older or
+simpler client keeps rendering the text. Compute preparation uses
+`structured.kind: "compute_preparation"` with its instance, provider, phase, state, message, and
+optional percent and elapsed time. Each phase is a separate append-only element, and replaying the
+same session event after reconnect does not duplicate it. Service notices are ordered alongside
+the transcript but do not open or close inference groups, produce turn footers, or consume the
+conversation's bootstrap-turn allowance.
+
 Every element carries a `groupId` and the `runId` it belongs to. A group is one stretch of work the
 person is waiting on: the question they asked, everything the agent produced answering it — text,
 thinking, and every tool call across as many turns of the tool loop as it took — and one `group_end`

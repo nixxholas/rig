@@ -12,6 +12,7 @@ export function querySessionHasLaterTranscriptMessage(
             WHERE session_id = ${sessionId}
               AND position > ${position}
               AND is_partial = 0
+              AND run_id IS NOT NULL
               AND COALESCE(json_extract(message_json, '$.internal'), 0) != 1
             LIMIT 1
         `) !== undefined

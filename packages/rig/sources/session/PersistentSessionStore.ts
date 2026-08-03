@@ -1262,13 +1262,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         before?: string,
     ): SessionTranscriptWindow | undefined {
-        const messages = querySessionTranscriptPage(this.#tx(), sessionId, turnLimit, before);
-        if (messages === undefined) return undefined;
-        const firstPosition = messages[0]?.position;
+        const page = querySessionTranscriptPage(this.#tx(), sessionId, turnLimit, before);
+        if (page === undefined) return undefined;
+        const firstPosition = page.messages[0]?.position;
         const hasEarlier =
             firstPosition !== undefined &&
             querySessionHasEarlierTranscriptMessage(this.#tx(), sessionId, firstPosition);
-        return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasEarlier);
+        return this.#transcriptWindowForMessages(
+            sessionId,
+            page.messages,
+            turnLimit,
+            !hasEarlier,
+            page.noticesTruncated,
+        );
     }
 
     loadTranscriptSince(
@@ -1276,13 +1282,19 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         turnLimit: number,
         after: EventId,
     ): SessionTranscriptWindow | undefined {
-        const messages = querySessionTranscriptSince(this.#tx(), sessionId, turnLimit, after);
-        if (messages === undefined) return undefined;
-        const lastPosition = messages.at(-1)?.position;
+        const range = querySessionTranscriptSince(this.#tx(), sessionId, turnLimit, after);
+        if (range === undefined) return undefined;
+        const lastPosition = range.messages.at(-1)?.position;
         const hasLater =
             lastPosition !== undefined &&
             querySessionHasLaterTranscriptMessage(this.#tx(), sessionId, lastPosition);
-        return this.#transcriptWindowForMessages(sessionId, messages, turnLimit, !hasLater);
+        return this.#transcriptWindowForMessages(
+            sessionId,
+            range.messages,
+            turnLimit,
+            !hasLater,
+            range.truncated,
+        );
     }
 
     upsertExternalToolCall(call: ExternalToolCall): void {
@@ -1566,6 +1578,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         messages: readonly PersistedSessionMessage[],
         turnLimit: number,
         complete: boolean,
+        noticesTruncated: boolean,
     ): SessionTranscriptWindow | undefined {
         const events = querySessionTranscriptEvents(this.#tx(), sessionId, messages);
         const eventLog = new SessionEventLog({
@@ -1602,6 +1615,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         return {
             ...window,
             complete,
+            ...(noticesTruncated ? { noticesTruncated: true } : {}),
             ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         };
     }

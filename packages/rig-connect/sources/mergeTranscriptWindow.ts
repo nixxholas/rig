@@ -73,6 +73,14 @@ export function mergeTranscriptWindow(
             reviews.findLastIndex((candidate) => candidate.toolCallId === review.toolCallId) ===
             index,
     );
+    const noticesById = new Map(
+        (loaded.notices ?? []).map((notice) => [notice.message.id, notice]),
+    );
+    for (const notice of incoming.notices ?? []) noticesById.set(notice.message.id, notice);
+    const notices = [...noticesById.values()].sort(
+        (left, right) =>
+            left.createdAt - right.createdAt || left.eventId.localeCompare(right.eventId),
+    );
 
     return {
         complete: loaded.complete || incoming.complete,
@@ -83,6 +91,10 @@ export function mergeTranscriptWindow(
         ...(Object.keys(messageGroupId).length === 0 ? {} : { messageGroupId }),
         ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         messages,
+        ...(notices.length === 0 ? {} : { notices }),
+        ...(loaded.noticesTruncated === true || incoming.noticesTruncated === true
+            ? { noticesTruncated: true }
+            : {}),
         turns,
     };
 }
@@ -101,7 +113,9 @@ export function mergeForwardTranscriptWindow(
     historyComplete: boolean,
 ): SessionTranscriptWindow {
     if (loaded === undefined) return { ...incoming, complete: historyComplete };
-    if (incoming.turns.length === 0) return { ...loaded, complete: historyComplete };
+    if (incoming.turns.length === 0 && (incoming.notices?.length ?? 0) === 0) {
+        return { ...loaded, complete: historyComplete };
+    }
     return {
         ...mergeTranscriptWindow(loaded, { ...incoming, complete: false }),
         complete: historyComplete,

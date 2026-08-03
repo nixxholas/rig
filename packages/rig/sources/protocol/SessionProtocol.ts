@@ -6,7 +6,7 @@ import type {
     AgentSnapshot,
     ContentBlock,
 } from "../agent/index.js";
-import type { AgentMessage, Message, UserMessage } from "../agent/types.js";
+import type { AgentMessage, Message, SystemMessage, UserMessage } from "../agent/types.js";
 import type { Attachment } from "./Attachment.js";
 import type { Model, ServiceTier, StopReason, Usage } from "@slopus/rig-execution";
 import type {
@@ -387,6 +387,13 @@ export interface SessionTranscriptGroup {
     errorMessage?: string;
 }
 
+/** A durable service row ordered independently from conversational turns. */
+export interface SessionTranscriptNotice {
+    createdAt: number;
+    eventId: EventId;
+    message: SystemMessage;
+}
+
 /**
  * The transcript window carried in a stream's opening frame.
  *
@@ -412,6 +419,9 @@ export interface SessionTranscriptWindow {
     messageBoundaryGroupId?: Readonly<Record<string, string>>;
     /** The inference group each durable error occurred in, keyed by message ID. */
     messageGroupId?: Readonly<Record<string, string>>;
+    notices?: readonly SessionTranscriptNotice[];
+    /** True when this bounded window omitted older service notices in its position range. */
+    noticesTruncated?: boolean;
     /** Resolved permission facts for tool calls contained in this page. */
     permissionReviews?: readonly SessionPermissionReview[];
     turns: readonly SessionTranscriptTurn[];
@@ -503,6 +513,8 @@ export interface SessionStreamCurrentState {
  * event log is never replayed on top of it.
  */
 export const SESSION_STREAM_TURN_LIMIT = 20;
+/** Service rows are bounded separately and never consume the conversational turn budget. */
+export const SESSION_TRANSCRIPT_NOTICE_LIMIT = 50;
 
 export interface SubagentSummary {
     activeSince?: number;
@@ -968,6 +980,7 @@ export type SessionEvent =
     | RunStartedEvent
     | AgentStreamEvent
     | AgentMessageEvent
+    | SystemNoticeEvent
     | RunFinishedEvent
     | ProviderQuotaObservedEvent
     | RunErrorEvent
@@ -1065,6 +1078,9 @@ export type AgentMessageEvent = BaseSessionEvent<
         runId: string;
     }
 >;
+
+/** A visible service row that has no agent-run lifecycle or model-context effect. */
+export type SystemNoticeEvent = BaseSessionEvent<"system_notice", { message: SystemMessage }>;
 
 export type RunFinishedEvent = BaseSessionEvent<
     "run_finished",

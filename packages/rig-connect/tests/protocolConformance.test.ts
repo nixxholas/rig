@@ -1,13 +1,16 @@
+import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
 // The daemon's own declarations, read from source so this check needs no build
 // step and no published type surface. It is a type-only import in a test, so
 // nothing from the daemon reaches this library's bundle.
 import type * as daemon from "../../rig/sources/protocol/index.js";
+import { systemNoticePayloadSchema as daemonSystemNoticePayloadSchema } from "../../rig/sources/protocol/index.js";
 // Presentation is owned by the agent layer rather than the protocol module, but
 // it travels on the wire all the same, so it is checked the same way.
 import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
+import { systemNoticePayloadSchema } from "@/protocol.js";
 
 /**
  * The protocol types are declared locally so a browser bundle carries no daemon
@@ -41,6 +44,10 @@ type _TokenCount = Assignable<local.SessionTokenCount, daemon.SessionTokenCount>
 type _UnreadState = Assignable<local.SessionUnreadState, daemon.SessionUnreadState>;
 type _UnreadReason = Assignable<local.SessionUnreadReason, daemon.SessionUnreadReason>;
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
+type _ServiceNotice = Assignable<local.ServiceNotice, daemon.ServiceNotice>;
+type _SystemNoticePayload = Assignable<local.SystemNoticePayload, daemon.SystemNoticePayload>;
+type _SystemMessage = Assignable<local.SystemMessage, daemonAgent.SystemMessage>;
+type _TranscriptNotice = Assignable<local.SessionTranscriptNotice, daemon.SessionTranscriptNotice>;
 type ApplicationReadEventType =
     | "session_updated"
     | "session_activity_changed"
@@ -163,5 +170,28 @@ describe("protocol conformance", () => {
         // The assertions above are compile-time. This case documents that a
         // failure shows up as a type error rather than as a failing expectation.
         expect(true).toBe(true);
+    });
+
+    it("round-trips a structured compute notice with its text fallback", () => {
+        const payload: local.SystemNoticePayload = {
+            structured: {
+                computeInstanceId: "compute-1",
+                elapsedMs: 45_000,
+                kind: "compute_preparation",
+                message: "Waiting for the sandbox to start.",
+                percent: 40,
+                phase: "waiting_for_sandbox",
+                provider: "daytona",
+                state: "provisioning",
+            },
+            text: "Preparing compute: Waiting for the sandbox to start. (45s)",
+        };
+
+        const serialized = JSON.parse(JSON.stringify(payload));
+        const decoded = Value.Decode(systemNoticePayloadSchema, serialized);
+
+        expect(decoded).toEqual(payload);
+        expect(Value.Decode(daemonSystemNoticePayloadSchema, serialized)).toEqual(payload);
+        expect(decoded.text).toBe("Preparing compute: Waiting for the sandbox to start. (45s)");
     });
 });

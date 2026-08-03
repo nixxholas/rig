@@ -70,6 +70,7 @@ import type {
     SessionInterruption,
     SessionStatus,
     SessionSummary,
+    SystemNoticePayload,
     SessionTokenCount,
     SessionUnreadState,
     ShellCommandFinishedEvent,
@@ -84,10 +85,15 @@ import type {
     UpdateSessionRequest,
     SessionTranscriptWindow,
 } from "../protocol/index.js";
-import { SESSION_DRAFT_MAX_LENGTH, SESSION_STREAM_TURN_LIMIT } from "../protocol/index.js";
+import {
+    SESSION_DRAFT_MAX_LENGTH,
+    SESSION_STREAM_TURN_LIMIT,
+    SESSION_TRANSCRIPT_NOTICE_LIMIT,
+} from "../protocol/index.js";
 
 const RETAINED_SESSION_MESSAGE_LIMIT = 512;
 import {
+    isTranscriptNoticeEntry,
     sessionTranscriptWindow,
     type TranscriptEntry,
     type TranscriptRunFacts,
@@ -1340,6 +1346,32 @@ export class InMemorySession {
             role: "user",
         });
         this.#append("subagents_suspended", { displayText });
+    }
+
+    /**
+     * Appends a visible service message without putting operational progress into model context.
+     *
+     * Notices have their own durable event and message position. They deliberately have no run
+     * lifecycle, so they cannot disturb activity, unread state, or an in-flight agent group.
+     */
+    recordSystemNotice(payload: SystemNoticePayload): void {
+        if (this.#archived || this.#workspaceArchived) return;
+        const message: SystemMessage = {
+            blocks: [{ text: payload.text, type: "text" }],
+            context: "excluded",
+            id: createId(),
+            role: "system",
+            ...(payload.structured === undefined ? {} : { structured: payload.structured }),
+        };
+        const commit = () => {
+            this.#storeMessage(this.#nextMessagePosition(), message, false);
+            this.#append("system_notice", { message });
+        };
+        if (this.#persistence?.transaction === undefined) {
+            commit();
+        } else {
+            this.#persistence.transaction(commit);
+        }
     }
 
     agentMetadata(): SessionAgentMetadata {
@@ -3567,7 +3599,17 @@ export class InMemorySession {
         }
         const first = Math.max(0, earlierCount - turnLimit);
         const keptRunIds = this.#transcriptRunOrder.slice(first, earlierCount);
-        const keptMessages = keptRunIds.flatMap((runId) => this.#transcriptRuns.get(runId) ?? []);
+        const turnMessages = keptRunIds.flatMap((runId) => this.#transcriptRuns.get(runId) ?? []);
+        const lowerPosition =
+            first === 0 && !this.#transcriptHasEarlier ? 0 : (turnMessages[0]?.position ?? 0);
+        const upperPosition =
+            before === undefined
+                ? Number.POSITIVE_INFINITY
+                : (this.#transcriptRuns.get(before)?.[0]?.position ?? Number.POSITIVE_INFINITY);
+        const noticeSlice = this.#transcriptNoticeMessages(lowerPosition, upperPosition);
+        const keptMessages = [...turnMessages, ...noticeSlice.messages].sort(
+            (left, right) => left.position - right.position,
+        );
         if (
             this.#persistence?.loadTranscriptPage !== undefined &&
             (keptRunIds.some((runId) => !this.#runFacts.has(runId)) ||
@@ -3579,20 +3621,7 @@ export class InMemorySession {
         ) {
             return this.#persistence.loadTranscriptPage(this.id, turnLimit, before);
         }
-        const entries = keptRunIds.flatMap((runId) =>
-            (this.#transcriptRuns.get(runId) ?? []).map((entry): TranscriptEntry => {
-                const createdAt = this.events.messageCreatedAt(entry.message.id);
-                const eventId = this.events.messageEventId(entry.message.id);
-                const steeredAt = this.events.messageSteeredAt(entry.message.id);
-                return {
-                    ...(createdAt === undefined ? {} : { createdAt }),
-                    ...(eventId === undefined ? {} : { eventId }),
-                    message: entry.message,
-                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
-                    ...(steeredAt === undefined ? {} : { steeredAt }),
-                };
-            }),
-        );
+        const entries = this.#transcriptEntries(keptMessages);
         const window = sessionTranscriptWindow(entries, this.#runFacts, keptRunIds.length);
         const toolCallIds = new Set(
             entries.flatMap((entry) =>
@@ -3610,6 +3639,7 @@ export class InMemorySession {
             : {
                   ...window,
                   complete: !this.#transcriptHasEarlier && keptRunIds.length === earlierCount,
+                  ...(noticeSlice.truncated ? { noticesTruncated: true } : {}),
                   ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
               };
     }
@@ -3656,42 +3686,66 @@ export class InMemorySession {
                 break;
             }
         }
+        const noticeMessagesAtOrAfter = this.#messages.filter(
+            (entry) =>
+                isTranscriptNoticeEntry(entry) &&
+                (this.events.messageEventId(entry.message.id) ?? "") >= after,
+        );
         // Nothing at or after the anchor: the client is already current.
-        if (first === runIds.length) {
+        if (first === runIds.length && noticeMessagesAtOrAfter.length === 0) {
             return { complete: true, messages: [], turns: [] };
         }
+        const exactAnchor = this.#messages.find(
+            (entry) => this.events.messageEventId(entry.message.id) === after,
+        );
         // The anchor predates everything retained, so paging forward from it
         // would silently skip whatever was trimmed in between.
-        if (first === 0 && this.#transcriptHasEarlier) return undefined;
+        if (first === 0 && this.#transcriptHasEarlier && exactAnchor === undefined) {
+            return undefined;
+        }
 
         const keptRunIds = runIds.slice(first, first + turnLimit);
+        const firstRunPosition =
+            keptRunIds.length === 0
+                ? undefined
+                : this.#transcriptRuns.get(keptRunIds[0]!)?.[0]?.position;
+        const anchorPosition =
+            exactAnchor?.runId === undefined
+                ? exactAnchor?.position
+                : exactAnchor === undefined
+                  ? undefined
+                  : this.#transcriptRuns.get(exactAnchor.runId)?.[0]?.position;
+        const firstNoticePosition = noticeMessagesAtOrAfter[0]?.position;
+        const lowerPosition = Math.min(
+            anchorPosition ?? Number.POSITIVE_INFINITY,
+            firstRunPosition ?? Number.POSITIVE_INFINITY,
+            firstNoticePosition ?? Number.POSITIVE_INFINITY,
+        );
+        const nextRunId = runIds[first + keptRunIds.length];
+        const upperPosition =
+            nextRunId === undefined
+                ? Number.POSITIVE_INFINITY
+                : (this.#transcriptRuns.get(nextRunId)?.[0]?.position ?? Number.POSITIVE_INFINITY);
+        const turnMessages = keptRunIds.flatMap((runId) => this.#transcriptRuns.get(runId) ?? []);
+        const noticeSlice = this.#transcriptNoticeMessages(
+            Number.isFinite(lowerPosition) ? lowerPosition : 0,
+            upperPosition,
+        );
+        const keptMessages = [...turnMessages, ...noticeSlice.messages].sort(
+            (left, right) => left.position - right.position,
+        );
         if (
             keptRunIds.some((runId) => !this.#runFacts.has(runId)) ||
-            keptRunIds.some((runId) =>
-                (this.#transcriptRuns.get(runId) ?? []).some(
-                    (entry) =>
-                        this.events.messageCreatedAt(entry.message.id) === undefined ||
-                        this.events.messageEventId(entry.message.id) === undefined,
-                ),
+            keptMessages.some(
+                (entry) =>
+                    this.events.messageCreatedAt(entry.message.id) === undefined ||
+                    this.events.messageEventId(entry.message.id) === undefined,
             )
         ) {
             return undefined;
         }
 
-        const entries = keptRunIds.flatMap((runId) =>
-            (this.#transcriptRuns.get(runId) ?? []).map((entry): TranscriptEntry => {
-                const createdAt = this.events.messageCreatedAt(entry.message.id);
-                const eventId = this.events.messageEventId(entry.message.id);
-                const steeredAt = this.events.messageSteeredAt(entry.message.id);
-                return {
-                    ...(createdAt === undefined ? {} : { createdAt }),
-                    ...(eventId === undefined ? {} : { eventId }),
-                    message: entry.message,
-                    ...(entry.runId === undefined ? {} : { runId: entry.runId }),
-                    ...(steeredAt === undefined ? {} : { steeredAt }),
-                };
-            }),
-        );
+        const entries = this.#transcriptEntries(keptMessages);
         const window = sessionTranscriptWindow(entries, this.#runFacts, keptRunIds.length);
         if (window === undefined) return undefined;
         const toolCallIds = new Set(
@@ -3710,6 +3764,7 @@ export class InMemorySession {
             // Whether this page reaches the newest turn, so a client knows if it
             // must ask again to finish catching up.
             complete: first + keptRunIds.length === runIds.length,
+            ...(noticeSlice.truncated ? { noticesTruncated: true } : {}),
             ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
         };
     }
@@ -6147,7 +6202,9 @@ export class InMemorySession {
                               agentManager.readChatHistory(this.id, historyOptions),
                       },
                   }),
-            messages: this.#contextMessages ?? this.#committedMessages(),
+            messages:
+                this.#contextMessages ??
+                this.#committedMessages().filter((message) => !isExcludedFromModelContext(message)),
             isSubagent: this.isSubagent(),
             modelId: this.#modelId,
             permissionMode: this.#permissionMode,
@@ -7197,6 +7254,10 @@ export class InMemorySession {
             if (!rebuilding && orderChanged) this.#reindexTranscriptRuns();
             return;
         }
+        if (isTranscriptNoticeEntry(entry)) {
+            if (!rebuilding && orderChanged) this.#reindexTranscriptRuns();
+            return;
+        }
 
         const runId = entry.runId ?? `orphan:${entry.message.id}`;
         const known = this.#transcriptRuns.get(runId);
@@ -7244,7 +7305,38 @@ export class InMemorySession {
         }
     }
 
-    #storeMessage(position: number, message: Message, isPartial: boolean, runId: string): void {
+    #transcriptNoticeMessages(
+        lowerPosition: number,
+        upperPosition: number,
+    ): { messages: readonly PersistedSessionMessage[]; truncated: boolean } {
+        const matches = this.#messages.filter(
+            (entry) =>
+                isTranscriptNoticeEntry(entry) &&
+                entry.position >= lowerPosition &&
+                entry.position < upperPosition,
+        );
+        return {
+            messages: matches.slice(-SESSION_TRANSCRIPT_NOTICE_LIMIT),
+            truncated: matches.length > SESSION_TRANSCRIPT_NOTICE_LIMIT,
+        };
+    }
+
+    #transcriptEntries(messages: readonly PersistedSessionMessage[]): TranscriptEntry[] {
+        return messages.map((entry): TranscriptEntry => {
+            const createdAt = this.events.messageCreatedAt(entry.message.id);
+            const eventId = this.events.messageEventId(entry.message.id);
+            const steeredAt = this.events.messageSteeredAt(entry.message.id);
+            return {
+                ...(createdAt === undefined ? {} : { createdAt }),
+                ...(eventId === undefined ? {} : { eventId }),
+                message: entry.message,
+                ...(entry.runId === undefined ? {} : { runId: entry.runId }),
+                ...(steeredAt === undefined ? {} : { steeredAt }),
+            };
+        });
+    }
+
+    #storeMessage(position: number, message: Message, isPartial: boolean, runId?: string): void {
         const replacedIndex = this.#messageIndexByPosition.get(position);
         const replaced = replacedIndex === undefined ? undefined : this.#messages[replacedIndex];
         if (replaced?.message.role === "user") {
@@ -7254,7 +7346,7 @@ export class InMemorySession {
             isPartial,
             message,
             position,
-            runId,
+            ...(runId === undefined ? {} : { runId }),
         };
         if (replacedIndex !== undefined) {
             this.#messages[replacedIndex] = entry;

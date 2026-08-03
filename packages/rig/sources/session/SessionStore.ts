@@ -77,6 +77,8 @@ export interface SessionStore {
     list(options?: { limit?: number }): readonly SessionSummary[];
     /** Every explicitly unarchived primary session, with no default limit. */
     listActive(options?: { limit?: number }): readonly SessionSummary[];
+    /** Sessions already resident in memory; implementations must not hydrate storage to answer. */
+    loadedSessions(): readonly InMemorySession[];
     listExternalToolCalls(options?: {
         limit?: number;
         status?: ExternalToolCall["status"];

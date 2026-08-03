@@ -2,6 +2,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type Dockerode from "dockerode";
+import { defineModel } from "@slopus/rig-execution";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
@@ -18,6 +19,12 @@ import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
 import type { RegisteredPlugin } from "../types.js";
 
 const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const TEST_MODEL = defineModel({
+    defaultThinkingLevel: "off",
+    id: "test/model",
+    name: "Test model",
+    thinkingLevels: ["off"],
+});
 const cleanup: (() => Promise<void> | void)[] = [];
 
 afterEach(async () => {
@@ -245,6 +252,219 @@ describe("plugin registration", () => {
             expect(harness.events.at(-1)?.data.plugins[0]?.compute).toBeUndefined(),
         );
         consumer.close();
+    });
+
+    it("appends ordered compute preparation notices only to sessions in the source workspace", async () => {
+        const computeRegistry = new PluginComputeRegistry();
+        const harness = await createHarness({ computeRegistry });
+        await harness.manager.start();
+        const rejected = harness.store.create({ cwd: harness.workspace });
+        const rejectNotice = vi.spyOn(rejected, "recordSystemNotice").mockImplementation(() => {
+            throw new Error("The session is shutting down.");
+        });
+        const attributed = harness.store.create({ cwd: harness.workspace });
+        const unrelated = harness.store.create({ cwd: harness.dataRoot });
+        const provider = computeRegistry.createConnection({
+            compute: { name: "cloud" },
+            folder: "cloud",
+            name: "Cloud",
+        });
+        const consumer = computeRegistry.createConnection({
+            folder: "consumer",
+            name: "Consumer",
+        });
+        const registrationId = provider.register();
+        let starts = 0;
+        cleanup.push(() => {
+            consumer.close();
+            provider.close();
+        });
+        provider.attach(registrationId, (event) => {
+            if (event.type !== "call") return true;
+            if (event.operation === "start") {
+                starts += 1;
+                if (starts === 2) {
+                    provider.complete(registrationId, event.callId, {
+                        error: {
+                            code: "invalid_response",
+                            message: "The sandbox could not be created.",
+                            retryable: false,
+                        },
+                    });
+                    return true;
+                }
+                provider.progress(registrationId, event.callId, {
+                    message: "Waiting for the sandbox to start.",
+                    percent: 20,
+                    phase: "waiting_for_sandbox",
+                });
+                provider.progress(registrationId, event.callId, {
+                    message: "Still waiting for the sandbox.",
+                    percent: 30,
+                    phase: "waiting_for_sandbox",
+                });
+                provider.progress(registrationId, event.callId, {
+                    message: "Copying the workspace.",
+                    percent: 60,
+                    phase: "copying_workspace",
+                });
+                provider.complete(registrationId, event.callId, {
+                    operation: "start",
+                    result: { instanceId: "provider-instance-1" },
+                });
+            } else if (event.operation === "exec") {
+                provider.complete(registrationId, event.callId, {
+                    operation: "exec",
+                    result: {
+                        exitCode: 0,
+                        stderrBase64: "",
+                        stderrTruncated: false,
+                        stdoutBase64: "",
+                        stdoutTruncated: false,
+                        timedOut: false,
+                    },
+                });
+            }
+            return true;
+        });
+        const instance = computeRegistry.create(
+            {
+                provider: "cloud",
+                workspaceSource: {
+                    path: harness.workspace,
+                    type: "local_directory",
+                },
+            },
+            consumer.generation,
+        );
+
+        await expect(
+            computeRegistry.read(
+                { instanceId: instance.instanceId, path: "message.txt" },
+                consumer.generation,
+            ),
+        ).rejects.toMatchObject({ code: "preparing_compute" });
+        await vi.waitFor(() =>
+            expect(computeRegistry.listInstances(consumer.generation)[0]?.state).toBe("ready"),
+        );
+
+        const notices = (session: typeof attributed) =>
+            session.events
+                .all()
+                .flatMap((event) =>
+                    event.type === "system_notice" &&
+                    event.data.message.role === "system" &&
+                    event.data.message.structured?.kind === "compute_preparation"
+                        ? [event.data.message]
+                        : [],
+                );
+        expect(notices(attributed).map((message) => message.structured?.phase)).toEqual([
+            "preparing_compute",
+            "waiting_for_sandbox",
+            "copying_workspace",
+            "verifying_compute",
+            "ready",
+        ]);
+        const syntheticComputeRuns = attributed.events
+            .all()
+            .flatMap((event) =>
+                (event.type === "run_started" || event.type === "run_finished") &&
+                event.data.runId.startsWith("compute:")
+                    ? [event.data.runId]
+                    : [],
+            );
+        expect(syntheticComputeRuns).toEqual([]);
+        expect(
+            harness.computeEvents
+                .filter((event) => event.computeInstanceId === instance.instanceId)
+                .map((event) => [event.data.phase, event.data.percent]),
+        ).toEqual([
+            ["preparing_compute", undefined],
+            ["waiting_for_sandbox", 20],
+            ["waiting_for_sandbox", 30],
+            ["copying_workspace", 60],
+            ["verifying_compute", undefined],
+            ["ready", undefined],
+        ]);
+        expect(
+            harness.store.globalEventQueue
+                .list()
+                ?.flatMap((entry) =>
+                    entry.event.type === "compute_preparation" ? [entry.event.id] : [],
+                ),
+        ).toEqual(
+            harness.computeEvents
+                .filter((event) => event.computeInstanceId === instance.instanceId)
+                .map((event) => event.id),
+        );
+        expect(rejectNotice).toHaveBeenCalled();
+        expect(notices(attributed)[1]).toMatchObject({
+            blocks: [
+                {
+                    text: expect.stringMatching(
+                        /^Preparing compute: Waiting for the sandbox to start\./,
+                    ),
+                    type: "text",
+                },
+            ],
+            context: "excluded",
+            structured: {
+                computeInstanceId: instance.instanceId,
+                kind: "compute_preparation",
+                percent: 20,
+                provider: "cloud",
+                state: "provisioning",
+            },
+        });
+        expect(notices(attributed).at(-1)?.blocks).toEqual([
+            { text: "Compute is ready.", type: "text" },
+        ]);
+        expect(notices(unrelated)).toEqual([]);
+
+        const failedInstance = computeRegistry.create(
+            {
+                provider: "cloud",
+                workspaceSource: {
+                    path: harness.workspace,
+                    type: "local_directory",
+                },
+            },
+            consumer.generation,
+        );
+        await expect(
+            computeRegistry.read(
+                { instanceId: failedInstance.instanceId, path: "message.txt" },
+                consumer.generation,
+            ),
+        ).rejects.toMatchObject({ code: "preparing_compute" });
+        await vi.waitFor(() =>
+            expect(
+                computeRegistry
+                    .listInstances(consumer.generation)
+                    .find((candidate) => candidate.instanceId === failedInstance.instanceId)?.state,
+            ).toBe("unprovisioned"),
+        );
+        const failedNotices = notices(attributed).filter(
+            (message) =>
+                message.structured?.kind === "compute_preparation" &&
+                message.structured.computeInstanceId === failedInstance.instanceId,
+        );
+        expect(failedNotices.map((message) => message.structured?.phase)).toEqual([
+            "preparing_compute",
+            "failed",
+        ]);
+        expect(failedNotices.at(-1)?.blocks).toEqual([
+            {
+                text: expect.stringMatching(
+                    /^Compute preparation failed: The sandbox could not be created\./,
+                ),
+                type: "text",
+            },
+        ]);
+        expect(notices(unrelated)).toEqual([]);
+
+        consumer.close();
+        provider.close();
     });
 
     it("durably closes an in-flight preparation before daemon shutdown", async () => {
@@ -679,7 +899,12 @@ async function createHarness(
     await mkdir(workspace, { recursive: true });
 
     const store = new InMemorySessionStore({
-        modelCatalog: { defaultModelId: "", defaultProviderId: "", models: [], providers: [] },
+        modelCatalog: {
+            defaultModelId: TEST_MODEL.id,
+            defaultProviderId: "test",
+            models: [TEST_MODEL],
+            providers: [{ models: [TEST_MODEL], providerId: "test" }],
+        },
     });
     cleanup.push(() => store.close());
 

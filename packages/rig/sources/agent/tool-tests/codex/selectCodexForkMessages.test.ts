@@ -49,6 +49,12 @@ describe("selectCodexForkMessages", () => {
                 context: "excluded",
                 outcome: "continued",
             },
+            {
+                role: "system",
+                id: "display-only-service-notice",
+                blocks: [{ type: "text", text: "Preparing compute." }],
+                context: "excluded",
+            },
         ];
 
         const forked = selectCodexForkMessages(messages, undefined);

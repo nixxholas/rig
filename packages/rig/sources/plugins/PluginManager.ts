@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 
 import type Dockerode from "dockerode";
 import {
@@ -53,9 +53,11 @@ import { boundPluginLogText, readBoundedPluginLog } from "./readBoundedPluginLog
 import { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
 import { removePluginDockerContainers } from "./startPluginDockerContainer.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS } from "./PluginStartupState.js";
+import { formatComputePreparationNotice } from "./formatComputePreparationNotice.js";
 
 const PLUGIN_STATUS_PUBLICATION_INTERVAL_MS = 100;
 const PLUGIN_PROCESS_EXIT_SETTLE_MS = 100;
+const MAX_COMPUTE_SESSION_PREPARATIONS = 1_000;
 
 export interface PluginManagerOptions {
     appRegistry?: PluginAppRegistry;
@@ -121,6 +123,10 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #createEventId = createEventIdFactory();
     #catalogVersion: EventId = this.#createEventId();
     readonly #computeRegistry: PluginComputeRegistry;
+    readonly #computeSessionPreparation = new Map<
+        string,
+        { phase: string; state: ComputePreparationEvent["data"]["state"] }
+    >();
     readonly #daemonLog: DaemonLog;
     readonly #defaultDocker: DockerExecutionConfig | undefined;
     readonly #docker: Dockerode;
@@ -1106,6 +1112,68 @@ export class PluginManager implements ManagedNetworkInterceptor {
             );
         }
         this.#store.liveEvents.publish(event);
+        this.#publishComputePreparationToSessions(progress, event);
+    }
+
+    #publishComputePreparationToSessions(
+        progress: Extract<PluginComputeRegistryEvent, { type: "preparation" }>,
+        event: ComputePreparationEvent,
+    ): void {
+        if (progress.workspaceSource.type !== "local_directory") return;
+        const previous = this.#computeSessionPreparation.get(event.computeInstanceId);
+        if (previous?.phase === event.data.phase && previous.state === event.data.state) return;
+        if (event.data.state === "provisioning") {
+            if (
+                !this.#computeSessionPreparation.has(event.computeInstanceId) &&
+                this.#computeSessionPreparation.size >= MAX_COMPUTE_SESSION_PREPARATIONS
+            ) {
+                const oldest = this.#computeSessionPreparation.keys().next().value;
+                if (oldest !== undefined) this.#computeSessionPreparation.delete(oldest);
+            }
+            this.#computeSessionPreparation.set(event.computeInstanceId, {
+                phase: event.data.phase,
+                state: event.data.state,
+            });
+        } else {
+            // Terminal transitions are unique at the registry and need no retained projection state.
+            this.#computeSessionPreparation.delete(event.computeInstanceId);
+        }
+
+        const sourcePath = resolve(progress.workspaceSource.path);
+        /*
+         * Attribution rule: a local-directory compute transition belongs to every active,
+         * user-visible session already resident in memory whose normalized cwd is that exact source
+         * directory. Cold sessions are never hydrated merely to receive progress. Sessions in
+         * another workspace or project never receive it. Compute has no agent-execution owner yet,
+         * so the retained workspace source is the one explicit association used here. `resolve`
+         * normalizes path syntax but does not resolve symlinks, so aliases such as `/tmp` and
+         * `/private/tmp` intentionally do not match. Phase coalescing is process-local and bounded;
+         * a daemon restart or extreme concurrent-preparation eviction may append the current phase
+         * once more.
+         */
+        const payload = formatComputePreparationNotice(event);
+        for (const session of this.#store.loadedSessions()) {
+            if (session.isSubagent()) continue;
+            const summary = session.summary();
+            if (summary.archived) continue;
+            if (resolve(summary.cwd) !== sourcePath) continue;
+            try {
+                session.recordSystemNotice(payload);
+            } catch (error) {
+                this.#daemonLog.record(
+                    "warning",
+                    "compute_preparation_session_notice_failed",
+                    "Rig could not append compute preparation progress to a session.",
+                    {
+                        error: errorToMessage(error),
+                        instanceId: event.computeInstanceId,
+                        phase: event.data.phase,
+                        provider: event.data.provider,
+                        sessionId: session.id,
+                    },
+                );
+            }
+        }
     }
 }
 

@@ -4,52 +4,80 @@ import type { Message } from "../../agent/types.js";
 import type { PersistedSessionMessage } from "../../session/InMemorySession.js";
 import type { TX } from "../Transaction.js";
 import { readNumber, readString } from "./impl/sqliteRow.js";
+import { querySessionTranscriptNotices } from "./querySessionTranscriptNotices.js";
+
+export interface SessionTranscriptMessagePage {
+    messages: readonly PersistedSessionMessage[];
+    noticesTruncated: boolean;
+}
 
 export function querySessionTranscriptPage(
     tx: TX,
     sessionId: string,
     turnLimit: number,
     before?: string,
-): PersistedSessionMessage[] | undefined {
+): SessionTranscriptMessagePage | undefined {
+    const beforeRow =
+        before === undefined
+            ? undefined
+            : tx.get<Record<string, unknown>>(sql`
+                  SELECT first_position
+                  FROM session_turns
+                  WHERE session_id = ${sessionId} AND run_id = ${before}
+              `);
+    // Partial-only runs have messages but no session_turns row. They are not
+    // valid transcript page anchors and must not be dereferenced as one.
+    if (before !== undefined && beforeRow === undefined) return undefined;
+    const beforePosition =
+        beforeRow === undefined ? Number.MAX_SAFE_INTEGER : readNumber(beforeRow, "first_position");
     const runRows = tx.all<Record<string, unknown>>(sql`
-        WITH ordered_runs AS (
-            SELECT run_id, first_position FROM session_turns WHERE session_id = ${sessionId}
-        ),
-        anchor AS (
-            SELECT first_position FROM ordered_runs WHERE run_id = ${before ?? null}
-        )
-        SELECT run_id FROM ordered_runs
-        WHERE ${before ?? null} IS NULL
-            OR first_position < (SELECT first_position FROM anchor)
+        SELECT run_id, first_position FROM session_turns
+        WHERE session_id = ${sessionId}
+          AND first_position < ${beforePosition}
         ORDER BY first_position DESC
         LIMIT ${turnLimit}
     `);
-    if (before !== undefined && runRows.length === 0) {
-        const known = tx.get(sql`
-            SELECT 1 FROM session_messages
-            WHERE session_id = ${sessionId} AND run_id = ${before}
-            LIMIT 1
-        `);
-        if (known === undefined) return undefined;
-    }
-    const runIds = runRows.map((row) => readString(row, "run_id")).reverse();
-    if (runIds.length === 0) return [];
-    return tx
-        .all<Record<string, unknown>>(sql`
-            SELECT position, is_partial, run_id, message_json
-            FROM session_messages
+    const orderedRows = runRows.reverse();
+    const runIds = orderedRows.map((row) => readString(row, "run_id"));
+    const turnMessages =
+        runIds.length === 0
+            ? []
+            : tx
+                  .all<Record<string, unknown>>(sql`
+                      SELECT position, is_partial, run_id, message_json
+                      FROM session_messages
+                      WHERE session_id = ${sessionId}
+                          AND is_partial = 0
+                          AND run_id IN (${sql.join(
+                              runIds.map((id) => sql`${id}`),
+                              sql`, `,
+                          )})
+                      ORDER BY position ASC
+                  `)
+                  .map((row) => ({
+                      isPartial: readNumber(row, "is_partial") !== 0,
+                      message: JSON.parse(readString(row, "message_json")) as Message,
+                      position: readNumber(row, "position"),
+                      runId: readString(row, "run_id"),
+                  }));
+    const firstPosition =
+        orderedRows.length === 0 ? undefined : readNumber(orderedRows[0]!, "first_position");
+    const hasEarlierTurn =
+        firstPosition !== undefined &&
+        tx.get(sql`
+            SELECT 1 FROM session_turns
             WHERE session_id = ${sessionId}
-                AND is_partial = 0
-                AND run_id IN (${sql.join(
-                    runIds.map((id) => sql`${id}`),
-                    sql`, `,
-                )})
-            ORDER BY position ASC
-        `)
-        .map((row) => ({
-            isPartial: readNumber(row, "is_partial") !== 0,
-            message: JSON.parse(readString(row, "message_json")) as Message,
-            position: readNumber(row, "position"),
-            runId: readString(row, "run_id"),
-        }));
+              AND first_position < ${firstPosition}
+            LIMIT 1
+        `) !== undefined;
+    // The oldest turn owns every preceding runless notice. Using the turn's
+    // first message as this bound would permanently hide notices recorded while idle.
+    const lowerPosition = firstPosition === undefined || !hasEarlierTurn ? 0 : firstPosition;
+    const notices = querySessionTranscriptNotices(tx, sessionId, lowerPosition, beforePosition);
+    return {
+        messages: [...turnMessages, ...notices.messages].sort(
+            (left, right) => left.position - right.position,
+        ),
+        noticesTruncated: notices.truncated,
+    };
 }

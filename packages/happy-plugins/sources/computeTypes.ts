@@ -1,7 +1,12 @@
 import { type Static, Type } from "@sinclair/typebox";
 
+export const HAPPY_COMPUTE_PROGRESS_MESSAGE_MAX_LENGTH = 4_096;
+
 const exact = { additionalProperties: false } as const;
-const nonEmptyText = Type.String({ minLength: 1 });
+const nonEmptyText = Type.String({
+    maxLength: HAPPY_COMPUTE_PROGRESS_MESSAGE_MAX_LENGTH,
+    minLength: 1,
+});
 const instanceIdSchema = Type.String({ maxLength: 128, minLength: 1 });
 
 export const HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
@@ -455,7 +460,10 @@ export type HappyComputeProvisioningPhase = Static<typeof happyComputeProvisioni
 
 export const happyComputeProvisioningProgressSchema = Type.Object(
     {
-        message: nonEmptyText,
+        message: Type.String({
+            maxLength: HAPPY_COMPUTE_PROGRESS_MESSAGE_MAX_LENGTH,
+            minLength: 1,
+        }),
         phase: happyComputeProvisioningPhaseSchema,
         percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
     },
@@ -478,7 +486,10 @@ export const happyComputePreparationEventSchema = Type.Object(
         error: Type.Optional(happyComputeErrorSchema),
         instanceId: instanceIdSchema,
         lastProgressAt: Type.Optional(Type.Integer({ minimum: 0 })),
-        message: nonEmptyText,
+        message: Type.String({
+            maxLength: HAPPY_COMPUTE_PROGRESS_MESSAGE_MAX_LENGTH,
+            minLength: 1,
+        }),
         percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
         phase: happyComputePreparationPhaseSchema,
         provider: happyComputeProviderNameSchema,

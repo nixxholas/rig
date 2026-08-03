@@ -12,6 +12,44 @@ import { Type, type Static } from "@sinclair/typebox";
 export type EventId = string;
 export type MutationId = string;
 
+const serviceNoticeExact = { additionalProperties: false } as const;
+const serviceNoticeText = Type.String({ minLength: 1 });
+export const SERVICE_NOTICE_MESSAGE_MAX_LENGTH = 4_096;
+export const SERVICE_NOTICE_TEXT_MAX_LENGTH = 8_192;
+
+export const computePreparationNoticeSchema = Type.Object(
+    {
+        computeInstanceId: serviceNoticeText,
+        elapsedMs: Type.Optional(Type.Integer({ minimum: 0 })),
+        kind: Type.Literal("compute_preparation"),
+        message: Type.String({ maxLength: SERVICE_NOTICE_MESSAGE_MAX_LENGTH, minLength: 1 }),
+        percent: Type.Optional(Type.Number({ maximum: 100, minimum: 0 })),
+        phase: Type.String({ maxLength: 128, minLength: 1 }),
+        provider: serviceNoticeText,
+        state: Type.Union([
+            Type.Literal("failed"),
+            Type.Literal("provisioning"),
+            Type.Literal("ready"),
+            Type.Literal("stopped"),
+            Type.Literal("unprovisioned"),
+        ]),
+    },
+    serviceNoticeExact,
+);
+export type ComputePreparationNotice = Static<typeof computePreparationNoticeSchema>;
+
+export const serviceNoticeSchema = Type.Union([computePreparationNoticeSchema]);
+export type ServiceNotice = Static<typeof serviceNoticeSchema>;
+
+export const systemNoticePayloadSchema = Type.Object(
+    {
+        structured: Type.Optional(serviceNoticeSchema),
+        text: Type.String({ maxLength: SERVICE_NOTICE_TEXT_MAX_LENGTH, minLength: 1 }),
+    },
+    serviceNoticeExact,
+);
+export type SystemNoticePayload = Static<typeof systemNoticePayloadSchema>;
+
 export type SessionActivityKind =
     | "idle"
     | "queued"
@@ -297,6 +335,8 @@ export interface SystemMessage {
     role: "system";
     id: string;
     blocks: readonly ContentBlock[];
+    structured?: ServiceNotice;
+    context?: "excluded";
     internal?: true;
 }
 
@@ -837,6 +877,12 @@ export interface SessionTranscriptGroup {
     errorMessage?: string;
 }
 
+export interface SessionTranscriptNotice {
+    createdAt: number;
+    eventId: EventId;
+    message: SystemMessage;
+}
+
 export interface SessionTranscriptWindow {
     messages: readonly Message[];
     messageCreatedAt?: Readonly<Record<string, number>>;
@@ -845,6 +891,9 @@ export interface SessionTranscriptWindow {
     messageSteeredAt?: Readonly<Record<string, number>>;
     messageBoundaryGroupId?: Readonly<Record<string, string>>;
     messageGroupId?: Readonly<Record<string, string>>;
+    notices?: readonly SessionTranscriptNotice[];
+    /** True when this bounded window omitted older service notices in its position range. */
+    noticesTruncated?: boolean;
     permissionReviews?: readonly PermissionReviewState[];
     turns: readonly SessionTranscriptTurn[];
     /** False when the conversation began before the first turn in this window. */
@@ -1542,19 +1591,56 @@ export interface ComputePreparationEvent {
     createdAt: number;
     data: {
         elapsedMs?: number;
-        error?: {
-            code: string;
-            message: string;
-            retryable: boolean;
-            state?: string;
-        };
+        error?:
+            | {
+                  code: "capacity_exhausted" | "deadline_exceeded";
+                  message: string;
+                  retryable: true;
+                  state?:
+                      | "unprovisioned"
+                      | "provisioning"
+                      | "ready"
+                      | "unavailable"
+                      | "failed"
+                      | "stopped";
+              }
+            | {
+                  code: "preparing_compute";
+                  elapsedMs?: number;
+                  lastProgressAt?: number;
+                  message: string;
+                  percent?: number;
+                  phase?: string;
+                  retryable: true;
+                  startedAt?: number;
+                  state: "unprovisioned" | "provisioning" | "unavailable";
+              }
+            | {
+                  code:
+                      | "invalid_request"
+                      | "invalid_response"
+                      | "instance_failed"
+                      | "instance_not_found"
+                      | "provider_lost"
+                      | "provider_not_found"
+                      | "provider_unhealthy";
+                  message: string;
+                  retryable: false;
+                  state?:
+                      | "unprovisioned"
+                      | "provisioning"
+                      | "ready"
+                      | "unavailable"
+                      | "failed"
+                      | "stopped";
+              };
         lastProgressAt?: number;
         message: string;
         percent?: number;
         phase: string;
         provider: string;
         startedAt?: number;
-        state: "failed" | "provisioning" | "ready" | "stopped" | "unprovisioned";
+        state: ComputePreparationNotice["state"];
     };
     id: string;
     type: "compute_preparation";

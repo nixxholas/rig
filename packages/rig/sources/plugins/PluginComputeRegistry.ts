@@ -156,6 +156,7 @@ type ComputeTombstone = {
     provider: string;
     reason: string;
     state: "failed" | "stopped";
+    workspaceSource: HappyComputeWorkspaceSource;
 };
 
 export type PluginComputePreparationPhase = HappyComputePreparationPhase;
@@ -176,6 +177,7 @@ export type PluginComputeRegistryEvent =
           startedAt?: number;
           state: "failed" | "provisioning" | "ready" | "stopped" | "unprovisioned";
           type: "preparation";
+          workspaceSource: HappyComputeWorkspaceSource;
       };
 
 export interface PluginComputeConnection {
@@ -1520,6 +1522,7 @@ export class PluginComputeRegistry {
                     provider: instance.provider,
                     reason,
                     state,
+                    workspaceSource: instance.workspaceSource,
                 }
             );
         }
@@ -1532,6 +1535,7 @@ export class PluginComputeRegistry {
             provider: instance.provider,
             reason,
             state,
+            workspaceSource: instance.workspaceSource,
         };
         this.#tombstones.set(instance.id, tombstone);
         while (this.#tombstones.size > this.#maxTombstones) {
@@ -1647,6 +1651,7 @@ export class PluginComputeRegistry {
             provider: instance.provider,
             state,
             type: "preparation",
+            workspaceSource: instance.workspaceSource,
         });
     }
 

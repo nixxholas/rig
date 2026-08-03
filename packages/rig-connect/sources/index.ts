@@ -130,6 +130,13 @@ export type {
     WorkspaceGroup,
 } from "./GroupElement.js";
 export { sessionUnreadAfterEvent } from "./sessionUnread.js";
+export {
+    computePreparationNoticeSchema,
+    SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
+    SERVICE_NOTICE_TEXT_MAX_LENGTH,
+    serviceNoticeSchema,
+    systemNoticePayloadSchema,
+} from "./protocol.js";
 export type {
     BackgroundProcess,
     BackgroundProcessSnapshot,
@@ -176,6 +183,7 @@ export type {
     SessionExecutionEnvironment,
     SessionInterruption,
     SessionTranscriptGroup,
+    SessionTranscriptNotice,
     SessionUnreadReason,
     SessionUnreadState,
     SessionEvent,
@@ -183,6 +191,9 @@ export type {
     SessionTask,
     ScheduledMessage,
     SessionUsageGroup,
+    ComputePreparationNotice,
+    ServiceNotice,
+    SystemNoticePayload,
     ShellCommandState,
     SubagentSummary,
     TimelineAgent,

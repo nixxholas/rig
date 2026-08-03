@@ -2245,6 +2245,141 @@ describe("ChatStore", () => {
         ]);
     });
 
+    it("keeps an interleaved compute notice outside the live run and rebuilds identically", () => {
+        const message = {
+            blocks: [
+                {
+                    text: "Preparing compute: waiting for the sandbox to start (45s)",
+                    type: "text" as const,
+                },
+            ],
+            context: "excluded" as const,
+            id: "compute-notice-1",
+            role: "system" as const,
+            structured: {
+                computeInstanceId: "compute-1",
+                elapsedMs: 45_000,
+                kind: "compute_preparation" as const,
+                message: "waiting for the sandbox to start",
+                percent: 40,
+                phase: "waiting_for_sandbox",
+                provider: "daytona",
+                state: "provisioning" as const,
+            },
+        };
+        const toolMessage = {
+            blocks: [
+                {
+                    arguments: { command: "ls" },
+                    id: "call-1",
+                    name: "Bash",
+                    type: "tool_call" as const,
+                },
+            ],
+            id: "m1",
+            role: "agent" as const,
+        };
+        const started = event("run_started", { runId: "run-1" });
+        const inferenceStarted = agentEvent({
+            iteration: 1,
+            messageId: toolMessage.id,
+            type: "inference_iteration_start",
+        });
+        const committedTool = event("agent_message", {
+            message: toolMessage,
+            runId: "run-1",
+        });
+        const toolStarted = agentEvent({
+            toolCall: {
+                arguments: { command: "ls" },
+                id: "call-1",
+                name: "Bash",
+                type: "tool_call",
+            },
+            type: "tool_execution_start",
+        });
+        const noticeEvent = event("system_notice", { message });
+        const live = new ChatStore("session-1");
+        live.applyHello(hello());
+        for (const emitted of [
+            started,
+            inferenceStarted,
+            committedTool,
+            toolStarted,
+            noticeEvent,
+        ]) {
+            live.apply(emitted);
+        }
+        live.setConnection("reconnecting");
+        live.apply(noticeEvent);
+
+        expect(live.session().activeGroup).toMatchObject({
+            groupId: `group:${toolMessage.id}`,
+            runId: "run-1",
+        });
+        expect(live.elements().filter((element) => element.kind === "group_end")).toEqual([]);
+        expect(live.elements().find((element) => element.kind === "tool_call")).toMatchObject({
+            status: "running",
+        });
+        expect(live.elements().filter((element) => element.kind === "system_notice")).toEqual([
+            expect.objectContaining({
+                groupId: `notice:${message.id}`,
+                kind: "system_notice",
+                structured: message.structured,
+                text: "Preparing compute: waiting for the sandbox to start (45s)",
+            }),
+        ]);
+
+        const rebuilt = new ChatStore("session-1");
+        rebuilt.applyHello({
+            ...hello(),
+            activity: {
+                kind: "executing_tool_call",
+                label: "Running Bash",
+                runId: "run-1",
+                since: toolStarted.createdAt,
+                toolCalls: [
+                    {
+                        startedAt: toolStarted.createdAt,
+                        toolCallId: "call-1",
+                        toolName: "Bash",
+                    },
+                ],
+            },
+            session: {
+                ...hello().session!,
+                activeTurn: { runId: "run-1", startedAt: started.createdAt },
+            },
+            transcript: {
+                complete: true,
+                messageCreatedAt: { [toolMessage.id]: committedTool.createdAt },
+                messageEventId: { [toolMessage.id]: committedTool.id },
+                messages: [toolMessage],
+                notices: [
+                    {
+                        createdAt: noticeEvent.createdAt,
+                        eventId: noticeEvent.id,
+                        message,
+                    },
+                ],
+                turns: [
+                    {
+                        groups: [{ id: toolMessage.id, startedAt: inferenceStarted.createdAt }],
+                        messageIds: [toolMessage.id],
+                        runId: "run-1",
+                        startedAt: started.createdAt,
+                    },
+                ],
+            },
+        });
+        rebuilt.apply(noticeEvent);
+
+        expect(rebuilt.elements()).toEqual(live.elements());
+        expect(
+            rebuilt.elements().filter((element) => element.kind === "system_notice"),
+        ).toHaveLength(1);
+    });
+
     it("tracks live session facts without a follow-up request", () => {
         const store = new ChatStore("session-1");
         store.applyHello(hello());

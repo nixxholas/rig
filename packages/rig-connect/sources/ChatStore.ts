@@ -27,6 +27,7 @@ import type {
     SessionUsageSnapshot,
     ShellCommandState,
     SubagentSummary,
+    SystemMessage,
     ToolCallBlock,
     ToolCallPresentation,
     ToolResultBlock,
@@ -187,7 +188,7 @@ export class ChatStore {
     }
 
     /**
-     * The event id of the newest message this store holds.
+     * The event id of the newest transcript row this store holds.
      *
      * This is the anchor a catch-up starts from: the daemon returns the turns
      * from here on, so a conversation is not re-sent from the beginning after a
@@ -204,6 +205,9 @@ export class ChatStore {
             if (eventId !== undefined && (newest === undefined || eventId > newest)) {
                 newest = eventId;
             }
+        }
+        for (const notice of transcript.notices ?? []) {
+            if (newest === undefined || notice.eventId > newest) newest = notice.eventId;
         }
         return newest;
     }
@@ -311,6 +315,17 @@ export class ChatStore {
                 ),
             ).values(),
         ];
+        const notices = [
+            ...new Map(
+                [...(page.notices ?? []), ...(loaded?.notices ?? [])].map((notice) => [
+                    notice.message.id,
+                    notice,
+                ]),
+            ).values(),
+        ].sort(
+            (left, right) =>
+                left.createdAt - right.createdAt || left.eventId.localeCompare(right.eventId),
+        );
         const merged: SessionTranscriptWindow = {
             complete: page.complete,
             ...(Object.keys(messageCreatedAt).length === 0 ? {} : { messageCreatedAt }),
@@ -318,6 +333,10 @@ export class ChatStore {
             ...(Object.keys(messageSteeredAt).length === 0 ? {} : { messageSteeredAt }),
             ...(permissionReviews.length === 0 ? {} : { permissionReviews }),
             messages: [...page.messages, ...(loaded?.messages ?? [])],
+            ...(notices.length === 0 ? {} : { notices }),
+            ...(page.noticesTruncated === true || loaded?.noticesTruncated === true
+                ? { noticesTruncated: true }
+                : {}),
             turns: [...page.turns, ...(loaded?.turns ?? [])],
         };
         this.#prependTranscriptPage(page);
@@ -1040,6 +1059,11 @@ export class ChatStore {
                     this.#applyMessage(data.message, event.createdAt, deltas, data.runId);
                 }
                 break;
+            case "system_notice": {
+                const data = event.data as { message: SystemMessage };
+                this.#applySystemNotice(data.message, event.createdAt);
+                break;
+            }
             case "provider_quota_observed": {
                 const data = event.data as {
                     providerId: string;
@@ -1395,7 +1419,10 @@ export class ChatStore {
         };
         this.#loadedTranscript = transcript;
         try {
-            if (transcript !== undefined && transcript.turns.length > 0) {
+            if (
+                transcript !== undefined &&
+                (transcript.turns.length > 0 || (transcript.notices?.length ?? 0) > 0)
+            ) {
                 this.#rebuildTurns(transcript.messages, transcript, deltas, activeTurn);
                 return;
             }
@@ -1476,6 +1503,13 @@ export class ChatStore {
                   kind: "group_end";
                   order: number;
                   runId: string;
+              }
+            | {
+                  at: number;
+                  eventId: string;
+                  kind: "notice";
+                  message: SystemMessage;
+                  order: number;
               };
         /**
          * Only one inference occupies the session at a time, so its groups form
@@ -1556,6 +1590,17 @@ export class ChatStore {
             ];
         });
         let order = messages.length;
+        for (const notice of transcript.notices ?? []) {
+            timeline.push({
+                at: notice.createdAt,
+                eventId: notice.eventId,
+                groupIndex: groupsClosedBy(notice.createdAt),
+                kind: "notice",
+                message: notice.message,
+                order,
+            });
+            order += 1;
+        }
         for (const turn of transcript.turns) {
             for (const group of turn.groups ?? []) {
                 const groupIndex = groupIndexByMessageId.get(group.id) ?? 0;
@@ -1597,6 +1642,9 @@ export class ChatStore {
             item.kind === "message" && item.steered === true
                 ? timelinePriority("compaction")
                 : timelinePriority(item.kind);
+        // Millisecond timestamps can tie across independently stored rows. Structural
+        // priorities preserve group boundaries first; event IDs then retain durable
+        // order within a priority, so a cross-kind tie can differ from live arrival.
         timeline.sort(
             (left, right) =>
                 left.at - right.at ||
@@ -1606,6 +1654,10 @@ export class ChatStore {
                 left.order - right.order,
         );
         for (const item of timeline) {
+            if (item.kind === "notice") {
+                this.#applySystemNotice(item.message, item.at);
+                continue;
+            }
             this.#turnId = item.runId;
             if (item.kind === "group_start") {
                 this.#startGroup(item.group.id, item.runId, item.at, deltas);
@@ -2185,6 +2237,10 @@ export class ChatStore {
         emitRetryDelta = true,
     ): void {
         if (message.internal === true) return;
+        if (message.role === "system") {
+            this.#applySystemNotice(message, at, turnId);
+            return;
+        }
         if (this.#appliedMessageIds.has(message.id)) {
             if (message.role === "agent") this.#reconcileAgentMessage(message, at);
             if (message.role === "compaction") {
@@ -2197,17 +2253,6 @@ export class ChatStore {
             return;
         }
         this.#appliedMessageIds.add(message.id);
-        if (message.role === "system") {
-            const element: SystemNoticeElement = {
-                createdAt: at,
-                id: `message:${message.id}`,
-                kind: "system_notice",
-                text: textOf(message.blocks),
-                ...this.#elementIdentity(turnId ?? `history:${message.id}`),
-            };
-            this.#append(element);
-            return;
-        }
         if (message.role === "user") {
             this.#appendUserMessage(message, at, turnId, delivery, source, steering);
             return;
@@ -2223,6 +2268,23 @@ export class ChatStore {
         const runId = turnId ?? this.#turnId ?? `history:${message.id}`;
         this.#startGroup(message.id, runId, at, deltas);
         this.#appendAgentBlocks(message, at, deltas, turnId);
+    }
+
+    #applySystemNotice(message: SystemMessage, at: number, turnId?: string): void {
+        if (this.#appliedMessageIds.has(message.id)) return;
+        this.#appliedMessageIds.add(message.id);
+        const noticeId = `notice:${message.id}`;
+        const element: SystemNoticeElement = {
+            createdAt: at,
+            id: `message:${message.id}`,
+            kind: "system_notice",
+            ...(message.structured === undefined ? {} : { structured: message.structured }),
+            text: textOf(message.blocks),
+            ...(turnId === undefined
+                ? { groupId: noticeId, runId: noticeId }
+                : this.#elementIdentity(turnId)),
+        };
+        this.#append(element);
     }
 
     #applyErrorMessage(
