@@ -359,6 +359,20 @@ export class Agent {
         this.#contextMessages?.push(message);
     }
 
+    /**
+     * Replaces only the model-facing conversation while preserving durable visible history.
+     *
+     * The next provider run receives the complete replacement and naturally rebuilds any cached
+     * prefix that no longer matches. An active loop owns its context, so replacing it mid-run
+     * would create two competing histories and is rejected.
+     */
+    replaceContextMessages(messages: readonly Message[]): void {
+        if (this.#activeRunId !== undefined) {
+            throw new Error("Cannot replace model context while the agent is running.");
+        }
+        this.#contextMessages = [...messages];
+    }
+
     async send(
         text: string | readonly ContentBlock[],
         options: AgentRunOptions = {},

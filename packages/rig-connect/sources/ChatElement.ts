@@ -15,6 +15,7 @@ import type {
     SessionExecutionEnvironment,
     SessionGoal,
     SessionInterruption,
+    SessionSharedMetadata,
     ScheduledMessage,
     SessionStatus,
     SessionTask,
@@ -72,6 +73,16 @@ export interface UserMessageElement extends BaseChatElement {
     delivery: "pending_steering" | "sent";
     /** This message is background context for the next actionable group. */
     contextOnly?: true;
+    friendAuthor?: {
+        displayName: string;
+        grantEpoch: number;
+        kind: "friend";
+        murmurPeerId: string;
+        shareId: string;
+        shareMemberId: string;
+    };
+    /** Whether this friend's message is queued for, included in, or outside model context. */
+    friendMessageContext?: "included" | "overflow" | "pending";
     /** When this message was actually applied as steering, not when it was queued. */
     steeredAt?: number;
     /** Time since the preceding steering or compaction, or since the turn began. */
@@ -262,6 +273,8 @@ export interface SessionState {
     sessionId: string;
     agentId?: string;
     agent?: SessionAgentMetadata;
+    /** Owner-side sharing state, absent for an ordinary or replica session. */
+    shared?: SessionSharedMetadata;
     lastEventId?: string;
     projectId: string;
     workspaceId?: string;
@@ -367,7 +380,12 @@ export type MutationAction =
     | "stop_workflow"
     | "set_session_archived"
     | "mark_session_read"
-    | "rename_group";
+    | "rename_group"
+    | "create_session_share"
+    | "add_session_share_member"
+    | "revoke_session_share_member"
+    | "stop_session_share"
+    | "set_session_share_friend_messages";
 
 export interface MutationRejectedDelta {
     action: MutationAction;

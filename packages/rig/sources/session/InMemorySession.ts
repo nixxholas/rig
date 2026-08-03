@@ -224,6 +224,32 @@ export interface PersistedPendingContextMessage {
     position: number;
 }
 
+export interface FriendContextDrainLimits {
+    maxBytes: number;
+    maxEstimatedTokens: number;
+    maxMessages: number;
+}
+
+export const DEFAULT_FRIEND_CONTEXT_DRAIN_LIMITS: FriendContextDrainLimits = {
+    maxBytes: 64 * 1024,
+    maxEstimatedTokens: 16_000,
+    maxMessages: 32,
+};
+
+/**
+ * The durable result of selecting friend context for one owner turn.
+ *
+ * Persistence owns the toggle check, newest-first budget selection, disposition updates, and
+ * removal from the pending-context store in one transaction. Selected messages are returned in
+ * chronological order. When disabled, no rows may be returned or changed.
+ */
+export interface FriendContextDrainResult {
+    enabled: boolean;
+    messages: readonly PersistedPendingContextMessage[];
+    omittedCount: number;
+    omittedMessageIds: readonly string[];
+}
+
 export interface PersistedQueuedRun {
     debug?: boolean;
     debugDirectory?: string;
@@ -343,6 +369,11 @@ export interface InMemorySessionPersistence {
         sessionId: string,
         messageIds?: readonly string[],
     ): readonly PersistedPendingContextMessage[];
+    drainFriendContextMessages?(input: {
+        limits: FriendContextDrainLimits;
+        runId: string;
+        sessionId: string;
+    }): FriendContextDrainResult;
     loadTranscriptPage?(
         sessionId: string,
         turnLimit: number,
@@ -4170,6 +4201,101 @@ export class InMemorySession {
             : this.#persistence.transaction(apply);
     }
 
+    /**
+     * Records authenticated friend context without turning it into owner activity.
+     *
+     * Arrival is durable and visible immediately, but it neither starts nor wakes a run, steers
+     * active inference, interrupts waits, nor changes owner-derived timing and metadata facts.
+     */
+    deliverFriendMessage(
+        message: UserMessage & {
+            contextOnly: true;
+            friendAuthor: NonNullable<UserMessage["friendAuthor"]>;
+        },
+    ): void {
+        this.#assertAcceptingWork();
+        if (this.events.messageSubmission(message.id) !== undefined) return;
+        const apply = () => {
+            const createdAt = this.#now();
+            const anchorRunId = `friend:${message.id}`;
+            const position = this.#nextMessagePosition();
+            const stored = structuredClone(message);
+            const pending: PersistedPendingContextMessage = {
+                anchorRunId,
+                createdAt,
+                message: stored,
+                position,
+            };
+            this.#storeMessage(position, stored, false, anchorRunId);
+            this.#persistence?.insertPendingContextMessage?.(this.id, pending);
+            this.#pendingContextMessages.set(stored.id, pending);
+            this.#append("message_submitted", {
+                delivery: "context",
+                displayText: textOfContentBlocks(stored.blocks),
+                message: stored,
+                runId: anchorRunId,
+            });
+        };
+        if (this.#persistence?.transaction === undefined) apply();
+        else this.#persistence.transaction(apply);
+    }
+
+    /** Applies the in-memory half after sharing persistence committed the message atomically. */
+    applyPersistedFriendMessage(
+        message: UserMessage & {
+            contextOnly: true;
+            friendAuthor: NonNullable<UserMessage["friendAuthor"]>;
+        },
+        persisted: {
+            createdAt: number;
+            event: Extract<SessionEvent, { type: "message_submitted" }>;
+            position: number;
+        },
+    ): void {
+        this.#assertAcceptingWork();
+        if (this.events.messageSubmission(message.id) !== undefined) return;
+        const anchorRunId = `friend:${message.id}`;
+        const stored = structuredClone(message);
+        const pending: PersistedPendingContextMessage = {
+            anchorRunId,
+            createdAt: persisted.createdAt,
+            message: stored,
+            position: persisted.position,
+        };
+        this.#storeMessage(persisted.position, stored, false, anchorRunId, false);
+        this.#pendingContextMessages.set(stored.id, pending);
+        this.#appendDurableEvent(persisted.event);
+    }
+
+    /**
+     * Removes already-included friend context without changing the visible transcript.
+     *
+     * The durable sharing toggle is owned by the caller's persistence operation. This method is
+     * the in-memory/cache half and is intentionally safe only between turns.
+     */
+    setFriendMessagesInModel(enabled: boolean): void {
+        if (enabled) return;
+        if (this.#activeRun !== undefined || this.#queue.length > 0) {
+            throw new Error(
+                "Wait for the active response and queued messages before excluding friend context.",
+            );
+        }
+        this.#excludeFriendModelContext();
+        this.#saveSession();
+    }
+
+    #excludeFriendModelContext(): void {
+        const runtimeSnapshot = this.#runtime?.agent.snapshot();
+        const current =
+            runtimeSnapshot?.contextMessages ??
+            runtimeSnapshot?.messages ??
+            this.#contextMessages ??
+            this.#committedMessages().filter((message) => !isExcludedFromModelContext(message));
+        const filtered = current.filter((message) => !isFriendModelContext(message));
+        this.#contextMessages = [...filtered];
+        this.#runtime?.agent.replaceContextMessages(filtered);
+    }
+
     submit(
         request: SessionSubmitMessageRequest,
         options: { source?: "notification" } = {},
@@ -6664,10 +6790,15 @@ export class InMemorySession {
     #persistPendingContextDrain(
         messageIds?: readonly string[],
     ): readonly PersistedPendingContextMessage[] {
+        const selectedIds =
+            messageIds ??
+            [...this.#pendingContextMessages.values()]
+                .filter((pending) => pending.message.friendAuthor === undefined)
+                .map((pending) => pending.message.id);
         return (
-            this.#persistence?.drainPendingContextMessages?.(this.id, messageIds) ??
-            [...this.#pendingContextMessages.values()].filter(
-                (pending) => messageIds === undefined || messageIds.includes(pending.message.id),
+            this.#persistence?.drainPendingContextMessages?.(this.id, selectedIds) ??
+            [...this.#pendingContextMessages.values()].filter((pending) =>
+                selectedIds.includes(pending.message.id),
             )
         );
     }
@@ -6698,13 +6829,60 @@ export class InMemorySession {
 
             const begin = () => {
                 this.#persistence?.deleteQueuedRun(this.id, queued.runId);
-                return this.#persistPendingContextDrain();
+                const regular = this.#persistPendingContextDrain();
+                const friends = this.#persistence?.drainFriendContextMessages?.({
+                    limits: { ...DEFAULT_FRIEND_CONTEXT_DRAIN_LIMITS },
+                    runId: queued.runId,
+                    sessionId: this.id,
+                }) ?? {
+                    enabled: false,
+                    messages: [],
+                    omittedCount: 0,
+                    omittedMessageIds: [],
+                };
+                if (
+                    !friends.enabled &&
+                    (friends.messages.length > 0 ||
+                        friends.omittedCount > 0 ||
+                        friends.omittedMessageIds.length > 0)
+                ) {
+                    throw new Error("Disabled friend context drain returned selected messages.");
+                }
+                if (friends.omittedCount !== friends.omittedMessageIds.length) {
+                    throw new Error("Friend context drain returned an inconsistent omitted count.");
+                }
+                return { friends, regular };
             };
-            const contextMessages =
+            const drained =
                 this.#persistence?.transaction === undefined
                     ? begin()
                     : this.#persistence.transaction(begin);
-            this.#applyPendingContextDrain(contextMessages);
+            // The durable toggle is read inside the drain transaction. Filtering here is the
+            // final provider boundary, so a toggle made while a turn was active still prevents
+            // friend-authored context from entering every later provider request.
+            if (!drained.friends.enabled) this.#excludeFriendModelContext();
+            this.#applyPendingContextDrain(drained.regular);
+            this.#applyPendingContextDrain(drained.friends.messages);
+            for (const messageId of drained.friends.omittedMessageIds) {
+                this.#pendingContextMessages.delete(messageId);
+            }
+            const contextMessages = [
+                ...drained.regular,
+                ...drained.friends.messages,
+                ...(drained.friends.omittedCount === 0
+                    ? []
+                    : [
+                          friendContextOmission(
+                              queued.runId,
+                              drained.friends.omittedCount,
+                              this.#now(),
+                          ),
+                      ]),
+            ];
+            if (drained.friends.omittedCount > 0) {
+                this.#separateModelContextFromVisibleTranscript();
+                this.#contextMessages?.push(contextMessages.at(-1)!.message);
+            }
             this.#queue.shift();
             await this.#runQueued(queued, contextMessages);
         }
@@ -6740,11 +6918,14 @@ export class InMemorySession {
         if (this.#contextMessages !== undefined) return;
 
         const runtimeSnapshot = this.#runtime?.agent.snapshot();
+        const pendingContextIds = new Set(this.#pendingContextMessages.keys());
         this.#contextMessages = (
             runtimeSnapshot?.contextMessages ??
             runtimeSnapshot?.messages ??
             this.#committedMessages()
-        ).filter((message) => !isExcludedFromModelContext(message));
+        ).filter(
+            (message) => !isExcludedFromModelContext(message) && !pendingContextIds.has(message.id),
+        );
     }
 
     #completionForRun(runId: string): SessionRunCompletion | undefined {
@@ -7140,7 +7321,8 @@ export class InMemorySession {
         const reserved = this.#pendingContextSteering.get(runId) ?? new Set<string>();
         this.#pendingContextSteering.set(runId, reserved);
         const selected = [...this.#pendingContextMessages.values()].filter(
-            (pending) => !reserved.has(pending.message.id),
+            (pending) =>
+                pending.message.friendAuthor === undefined && !reserved.has(pending.message.id),
         );
         for (const pending of selected) reserved.add(pending.message.id);
         return selected;
@@ -7565,7 +7747,13 @@ export class InMemorySession {
         });
     }
 
-    #storeMessage(position: number, message: Message, isPartial: boolean, runId?: string): void {
+    #storeMessage(
+        position: number,
+        message: Message,
+        isPartial: boolean,
+        runId?: string,
+        persist = true,
+    ): void {
         const replacedIndex = this.#messageIndexByPosition.get(position);
         const replaced = replacedIndex === undefined ? undefined : this.#messages[replacedIndex];
         if (replaced?.message.role === "user") {
@@ -7603,7 +7791,7 @@ export class InMemorySession {
             this.#partialPositions.delete(position);
         }
         if (message.role === "user") this.#submittedUserMessages.set(message.id, entry);
-        this.#persistence?.upsertMessage(this.id, entry);
+        if (persist) this.#persistence?.upsertMessage(this.id, entry);
     }
 
     #storePartialMessage(
@@ -7637,6 +7825,42 @@ function cloneWorkflowRun(run: WorkflowRun): WorkflowRun {
         ...run,
         logs: [...run.logs],
     };
+}
+
+function textOfContentBlocks(blocks: readonly ContentBlock[]): string {
+    return blocks.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
+function friendContextOmission(
+    runId: string,
+    omittedCount: number,
+    createdAt: number,
+): PersistedPendingContextMessage {
+    const message: UserMessage = {
+        blocks: [
+            {
+                text: `${String(omittedCount)} older friend message${omittedCount === 1 ? " was" : "s were"} omitted from this turn because the bounded friend-context budget keeps the newest messages.`,
+                type: "text",
+            },
+        ],
+        contextOnly: true,
+        id: `friend-context-omitted:${runId}`,
+        internal: true,
+        role: "user",
+    };
+    return {
+        anchorRunId: runId,
+        createdAt,
+        message,
+        position: -1,
+    };
+}
+
+function isFriendModelContext(message: Message): boolean {
+    return (
+        (message.role === "user" && message.friendAuthor !== undefined) ||
+        message.id.startsWith("friend-context-omitted:")
+    );
 }
 
 function modelPresenceInstruction(state: PresenceState, changed: boolean): string {

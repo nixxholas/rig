@@ -12,6 +12,217 @@ import { Type, type Static } from "@sinclair/typebox";
 export type EventId = string;
 export type MutationId = string;
 
+const sessionShareExact = { additionalProperties: false } as const;
+const sessionShareIdentifierSchema = Type.String({ maxLength: 256, minLength: 1 });
+const sessionShareTimestampSchema = Type.Integer({
+    maximum: Number.MAX_SAFE_INTEGER,
+    minimum: 0,
+});
+
+export const sessionShareStateSchema = Type.Union([
+    Type.Literal("active"),
+    Type.Literal("degraded"),
+    Type.Literal("stopped"),
+]);
+export type SessionShareState = Static<typeof sessionShareStateSchema>;
+
+export const sessionShareMemberStateSchema = Type.Union([
+    Type.Literal("active"),
+    Type.Literal("revoked"),
+    Type.Literal("stopped"),
+]);
+export type SessionShareMemberState = Static<typeof sessionShareMemberStateSchema>;
+
+export const sessionShareGrantSchema = Type.Object(
+    {
+        grantEpoch: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
+        murmurPeerId: sessionShareIdentifierSchema,
+        shareId: sessionShareIdentifierSchema,
+        shareMemberId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type SessionShareGrant = Static<typeof sessionShareGrantSchema>;
+
+export const sessionShareMemberSchema = Type.Object(
+    {
+        createdAt: sessionShareTimestampSchema,
+        currentGrantEpoch: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
+        displayName: Type.String({ maxLength: 512, minLength: 1 }),
+        murmurPeerId: sessionShareIdentifierSchema,
+        shareId: sessionShareIdentifierSchema,
+        shareMemberId: sessionShareIdentifierSchema,
+        state: sessionShareMemberStateSchema,
+        updatedAt: sessionShareTimestampSchema,
+    },
+    sessionShareExact,
+);
+export type SessionShareMember = Static<typeof sessionShareMemberSchema>;
+
+export const sessionSharedMetadataSchema = Type.Object(
+    {
+        includeFriendMessagesInModel: Type.Boolean(),
+        memberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
+        shareId: sessionShareIdentifierSchema,
+        state: sessionShareStateSchema,
+    },
+    sessionShareExact,
+);
+export type SessionSharedMetadata = Static<typeof sessionSharedMetadataSchema>;
+
+export const sessionShareFriendInputSchema = Type.Object(
+    {
+        displayName: Type.String({ maxLength: 512, minLength: 1 }),
+        peerId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type SessionShareFriendInput = Static<typeof sessionShareFriendInputSchema>;
+
+export const createSessionShareRequestSchema = Type.Object(
+    {
+        friends: Type.Array(sessionShareFriendInputSchema, {
+            maxItems: 100,
+            minItems: 1,
+            uniqueItems: true,
+        }),
+        includeFriendMessagesInModel: Type.Boolean(),
+        mutationId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type CreateSessionShareRequest = Static<typeof createSessionShareRequestSchema>;
+
+export const addSessionShareMemberRequestSchema = Type.Object(
+    {
+        friend: sessionShareFriendInputSchema,
+        mutationId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type AddSessionShareMemberRequest = Static<typeof addSessionShareMemberRequestSchema>;
+
+export const revokeSessionShareMemberRequestSchema = Type.Object(
+    { mutationId: sessionShareIdentifierSchema },
+    sessionShareExact,
+);
+export type RevokeSessionShareMemberRequest = Static<typeof revokeSessionShareMemberRequestSchema>;
+
+export const stopSessionShareRequestSchema = Type.Object(
+    { mutationId: sessionShareIdentifierSchema },
+    sessionShareExact,
+);
+export type StopSessionShareRequest = Static<typeof stopSessionShareRequestSchema>;
+
+export const setSessionShareFriendMessagesRequestSchema = Type.Object(
+    {
+        includeFriendMessagesInModel: Type.Boolean(),
+        mutationId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type SetSessionShareFriendMessagesRequest = Static<
+    typeof setSessionShareFriendMessagesRequestSchema
+>;
+
+export const postSessionShareFriendMessageRequestSchema = Type.Object(
+    {
+        clientMessageId: sessionShareIdentifierSchema,
+        grant: sessionShareGrantSchema,
+        text: Type.String({ maxLength: 100_000, minLength: 1 }),
+    },
+    sessionShareExact,
+);
+export type PostSessionShareFriendMessageRequest = Static<
+    typeof postSessionShareFriendMessageRequestSchema
+>;
+
+export const sessionShareOwnerResponseSchema = Type.Object(
+    {
+        members: Type.Array(sessionShareMemberSchema, { maxItems: 10_000 }),
+        share: sessionSharedMetadataSchema,
+    },
+    sessionShareExact,
+);
+export type SessionShareOwnerResponse = Static<typeof sessionShareOwnerResponseSchema>;
+
+export const postSessionShareFriendMessageResponseSchema = Type.Object(
+    {
+        accepted: Type.Boolean(),
+        clientMessageId: sessionShareIdentifierSchema,
+    },
+    sessionShareExact,
+);
+export type PostSessionShareFriendMessageResponse = Static<
+    typeof postSessionShareFriendMessageResponseSchema
+>;
+
+export const sessionShareReplicaSchema = Type.Object(
+    {
+        createdAt: sessionShareTimestampSchema,
+        endedAt: Type.Optional(sessionShareTimestampSchema),
+        endedReason: Type.Optional(Type.String({ maxLength: 2_048, minLength: 1 })),
+        grant: sessionShareGrantSchema,
+        memberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
+        ownerPeerId: sessionShareIdentifierSchema,
+        state: Type.Union([Type.Literal("active"), Type.Literal("ended")]),
+        title: Type.String({ maxLength: 2_048 }),
+        updatedAt: sessionShareTimestampSchema,
+    },
+    sessionShareExact,
+);
+export type SessionShareReplica = Static<typeof sessionShareReplicaSchema>;
+
+export const listSessionShareReplicasResponseSchema = Type.Object(
+    { replicas: Type.Array(sessionShareReplicaSchema, { maxItems: 1_000 }) },
+    sessionShareExact,
+);
+export type ListSessionShareReplicasResponse = Static<
+    typeof listSessionShareReplicasResponseSchema
+>;
+
+export const sessionShareReplicaHistoryEntrySchema = Type.Object(
+    {
+        canonicalJson: Type.String({ maxLength: 1_048_576, minLength: 1 }),
+        createdAt: sessionShareTimestampSchema,
+        shareEventId: sessionShareIdentifierSchema,
+        shareSequence: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 1 }),
+    },
+    sessionShareExact,
+);
+export type SessionShareReplicaHistoryEntry = Static<typeof sessionShareReplicaHistoryEntrySchema>;
+
+export const getSessionShareReplicaHistoryResponseSchema = Type.Object(
+    {
+        complete: Type.Boolean(),
+        entries: Type.Array(sessionShareReplicaHistoryEntrySchema, { maxItems: 100 }),
+        nextCursor: Type.Optional(sessionShareIdentifierSchema),
+        replica: sessionShareReplicaSchema,
+    },
+    sessionShareExact,
+);
+export type GetSessionShareReplicaHistoryResponse = Static<
+    typeof getSessionShareReplicaHistoryResponseSchema
+>;
+
+export const sessionShareHealthSchema = Type.Object(
+    {
+        checkedAt: sessionShareTimestampSchema,
+        detail: Type.Optional(Type.String({ maxLength: 2_048, minLength: 1 })),
+        pendingBytes: Type.Integer({ maximum: 64 * 1024 * 1024, minimum: 0 }),
+        pendingEntries: Type.Integer({ maximum: 100_000, minimum: 0 }),
+        state: sessionShareStateSchema,
+    },
+    sessionShareExact,
+);
+export type SessionShareHealth = Static<typeof sessionShareHealthSchema>;
+
+export const getSessionShareHealthResponseSchema = Type.Object(
+    { health: sessionShareHealthSchema },
+    sessionShareExact,
+);
+export type GetSessionShareHealthResponse = Static<typeof getSessionShareHealthResponseSchema>;
+
 const serviceNoticeExact = { additionalProperties: false } as const;
 const serviceNoticeText = Type.String({ minLength: 1 });
 export const SERVICE_NOTICE_MESSAGE_MAX_LENGTH = 4_096;
@@ -345,6 +556,16 @@ export interface UserMessage {
     id: string;
     blocks: readonly ContentBlock[];
     contextOnly?: true;
+    friendAuthor?: {
+        displayName: string;
+        grantEpoch: number;
+        kind: "friend";
+        murmurPeerId: string;
+        shareId: string;
+        shareMemberId: string;
+    };
+    /** Durable context disposition assigned by the session-sharing owner. */
+    friendMessageDisposition?: "included" | "overflow" | "pending";
     provenance?: "agent";
     internal?: true;
 }
@@ -474,7 +695,7 @@ export interface SessionTokenCount {
  * then stopped working is still asking, so the stronger reason stands rather
  * than decaying into the weaker one when the run ends.
  */
-export type SessionUnreadReason = "attention_needed" | "turn_finished";
+export type SessionUnreadReason = "attention_needed" | "friend_message" | "turn_finished";
 
 export interface SessionUnreadState {
     reason: SessionUnreadReason;
@@ -791,6 +1012,7 @@ export interface ProtocolSession {
     activity: SessionActivity;
     activeTurn?: SessionActiveTurn;
     agentId?: string;
+    shared?: SessionSharedMetadata;
     agent?: SessionAgentMetadata;
     archived: boolean;
     appendSystemPrompt?: string;
@@ -1225,6 +1447,7 @@ export interface GitRepositoryFacts {
 export interface SessionSummary {
     id: string;
     archived: boolean;
+    shared?: SessionSharedMetadata;
     projectId: string;
     workspaceId?: string;
     cwd: string;

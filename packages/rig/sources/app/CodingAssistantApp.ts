@@ -49,6 +49,7 @@ import type {
     RunShellCommandResponse,
     SecretSummary,
     SessionEvent,
+    SessionShareState,
     SessionTokenCount,
     SessionTask,
     SteerMessageResponse,
@@ -210,6 +211,8 @@ export interface CodingAssistantAppOptions {
     initialProjectSecretIds?: readonly string[];
     initialSessionSecretIds?: readonly string[];
     initialTasks?: readonly SessionTask[];
+    /** Compact owner-share status only; Happy owns management controls. */
+    sessionShareState?: SessionShareState;
     initialUsageEventId?: EventId;
     initialWorkflowEventId?: EventId;
     initialWorkflows?: readonly WorkflowRun[];
@@ -404,6 +407,7 @@ export class CodingAssistantApp implements Component, Focusable {
         | ((requestId: string, response: UserInputResponse) => void | Promise<void>)
         | undefined;
     readonly #processManager: NativeProcessManager;
+    readonly #sessionShareState: SessionShareState | undefined;
     readonly #readClipboardImage: (
         options?: ReadClipboardImageOptions,
     ) => Promise<ClipboardImage | undefined>;
@@ -552,6 +556,7 @@ export class CodingAssistantApp implements Component, Focusable {
         this.#onExit = options.onExit;
         this.#respondUserInput = options.respondUserInput;
         this.#processManager = options.processManager;
+        this.#sessionShareState = options.sessionShareState;
         this.#readClipboardImage = options.readClipboardImage ?? readClipboardImage;
         this.#sessionBacked = options.sessionBacked ?? false;
         this.#codexStreamMaxRetries =
@@ -4606,6 +4611,13 @@ export class CodingAssistantApp implements Component, Focusable {
         parts.push(`${this.#theme.success}${this.#cwdDisplayName()}${RESET}`);
         if (this.#activeAgentLabel !== undefined) {
             parts.push(`${this.#theme.secondary}${this.#activeAgentLabel}${RESET}`);
+        }
+        if (this.#sessionShareState !== undefined) {
+            const label =
+                this.#sessionShareState === "active"
+                    ? "shared"
+                    : `shared ${this.#sessionShareState}`;
+            parts.push(`${this.#theme.secondary}${label}${RESET}`);
         }
         const queuedCount = this.#promptsShownAsQueued().length;
         if (queuedCount > 0) {

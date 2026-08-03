@@ -24,7 +24,16 @@ export function querySessionSummaries(
     options: { limit?: number },
 ): readonly SessionSummary[] {
     const rows = tx.all<Record<string, unknown>>(sql`
-        SELECT listed_sessions.*
+        SELECT listed_sessions.*,
+            session_shares.share_id AS share_id,
+            session_shares.state AS share_state,
+            session_shares.include_friend_messages AS share_include_friend_messages,
+            (
+                SELECT COUNT(*)
+                FROM session_share_members
+                WHERE session_share_members.share_id = session_shares.share_id
+                  AND session_share_members.state = 'active'
+            ) AS share_member_count
         FROM (
             SELECT
                 id, project_id, workspace_id, order_key, archived, track_unread,
@@ -40,6 +49,13 @@ export function querySessionSummaries(
         ) AS listed_sessions
         JOIN projects ON projects.id = listed_sessions.project_id
         LEFT JOIN project_workspaces ON project_workspaces.id = listed_sessions.workspace_id
+        LEFT JOIN session_shares ON session_shares.share_id = (
+            SELECT latest_share.share_id
+            FROM session_shares AS latest_share
+            WHERE latest_share.owner_session_id = listed_sessions.id
+            ORDER BY latest_share.created_at_ms DESC, latest_share.share_id DESC
+            LIMIT 1
+        )
         ORDER BY
             projects.order_key ASC,
             listed_sessions.workspace_id IS NOT NULL ASC,
@@ -67,6 +83,7 @@ export function querySessionSummaries(
         const unreadReason = readOptionalString(row, "unread_reason");
         const unreadSince = readOptionalNumber(row, "unread_since_ms");
         const workspaceId = readOptionalString(row, "workspace_id");
+        const shareId = readOptionalString(row, "share_id");
         // An empty stored key means the session has no place in an ordered
         // list, which the protocol says by leaving the position out.
         const orderKey = readString(row, "order_key");
@@ -76,6 +93,20 @@ export function querySessionSummaries(
             projectId: readString(row, "project_id"),
             ...(orderKey === "" ? {} : { orderKey }),
             ...(workspaceId === undefined ? {} : { workspaceId }),
+            ...(shareId === undefined
+                ? {}
+                : {
+                      shared: {
+                          includeFriendMessagesInModel:
+                              readNumber(row, "share_include_friend_messages") !== 0,
+                          memberCount: readNumber(row, "share_member_count"),
+                          shareId,
+                          state: readString(row, "share_state") as
+                              | "active"
+                              | "degraded"
+                              | "stopped",
+                      },
+                  }),
             trackUnread: readNumber(row, "track_unread") !== 0,
             ...(unreadReason !== undefined && unreadSince !== undefined
                 ? { unread: { reason: unreadReason as SessionUnreadReason, since: unreadSince } }

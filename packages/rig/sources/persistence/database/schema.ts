@@ -1,5 +1,15 @@
 import { desc, sql } from "drizzle-orm";
-import { index, integer, primaryKey, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import {
+    check,
+    foreignKey,
+    index,
+    integer,
+    primaryKey,
+    sqliteTable,
+    text,
+    unique,
+    uniqueIndex,
+} from "drizzle-orm/sqlite-core";
 
 export const projectAvatarAssets = sqliteTable("project_avatar_assets", {
     hash: text("hash").primaryKey(),
@@ -293,6 +303,238 @@ export const pendingContextMessages = sqliteTable(
         primaryKey({ columns: [table.sessionId, table.messageId] }),
         unique().on(table.sessionId, table.position),
         index("pending_context_messages_session_fifo").on(table.sessionId, table.position),
+    ],
+);
+
+export const sessionShares = sqliteTable(
+    "session_shares",
+    {
+        shareId: text("share_id").primaryKey(),
+        ownerSessionId: text("owner_session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        state: text("state").notNull(),
+        includeFriendMessages: integer("include_friend_messages", { mode: "boolean" }).notNull(),
+        ownerPeerId: text("owner_peer_id").notNull(),
+        snapshotThroughPosition: integer("snapshot_through_position"),
+        snapshotThroughEventId: text("snapshot_through_event_id"),
+        publishedMessagePosition: integer("published_message_position").notNull().default(-1),
+        publishedEventSeq: integer("published_event_seq").notNull().default(0),
+        nextShareSequence: integer("next_share_sequence").notNull().default(1),
+        outboxBytes: integer("outbox_bytes").notNull().default(0),
+        outboxCount: integer("outbox_count").notNull().default(0),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+        stoppedAtMs: integer("stopped_at_ms"),
+    },
+    (table) => [
+        uniqueIndex("session_shares_one_current_per_owner")
+            .on(table.ownerSessionId)
+            .where(sql`${table.state} <> 'stopped'`),
+        check(
+            "session_shares_state_check",
+            sql`${table.state} IN ('active', 'degraded', 'stopped')`,
+        ),
+        check("session_shares_published_seq_check", sql`${table.publishedEventSeq} >= 0`),
+        check(
+            "session_shares_published_message_check",
+            sql`${table.publishedMessagePosition} >= -1`,
+        ),
+        check("session_shares_next_sequence_check", sql`${table.nextShareSequence} >= 1`),
+        check("session_shares_outbox_bytes_check", sql`${table.outboxBytes} >= 0`),
+        check("session_shares_outbox_count_check", sql`${table.outboxCount} >= 0`),
+        check(
+            "session_shares_snapshot_position_check",
+            sql`${table.snapshotThroughPosition} IS NULL OR ${table.snapshotThroughPosition} >= 0`,
+        ),
+    ],
+);
+
+export const sessionShareMembers = sqliteTable(
+    "session_share_members",
+    {
+        shareMemberId: text("share_member_id").primaryKey(),
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        murmurPeerId: text("murmur_peer_id").notNull(),
+        displayName: text("display_name").notNull(),
+        currentGrantEpoch: integer("current_grant_epoch").notNull(),
+        state: text("state").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        unique().on(table.shareId, table.murmurPeerId),
+        unique().on(table.shareMemberId, table.currentGrantEpoch),
+        index("session_share_members_share_state").on(table.shareId, table.state),
+        check("session_share_members_epoch_check", sql`${table.currentGrantEpoch} >= 1`),
+        check(
+            "session_share_members_state_check",
+            sql`${table.state} IN ('active', 'revoked', 'stopped')`,
+        ),
+    ],
+);
+
+export const sessionShareGrants = sqliteTable(
+    "session_share_grants",
+    {
+        shareMemberId: text("share_member_id")
+            .notNull()
+            .references(() => sessionShareMembers.shareMemberId, { onDelete: "cascade" }),
+        grantEpoch: integer("grant_epoch").notNull(),
+        state: text("state").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        endedAtMs: integer("ended_at_ms"),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareMemberId, table.grantEpoch] }),
+        index("session_share_grants_state").on(table.shareMemberId, table.state),
+        check("session_share_grants_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check(
+            "session_share_grants_state_check",
+            sql`${table.state} IN ('active', 'revoked', 'stopped')`,
+        ),
+    ],
+);
+
+export const sessionShareOutbox = sqliteTable(
+    "session_share_outbox",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        sequence: integer("sequence").notNull(),
+        shareEventId: text("share_event_id").notNull().unique(),
+        sourceEventSeq: integer("source_event_seq").references(() => sessionEvents.seq, {
+            onDelete: "set null",
+        }),
+        canonicalJson: text("canonical_json").notNull(),
+        contentHash: text("content_hash").notNull(),
+        byteLength: integer("byte_length").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.sequence] }),
+        unique().on(table.shareId, table.sourceEventSeq),
+        index("session_share_outbox_source_event").on(table.shareId, table.sourceEventSeq),
+        check("session_share_outbox_sequence_check", sql`${table.sequence} >= 1`),
+        check("session_share_outbox_byte_length_check", sql`${table.byteLength} >= 0`),
+        check(
+            "session_share_outbox_source_event_check",
+            sql`${table.sourceEventSeq} IS NULL OR ${table.sourceEventSeq} >= 0`,
+        ),
+    ],
+);
+
+export const sessionShareFriendMessages = sqliteTable(
+    "session_share_friend_messages",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        shareMemberId: text("share_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        clientMessageId: text("client_message_id").notNull(),
+        messageId: text("message_id").notNull().unique(),
+        ownerSessionId: text("owner_session_id").notNull(),
+        ownerPosition: integer("owner_position").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        unique().on(table.shareId, table.shareMemberId, table.grantEpoch, table.clientMessageId),
+        foreignKey({
+            columns: [table.shareMemberId, table.grantEpoch],
+            foreignColumns: [sessionShareGrants.shareMemberId, sessionShareGrants.grantEpoch],
+        }).onDelete("cascade"),
+        foreignKey({
+            columns: [table.ownerSessionId, table.ownerPosition],
+            foreignColumns: [sessionMessages.sessionId, sessionMessages.position],
+        }).onDelete("cascade"),
+        index("session_share_friend_messages_owner").on(table.ownerSessionId, table.ownerPosition),
+        check("session_share_friend_messages_position_check", sql`${table.ownerPosition} >= 0`),
+    ],
+);
+
+export const sessionShareMessageContext = sqliteTable(
+    "session_share_message_context",
+    {
+        messageId: text("message_id")
+            .primaryKey()
+            .references(() => sessionShareFriendMessages.messageId, { onDelete: "cascade" }),
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        shareMemberId: text("share_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        disposition: text("disposition").notNull(),
+        includedRunId: text("included_run_id"),
+        byteEstimate: integer("byte_estimate").notNull(),
+        tokenEstimate: integer("token_estimate").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        foreignKey({
+            columns: [table.shareMemberId, table.grantEpoch],
+            foreignColumns: [sessionShareGrants.shareMemberId, sessionShareGrants.grantEpoch],
+        }).onDelete("cascade"),
+        index("session_share_message_context_disposition").on(
+            table.shareId,
+            table.disposition,
+            table.updatedAtMs,
+        ),
+        check(
+            "session_share_message_context_disposition_check",
+            sql`${table.disposition} IN ('pending', 'included', 'overflow')`,
+        ),
+        check("session_share_message_context_bytes_check", sql`${table.byteEstimate} >= 0`),
+        check("session_share_message_context_tokens_check", sql`${table.tokenEstimate} >= 0`),
+    ],
+);
+
+export const sessionShareReplicas = sqliteTable(
+    "session_share_replicas",
+    {
+        shareId: text("share_id").primaryKey(),
+        ownerPeerId: text("owner_peer_id").notNull(),
+        murmurPeerId: text("murmur_peer_id").notNull(),
+        shareMemberId: text("share_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        title: text("title").notNull(),
+        memberCount: integer("member_count").notNull(),
+        state: text("state").notNull(),
+        endedReason: text("ended_reason"),
+        endedAtMs: integer("ended_at_ms"),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        index("session_share_replicas_member").on(table.shareMemberId, table.grantEpoch),
+        check("session_share_replicas_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check("session_share_replicas_member_count_check", sql`${table.memberCount} >= 0`),
+        check("session_share_replicas_state_check", sql`${table.state} IN ('active', 'ended')`),
+    ],
+);
+
+export const sessionShareReplicaEntries = sqliteTable(
+    "session_share_replica_entries",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShareReplicas.shareId, { onDelete: "cascade" }),
+        shareEventId: text("share_event_id").notNull(),
+        grantMemberId: text("grant_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        sequence: integer("sequence").notNull(),
+        canonicalJson: text("canonical_json").notNull(),
+        contentHash: text("content_hash").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.shareEventId] }),
+        unique().on(table.shareId, table.sequence),
+        check("session_share_replica_entries_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check("session_share_replica_entries_sequence_check", sql`${table.sequence} >= 1`),
     ],
 );
 

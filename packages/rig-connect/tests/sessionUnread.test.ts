@@ -47,6 +47,34 @@ describe("the unread state a chat is left in", () => {
         });
     });
 
+    it("marks friend context unread and preserves it across the next run boundary", () => {
+        const message = {
+            ...event("message_submitted", 6),
+            data: {
+                delivery: "context",
+                displayText: "Hello",
+                message: {
+                    blocks: [{ text: "Hello", type: "text" }],
+                    contextOnly: true,
+                    friendAuthor: {
+                        displayName: "Grace",
+                        grantEpoch: 1,
+                        kind: "friend",
+                        murmurPeerId: "peer-1",
+                        shareId: "share-1",
+                        shareMemberId: "member-1",
+                    },
+                    id: "friend-1",
+                    role: "user",
+                },
+                runId: "friend:friend-1",
+            },
+        } as SessionEvent;
+        const unread = sessionUnreadAfterEvent(undefined, message);
+        expect(unread).toEqual({ reason: "friend_message", since: 6 });
+        expect(sessionUnreadAfterEvent(unread, event("run_finished", 7))).toEqual(unread);
+    });
+
     it("keeps the oldest waiting time when more work finishes", () => {
         const finished = sessionUnreadAfterEvent(undefined, event("run_finished", 8));
         // A second finish is a fresh wait only in that it re-stamps the moment;

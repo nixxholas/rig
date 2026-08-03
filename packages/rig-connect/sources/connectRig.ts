@@ -85,8 +85,21 @@ import type {
     StartMurmurServiceRequest,
     StartMurmurServiceResponse,
     StopMurmurServiceResponse,
+    AddSessionShareMemberRequest,
+    CreateSessionShareRequest,
+    GetSessionShareHealthResponse,
+    GetSessionShareReplicaHistoryResponse,
+    ListSessionShareReplicasResponse,
+    PostSessionShareFriendMessageRequest,
+    PostSessionShareFriendMessageResponse,
+    SessionSharedMetadata,
+    SessionShareFriendInput,
 } from "./protocol.js";
 import {
+    getSessionShareHealthResponseSchema,
+    getSessionShareReplicaHistoryResponseSchema,
+    listSessionShareReplicasResponseSchema,
+    postSessionShareFriendMessageResponseSchema,
     answerMurmurFriendRequestResponseSchema,
     deleteMurmurAccountResponseSchema,
     getMurmurAccountResponseSchema,
@@ -558,6 +571,34 @@ export interface RigConnection {
     listMurmurContacts: (options?: MurmurOperationOptions) => Promise<ListMurmurContactsResponse>;
     /** Reads the complete current friendship graph once. */
     listMurmurFriends: (options?: MurmurOperationOptions) => Promise<GetMurmurFriendsResponse>;
+    /** Owner operations are queued like other session mutations; daemon routes may be unavailable. */
+    createSessionShare: (
+        sessionId: string,
+        input: Omit<CreateSessionShareRequest, "mutationId">,
+    ) => MutationId;
+    addSessionShareMember: (sessionId: string, friend: SessionShareFriendInput) => MutationId;
+    revokeSessionShareMember: (sessionId: string, shareMemberId: string) => MutationId;
+    stopSessionShare: (sessionId: string) => MutationId;
+    setSessionShareFriendMessages: (
+        sessionId: string,
+        includeFriendMessagesInModel: boolean,
+    ) => MutationId;
+    /** Posts through an authenticated member grant; this is not an optimistic owner mutation. */
+    postSessionShareFriendMessage: (
+        request: PostSessionShareFriendMessageRequest,
+        options?: SessionShareOperationOptions,
+    ) => Promise<PostSessionShareFriendMessageResponse>;
+    listSessionShareReplicas: (
+        options?: SessionShareOperationOptions,
+    ) => Promise<ListSessionShareReplicasResponse>;
+    getSessionShareReplicaHistory: (
+        shareId: string,
+        options?: SessionShareOperationOptions & { after?: string },
+    ) => Promise<GetSessionShareReplicaHistoryResponse>;
+    getSessionShareHealth: (
+        shareId: string,
+        options?: SessionShareOperationOptions,
+    ) => Promise<GetSessionShareHealthResponse>;
     /** Entity-first project catalog actions. */
     projects: RigProjects;
     /** Returns the workspace's own identity, which is also this action's identity. */
@@ -624,6 +665,10 @@ export interface RigConnection {
 }
 
 export interface MurmurOperationOptions {
+    signal?: AbortSignal;
+}
+
+export interface SessionShareOperationOptions {
     signal?: AbortSignal;
 }
 
@@ -2786,6 +2831,184 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return { data, status: response.status };
     };
 
+    const requestSessionShare = async <T extends TSchema>(
+        path: string,
+        schema: T,
+        init: RequestInit = {},
+    ): Promise<Static<T>> => {
+        const response = await requestJson(path, init);
+        try {
+            return Value.Decode(schema, response.data);
+        } catch {
+            throw new Error("Rig returned an invalid session-sharing response.");
+        }
+    };
+
+    const enqueueSessionShareMutation = (
+        action: Extract<
+            MutationAction,
+            | "add_session_share_member"
+            | "create_session_share"
+            | "revoke_session_share_member"
+            | "set_session_share_friend_messages"
+            | "stop_session_share"
+        >,
+        sessionId: string,
+        path: string,
+        body: Readonly<Record<string, unknown>>,
+        project?: (shared: SessionSharedMetadata) => SessionSharedMetadata,
+    ): MutationId => {
+        const id = nextMutationId();
+        const key = sessionKey(sessionId);
+        let expectedEventId: string | undefined;
+        return enqueue({
+            acknowledged: false,
+            action,
+            applyOptimistic: (publish) => {
+                if (project === undefined) return () => undefined;
+                const undos: (() => void)[] = [];
+                const entry = sessionEntries.get(sessionId);
+                const chatShared = entry?.store.session().shared;
+                if (entry !== undefined && chatShared !== undefined) {
+                    const changed = entry.store.applyOptimisticSession({
+                        shared: project(chatShared),
+                    });
+                    undos.push(changed.undo);
+                    if (publish) publishSession(entry, changed.deltas);
+                }
+                const catalogShared = groupsEntry?.store.sessionSummary(sessionId)?.shared;
+                if (groupsEntry !== undefined && catalogShared !== undefined) {
+                    const changed = groupsEntry.store.applyOptimisticSessionPatch(sessionId, {
+                        shared: project(catalogShared),
+                    });
+                    undos.push(changed.undo);
+                    if (publish) publishGroups(groupsEntry, changed.deltas);
+                }
+                return composeUndo(undos);
+            },
+            entityKey: key,
+            id,
+            prepare: () => {
+                expectedEventId ??= currentSessionCursor(sessionId);
+                return {
+                    body: { ...body, mutationId: id },
+                    headers: {
+                        ...ifMatchHeader(expectedEventId),
+                        "x-rig-mutation-id": id,
+                    },
+                    method: "POST",
+                    url: endpointUrl(
+                        options.endpoint,
+                        `sessions/${encodeURIComponent(sessionId)}/share${path}`,
+                    ),
+                };
+            },
+            retryOnConflict: true,
+            sessionId,
+            undo: () => undefined,
+            versionSessionId: sessionId,
+        });
+    };
+
+    const createSessionShare: RigConnection["createSessionShare"] = (sessionId, input) =>
+        enqueueSessionShareMutation("create_session_share", sessionId, "", input);
+
+    const addSessionShareMember: RigConnection["addSessionShareMember"] = (sessionId, friend) =>
+        enqueueSessionShareMutation(
+            "add_session_share_member",
+            sessionId,
+            "/members",
+            { friend } satisfies Omit<AddSessionShareMemberRequest, "mutationId">,
+            (shared) => ({ ...shared, memberCount: shared.memberCount + 1 }),
+        );
+
+    const revokeSessionShareMember: RigConnection["revokeSessionShareMember"] = (
+        sessionId,
+        shareMemberId,
+    ) =>
+        enqueueSessionShareMutation(
+            "revoke_session_share_member",
+            sessionId,
+            `/members/${encodeURIComponent(shareMemberId)}/revoke`,
+            {},
+            (shared) => ({ ...shared, memberCount: Math.max(0, shared.memberCount - 1) }),
+        );
+
+    const stopSessionShare: RigConnection["stopSessionShare"] = (sessionId) =>
+        enqueueSessionShareMutation("stop_session_share", sessionId, "/stop", {}, (shared) => ({
+            ...shared,
+            state: "stopped",
+        }));
+
+    const setSessionShareFriendMessages: RigConnection["setSessionShareFriendMessages"] = (
+        sessionId,
+        includeFriendMessagesInModel,
+    ) =>
+        enqueueSessionShareMutation(
+            "set_session_share_friend_messages",
+            sessionId,
+            "/friend-messages",
+            { includeFriendMessagesInModel },
+            (shared) => ({ ...shared, includeFriendMessagesInModel }),
+        );
+
+    const postSessionShareFriendMessage: RigConnection["postSessionShareFriendMessage"] = (
+        post,
+        operationOptions = {},
+    ) =>
+        requestSessionShare(
+            "session-shares/friend-messages",
+            postSessionShareFriendMessageResponseSchema,
+            {
+                body: JSON.stringify(post),
+                headers: { "content-type": "application/json" },
+                method: "POST",
+                ...(operationOptions.signal === undefined
+                    ? {}
+                    : { signal: operationOptions.signal }),
+            },
+        );
+
+    const listSessionShareReplicas: RigConnection["listSessionShareReplicas"] = (
+        operationOptions = {},
+    ) =>
+        requestSessionShare("session-share-replicas", listSessionShareReplicasResponseSchema, {
+            ...(operationOptions.signal === undefined ? {} : { signal: operationOptions.signal }),
+        });
+
+    const getSessionShareReplicaHistory: RigConnection["getSessionShareReplicaHistory"] = (
+        shareId,
+        operationOptions = {},
+    ) => {
+        const after =
+            operationOptions.after === undefined
+                ? ""
+                : `?after=${encodeURIComponent(operationOptions.after)}`;
+        return requestSessionShare(
+            `session-share-replicas/${encodeURIComponent(shareId)}/history${after}`,
+            getSessionShareReplicaHistoryResponseSchema,
+            {
+                ...(operationOptions.signal === undefined
+                    ? {}
+                    : { signal: operationOptions.signal }),
+            },
+        );
+    };
+
+    const getSessionShareHealth: RigConnection["getSessionShareHealth"] = (
+        shareId,
+        operationOptions = {},
+    ) =>
+        requestSessionShare(
+            `session-shares/${encodeURIComponent(shareId)}/health`,
+            getSessionShareHealthResponseSchema,
+            {
+                ...(operationOptions.signal === undefined
+                    ? {}
+                    : { signal: operationOptions.signal }),
+            },
+        );
+
     const projects: RigProjects = {
         add: async (path, addOptions = {}) => {
             const projectId = addOptions.projectId ?? nextEntityId();
@@ -4096,22 +4319,29 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectSession,
         connectTerminalPresence,
         connectTimeline,
+        createSessionShare,
         createWorkspace,
         createSession,
+        addSessionShareMember,
         deleteMurmurAccount,
         detachSecret,
         forkSession,
         installPlugin,
         getMurmurAccount,
+        getSessionShareHealth,
+        getSessionShareReplicaHistory,
         listMurmurContacts,
         listMurmurFriends,
         listMurmurFriendRequests,
+        listSessionShareReplicas,
         projects,
         readBackgroundProcess,
         readPluginLog,
+        postSessionShareFriendMessage,
         recordActivity,
         renameGroup,
         resolveExternalToolCall,
+        revokeSessionShareMember,
         resetSession,
         rewindSession,
         runShellCommand,
@@ -4126,9 +4356,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         setGoal,
         setGoalStatus,
         setSessionArchived,
+        setSessionShareFriendMessages,
         stopRun,
         startMurmurService,
         stopMurmurService,
+        stopSessionShare,
         stopBackgroundProcess,
         stopBackgroundProcesses,
         stopWorkflow,

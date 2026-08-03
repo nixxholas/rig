@@ -117,23 +117,35 @@ import type {
     AnswerMurmurFriendRequestResponse,
     DeleteMurmurAccountResponse,
     GetMurmurAccountResponse,
+    GetSessionShareHealthResponse,
+    GetSessionShareReplicaHistoryResponse,
+    ListSessionShareReplicasResponse,
+    PostSessionShareFriendMessageResponse,
+    SessionShareOwnerResponse,
 } from "../protocol/index.js";
 import {
+    addSessionShareMemberRequestSchema,
     answerMurmurFriendRequestRequestSchema,
+    createSessionShareRequestSchema,
     globalSecurityPolicySchema,
     listFileTreeRequestSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
+    postSessionShareFriendMessageRequestSchema,
+    revokeSessionShareMemberRequestSchema,
     sendMurmurFriendRequestRequestSchema,
     SESSION_DRAFT_MAX_LENGTH,
     signupMurmurAccountRequestSchema,
     startMurmurServiceRequestSchema,
+    setSessionShareFriendMessagesRequestSchema,
+    stopSessionShareRequestSchema,
     submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
 import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
+import type { SessionShareServiceContract } from "../session-sharing/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { ProjectRegistrationError } from "../project/ProjectRepository.js";
@@ -266,6 +278,8 @@ export interface ProtocolHttpServerOptions {
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
     murmur?: MurmurServiceContract;
+    /** Unavailable until the released Murmur shared-session adapter is installed. */
+    sessionShares?: SessionShareServiceContract;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
@@ -322,6 +336,7 @@ export function createProtocolHttpServer(
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
         murmur: options.murmur,
+        sessionShares: options.sessionShares,
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
@@ -399,6 +414,7 @@ interface ProtocolServerRuntimeConfig {
     globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
     murmur: MurmurServiceContract | undefined;
+    sessionShares: SessionShareServiceContract | undefined;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
@@ -607,6 +623,123 @@ async function handleRequest(
             sendJson(response, 409, { error: errorToMessage(error) });
             return;
         }
+    }
+
+    if (route.name.startsWith("session-share")) {
+        const sessionShares = runtimeConfig.sessionShares;
+        if (sessionShares === undefined) {
+            sendJson(response, 503, {
+                error: "Session sharing is unavailable until the Murmur transport is installed.",
+            });
+            return;
+        }
+        if (request.method === "GET" && route.name === "session-share") {
+            const share = sessionShares.getOwner(route.sessionId);
+            if (share === undefined) sendJson(response, 404, { error: "Session share not found." });
+            else sendJson<SessionShareOwnerResponse>(response, 200, share);
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share") {
+            const body = await readCheckedBody(request, createSessionShareRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The session share request is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                201,
+                await sessionShares.create(route.sessionId, body),
+            );
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-members") {
+            const body = await readCheckedBody(request, addSessionShareMemberRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The member request is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                200,
+                await sessionShares.add(route.sessionId, body),
+            );
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-member-revoke") {
+            const body = await readCheckedBody(request, revokeSessionShareMemberRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The revocation request is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                200,
+                await sessionShares.revoke(route.sessionId, route.shareMemberId, body),
+            );
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-stop") {
+            const body = await readCheckedBody(request, stopSessionShareRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The stop request is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                200,
+                await sessionShares.stop(route.sessionId, body),
+            );
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-friend-messages") {
+            const body = await readCheckedBody(request, setSessionShareFriendMessagesRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The friend-message setting is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                200,
+                await sessionShares.setFriendMessages(route.sessionId, body),
+            );
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-post") {
+            const body = await readCheckedBody(request, postSessionShareFriendMessageRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The friend message is invalid." });
+                return;
+            }
+            sendJson<PostSessionShareFriendMessageResponse>(
+                response,
+                202,
+                await sessionShares.postFriendMessage(body),
+            );
+            return;
+        }
+        if (request.method === "GET" && route.name === "session-share-replicas") {
+            sendJson<ListSessionShareReplicasResponse>(response, 200, sessionShares.listReplicas());
+            return;
+        }
+        if (request.method === "GET" && route.name === "session-share-replica-history") {
+            const history = sessionShares.replicaHistory(
+                route.shareId,
+                url.searchParams.get("after") ?? undefined,
+            );
+            if (history === undefined)
+                sendJson(response, 404, { error: "Shared session not found." });
+            else sendJson<GetSessionShareReplicaHistoryResponse>(response, 200, history);
+            return;
+        }
+        if (request.method === "GET" && route.name === "session-share-health") {
+            const health = sessionShares.health(route.shareId);
+            if (health === undefined)
+                sendJson(response, 404, { error: "Session share not found." });
+            else sendJson<GetSessionShareHealthResponse>(response, 200, health);
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
     }
 
     if (request.method === "POST" && route.name === "shutdown") {
@@ -2478,8 +2611,13 @@ async function handleRequest(
             sendJson(response, 400, { error: "Session message limit is invalid." });
             return;
         }
+        const ownerShare = runtimeConfig.sessionShares?.getOwner(sessionId)?.share;
+        const snapshot = session.snapshot();
         sendJson(response, 200, {
-            session: limitProtocolSessionMessages(session.snapshot(), messageLimit),
+            session: limitProtocolSessionMessages(
+                ownerShare === undefined ? snapshot : { ...snapshot, shared: ownerShare },
+                messageLimit,
+            ),
         });
         return;
     }
@@ -3593,6 +3731,8 @@ function matchRoute(pathname: string):
               | "projects"
               | "provider-usage"
               | "secret-registrations"
+              | "session-share-post"
+              | "session-share-replicas"
               | "sessions"
               | "shutdown"
               | "slots"
@@ -3604,6 +3744,11 @@ function matchRoute(pathname: string):
           name: "murmur-friend-request-answer";
           peerId: string;
           sessionId?: undefined;
+      }
+    | {
+          name: "session-share-health" | "session-share-replica-history";
+          sessionId?: undefined;
+          shareId: string;
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
     | {
@@ -3716,6 +3861,10 @@ function matchRoute(pathname: string):
               | "shell"
               | "secrets"
               | "service-tier"
+              | "session-share"
+              | "session-share-friend-messages"
+              | "session-share-members"
+              | "session-share-stop"
               | "session"
               | "stream"
               | "session-state"
@@ -3726,6 +3875,11 @@ function matchRoute(pathname: string):
               | "unarchive"
               | "usage";
           sessionId: string;
+      }
+    | {
+          name: "session-share-member-revoke";
+          sessionId: string;
+          shareMemberId: string;
       }
     | {
           connectionId: string;
@@ -3772,6 +3926,8 @@ function matchRoute(pathname: string):
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
+    if (pathname === "/session-shares/friend-messages") return { name: "session-share-post" };
+    if (pathname === "/session-share-replicas") return { name: "session-share-replicas" };
     if (pathname === "/shutdown") return { name: "shutdown" };
     if (pathname === "/slots") return { name: "slots" };
     if (pathname === "/webapps") return { name: "webapps" };
@@ -3818,6 +3974,24 @@ function matchRoute(pathname: string):
     }
 
     const globalParts = pathname.split("/").filter(Boolean);
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "session-shares" &&
+        globalParts[2] === "health"
+    ) {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        return shareId === undefined ? undefined : { name: "session-share-health", shareId };
+    }
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "session-share-replicas" &&
+        globalParts[2] === "history"
+    ) {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        return shareId === undefined
+            ? undefined
+            : { name: "session-share-replica-history", shareId };
+    }
     if (
         globalParts.length === 4 &&
         globalParts[0] === "murmur" &&
@@ -3996,6 +4170,31 @@ function matchRoute(pathname: string):
 
     const sessionId = decodeURIComponent(parts[1]);
     if (parts.length === 2) return { name: "session", sessionId };
+    if (parts.length === 3 && parts[2] === "share") {
+        return { name: "session-share", sessionId };
+    }
+    if (parts.length === 4 && parts[2] === "share" && parts[3] === "members") {
+        return { name: "session-share-members", sessionId };
+    }
+    if (parts.length === 4 && parts[2] === "share" && parts[3] === "stop") {
+        return { name: "session-share-stop", sessionId };
+    }
+    if (parts.length === 4 && parts[2] === "share" && parts[3] === "friend-messages") {
+        return { name: "session-share-friend-messages", sessionId };
+    }
+    if (
+        parts.length === 6 &&
+        parts[2] === "share" &&
+        parts[3] === "members" &&
+        parts[4] !== undefined &&
+        parts[5] === "revoke"
+    ) {
+        return {
+            name: "session-share-member-revoke",
+            sessionId,
+            shareMemberId: decodeURIComponent(parts[4]),
+        };
+    }
     if (parts.length === 3 && parts[2] === "reorder") {
         return { name: "reorder", sessionId };
     }
@@ -4345,6 +4544,11 @@ function isSessionMutation(routeName: string, method: string | undefined): boole
                 "secrets",
                 "shell",
                 "steer",
+                "session-share",
+                "session-share-friend-messages",
+                "session-share-member-revoke",
+                "session-share-members",
+                "session-share-stop",
                 "unarchive",
             ].includes(routeName)) ||
         (method === "POST" && routeName === "workflow-stop") ||
@@ -4397,6 +4601,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "sessions") return request.method === "POST";
+    if (route.name === "session-share-post") return request.method === "POST";
     if (route.name === "projects") return request.method !== "GET";
     if (
         [
@@ -4422,6 +4627,14 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     }
     if (route.sessionId === undefined) return false;
     return isSessionMutation(route.name, request.method);
+}
+
+async function readCheckedBody<T extends TSchema>(
+    request: IncomingMessage,
+    schema: T,
+): Promise<Static<T> | undefined> {
+    const value = await readJson<unknown>(request, 512 * 1024);
+    return Value.Check(schema, value) ? (value as Static<T>) : undefined;
 }
 
 async function readJson<T>(request: IncomingMessage, maximumBytes?: number): Promise<T> {

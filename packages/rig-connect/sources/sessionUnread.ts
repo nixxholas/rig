@@ -20,7 +20,17 @@ export function sessionUnreadAfterEvent(
     if (event.type === "user_input_requested" || event.type === "external_tool_call_requested") {
         return { reason: "attention_needed", since: event.createdAt };
     }
+    if (
+        event.type === "message_submitted" &&
+        (event.data as { delivery?: unknown }).delivery === "context" &&
+        (event.data as { message?: { friendAuthor?: unknown } }).message?.friendAuthor !== undefined
+    ) {
+        if (current?.reason === "attention_needed") return current;
+        return { reason: "friend_message", since: event.createdAt };
+    }
     if (event.type !== "run_finished" && event.type !== "run_error") return current;
-    if (current?.reason === "attention_needed") return current;
+    if (current?.reason === "attention_needed" || current?.reason === "friend_message") {
+        return current;
+    }
     return { reason: "turn_finished", since: event.createdAt };
 }

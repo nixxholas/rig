@@ -107,6 +107,7 @@ import { sessionSaveMessage } from "../persistence/session/sessionSaveMessage.js
 import { sessionSaveQueuedRun } from "../persistence/session/sessionSaveQueuedRun.js";
 import { sessionSavePendingContextMessage } from "../persistence/session/sessionSavePendingContextMessage.js";
 import { sessionDrainPendingContextMessages } from "../persistence/session/sessionDrainPendingContextMessages.js";
+import { sessionDrainFriendContextMessages } from "../persistence/session-sharing/sessionDrainFriendContextMessages.js";
 import { sessionTransferWorkspace } from "../persistence/session/sessionTransferWorkspace.js";
 import { sessionSetWorkspaceTransferState } from "../persistence/session/sessionSetWorkspaceTransferState.js";
 import { queryWorkspaceHasAttachedSessions } from "../persistence/session/queryWorkspaceHasAttachedSessions.js";
@@ -745,6 +746,15 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         messageIds?: readonly string[],
     ): readonly PersistedPendingContextMessage[] {
         return sessionDrainPendingContextMessages(this.#tx(), sessionId, messageIds);
+    }
+
+    drainFriendContextMessages(
+        input: Parameters<NonNullable<InMemorySessionPersistence["drainFriendContextMessages"]>>[0],
+    ) {
+        return sessionDrainFriendContextMessages(this.#tx(), {
+            ...input,
+            now: this.#now(),
+        });
     }
 
     list(options: { limit?: number } = {}): readonly SessionSummary[] {
@@ -1404,9 +1414,10 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         }
         const eventFacts = sessionEventFacts(event);
         let globalEntry: ReturnType<GlobalEventQueue["append"]>;
+        let inserted = false;
         this.#transaction((tx) => {
-            sessionAppendEvent(tx, event, eventFacts, this.#now());
-            if (this.#globalEventQueue.durable) {
+            inserted = sessionAppendEvent(tx, event, eventFacts, this.#now()) === "inserted";
+            if (inserted && this.#globalEventQueue.durable) {
                 globalEntry = this.#globalEventQueue.append(event, tx);
             }
         });
@@ -1416,7 +1427,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         if (this.#globalEventQueue.durable && globalEntry !== undefined) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => queue.publish(globalEntry!));
-        } else if (!this.#globalEventQueue.durable && shouldPublishGlobalEvent(event)) {
+        } else if (inserted && !this.#globalEventQueue.durable && shouldPublishGlobalEvent(event)) {
             const queue = this.#globalEventQueue;
             this.#afterTransactionCommit(() => {
                 const entry = queue.append(event);

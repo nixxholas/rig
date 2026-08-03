@@ -7,6 +7,8 @@ import { describe, expect, it } from "vitest";
 import type * as daemon from "../../rig/sources/protocol/index.js";
 import {
     PROJECT_ERROR_MAX_LENGTH as DAEMON_PROJECT_ERROR_MAX_LENGTH,
+    createSessionShareRequestSchema as daemonCreateSessionShareRequestSchema,
+    sessionShareOwnerResponseSchema as daemonSessionShareOwnerResponseSchema,
     systemNoticePayloadSchema as daemonSystemNoticePayloadSchema,
 } from "../../rig/sources/protocol/index.js";
 // Presentation is owned by the agent layer rather than the protocol module, but
@@ -15,7 +17,9 @@ import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
 import {
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
+    createSessionShareRequestSchema,
     projectWorkspaceSchema,
+    sessionShareOwnerResponseSchema,
     systemNoticePayloadSchema,
 } from "@/protocol.js";
 
@@ -50,6 +54,15 @@ type _Git = Assignable<local.GitChangeSnapshot, daemon.GitChangeSnapshot>;
 type _TokenCount = Assignable<local.SessionTokenCount, daemon.SessionTokenCount>;
 type _UnreadState = Assignable<local.SessionUnreadState, daemon.SessionUnreadState>;
 type _UnreadReason = Assignable<local.SessionUnreadReason, daemon.SessionUnreadReason>;
+type _SessionSharedMetadata = Assignable<local.SessionSharedMetadata, daemon.SessionSharedMetadata>;
+type _CreateSessionShareRequest = Assignable<
+    local.CreateSessionShareRequest,
+    daemon.CreateSessionShareRequest
+>;
+type _SessionShareOwnerResponse = Assignable<
+    local.SessionShareOwnerResponse,
+    daemon.SessionShareOwnerResponse
+>;
 type _Event = Assignable<local.SessionEvent, daemon.SessionEvent>;
 type _ServiceNotice = Assignable<local.ServiceNotice, daemon.ServiceNotice>;
 type _SystemNoticePayload = Assignable<local.SystemNoticePayload, daemon.SystemNoticePayload>;
@@ -254,5 +267,38 @@ describe("protocol conformance", () => {
         expect(() =>
             Value.Decode(projectWorkspaceSchema, { ...workspace, unexpected: true }),
         ).toThrow();
+    });
+
+    it("decodes the same bounded session-sharing requests and owner responses", () => {
+        const request = {
+            friends: [{ displayName: "Ada", peerId: "peer-1" }],
+            includeFriendMessagesInModel: true,
+            mutationId: "mutation-1",
+        };
+        const response = {
+            members: [
+                {
+                    createdAt: 1,
+                    currentGrantEpoch: 1,
+                    displayName: "Ada",
+                    murmurPeerId: "peer-1",
+                    shareId: "share-1",
+                    shareMemberId: "member-1",
+                    state: "active",
+                    updatedAt: 1,
+                },
+            ],
+            share: {
+                includeFriendMessagesInModel: true,
+                memberCount: 1,
+                shareId: "share-1",
+                state: "active",
+            },
+        };
+
+        expect(Value.Decode(createSessionShareRequestSchema, request)).toEqual(request);
+        expect(Value.Decode(daemonCreateSessionShareRequestSchema, request)).toEqual(request);
+        expect(Value.Decode(sessionShareOwnerResponseSchema, response)).toEqual(response);
+        expect(Value.Decode(daemonSessionShareOwnerResponseSchema, response)).toEqual(response);
     });
 });

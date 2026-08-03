@@ -322,6 +322,9 @@ export async function runApp(options: RunAppOptions = {}): Promise<RunAppResult>
             initialSessionSecretIds: session.session.sessionSecretIds,
             initialUserInputs: session.session.pendingUserInputs,
             initialTasks: session.session.tasks,
+            ...(session.session.shared === undefined
+                ? {}
+                : { sessionShareState: session.session.shared.state }),
             ...(session.session.lastEventId === undefined
                 ? {}
                 : {

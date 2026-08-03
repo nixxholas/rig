@@ -573,6 +573,7 @@ export class ChatStore {
                 "lastEventId",
                 "recap",
                 "serviceTier",
+                "shared",
                 "title",
                 "titleError",
                 "tokens",
@@ -626,6 +627,7 @@ export class ChatStore {
             ...(session.goal === undefined ? {} : { goal: session.goal }),
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
+            ...(session.shared === undefined ? {} : { shared: session.shared }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
             ...(session.systemPrompt === undefined ? {} : { systemPrompt: session.systemPrompt }),
@@ -1337,6 +1339,7 @@ export class ChatStore {
                 "lastEventId",
                 "recap",
                 "serviceTier",
+                "shared",
                 "title",
                 "titleError",
                 "tokens",
@@ -1391,6 +1394,7 @@ export class ChatStore {
             ...(session.goal === undefined ? {} : { goal: session.goal }),
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
+            ...(session.shared === undefined ? {} : { shared: session.shared }),
             ...(session.title === undefined ? {} : { title: session.title }),
             ...(session.titleError === undefined ? {} : { titleError: session.titleError }),
             ...(session.systemPrompt === undefined ? {} : { systemPrompt: session.systemPrompt }),
@@ -2482,6 +2486,12 @@ export class ChatStore {
             createdAt: at,
             delivery,
             ...(message.contextOnly === true ? { contextOnly: true } : {}),
+            ...(message.friendAuthor === undefined
+                ? {}
+                : { friendAuthor: { ...message.friendAuthor } }),
+            ...(message.friendMessageDisposition === undefined
+                ? {}
+                : { friendMessageContext: message.friendMessageDisposition }),
             id: `message:${message.id}`,
             kind: "user_message",
             messageId: message.id,

@@ -81,6 +81,7 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
             if (text.length > 0) {
                 const isShellContext = isUserShellCommandContext(message.blocks);
                 const isAgentMessage = message.provenance === "agent";
+                const isFriendMessage = message.friendAuthor !== undefined;
                 entries.push({
                     category: isShellContext ? "tool" : "message",
                     ordinal: entries.length,
@@ -89,9 +90,11 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
                             ? `Tool result (direct user shell command):\n${text}`
                             : isAgentMessage
                               ? `Agent message:\n${text}`
-                              : `User:\n${text}`,
+                              : isFriendMessage
+                                ? `Friend message from ${message.friendAuthor!.displayName} (${message.friendAuthor!.murmurPeerId}):\n${text}`
+                                : `User:\n${text}`,
                     ),
-                    trustedUserEvidence: !isShellContext && !isAgentMessage,
+                    trustedUserEvidence: !isShellContext && !isAgentMessage && !isFriendMessage,
                 });
             }
             continue;

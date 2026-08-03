@@ -17,6 +17,7 @@ import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { UnansweredUserInput, UserInputResponse } from "../user-input/types.js";
 import type { Attachment } from "../protocol/Attachment.js";
 import type { ServiceNotice } from "../protocol/ServiceNotice.js";
+import type { FriendAuthor } from "../session-sharing/FriendAuthor.js";
 
 /** Plain text content. */
 export interface TextBlock {
@@ -112,6 +113,8 @@ export interface UserMessage {
     blocks: readonly ContentBlock[];
     /** Background context that waits for the next actionable user message. */
     contextOnly?: true;
+    /** Authenticated non-owner sender. Its text is never user authorization evidence. */
+    friendAuthor?: FriendAuthor;
     /** Durable origin for non-human messages that use a user-role provider input shape. */
     provenance?: "agent";
     /** Durable sender identity for rendering and navigating agent-authored messages. */

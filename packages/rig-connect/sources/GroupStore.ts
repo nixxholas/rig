@@ -888,6 +888,7 @@ export class GroupStore {
                 : { lastMessageAt: session.lastMessageAt }),
             ...(session.recap === undefined ? {} : { recap: session.recap }),
             ...(session.serviceTier === undefined ? {} : { serviceTier: session.serviceTier }),
+            ...(session.shared === undefined ? {} : { shared: session.shared }),
             ...(session.sessionTokenCount === undefined
                 ? {}
                 : { sessionTokenCount: session.sessionTokenCount }),
@@ -946,18 +947,25 @@ function sameSessions(left: readonly GroupSession[], right: readonly GroupSessio
 function unreadOf(sessions: readonly GroupSession[]): GroupUnread {
     let count = 0;
     let attentionCount = 0;
+    let friendMessageCount = 0;
     let since: number | undefined;
     for (const session of sessions) {
         if (session.archived || session.unread === undefined) continue;
         count += 1;
         if (session.unread.reason === "attention_needed") attentionCount += 1;
+        if (session.unread.reason === "friend_message") friendMessageCount += 1;
         if (since === undefined || session.unread.since < since) since = session.unread.since;
     }
     if (count === 0) return EMPTY_UNREAD;
     return {
         attentionCount,
         count,
-        reason: attentionCount > 0 ? "attention_needed" : "turn_finished",
+        reason:
+            attentionCount > 0
+                ? "attention_needed"
+                : friendMessageCount > 0
+                  ? "friend_message"
+                  : "turn_finished",
         ...(since === undefined ? {} : { since }),
     };
 }

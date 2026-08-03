@@ -114,6 +114,44 @@ function runOneTurn(store: ChatStore): ChatDelta[] {
 }
 
 describe("ChatStore", () => {
+    it("projects a friend's context badge without changing the message identity on replay", () => {
+        const store = new ChatStore("session-1");
+        store.applyHello(hello());
+        const submitted = event("message_submitted", {
+            delivery: "run",
+            message: {
+                blocks: [{ text: "Please also check the cache.", type: "text" }],
+                friendAuthor: {
+                    displayName: "Ada",
+                    grantEpoch: 1,
+                    kind: "friend",
+                    murmurPeerId: "peer-1",
+                    shareId: "share-1",
+                    shareMemberId: "member-1",
+                },
+                friendMessageDisposition: "pending",
+                id: "friend-message-1",
+                role: "user",
+            },
+            runId: "run-1",
+        });
+
+        store.apply(submitted);
+        const element = store
+            .elements()
+            .find((candidate) => candidate.id === "message:friend-message-1");
+        expect(element).toMatchObject({
+            friendMessageContext: "pending",
+            kind: "user_message",
+            messageId: "friend-message-1",
+        });
+
+        store.apply(submitted);
+        expect(
+            store.elements().find((candidate) => candidate.id === "message:friend-message-1"),
+        ).toBe(element);
+    });
+
     it("rebuilds a tail context anchor without restoring a live turn", () => {
         const message = {
             blocks: [{ text: "Use the blue database.", type: "text" as const }],

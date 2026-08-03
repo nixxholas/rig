@@ -38,6 +38,7 @@ import type {
 } from "../external-tools/index.js";
 import type { DurableSkillDefinition } from "../external-skills/index.js";
 import type { ScheduledMessage } from "../scheduling/index.js";
+import type { SessionSharedMetadata } from "./SessionShareProtocol.js";
 
 export type SessionStatus =
     | "idle"
@@ -124,7 +125,7 @@ export interface SessionActivity {
     toolCalls?: readonly SessionActivityToolCall[];
 }
 
-export type SessionUnreadReason = "attention_needed" | "turn_finished";
+export type SessionUnreadReason = "attention_needed" | "friend_message" | "turn_finished";
 
 export interface SessionTokenCount {
     /** Context window occupied after the latest inference or compaction. */
@@ -286,6 +287,7 @@ export interface ProtocolSession {
     activity: SessionActivity;
     activeTurn?: SessionActiveTurn;
     agentId: string;
+    shared?: SessionSharedMetadata;
     /** Git state of the session's directory, when it is inside a repository. */
     git?: GitChangeSnapshot;
     archived: boolean;
@@ -540,6 +542,7 @@ export interface SubagentSummary {
 export interface SessionSummary {
     id: string;
     archived: boolean;
+    shared?: SessionSharedMetadata;
     projectId: string;
     workspaceId?: string;
     trackUnread?: boolean;
