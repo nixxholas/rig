@@ -196,7 +196,6 @@ function createStub(): ScopeShareServiceContract & {
         listReplicas: vi.fn<ScopeShareServiceContract["listReplicas"]>(() => ({
             replicas: [replica],
         })),
-        metadata: vi.fn<ScopeShareServiceContract["metadata"]>(() => owner.share),
         replica: vi.fn<ScopeShareServiceContract["replica"]>(() => ({
             complete: true,
             entries: [],

@@ -35,7 +35,7 @@ interface NeutralFixture {
  * pumping (see MurmurShareTransport.test.ts). Anything that depends on those
  * differences stays in the fake-only block below instead of being forced to match here.
  */
-export function sessionShareTransportNeutralContract(
+export function shareTransportNeutralContract(
     name: string,
     createFixture: () => Promise<NeutralFixture> | NeutralFixture,
 ): void {
@@ -101,13 +101,22 @@ export function sessionShareTransportNeutralContract(
     });
 }
 
-sessionShareTransportNeutralContract("FakeShareTransport neutral contract", () => ({
+shareTransportNeutralContract("FakeShareTransport neutral contract", () => ({
     ownerPeerId: "owner",
     shareId: "share-neutral-1",
     transport: new FakeShareTransport(),
 }));
 
-sessionShareTransportNeutralContract("MurmurShareTransport neutral contract", murmurNeutralFixture);
+shareTransportNeutralContract("MurmurShareTransport neutral contract", () =>
+    murmurNeutralFixture("share-neutral-1"),
+);
+
+// A workspace share carries its kind in its own identifier, and the transport is
+// meant not to care: the same contract has to hold for a shareId that is not a
+// session's, or a scope share would depend on a session-shaped identifier.
+shareTransportNeutralContract("MurmurShareTransport neutral contract for a scope share", () =>
+    murmurNeutralFixture("wsp_share-neutral-1"),
+);
 
 /**
  * Whole-lifecycle assertions kept fake-only.
@@ -314,7 +323,7 @@ function unusedMurmurDirectory(): ShareMurmurDirectory {
     };
 }
 
-function murmurNeutralFixture(): NeutralFixture {
+function murmurNeutralFixture(shareId: string): NeutralFixture {
     const relay = new InMemoryMurmurRelay();
     const owner = createMurmurPeer(relay);
     const runtime: MurmurRuntimeHandle = {
@@ -327,5 +336,5 @@ function murmurNeutralFixture(): NeutralFixture {
         entrySource: () => emptyEntrySource(),
         runtime: () => runtime,
     });
-    return { ownerPeerId: owner.peerId, shareId: "share-neutral-1", transport };
+    return { ownerPeerId: owner.peerId, shareId, transport };
 }

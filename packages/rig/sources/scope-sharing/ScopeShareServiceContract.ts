@@ -8,7 +8,6 @@ import type {
     RevokeScopeShareMemberRequest,
     ScopeShareOwnerResponse,
     ScopeShareScopeKind,
-    ScopeSharedMetadata,
     StopScopeShareRequest,
 } from "../protocol/index.js";
 
@@ -26,8 +25,6 @@ export interface ScopeShareTarget {
  */
 export interface ScopeShareServiceContract {
     getOwner(scope: ScopeShareTarget): ScopeShareOwnerResponse | undefined;
-    /** The badge a client draws on a project or workspace, without a second fetch. */
-    metadata(scope: ScopeShareTarget): ScopeSharedMetadata | undefined;
     create(
         scope: ScopeShareTarget,
         request: CreateScopeShareRequest,

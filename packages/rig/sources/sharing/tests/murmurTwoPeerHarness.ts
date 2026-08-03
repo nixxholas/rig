@@ -6,7 +6,6 @@
  * the sync loop that makes replication deterministic.
  */
 import {
-    createPrivateMessage,
     encryptPrivateMessageForContact,
     generateIdentityKeyPair,
     identityId,

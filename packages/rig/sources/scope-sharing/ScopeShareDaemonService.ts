@@ -9,7 +9,6 @@ import type {
     ScopeShareMember,
     ScopeShareOwnerResponse,
     ScopeShareReplica,
-    ScopeSharedMetadata,
     StopScopeShareRequest,
 } from "../protocol/index.js";
 import type {
@@ -87,11 +86,6 @@ export class ScopeShareDaemonService implements ScopeShareServiceContract {
     getOwner(scope: ScopeShareTarget): ScopeShareOwnerResponse | undefined {
         const share = this.#store.queryActiveShareForScope(scope);
         return share === undefined ? undefined : this.#ownerResponse(share.shareId);
-    }
-
-    metadata(scope: ScopeShareTarget): ScopeSharedMetadata | undefined {
-        const share = this.#store.queryActiveShareForScope(scope);
-        return share === undefined ? undefined : this.#ownerResponse(share.shareId).share;
     }
 
     async create(
