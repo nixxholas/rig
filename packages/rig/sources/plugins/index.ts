@@ -47,6 +47,7 @@ export {
 } from "./PluginNetworkRegistry.js";
 export { PluginManager, type PluginManagerOptions } from "./PluginManager.js";
 export { PluginNotFoundError } from "./PluginNotFoundError.js";
+export { PluginIconError, type PluginIconErrorCode } from "./PluginIconError.js";
 export {
     DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS,
     PluginStartupState,
@@ -68,6 +69,7 @@ export {
 } from "./githubPluginCatalog.js";
 export { installGitHubPlugin } from "./installGitHubPlugin.js";
 export { readPluginManifest } from "./readPluginManifest.js";
+export { readPluginIcon } from "./readPluginIcon.js";
 export { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "./readBoundedPluginLog.js";
 export { startPlugin, type RunningPlugin, type StartPluginOptions } from "./startPlugin.js";
 export {
@@ -75,6 +77,8 @@ export {
     pluginManifestSchema,
     pluginVersionSchema,
     type PluginDiscovery,
+    type PluginIconResource,
+    type PluginIconSummary,
     type PluginManifest,
     type PluginRegistrationFailure,
     type PluginRuntimeSnapshot,

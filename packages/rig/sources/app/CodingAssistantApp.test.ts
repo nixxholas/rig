@@ -3276,6 +3276,9 @@ describe("CodingAssistantApp", () => {
             readAppResource() {
                 throw new Error("Unused in this test.");
             },
+            async readIcon() {
+                throw new Error("Unused in this test.");
+            },
             readLog,
             async storageDelete() {},
             async storageGet() {
@@ -10238,6 +10241,9 @@ function createPluginContext(overrides: Partial<PluginContext> = {}): PluginCont
                 plugins: [],
                 version: "01900000-0000-7000-8000-000000000001",
             };
+        },
+        async readIcon() {
+            throw new Error("Unused in this test.");
         },
         async loadSkills() {
             return [];

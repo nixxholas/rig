@@ -41,9 +41,11 @@ import { installGitHubPlugin } from "./installGitHubPlugin.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
+import { readPluginIcon } from "./readPluginIcon.js";
+import { PluginIconError } from "./PluginIconError.js";
 import { removePluginDockerImages } from "./preparePluginDockerImage.js";
 import { resolvePluginDockerImage } from "./resolvePluginDockerRuntime.js";
-import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
+import type { PluginDiscovery, PluginIconResource, RegisteredPlugin } from "./types.js";
 import { PluginComputeRegistry, type PluginComputeRegistryEvent } from "./PluginComputeRegistry.js";
 import { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
@@ -546,10 +548,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
                               },
                           }),
                     dataDirectory: getPluginDataDirectory(plugin.folderName, this.#environment),
+                    author: plugin.manifest.author,
+                    category: plugin.manifest.category,
                     description: plugin.manifest.description,
                     directory: plugin.directory,
                     ...(state.error === undefined ? {} : { error: state.error }),
                     folder: plugin.folderName,
+                    icon: plugin.icon,
                     logAvailable: state.error !== undefined || state.logPath !== undefined,
                     name: plugin.manifest.name,
                     status: state.status,
@@ -629,6 +634,30 @@ export class PluginManager implements ManagedNetworkInterceptor {
         resourceUri: string,
     ): PluginAppResource {
         return this.#appRegistry.readResource(applicationId, generation, resourceUri);
+    }
+
+    async readIcon(folder: string, generation: string): Promise<PluginIconResource> {
+        const discovery = await this.#discoverCurrentPlugins();
+        const plugin = discovery.plugins.find((candidate) => candidate.folderName === folder);
+        if (plugin === undefined) {
+            throw new PluginIconError(
+                "plugin_not_found",
+                `No installed plugin has the id ${JSON.stringify(folder)}.`,
+            );
+        }
+        let icon: PluginIconResource;
+        try {
+            icon = await readPluginIcon(plugin.iconPath);
+        } catch (error) {
+            throw new PluginIconError(
+                "icon_unavailable",
+                error instanceof Error ? error.message : String(error),
+            );
+        }
+        if (icon.generation !== generation) {
+            throw new PluginIconError("stale_generation", "That plugin icon generation is stale.");
+        }
+        return icon;
     }
 
     callAppTool(

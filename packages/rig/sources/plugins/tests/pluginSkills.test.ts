@@ -14,7 +14,10 @@ import { PluginStartupState } from "../PluginStartupState.js";
 import { readPluginManifest } from "../readPluginManifest.js";
 import type { RegisteredPlugin } from "../types.js";
 
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 const cleanup: (() => Promise<void> | void)[] = [];
 
 afterEach(async () => {
@@ -30,6 +33,8 @@ describe("plugin skills", () => {
             writeFile(
                 join(directory, "happy.plugin.json"),
                 `${JSON.stringify({
+                    author: "Happy",
+                    category: "productivity",
                     description: "Release prompt.",
                     icon: "icon.png",
                     name: "Release prompt",
@@ -189,6 +194,8 @@ describe("plugin skills", () => {
             writeFile(
                 join(directory, "happy.plugin.json"),
                 `${JSON.stringify({
+                    author: "Happy",
+                    category: "developer-tools",
                     description: "Missing skills.",
                     icon: "icon.png",
                     name: "Missing",
@@ -312,6 +319,8 @@ async function createPlugin(
             join(directory, "happy.plugin.json"),
             `${JSON.stringify(
                 {
+                    author: "Happy",
+                    category: "developer-tools",
                     description: "Release workflow skills.",
                     icon: "icon.png",
                     ...(options.entry === true ? { main: "index.ts" } : {}),

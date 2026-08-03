@@ -10,7 +10,10 @@ import { createNodeFileSystemContext } from "../../agent/context/createNodeFileS
 import type { GitHubFetch } from "../fetchBoundedGitHubResource.js";
 import { installGitHubPlugin } from "../installGitHubPlugin.js";
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -30,6 +33,8 @@ describe("installing an indexed GitHub plugin", () => {
             "repository-root/other/broken.ts": 'const value: number = "wrong";\n',
             "repository-root/plugins/clock/happy.plugin.json": `${JSON.stringify(
                 {
+                    author: "Happy",
+                    category: "utilities",
                     description: "A small clock.",
                     icon: "icon.png",
                     main: "index.ts",

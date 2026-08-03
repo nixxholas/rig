@@ -40,6 +40,7 @@ export { MurmurFriendsStore } from "./MurmurFriendElement.js";
 export type { MurmurFriendsState } from "./MurmurFriendElement.js";
 export {
     PluginAppRequestError,
+    PluginIconRequestError,
     PluginManagementRequestError,
     PluginStore,
 } from "./PluginElement.js";
@@ -48,8 +49,10 @@ export type {
     PluginApp,
     PluginAppResource,
     PluginCatalogFailure,
+    PluginIconRequestErrorCode,
     PluginsState,
     ReadPluginAppResourceResult,
+    ReadPluginIconResult,
 } from "./PluginElement.js";
 export type {
     InstalledPluginSummary,
@@ -180,6 +183,8 @@ export type {
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
+    PluginCategory,
+    PluginIcon,
     ProviderModelCatalog,
     PermissionReviewState,
     ProviderQuota,

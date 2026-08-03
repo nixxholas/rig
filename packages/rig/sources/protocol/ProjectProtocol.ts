@@ -3,6 +3,7 @@ import type {
     HappyComputePreparationPhase,
     HappyComputeProviderContribution,
     HappyPluginAppContribution,
+    HappyPluginCategory,
 } from "happy-plugins";
 import { Type, type Static } from "@sinclair/typebox";
 
@@ -429,6 +430,10 @@ export interface SetPresenceRequestBody {
 export interface PluginSummary {
     /** Running local MCP Apps, ordered exactly as a navigation host should present them. */
     apps: readonly HappyPluginAppContribution[];
+    /** The bounded human-readable publisher/author label from the manifest. */
+    author: string;
+    /** The one catalog section chosen by the plugin author. */
+    category: HappyPluginCategory;
     /** The live compute contribution from this plugin process, when attached. */
     compute?: HappyComputeProviderContribution;
     /** The folder the plugin writes to, which the user can open. */
@@ -437,6 +442,13 @@ export interface PluginSummary {
     /** Where Rig installed the plugin's code. */
     directory: string;
     folder: string;
+    /** A private resource handle. It contains no filesystem location or credential. */
+    icon: {
+        /** SHA-256 identity of the validated icon bytes. */
+        generation: string;
+        mediaType: "image/png";
+        size: number;
+    };
     /** Why the current plugin generation is or is not available. */
     status: "failed" | "running" | "stopped";
     /** The plugin's own human-readable description of its current state. */

@@ -429,6 +429,8 @@ async function runOwnedLocalProtocolServer(
             loadSkills: (fs) => requirePluginManager(pluginManager).loadSkills(fs),
             loadSystemPrompt: () => requirePluginManager(pluginManager).loadSystemPrompt(),
             list: () => requirePluginManager(pluginManager).list(),
+            readIcon: (...parameters) =>
+                requirePluginManager(pluginManager).readIcon(...parameters),
             network: {
                 interceptHttp: (request) =>
                     requirePluginManager(pluginManager).interceptHttp(request),

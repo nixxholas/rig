@@ -91,6 +91,8 @@ The manifest is intentionally small and exact:
 
 ```json
 {
+    "author": "Happy",
+    "category": "developer-tools",
     "name": "Project Counter",
     "description": "Reports how many projects Happy knows about.",
     "version": "1.0.0",
@@ -111,11 +113,16 @@ The manifest is intentionally small and exact:
 }
 ```
 
-`name`, `description`, and `icon` are required. `main`, `skills`, `systemPrompt`, `version`,
+`author`, `category`, `name`, `description`, and `icon` are required. `main`, `skills`,
+`systemPrompt`, `version`,
 `docker`, `apps`, and `compute` are optional, but at least a main entry point, a skills directory,
 or a system-prompt contribution must be present. Extra fields are rejected.
 
 - `name`: a non-empty human-readable name.
+- `author`: the publisher/author label displayed in the local catalog. It is 1–80 characters,
+  cannot start or end with whitespace, and cannot contain control characters.
+- `category`: exactly one of `automation`, `collaboration`, `data`, `developer-tools`, `media`,
+  `productivity`, `utilities`, or `other`.
 - `description`: a non-empty explanation of the plugin.
 - `version`: a Semantic Versioning string. An omitted version is treated as `0.0.0`.
 - `main`: a relative path to a runnable JavaScript or TypeScript file inside the plugin folder.
@@ -125,7 +132,8 @@ or a system-prompt contribution must be present. Extra fields are rejected.
 - `systemPrompt`: either `{ "text": "..." }` for inline text or `{ "path": "..." }` for a
   relative ordinary file inside the plugin folder. A contribution and the combined active-plugin
   contribution are each capped at 256 KiB.
-- `icon`: a relative path to a PNG file inside the plugin folder.
+- `icon`: a relative path to a square PNG file inside the plugin folder. The file is limited to
+  4 MiB and 2048×2048 pixels.
 - `compute`: one lowercase provider name contributed by this plugin process. A compute contribution
   requires `main`, and startup code must call `happy.compute.register(...)`.
 - `apps`: up to 8 immutable static MCP Apps, each with a stable ID, resource root, HTML page,
@@ -135,7 +143,8 @@ or a system-prompt contribution must be present. Extra fields are rejected.
   access or changes the sandbox allowlist.
 
 Main and icon paths must remain inside the plugin folder. The main entry point and icon themselves
-must be ordinary files rather than symbolic links. Happy does not register a plugin whose
+must be ordinary files rather than symbolic links. Happy validates the icon's exact bytes, PNG
+type, dimensions, and square shape. Happy does not register a plugin whose
 manifest, icon, or main entry point is invalid.
 
 ### Run the plugin in Docker

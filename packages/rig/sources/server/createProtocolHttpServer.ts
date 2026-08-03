@@ -199,7 +199,7 @@ import type {
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
-import { PluginAppError, PluginNotFoundError } from "../plugins/index.js";
+import { PluginAppError, PluginIconError, PluginNotFoundError } from "../plugins/index.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import {
     describeWebappScopeNotAllowed,
@@ -283,6 +283,7 @@ export interface ProtocolHttpServerOptions {
         | "install"
         | "list"
         | "readAppResource"
+        | "readIcon"
         | "readLog"
         | "storageDelete"
         | "storageGet"
@@ -408,6 +409,7 @@ interface ProtocolServerRuntimeConfig {
               | "install"
               | "list"
               | "readAppResource"
+              | "readIcon"
               | "readLog"
               | "storageDelete"
               | "storageGet"
@@ -747,6 +749,32 @@ async function handleRequest(
             return;
         }
         sendJson(response, 200, { log: await runtimeConfig.plugins.readLog(route.pluginName) });
+        return;
+    }
+    if (request.method === "GET" && route.name === "plugin-icon") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
+            return;
+        }
+        try {
+            const icon = await plugins.readIcon(route.pluginId, route.generation);
+            response.statusCode = 200;
+            response.setHeader("cache-control", "private, max-age=31536000, immutable");
+            response.setHeader("content-length", String(icon.body.byteLength));
+            response.setHeader("content-type", icon.mediaType);
+            response.setHeader("x-content-type-options", "nosniff");
+            response.end(icon.body);
+        } catch (error) {
+            if (!(error instanceof PluginIconError)) throw error;
+            const status =
+                error.code === "plugin_not_found"
+                    ? 404
+                    : error.code === "stale_generation"
+                      ? 409
+                      : 422;
+            sendJson(response, status, { error: { code: error.code, message: error.message } });
+        }
         return;
     }
     if (request.method === "POST" && route.name === "plugin-app-resource-read") {
@@ -3591,6 +3619,12 @@ function matchRoute(pathname: string):
           sessionId?: undefined;
       }
     | {
+          generation: string;
+          name: "plugin-icon";
+          pluginId: string;
+          sessionId?: undefined;
+      }
+    | {
           appId: string;
           generation: string;
           name: "plugin-app-resource-read" | "plugin-app-tool-call";
@@ -3805,6 +3839,13 @@ function matchRoute(pathname: string):
         const operation = appOperation[4] as "delete" | "get" | "list" | "set" | undefined;
         if (operation === undefined) return undefined;
         return { appId, generation, name: "plugin-app-storage", operation };
+    }
+    const pluginIcon = /^\/plugins\/([^/]+)\/generations\/([^/]+)\/icon$/u.exec(pathname);
+    if (pluginIcon !== null) {
+        const pluginId = decodeUrlComponent(pluginIcon[1]);
+        const generation = decodeUrlComponent(pluginIcon[2]);
+        if (pluginId === undefined || generation === undefined) return undefined;
+        return { generation, name: "plugin-icon", pluginId };
     }
     if (
         globalParts.length === 3 &&

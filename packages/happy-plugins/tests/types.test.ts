@@ -10,6 +10,30 @@ import { happyPluginManifestSchema } from "../sources/types.js";
 import { HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS } from "../sources/types.js";
 
 describe("happy plugin manifest", () => {
+    it("requires bounded catalog author and category metadata", () => {
+        const manifest = {
+            author: "Happy",
+            category: "developer-tools",
+            description: "Tests catalog metadata.",
+            icon: "icon.png",
+            main: "index.ts",
+            name: "Catalog fixture",
+        };
+
+        expect(Value.Check(happyPluginManifestSchema, manifest)).toBe(true);
+        expect(Value.Check(happyPluginManifestSchema, { ...manifest, author: "" })).toBe(false);
+        expect(
+            Value.Check(happyPluginManifestSchema, { ...manifest, author: "x".repeat(81) }),
+        ).toBe(false);
+        expect(
+            Value.Check(happyPluginManifestSchema, { ...manifest, category: "uncategorized" }),
+        ).toBe(false);
+        const { author: _author, ...withoutAuthor } = manifest;
+        const { category: _category, ...withoutCategory } = manifest;
+        expect(Value.Check(happyPluginManifestSchema, withoutAuthor)).toBe(false);
+        expect(Value.Check(happyPluginManifestSchema, withoutCategory)).toBe(false);
+    });
+
     it("validates compute readiness errors and terminal instance tombstones", () => {
         expect(
             Value.Check(happyComputeErrorSchema, {
@@ -89,6 +113,8 @@ describe("happy plugin manifest", () => {
 
     it("accepts Dockerfile and prebuilt-image runtime declarations", () => {
         const manifest = {
+            author: "Happy",
+            category: "developer-tools",
             description: "Runs in a container.",
             icon: "icon.png",
             main: "index.ts",
@@ -113,6 +139,8 @@ describe("happy plugin manifest", () => {
 
     it("matches entry point extensions case-insensitively and rejects declarations", () => {
         const manifest = {
+            author: "Happy",
+            category: "developer-tools",
             description: "Tests the manifest entry point.",
             icon: "icon.png",
             main: "index.MJS",
@@ -130,6 +158,8 @@ describe("happy plugin manifest", () => {
 
     it("accepts at most sixteen exact interception hostnames and rejects wildcards", () => {
         const manifest = {
+            author: "Happy",
+            category: "developer-tools",
             description: "Intercepts one exact API host.",
             icon: "icon.png",
             interceptDomains: ["api.example.com"],

@@ -2,7 +2,7 @@ import { request as requestHttp } from "node:http";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PluginAppError, PluginNotFoundError } from "../../plugins/index.js";
+import { PluginAppError, PluginIconError, PluginNotFoundError } from "../../plugins/index.js";
 import type { PluginContext } from "../../agent/context/PluginContext.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -206,6 +206,20 @@ describe("plugin HTTP protocol", () => {
                 })
             ).status,
         ).toBe(409);
+
+        const iconBase = `/plugins/clock/generations/${"a".repeat(64)}/icon`;
+        expect((await request(port, { path: iconBase, token: "wrong" })).status).toBe(401);
+        await expect(request(port, { path: iconBase })).resolves.toMatchObject({
+            body: "catalog-icon",
+            status: 200,
+        });
+        expect(
+            (
+                await request(port, {
+                    path: `/plugins/clock/generations/${"b".repeat(64)}/icon`,
+                })
+            ).status,
+        ).toBe(409);
     });
 });
 
@@ -215,6 +229,7 @@ function context(): Pick<
     | "install"
     | "list"
     | "readAppResource"
+    | "readIcon"
     | "readLog"
     | "storageDelete"
     | "storageGet"
@@ -249,10 +264,17 @@ function context(): Pick<
                 plugins: [
                     {
                         apps: [],
+                        author: "Happy",
+                        category: "utilities",
                         dataDirectory: "/data/clock",
                         description: "A clock.",
                         directory: "/plugins/clock",
                         folder: "clock",
+                        icon: {
+                            generation: "a".repeat(64),
+                            mediaType: "image/png",
+                            size: 12,
+                        },
                         logAvailable: true,
                         name: "Clock",
                         status: "stopped",
@@ -266,6 +288,18 @@ function context(): Pick<
             if (generation === "old")
                 throw new PluginAppError("stale_generation", "stale generation");
             return { mimeType: "text/html;profile=mcp-app", text: "<h1>Usage</h1>", uri };
+        },
+        async readIcon(_pluginId, generation) {
+            if (generation !== "a".repeat(64)) {
+                throw new PluginIconError("stale_generation", "stale generation");
+            }
+            const body = Buffer.from("catalog-icon");
+            return {
+                body,
+                generation,
+                mediaType: "image/png",
+                size: body.byteLength,
+            };
         },
         async readLog(name) {
             return {

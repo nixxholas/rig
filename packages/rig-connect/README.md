@@ -24,7 +24,7 @@ subscription:
 ```ts
 const plugins = rig.connectPlugins({
     onChange(apps, installed, state) {
-        renderPluginNavigation(apps, state);
+        renderPluginCatalog(installed, apps, state);
     },
 });
 ```
@@ -33,6 +33,37 @@ Apps are in deterministic navigation order: order, label, plugin identity, then 
 Unchanged objects preserve reference identity. The stable `id` is
 `<plugin-folder>:<app-id>`; `generation` changes whenever the owning process restarts or is
 replaced.
+
+Each `LocalPlugin` carries the manifest's bounded `author` label, one canonical `category`, and a
+transport-safe icon handle:
+
+```ts
+type PluginCategory =
+    | "automation"
+    | "collaboration"
+    | "data"
+    | "developer-tools"
+    | "media"
+    | "productivity"
+    | "utilities"
+    | "other";
+
+type LocalPlugin = {
+    // Existing catalog and lifecycle fields omitted.
+    author: string;
+    category: PluginCategory;
+    icon: { generation: string; mediaType: "image/png"; size: number };
+};
+
+const plugin = plugins.plugins()[0]!;
+const icon = await plugins.readIcon(plugin);
+// icon: { bytes: Uint8Array; mediaType: "image/png" }
+```
+
+`readIcon` sends the daemon bearer token itself, checks the response against the declared type and
+size, and is cancelled by either its optional `AbortSignal` or `plugins.close()`.
+`PluginIconRequestError` exposes `icon_unavailable`, `plugin_not_found`, or `stale_generation`.
+The handle contains no filesystem path, URL credential, or arbitrary-read capability.
 
 ```ts
 const app = plugins.apps()[0]!;

@@ -245,15 +245,31 @@ same local-or-Docker filesystem, current permission mode, shell sandbox,
 network boundary, process accounting, output limits, and abort lifecycle as the
 TUI agent. File writes retain Happy's SHA-256 optimistic-concurrency contract.
 
-## Happy2 local MCP Apps
+## Happy2 local plugins and MCP Apps
 
 Happy2 consumes local MCP Apps through `@slopus/rig-connect`. Its Electron main process passes
 the daemon endpoint and bearer token to `connectRig`, then calls `connectPlugins`. Never send those
-credentials to a renderer or open a second event stream. Protocol version 3 is required.
+credentials to a renderer or open a second event stream. Protocol version 5 is required.
 
 `onChange(apps, plugins, state)` supplies the complete catalog in navigation order. Key logical
 navigation by `app.id`, but key loaded code and caches by both `app.id` and `app.generation`. A
 generation change is replacement, never an in-place update.
+
+For the App Store-style local plugin catalog, render `plugin.name`, `plugin.description`,
+`plugin.author`, and `plugin.category` directly from `LocalPlugin`. Load artwork in Electron main
+with `await connection.readIcon(plugin, { signal })`, then transfer or register only those returned
+PNG bytes for the renderer. Cache by `[plugin.id, plugin.icon.generation]`; on
+`PluginIconRequestError` with `code === "stale_generation"`, discard that cache entry and wait for
+the authoritative catalog. Do not turn the daemon endpoint into a public image URL, send the bearer
+token to a renderer, or infer a filesystem location.
+
+The corresponding Happy dependency change is a direct bump from `@slopus/rig-connect@0.0.29` to
+`@slopus/rig-connect@0.0.30` after that patch is released. Replace Happy's parallel local-plugin
+publisher/category/icon types with the exported `LocalPlugin`, `PluginCategory`, `PluginIcon`, and
+`ReadPluginIconResult` types, and use `RigPluginsConnection.readIcon`. Release
+`happy-plugins@0.0.5` first for manifest authors, Rig `0.0.128` with protocol 5 second, and
+`@slopus/rig-connect@0.0.30` third; then bump Happy. These are required patch releases under the
+repository's early-stage policy—there is no legacy manifest alias or protocol fallback.
 
 Mounting must be instant at click time:
 

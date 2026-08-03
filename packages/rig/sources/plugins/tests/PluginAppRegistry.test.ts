@@ -226,6 +226,11 @@ function plugin(): PluginRuntimeSnapshot {
         directory: "/plugin",
         entryPath: "/plugin/index.ts",
         folderName: "usage",
+        icon: {
+            generation: "a".repeat(64),
+            mediaType: "image/png",
+            size: 128,
+        },
         iconPath: "/plugin/icon.png",
         manifest: {
             apps: [
@@ -237,6 +242,8 @@ function plugin(): PluginRuntimeSnapshot {
                     title: "Usage",
                 },
             ],
+            author: "Happy",
+            category: "utilities",
             description: "Usage",
             icon: "icon.png",
             main: "index.ts",

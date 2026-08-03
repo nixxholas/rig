@@ -25,6 +25,8 @@ const nonEmptyText = Type.String({ minLength: 1 });
 
 // Must stay in sync with MAX_INSTALLED_PLUGINS in Rig's plugin discovery.
 export const HAPPY_PLUGIN_MAX_LIST_ITEMS = 64;
+export const HAPPY_PLUGIN_MAX_ICON_BYTES = 4 * 1024 * 1024;
+export const HAPPY_PLUGIN_MAX_ICON_DIMENSION = 2_048;
 export const HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS = 16;
 export const HAPPY_PLUGIN_MAX_NETWORK_BODY_BYTES = 256 * 1024;
 export const HAPPY_PLUGIN_MAX_NETWORK_EVENT_BYTES = 512 * 1024;
@@ -749,6 +751,18 @@ export const happyPluginDockerSchema = Type.Union([
 ]);
 export type HappyPluginDocker = Static<typeof happyPluginDockerSchema>;
 
+export const happyPluginCategorySchema = Type.Union([
+    Type.Literal("automation"),
+    Type.Literal("collaboration"),
+    Type.Literal("data"),
+    Type.Literal("developer-tools"),
+    Type.Literal("media"),
+    Type.Literal("productivity"),
+    Type.Literal("utilities"),
+    Type.Literal("other"),
+]);
+export type HappyPluginCategory = Static<typeof happyPluginCategorySchema>;
+
 export const happyPluginManifestSchema = Type.Object(
     {
         apps: Type.Optional(
@@ -757,10 +771,16 @@ export const happyPluginManifestSchema = Type.Object(
                 uniqueItems: true,
             }),
         ),
+        author: Type.String({
+            maxLength: 80,
+            minLength: 1,
+            pattern: "^(?!\\s)(?!.*\\s$)[^\\x00-\\x1F\\x7F]+$",
+        }),
+        category: happyPluginCategorySchema,
         compute: Type.Optional(happyComputeProviderManifestSchema),
-        description: Type.String({ minLength: 1 }),
+        description: Type.String({ maxLength: 512, minLength: 1 }),
         docker: Type.Optional(happyPluginDockerSchema),
-        icon: Type.String({ pattern: "^.+\\.[pP][nN][gG]$" }),
+        icon: Type.String({ maxLength: 4_096, pattern: "^.+\\.[pP][nN][gG]$" }),
         interceptDomains: Type.Optional(
             Type.Array(
                 Type.String({
@@ -781,7 +801,7 @@ export const happyPluginManifestSchema = Type.Object(
                     "^(?!.*\\.[dD]\\.[cCmM]?[tT][sS]$).+\\.(?:[cCmM]?[jJ][sS]|[cCmM]?[tT][sS])$",
             }),
         ),
-        name: Type.String({ minLength: 1 }),
+        name: Type.String({ maxLength: 128, minLength: 1 }),
         skills: Type.Optional(Type.String({ minLength: 1 })),
         systemPrompt: Type.Optional(happyPluginSystemPromptContributionSchema),
         version: Type.Optional(happyPluginVersionSchema),

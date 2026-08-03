@@ -3,7 +3,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createGym, type Gym } from "@slopus/rig-gym";
 
 const running = new Set<Gym>();
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 
 afterEach(async () => {
     await Promise.all([...running].map((gym) => gym.dispose()));
@@ -30,6 +33,8 @@ describe("TypeScript plugins", () => {
                 ].join("\n"),
                 ".happy/rig/plugins/project-counter/happy.plugin.json": `${JSON.stringify(
                     {
+                        author: "Happy",
+                        category: "developer-tools",
                         description: "Records how many projects Rig knows.",
                         icon: "icon.png",
                         main: "index.ts",

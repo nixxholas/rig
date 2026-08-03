@@ -7,6 +7,7 @@ import type {
 } from "../../protocol/index.js";
 import type { HappySystemPromptHookInput, HappyTracingEvent } from "happy-plugins";
 import type { PluginAppResource } from "../../plugins/PluginAppRegistry.js";
+import type { PluginIconResource } from "../../plugins/types.js";
 import type {
     GitHubPluginIndex,
     GitHubPluginInstallSource,
@@ -59,6 +60,7 @@ export interface PluginContext {
         generation: string,
         resourceUri: string,
     ): PluginAppResource;
+    readIcon(pluginId: string, generation: string): Promise<PluginIconResource>;
     storageDelete(applicationId: string, generation: string, key: string): Promise<void>;
     storageGet(
         applicationId: string,

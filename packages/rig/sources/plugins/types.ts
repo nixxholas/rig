@@ -45,11 +45,22 @@ export interface RegisteredPlugin {
     docker?: PluginDockerRuntime;
     entryPath?: string;
     folderName: string;
+    icon: PluginIconSummary;
     iconPath: string;
     manifest: RegisteredPluginManifest;
     manifestPath: string;
     skillsPath?: string;
     systemPrompt?: string;
+}
+
+export interface PluginIconSummary {
+    generation: string;
+    mediaType: "image/png";
+    size: number;
+}
+
+export interface PluginIconResource extends PluginIconSummary {
+    body: Buffer;
 }
 
 export interface PluginAppResourceSnapshot {

@@ -34,7 +34,10 @@ import {
 import { readPluginDockerBridgeAuthentication } from "../startPluginDockerSocketBridge.js";
 import { withPluginDockerDeadline } from "../withPluginDockerDeadline.js";
 
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -606,6 +609,8 @@ async function createPlugin(options: {
             join(directory, "happy.plugin.json"),
             `${JSON.stringify(
                 {
+                    author: "Happy",
+                    category: "developer-tools",
                     description: "A container clock.",
                     ...(options.docker === undefined ? {} : { docker: options.docker }),
                     icon: "icon.png",

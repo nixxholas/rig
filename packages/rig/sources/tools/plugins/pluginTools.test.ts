@@ -179,10 +179,17 @@ describe("plugin tools", () => {
                 plugins: [
                     {
                         apps: [],
+                        author: "Happy",
+                        category: "utilities",
                         dataDirectory: "/home/steve/Happy/Plugins/clock",
                         description: "A small clock.",
                         directory: "/home/steve/.happy/rig/plugins/clock",
                         folder: "clock",
+                        icon: {
+                            generation: "a".repeat(64),
+                            mediaType: "image/png",
+                            size: 128,
+                        },
                         logAvailable: true,
                         name: "Clock",
                         status: "running",

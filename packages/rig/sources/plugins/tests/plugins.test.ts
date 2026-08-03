@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import sharp from "sharp";
 
 import { discoverPlugins } from "../discoverPlugins.js";
 import { PluginLog } from "../PluginLog.js";
@@ -11,7 +12,10 @@ import { getPluginsDirectory } from "../getPluginsDirectory.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "../readBoundedPluginLog.js";
 import { readPluginManifest } from "../readPluginManifest.js";
 
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
@@ -68,6 +72,8 @@ describe("plugins", () => {
         });
         await createPluginFixture(join(root, "broken"), {
             manifest: {
+                author: "Happy",
+                category: "utilities",
                 description: "Has an unexpected field",
                 icon: "icon.png",
                 main: "index.ts",
@@ -108,10 +114,51 @@ describe("plugins", () => {
         );
     });
 
+    it("accepts only bounded square PNG catalog icons", async () => {
+        const root = await temporaryDirectory();
+        const valid = join(root, "valid");
+        const rectangular = join(root, "rectangular");
+        const oversized = join(root, "oversized");
+        await Promise.all([
+            createPluginFixture(valid, {}),
+            createPluginFixture(rectangular, {}),
+            createPluginFixture(oversized, {}),
+        ]);
+        await writeFile(
+            join(rectangular, "icon.png"),
+            await sharp({
+                create: {
+                    background: "#336699",
+                    channels: 4,
+                    height: 32,
+                    width: 64,
+                },
+            })
+                .png()
+                .toBuffer(),
+        );
+        await writeFile(join(oversized, "icon.png"), Buffer.alloc(4 * 1024 * 1024 + 1));
+
+        await expect(readPluginManifest(valid)).resolves.toMatchObject({
+            icon: {
+                generation: expect.stringMatching(/^[a-f0-9]{64}$/u),
+                mediaType: "image/png",
+                size: expect.any(Number),
+            },
+        });
+        await expect(readPluginManifest(rectangular)).rejects.toThrow(
+            "The plugin icon must be square.",
+        );
+        await expect(readPluginManifest(oversized)).rejects.toThrow(
+            "The plugin icon cannot exceed 4 MiB.",
+        );
+    });
+
     it("rejects manifest assets that escape through symbolic links", async () => {
         const root = await temporaryDirectory();
         const directory = join(root, "linked");
         const externalEntry = join(root, "outside.ts");
+        const externalIcon = join(root, "outside.png");
         await createPluginFixture(directory, {});
         await writeFile(externalEntry, 'console.log("outside");\n');
         await rm(join(directory, "index.ts"));
@@ -119,6 +166,15 @@ describe("plugins", () => {
 
         await expect(readPluginManifest(directory)).rejects.toThrow(
             "The plugin main entry point must be a file.",
+        );
+
+        await rm(join(directory, "index.ts"));
+        await writeFile(join(directory, "index.ts"), 'console.log("inside");\n');
+        await writeFile(externalIcon, PNG_SIGNATURE);
+        await rm(join(directory, "icon.png"));
+        await symlink(externalIcon, join(directory, "icon.png"));
+        await expect(readPluginManifest(directory)).rejects.toThrow(
+            "The plugin icon must be an ordinary file.",
         );
     });
 
@@ -221,6 +277,8 @@ async function createPluginFixture(
             join(directory, "happy.plugin.json"),
             `${JSON.stringify(
                 options.manifest ?? {
+                    author: "Happy",
+                    category: "utilities",
                     description: "A small clock.",
                     icon: "icon.png",
                     main: "index.ts",
@@ -240,6 +298,8 @@ async function createPluginFixture(
 
 function pluginManifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
     return {
+        author: "Happy",
+        category: "utilities",
         description: "A small clock.",
         icon: "icon.png",
         main: "index.ts",

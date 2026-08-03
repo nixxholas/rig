@@ -225,7 +225,7 @@ function friendshipChanged(cursor: string, id: string): string {
 }
 
 function hello(cursor: string, gap: boolean, resumed: boolean): string {
-    return sse("hello", { cursor, gap, protocolVersion: 4, resumed });
+    return sse("hello", { cursor, gap, protocolVersion: 5, resumed });
 }
 
 function sse(event: string, data: unknown): string {

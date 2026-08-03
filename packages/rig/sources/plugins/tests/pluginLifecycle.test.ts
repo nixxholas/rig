@@ -4,6 +4,7 @@ import { join } from "node:path";
 import type Dockerode from "dockerode";
 import { defineModel } from "@slopus/rig-execution";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import sharp from "sharp";
 
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
 import type { FileSystemContext } from "../../agent/context/FileSystemContext.js";
@@ -18,7 +19,10 @@ import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS, PluginStartupState } from "../Plugin
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
 import type { RegisteredPlugin } from "../types.js";
 
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 const TEST_MODEL = defineModel({
     defaultThinkingLevel: "off",
     id: "test/model",
@@ -72,10 +76,17 @@ describe("plugin registration", () => {
         expect(afterInstall.plugins).toEqual([
             {
                 apps: [],
+                author: "Happy",
+                category: "utilities",
                 dataDirectory: join(harness.dataRoot, "clock"),
                 description: "A small clock.",
                 directory: installed.directory,
                 folder: "clock",
+                icon: {
+                    generation: expect.stringMatching(/^[a-f0-9]{64}$/u),
+                    mediaType: "image/png",
+                    size: PNG_SIGNATURE.byteLength,
+                },
                 logAvailable: true,
                 name: "Clock",
                 status: "running",
@@ -84,6 +95,25 @@ describe("plugin registration", () => {
             },
         ]);
         expect(lastPlugins(harness.events)).toEqual(afterInstall.plugins);
+        const icon = afterInstall.plugins[0]!.icon;
+        await expect(harness.manager.readIcon("clock", icon.generation)).resolves.toMatchObject({
+            body: PNG_SIGNATURE,
+            ...icon,
+        });
+        const replacementIcon = await sharp({
+            create: {
+                background: "#234567",
+                channels: 4,
+                height: 2,
+                width: 2,
+            },
+        })
+            .png()
+            .toBuffer();
+        await writeFile(join(installed.directory, "icon.png"), replacementIcon);
+        await expect(harness.manager.readIcon("clock", icon.generation)).rejects.toMatchObject({
+            code: "stale_generation",
+        });
         expect(harness.events.at(-1)?.data.installation).toEqual(installed);
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
@@ -1040,6 +1070,8 @@ async function createPluginSource(
             join(directory, "happy.plugin.json"),
             `${JSON.stringify(
                 {
+                    author: "Happy",
+                    category: "utilities",
                     description: "A small clock.",
                     ...(computeName === undefined ? {} : { compute: { name: computeName } }),
                     ...(docker === undefined ? {} : { docker }),

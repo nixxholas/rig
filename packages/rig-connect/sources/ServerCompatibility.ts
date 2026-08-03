@@ -1,7 +1,7 @@
 /** Oldest daemon protocol this build of rig-connect can read. */
-export const MINIMUM_RIG_PROTOCOL_VERSION = 4;
+export const MINIMUM_RIG_PROTOCOL_VERSION = 5;
 /** Newest daemon protocol this build of rig-connect can read. */
-export const MAXIMUM_RIG_PROTOCOL_VERSION = 4;
+export const MAXIMUM_RIG_PROTOCOL_VERSION = 5;
 
 export type ServerCompatibility =
     | {

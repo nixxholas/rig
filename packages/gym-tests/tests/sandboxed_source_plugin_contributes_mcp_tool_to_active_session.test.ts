@@ -13,6 +13,8 @@ const PLUGIN_TOOL_NAME = "mcp__Project_Tools___Catalog__list_projects";
 const APP_ONLY_TOOL_NAME = "mcp__Project_Tools___Catalog__refresh_app";
 const PLUGIN_MANIFEST = `${JSON.stringify(
     {
+        author: "Happy",
+        category: "developer-tools",
         description: "Contributes a project catalog tool.",
         icon: "icon.png",
         main: "index.ts",

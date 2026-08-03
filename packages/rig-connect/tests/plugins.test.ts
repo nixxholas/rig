@@ -19,6 +19,20 @@ describe("plugin MCP App projection", () => {
         expect(() => store.replace([invalid], [], "live")).toThrow();
     });
 
+    it("rejects invalid catalog display metadata at the browser boundary", () => {
+        const store = new PluginStore();
+        expect(() =>
+            store.replace([{ ...plugin("generation-1"), author: "" }], [], "live"),
+        ).toThrow();
+        expect(() =>
+            store.replace(
+                [{ ...plugin("generation-1"), category: "uncategorized" as never }],
+                [],
+                "live",
+            ),
+        ).toThrow();
+    });
+
     it("rebases a stream change that lands during the opening snapshot without losing it", async () => {
         const encoder = new TextEncoder();
         let stream!: ReadableStreamDefaultController<Uint8Array>;
@@ -197,6 +211,26 @@ describe("plugin MCP App projection", () => {
                     ],
                 });
             }
+            if (url.endsWith(`/generations/${"a".repeat(64)}/icon`)) {
+                expect(new Headers(init?.headers).get("authorization")).toBe("Bearer secret");
+                return new Response(new Uint8Array([137, 80, 78, 71]), {
+                    headers: {
+                        "content-length": "4",
+                        "content-type": "image/png",
+                    },
+                });
+            }
+            if (url.endsWith(`/generations/${"b".repeat(64)}/icon`)) {
+                return Response.json(
+                    {
+                        error: {
+                            code: "stale_generation",
+                            message: "That icon generation is stale.",
+                        },
+                    },
+                    { status: 409 },
+                );
+            }
             if (url.endsWith("/tools/call")) {
                 expect(init?.method).toBe("POST");
                 const body = JSON.parse(String(init?.body)) as { name: string };
@@ -227,7 +261,18 @@ describe("plugin MCP App projection", () => {
         stream.enqueue(encoder.encode(hello(CURSOR_1, false, false)));
         await vi.waitFor(() => expect(connection.apps()).toHaveLength(1));
         const application = connection.apps()[0]!;
+        const installed = connection.plugins()[0]!;
 
+        await expect(connection.readIcon(installed)).resolves.toEqual({
+            bytes: new Uint8Array([137, 80, 78, 71]),
+            mediaType: "image/png",
+        });
+        await expect(
+            connection.readIcon({
+                ...installed,
+                icon: { ...installed.icon, generation: "b".repeat(64) },
+            }),
+        ).rejects.toMatchObject({ code: "stale_generation", status: 409 });
         await expect(
             connection.readResource(application, "ui://usage/overview/index.html"),
         ).resolves.toMatchObject({
@@ -251,6 +296,7 @@ describe("plugin MCP App projection", () => {
         ).rejects.toThrow("exceeds the host limit");
 
         connection.close();
+        await expect(connection.readIcon(installed)).rejects.toThrow("connection is closed");
         await expect(connection.callTool(application, "Usage", "read", {})).rejects.toThrow(
             "connection is closed",
         );
@@ -363,10 +409,17 @@ function plugin(generation: string, withLargeResource = false): PluginSummary {
                 ],
             },
         ],
+        author: "Happy",
+        category: "utilities",
         dataDirectory: "/data/usage",
         description: "Provider usage.",
         directory: "/plugins/usage",
         folder: "usage",
+        icon: {
+            generation: "a".repeat(64),
+            mediaType: "image/png",
+            size: 4,
+        },
         logAvailable: false,
         name: "Usage",
         status: "running",
@@ -376,7 +429,7 @@ function plugin(generation: string, withLargeResource = false): PluginSummary {
 }
 
 function hello(cursor: string, gap: boolean, resumed: boolean): string {
-    return sse("hello", { cursor, gap, protocolVersion: 4, resumed });
+    return sse("hello", { cursor, gap, protocolVersion: 5, resumed });
 }
 
 function pluginsChanged(cursor: string, plugins: readonly PluginSummary[]): string {

@@ -8,18 +8,29 @@ describe("plugin logs", () => {
             const url = String(input);
             if (url.endsWith("/plugins")) {
                 return Response.json({
+                    cursor: "01900000-0000-7000-8000-000000000001",
                     failures: [],
                     plugins: [
                         {
+                            apps: [],
+                            author: "Happy",
+                            category: "utilities",
                             dataDirectory: "/home/steve/Happy/Plugins/clock",
                             description: "A clock.",
                             directory: "/home/steve/.happy/rig/plugins/clock",
                             folder: "clock",
+                            icon: {
+                                generation: "a".repeat(64),
+                                mediaType: "image/png",
+                                size: 128,
+                            },
                             logAvailable: true,
                             name: "Clock",
                             status: "stopped",
+                            version: "0.0.0",
                         },
                     ],
+                    version: "01900000-0000-7000-8000-000000000001",
                 });
             }
             if (url.endsWith("/plugins/Clock/log")) {
@@ -92,7 +103,7 @@ describe("plugin logs", () => {
                 sse("hello", {
                     cursor: "01900000-0000-7000-8000-000000000001",
                     gap: false,
-                    protocolVersion: 4,
+                    protocolVersion: 5,
                     resumed: false,
                 }),
             ),
@@ -108,13 +119,21 @@ describe("plugin logs", () => {
                             plugins: [
                                 {
                                     apps: [],
+                                    author: "Happy",
+                                    category: "utilities",
                                     dataDirectory: "/plugins/clock",
                                     description: "A clock.",
                                     directory: "/managed/clock",
                                     folder: "clock",
+                                    icon: {
+                                        generation: "a".repeat(64),
+                                        mediaType: "image/png",
+                                        size: 128,
+                                    },
                                     logAvailable: true,
                                     name: "Clock",
                                     status: "running",
+                                    version: "0.0.0",
                                 },
                             ],
                             version: "01900000-0000-7000-8000-000000000002",

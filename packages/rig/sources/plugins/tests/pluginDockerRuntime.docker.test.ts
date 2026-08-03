@@ -13,7 +13,10 @@ import { PluginMcpRegistry } from "../PluginMcpRegistry.js";
 import { readPluginManifest } from "../readPluginManifest.js";
 import { resolvePluginDockerImage } from "../resolvePluginDockerRuntime.js";
 
-const PNG_SIGNATURE = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const PNG_SIGNATURE = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
 const docker = new Dockerode();
 const dockerAvailable = await docker.ping().then(
     () => true,
@@ -41,6 +44,8 @@ describe.skipIf(!dockerAvailable)("Docker plugin lifecycle", () => {
                 join(source, "happy.plugin.json"),
                 `${JSON.stringify(
                     {
+                        author: "Happy",
+                        category: "developer-tools",
                         description: "A Docker lifecycle fixture.",
                         icon: "icon.png",
                         main: "index.ts",

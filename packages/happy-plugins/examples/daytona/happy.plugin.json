@@ -1,4 +1,6 @@
 {
+    "author": "Happy",
+    "category": "developer-tools",
     "name": "Daytona Compute",
     "description": "Creates Daytona cloud sandboxes, uploads a source folder, and provides bounded command and file access.",
     "version": "1.0.0",

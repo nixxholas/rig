@@ -3,6 +3,9 @@ import { Value } from "@sinclair/typebox/value";
 import type { ConnectionState } from "./ChatElement.js";
 import {
     pluginAppContributionSchema,
+    pluginSummarySchema,
+    type PluginCategory,
+    type PluginIcon,
     type PluginManagementErrorCode,
     type PluginAppContribution,
     type PluginSummary,
@@ -40,11 +43,14 @@ export interface PluginApp {
 
 export interface LocalPlugin {
     apps: readonly PluginApp[];
+    author: string;
+    category: PluginCategory;
     dataDirectory: string;
     description: string;
     directory: string;
     error?: string;
     id: string;
+    icon: PluginIcon;
     logAvailable: boolean;
     name: string;
     status: "failed" | "running" | "stopped";
@@ -65,6 +71,22 @@ export class PluginAppRequestError extends Error {
     ) {
         super(message);
         this.name = "PluginAppRequestError";
+    }
+}
+
+export type PluginIconRequestErrorCode =
+    | "icon_unavailable"
+    | "plugin_not_found"
+    | "stale_generation";
+
+export class PluginIconRequestError extends Error {
+    constructor(
+        readonly code: PluginIconRequestErrorCode,
+        readonly status: number,
+        message: string,
+    ) {
+        super(message);
+        this.name = "PluginIconRequestError";
     }
 }
 
@@ -91,6 +113,11 @@ export interface ReadPluginAppResourceResult {
         text?: string;
         uri: string;
     }[];
+}
+
+export interface ReadPluginIconResult {
+    bytes: Uint8Array;
+    mediaType: "image/png";
 }
 
 /** Immutable, reference-stable projection of the daemon's plugin catalog. */
@@ -154,24 +181,30 @@ export class PluginStore {
 }
 
 function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined): LocalPlugin {
+    const validated = Value.Decode(pluginSummarySchema, plugin);
     const previousApps = new Map(previous?.apps.map((app) => [app.id, app]) ?? []);
-    const apps = plugin.apps.map((app) => {
+    const apps = validated.apps.map((app) => {
         const projected = projectApp(Value.Decode(pluginAppContributionSchema, app));
         const before = previousApps.get(projected.id);
         return sameApp(before, projected) ? before! : projected;
     });
     return {
         apps: previous !== undefined && sameReferences(previous.apps, apps) ? previous.apps : apps,
-        dataDirectory: plugin.dataDirectory,
-        description: plugin.description,
-        directory: plugin.directory,
-        ...(plugin.error === undefined ? {} : { error: plugin.error }),
-        id: plugin.folder,
-        logAvailable: plugin.logAvailable,
-        name: plugin.name,
-        status: plugin.status,
-        ...(plugin.statusMessage === undefined ? {} : { statusMessage: plugin.statusMessage }),
-        version: plugin.version,
+        author: validated.author,
+        category: validated.category,
+        dataDirectory: validated.dataDirectory,
+        description: validated.description,
+        directory: validated.directory,
+        ...(validated.error === undefined ? {} : { error: validated.error }),
+        id: validated.folder,
+        icon: validated.icon,
+        logAvailable: validated.logAvailable,
+        name: validated.name,
+        status: validated.status,
+        ...(validated.statusMessage === undefined
+            ? {}
+            : { statusMessage: validated.statusMessage }),
+        version: validated.version,
     };
 }
 
@@ -194,11 +227,16 @@ function samePlugin(left: LocalPlugin | undefined, right: LocalPlugin): boolean 
     return (
         left !== undefined &&
         left.apps === right.apps &&
+        left.author === right.author &&
+        left.category === right.category &&
         left.dataDirectory === right.dataDirectory &&
         left.description === right.description &&
         left.directory === right.directory &&
         left.error === right.error &&
         left.id === right.id &&
+        left.icon.generation === right.icon.generation &&
+        left.icon.mediaType === right.icon.mediaType &&
+        left.icon.size === right.icon.size &&
         left.logAvailable === right.logAvailable &&
         left.name === right.name &&
         left.status === right.status &&

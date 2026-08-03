@@ -119,6 +119,11 @@ function plugin(root: string): RegisteredPlugin {
         directory: root,
         entryPath: join(root, "index.ts"),
         folderName: "usage",
+        icon: {
+            generation: "a".repeat(64),
+            mediaType: "image/png",
+            size: 128,
+        },
         iconPath: join(root, "icon.png"),
         manifest: {
             apps: [
@@ -130,6 +135,8 @@ function plugin(root: string): RegisteredPlugin {
                     title: "Usage",
                 },
             ],
+            author: "Happy",
+            category: "utilities",
             description: "Usage",
             icon: "icon.png",
             main: "index.ts",

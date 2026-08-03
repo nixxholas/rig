@@ -1541,22 +1541,57 @@ export const pluginAppContributionSchema = Type.Object(
     exact,
 );
 
-export interface PluginSummary {
-    apps: readonly PluginAppContribution[];
-    /** The folder the plugin writes to, which the user can open. */
-    dataDirectory: string;
-    description: string;
-    /** Where Rig installed the plugin's code. */
-    directory: string;
-    folder: string;
-    error?: string;
-    logAvailable: boolean;
-    name: string;
-    status: "failed" | "running" | "stopped";
-    /** The plugin's own human-readable description of its current state. */
-    statusMessage?: string;
-    version: string;
-}
+export const pluginCategorySchema = Type.Union([
+    Type.Literal("automation"),
+    Type.Literal("collaboration"),
+    Type.Literal("data"),
+    Type.Literal("developer-tools"),
+    Type.Literal("media"),
+    Type.Literal("productivity"),
+    Type.Literal("utilities"),
+    Type.Literal("other"),
+]);
+export type PluginCategory = Static<typeof pluginCategorySchema>;
+
+export const pluginIconSchema = Type.Object(
+    {
+        generation: Type.String({
+            maxLength: 64,
+            minLength: 64,
+            pattern: "^[a-f0-9]{64}$",
+        }),
+        mediaType: Type.Literal("image/png"),
+        size: Type.Integer({ maximum: 4 * 1024 * 1024, minimum: 1 }),
+    },
+    exact,
+);
+export type PluginIcon = Static<typeof pluginIconSchema>;
+
+export const pluginSummarySchema = Type.Object({
+    apps: Type.Array(pluginAppContributionSchema, { maxItems: 8 }),
+    author: Type.String({
+        maxLength: 80,
+        minLength: 1,
+        pattern: "^(?!\\s)(?!.*\\s$)[^\\x00-\\x1F\\x7F]+$",
+    }),
+    category: pluginCategorySchema,
+    compute: Type.Optional(Type.Unknown()),
+    dataDirectory: Type.String({ minLength: 1 }),
+    description: Type.String({ maxLength: 512, minLength: 1 }),
+    directory: Type.String({ minLength: 1 }),
+    error: Type.Optional(Type.String()),
+    folder: Type.String({ minLength: 1 }),
+    icon: pluginIconSchema,
+    logAvailable: Type.Boolean(),
+    name: Type.String({ maxLength: 128, minLength: 1 }),
+    status: Type.Union([Type.Literal("failed"), Type.Literal("running"), Type.Literal("stopped")]),
+    statusMessage: Type.Optional(Type.String()),
+    version: Type.String({ minLength: 1 }),
+});
+type ValidatedPluginSummary = Static<typeof pluginSummarySchema>;
+export type PluginSummary = Omit<ValidatedPluginSummary, "apps"> & {
+    readonly apps: readonly PluginAppContribution[];
+};
 
 export interface PluginLogSnapshot {
     error?: string;
@@ -1569,12 +1604,28 @@ export interface PluginLogSnapshot {
     updatedAt: number;
 }
 
-export interface ListPluginsResponse {
-    cursor: string;
-    failures: readonly { error: string; folder: string }[];
-    plugins: readonly PluginSummary[];
-    version: string;
-}
+export const listPluginsResponseSchema = Type.Object(
+    {
+        cursor: Type.String({ minLength: 1 }),
+        failures: Type.Array(
+            Type.Object(
+                {
+                    error: Type.String(),
+                    folder: Type.String({ minLength: 1 }),
+                },
+                exact,
+            ),
+        ),
+        plugins: Type.Array(pluginSummarySchema),
+        version: Type.String({ minLength: 1 }),
+    },
+    exact,
+);
+type ValidatedListPluginsResponse = Static<typeof listPluginsResponseSchema>;
+export type ListPluginsResponse = Omit<ValidatedListPluginsResponse, "failures" | "plugins"> & {
+    readonly failures: readonly { error: string; folder: string }[];
+    readonly plugins: readonly PluginSummary[];
+};
 
 export interface PluginLogResponse {
     log: PluginLogSnapshot;

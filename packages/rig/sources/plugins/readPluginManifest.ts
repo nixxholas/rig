@@ -11,8 +11,8 @@ import {
     type RegisteredPlugin,
 } from "./types.js";
 import { resolvePluginDockerRuntime } from "./resolvePluginDockerRuntime.js";
+import { readPluginIcon } from "./readPluginIcon.js";
 
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const CONVENTIONAL_SKILLS_DIRECTORY = "skills";
 
 export async function readPluginManifest(
@@ -68,7 +68,7 @@ export async function readPluginManifest(
             "The plugin must declare a main entry point, provide a skills directory, or contribute a system prompt.",
         );
     }
-    const [entryInfo, iconInfo, iconHeader] = await Promise.all([
+    const [entryInfo, icon] = await Promise.all([
         entryPath === undefined
             ? undefined
             : lstat(entryPath).catch((error: unknown) => {
@@ -79,15 +79,10 @@ export async function readPluginManifest(
                   }
                   throw error;
               }),
-        lstat(iconPath),
-        readFile(iconPath).then((bytes) => bytes.subarray(0, PNG_SIGNATURE.length)),
+        readPluginIcon(iconPath),
     ]);
     if (entryInfo !== undefined && !entryInfo.isFile()) {
         throw new Error("The plugin main entry point must be a file.");
-    }
-    if (!iconInfo.isFile()) throw new Error("The plugin icon must be a file.");
-    if (!iconHeader.equals(PNG_SIGNATURE)) {
-        throw new Error("The plugin icon is not a valid PNG image.");
     }
 
     return {
@@ -95,6 +90,11 @@ export async function readPluginManifest(
         ...(docker === undefined ? {} : { docker }),
         ...(entryPath === undefined ? {} : { entryPath }),
         folderName,
+        icon: {
+            generation: icon.generation,
+            mediaType: icon.mediaType,
+            size: icon.size,
+        },
         iconPath,
         manifest,
         manifestPath,

@@ -25,9 +25,11 @@ import type {
     PluginApp,
     PluginsState,
     ReadPluginAppResourceResult,
+    ReadPluginIconResult,
 } from "./PluginElement.js";
 import {
     PluginAppRequestError,
+    PluginIconRequestError,
     PluginManagementRequestError,
     PluginStore,
 } from "./PluginElement.js";
@@ -91,6 +93,7 @@ import {
     getMurmurFriendsResponseSchema,
     listMurmurContactsResponseSchema,
     listMurmurFriendRequestsResponseSchema,
+    listPluginsResponseSchema,
     pluginInstallClassificationSchema,
     projectRegistrationErrorResponseSchema,
     projectResponseSchema,
@@ -113,6 +116,7 @@ const GIT_WATCH_RENEWAL_MS = 4 * 60 * 1_000;
 const GIT_WATCH_RETRY_MS = 5_000;
 const MAXIMUM_PLUGIN_APP_REQUEST_BYTES = 1024 * 1024;
 const MAXIMUM_PLUGIN_APP_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAXIMUM_PLUGIN_ICON_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_REMEMBERED_MURMUR_FRIENDSHIP_EVENTS = 1_024;
 const pluginAppToolResponseSchema = Type.Object(
     { result: Type.Unknown() },
@@ -328,6 +332,11 @@ export interface RigPluginsConnection {
         uri: string,
         options?: { signal?: AbortSignal },
     ) => Promise<ReadPluginAppResourceResult>;
+    /** Reads the exact validated PNG generation declared by this catalog entry. */
+    readIcon: (
+        plugin: Pick<LocalPlugin, "icon" | "id">,
+        options?: { signal?: AbortSignal },
+    ) => Promise<ReadPluginIconResult>;
     callTool: (
         app: Pick<PluginApp, "generation" | "id" | "tools">,
         server: string,
@@ -2597,6 +2606,35 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             ).result;
         };
 
+        const readIcon: RigPluginsConnection["readIcon"] = async (plugin, readOptions = {}) => {
+            if (subscriber.closed) throw new Error("This plugin connection is closed.");
+            const requestSignal = combinedSignal(calls.controller.signal, readOptions.signal);
+            try {
+                const response = await request(
+                    endpointUrl(
+                        options.endpoint,
+                        `plugins/${encodeURIComponent(plugin.id)}/generations/${encodeURIComponent(plugin.icon.generation)}/icon`,
+                    ),
+                    {
+                        headers: {
+                            accept: plugin.icon.mediaType,
+                            authorization: `Bearer ${options.token}`,
+                        },
+                        signal: requestSignal.signal,
+                    },
+                );
+                const bytes = await readBoundedResponseBytes(response, MAXIMUM_PLUGIN_ICON_BYTES);
+                if (!response.ok) throw pluginIconResponseError(response.status, bytes);
+                const mediaType = response.headers.get("content-type")?.split(";", 1)[0];
+                if (mediaType !== plugin.icon.mediaType || bytes.byteLength !== plugin.icon.size) {
+                    throw new Error("Rig returned an invalid plugin icon response.");
+                }
+                return { bytes, mediaType: plugin.icon.mediaType };
+            } finally {
+                requestSignal.detach();
+            }
+        };
+
         return {
             apps: () => entry.store.apps(),
             callTool,
@@ -2613,6 +2651,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
             },
             plugins: () => entry.store.plugins(),
+            readIcon,
             readResource,
             state: () => entry.store.state(),
             storageDelete: async (app, key) => {
@@ -4213,6 +4252,26 @@ function responseError(status: number, body: Uint8Array): Error {
     return new Error(`Rig rejected the MCP App request (${String(status)}).`);
 }
 
+function pluginIconResponseError(status: number, body: Uint8Array): Error {
+    const text = new TextDecoder().decode(body);
+    try {
+        const payload = JSON.parse(text) as {
+            error?: { code?: unknown; message?: unknown };
+        };
+        if (
+            (payload.error?.code === "icon_unavailable" ||
+                payload.error?.code === "plugin_not_found" ||
+                payload.error?.code === "stale_generation") &&
+            typeof payload.error.message === "string"
+        ) {
+            return new PluginIconRequestError(payload.error.code, status, payload.error.message);
+        }
+    } catch {
+        // A non-JSON refusal still gets a deterministic host-facing fallback.
+    }
+    return new Error(`Rig could not read the plugin icon (${String(status)}).`);
+}
+
 async function readPluginManagementResponse<TSchema_ extends TSchema>(
     response: Response,
     schema: TSchema_,
@@ -4419,7 +4478,7 @@ async function fetchPluginCatalog(
     if (!response.ok) {
         throw new Error(`Rig could not load the plugin catalog (${String(response.status)}).`);
     }
-    return (await response.json()) as ListPluginsResponse;
+    return Value.Decode(listPluginsResponseSchema, await response.json());
 }
 
 async function fetchGitWatch(

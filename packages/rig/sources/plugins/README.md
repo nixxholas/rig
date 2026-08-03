@@ -165,6 +165,15 @@ starting. Dockerfile discovery on catalog and log-read paths checks only the dec
 Dockerfile; content hashing is deferred until image preparation or process startup actually needs
 an image tag.
 
+Every manifest also supplies one bounded `author` display label and one category from the public
+catalog vocabulary. Icons are ordinary, manifest-owned square PNGs capped at 4 MiB and 2048 pixels.
+The catalog publishes only `{ generation, mediaType, size }`; `generation` is the SHA-256 identity
+of the validated bytes, never a path. Authenticated clients read those bytes through
+`GET /plugins/<folder>/generations/<generation>/icon`. The manager reopens the current
+manifest-owned file without following symlinks, revalidates it, and compares the digest before
+serving it. Replacement during or after catalog reconciliation therefore returns
+`stale_generation` instead of serving bytes from the wrong icon.
+
 Registration is synchronous in the product sense. Every process generation moves through one
 explicit `starting -> running | failed` state machine. It has one 10-second window to register its
 MCP server and managed-network listeners, attach their NDJSON streams, then call
@@ -350,8 +359,9 @@ The manager records one authoritative state for every registered plugin: `runnin
 `failed`. The current-run file retains the most recent 1 MiB and resets for each process
 generation. `readLog` returns its newest 16 KiB, or the bounded startup diagnostic when no process
 started, and marks the snapshot when that read bound omitted older output. The daemon protocol
-serves these through `GET /plugins` and `GET /plugins/<name>/log`; `/plugins`, the `plugin_logs`
-agent tool, and `rig-connect` consume that boundary without polling.
+serves these through `GET /plugins`, `GET /plugins/<name>/log`, and the generation-bound icon
+route; `/plugins`, the `plugin_logs` agent tool, and `rig-connect` consume that boundary without
+polling.
 
 ## GitHub repository catalogs
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Added required local-plugin author/category metadata and an authenticated, generation-bound PNG
+  icon capability for local and remote `rig-connect` catalog clients.
 - Added parsed OSC 8 hyperlink metadata to Ghostty snapshot cells and preserved it through remote
   semantic-grid keyframes, patches, reconnect recovery, resize snapshots, and scrollback.
 
