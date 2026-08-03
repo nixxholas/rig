@@ -143,6 +143,7 @@ import {
     type GetScopeShareSessionHistoryResponse,
     type ListScopeShareReplicasResponse,
     type ScopeShareOwnerResponse,
+    type ScopeShareScopeKind,
     discoverPluginCatalogRequestSchema,
     globalSecurityPolicySchema,
     installPluginRequestSchema,
@@ -774,23 +775,29 @@ async function handleRequest(
             return;
         }
         if (
-            route.name === "scope-share-workspace" ||
-            route.name === "scope-share-workspace-members" ||
-            route.name === "scope-share-workspace-member-revoke" ||
-            route.name === "scope-share-workspace-stop"
+            route.name === "scope-share-scope" ||
+            route.name === "scope-share-scope-members" ||
+            route.name === "scope-share-scope-member-revoke" ||
+            route.name === "scope-share-scope-stop"
         ) {
-            const scope: ScopeShareTarget = { scopeId: route.workspaceId, scopeKind: "workspace" };
-            if (request.method === "GET" && route.name === "scope-share-workspace") {
+            // A project share and a workspace share are the same share over a wider
+            // subject set, so the route only says which one it named and everything
+            // below this line is one path.
+            const scope: ScopeShareTarget = { scopeId: route.scopeId, scopeKind: route.scopeKind };
+            const subject = route.scopeKind === "project" ? "Project" : "Workspace";
+            if (request.method === "GET" && route.name === "scope-share-scope") {
                 const share = scopeShares.getOwner(scope);
                 if (share === undefined) {
-                    sendJson(response, 404, { error: "Workspace share not found." });
+                    sendJson(response, 404, { error: `${subject} share not found.` });
                 } else sendJson<ScopeShareOwnerResponse>(response, 200, share);
                 return;
             }
-            if (request.method === "POST" && route.name === "scope-share-workspace") {
+            if (request.method === "POST" && route.name === "scope-share-scope") {
                 const body = await readCheckedBody(request, createScopeShareRequestSchema);
                 if (body === undefined) {
-                    sendJson(response, 400, { error: "The workspace share request is invalid." });
+                    sendJson(response, 400, {
+                        error: `The ${subject.toLowerCase()} share request is invalid.`,
+                    });
                     return;
                 }
                 sendJson<ScopeShareOwnerResponse>(
@@ -800,7 +807,7 @@ async function handleRequest(
                 );
                 return;
             }
-            if (request.method === "POST" && route.name === "scope-share-workspace-members") {
+            if (request.method === "POST" && route.name === "scope-share-scope-members") {
                 const body = await readCheckedBody(request, addScopeShareMemberRequestSchema);
                 if (body === undefined) {
                     sendJson(response, 400, { error: "The member request is invalid." });
@@ -813,7 +820,7 @@ async function handleRequest(
                 );
                 return;
             }
-            if (request.method === "POST" && route.name === "scope-share-workspace-member-revoke") {
+            if (request.method === "POST" && route.name === "scope-share-scope-member-revoke") {
                 const body = await readCheckedBody(request, revokeScopeShareMemberRequestSchema);
                 if (body === undefined) {
                     sendJson(response, 400, { error: "The revocation request is invalid." });
@@ -826,7 +833,7 @@ async function handleRequest(
                 );
                 return;
             }
-            if (request.method === "POST" && route.name === "scope-share-workspace-stop") {
+            if (request.method === "POST" && route.name === "scope-share-scope-stop") {
                 const body = await readCheckedBody(request, stopScopeShareRequestSchema);
                 if (body === undefined) {
                     sendJson(response, 400, { error: "The stop request is invalid." });
@@ -4218,20 +4225,26 @@ function matchRoute(pathname: string):
               | "project-workspace"
               | "project-workspace-archive"
               | "project-workspace-git"
-              | "project-workspace-reorder"
-              | "scope-share-workspace"
-              | "scope-share-workspace-members"
-              | "scope-share-workspace-stop";
+              | "project-workspace-reorder";
           projectId: string;
           sessionId?: undefined;
           workspaceId: string;
       }
     | {
-          name: "scope-share-workspace-member-revoke";
+          name: "scope-share-scope" | "scope-share-scope-members" | "scope-share-scope-stop";
           projectId: string;
+          /** The workspace or the project itself, whichever the route named. */
+          scopeId: string;
+          scopeKind: ScopeShareScopeKind;
+          sessionId?: undefined;
+      }
+    | {
+          name: "scope-share-scope-member-revoke";
+          projectId: string;
+          scopeId: string;
+          scopeKind: ScopeShareScopeKind;
           sessionId?: undefined;
           shareMemberId: string;
-          workspaceId: string;
       }
     | {
           name:
@@ -4549,6 +4562,12 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "settings") {
             return { name: "project-settings", projectId };
         }
+        const projectShare = matchScopeShareRoute(globalParts.slice(2), {
+            projectId,
+            scopeId: projectId,
+            scopeKind: "project",
+        });
+        if (projectShare !== undefined) return projectShare;
         if (globalParts.length === 3 && globalParts[2] === "terminals") {
             return { name: "project-terminals", projectId };
         }
@@ -4599,37 +4618,12 @@ function matchRoute(pathname: string):
             if (globalParts.length === 5 && globalParts[4] === "reorder") {
                 return { name: "project-workspace-reorder", projectId, workspaceId };
             }
-            if (globalParts.length === 5 && globalParts[4] === "share") {
-                return { name: "scope-share-workspace", projectId, workspaceId };
-            }
-            if (
-                globalParts.length === 6 &&
-                globalParts[4] === "share" &&
-                globalParts[5] === "members"
-            ) {
-                return { name: "scope-share-workspace-members", projectId, workspaceId };
-            }
-            if (
-                globalParts.length === 6 &&
-                globalParts[4] === "share" &&
-                globalParts[5] === "stop"
-            ) {
-                return { name: "scope-share-workspace-stop", projectId, workspaceId };
-            }
-            if (
-                globalParts.length === 8 &&
-                globalParts[4] === "share" &&
-                globalParts[5] === "members" &&
-                globalParts[6] !== undefined &&
-                globalParts[7] === "revoke"
-            ) {
-                return {
-                    name: "scope-share-workspace-member-revoke",
-                    projectId,
-                    shareMemberId: decodeURIComponent(globalParts[6]),
-                    workspaceId,
-                };
-            }
+            const workspaceShare = matchScopeShareRoute(globalParts.slice(4), {
+                projectId,
+                scopeId: workspaceId,
+                scopeKind: "workspace",
+            });
+            if (workspaceShare !== undefined) return workspaceShare;
             if (globalParts.length === 5 && globalParts[4] === "terminals") {
                 return { name: "project-terminals", projectId, workspaceId };
             }
@@ -4798,6 +4792,34 @@ function matchRoute(pathname: string):
     if (parts[2] === "subagents") return { name: "subagents", sessionId };
     if (parts[2] === "usage") return { name: "usage", sessionId };
     if (parts[2] === "unarchive") return { name: "unarchive", sessionId };
+    return undefined;
+}
+
+/**
+ * The share routes a project and a workspace both answer, below whichever one they hang off.
+ *
+ * `/projects/{id}/share` and `/projects/{id}/workspaces/{id}/share` are the same four
+ * routes over a different subject, so both are parsed here and the scope they name is
+ * decided by the caller rather than by the path they were reached through.
+ */
+function matchScopeShareRoute(
+    parts: readonly (string | undefined)[],
+    scope: { projectId: string; scopeId: string; scopeKind: ScopeShareScopeKind },
+): ReturnType<typeof matchRoute> {
+    if (parts[0] !== "share") return undefined;
+    if (parts.length === 1) return { name: "scope-share-scope", ...scope };
+    if (parts.length === 2 && parts[1] === "members") {
+        return { name: "scope-share-scope-members", ...scope };
+    }
+    if (parts.length === 2 && parts[1] === "stop") {
+        return { name: "scope-share-scope-stop", ...scope };
+    }
+    if (parts.length === 4 && parts[1] === "members" && parts[3] === "revoke") {
+        const shareMemberId = decodeUrlComponent(parts[2]);
+        return shareMemberId === undefined
+            ? undefined
+            : { name: "scope-share-scope-member-revoke", shareMemberId, ...scope };
+    }
     return undefined;
 }
 
@@ -5103,7 +5125,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     }
     if (route.name === "sessions") return request.method === "POST";
     if (route.name === "session-share-post") return request.method === "POST";
-    if (route.name.startsWith("scope-share-workspace")) return request.method !== "GET";
+    if (route.name.startsWith("scope-share-scope")) return request.method !== "GET";
     if (route.name === "projects") return request.method !== "GET";
     if (
         [

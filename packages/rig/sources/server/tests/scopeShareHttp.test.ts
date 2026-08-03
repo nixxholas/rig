@@ -46,6 +46,7 @@ const replica = {
 };
 
 const SHARE_PATH = "/projects/project-1/workspaces/workspace-1/share";
+const PROJECT_SHARE_PATH = "/projects/project-1/share";
 
 describe("scope share HTTP API", () => {
     it("reports plainly when a server was started without workspace sharing", async () => {
@@ -116,6 +117,45 @@ describe("scope share HTTP API", () => {
         }
     });
 
+    it("shares a whole project over the same four routes", async () => {
+        const service = createStub();
+        const server = await startServer(service);
+        try {
+            expect(
+                await request(server.socketPath, "POST", PROJECT_SHARE_PATH, {
+                    friends: [{ displayName: "Friend", peerId: "peer-friend" }],
+                    mutationId: "mutation-1",
+                }),
+            ).toMatchObject({ status: 201 });
+            await request(server.socketPath, "POST", `${PROJECT_SHARE_PATH}/members`, {
+                friend: { displayName: "Second", peerId: "peer-second" },
+                mutationId: "mutation-2",
+            });
+            await request(
+                server.socketPath,
+                "POST",
+                `${PROJECT_SHARE_PATH}/members/member-1/revoke`,
+                { mutationId: "mutation-3" },
+            );
+            await request(server.socketPath, "POST", `${PROJECT_SHARE_PATH}/stop`, {
+                mutationId: "mutation-4",
+            });
+            expect(await request(server.socketPath, "GET", PROJECT_SHARE_PATH)).toMatchObject({
+                status: 200,
+            });
+
+            // The project is its own scope, and naming it never reaches a workspace.
+            const scope = { scopeId: "project-1", scopeKind: "project" };
+            expect(service.create).toHaveBeenCalledWith(scope, expect.anything());
+            expect(service.add).toHaveBeenCalledWith(scope, expect.anything());
+            expect(service.revoke).toHaveBeenCalledWith(scope, "member-1", expect.anything());
+            expect(service.stop).toHaveBeenCalledWith(scope, expect.anything());
+            expect(service.getOwner).toHaveBeenCalledWith(scope);
+        } finally {
+            await server.close();
+        }
+    });
+
     it("refuses a request body that does not match its schema", async () => {
         const server = await startServer(createStub());
         try {
@@ -132,11 +172,14 @@ describe("scope share HTTP API", () => {
 });
 
 function createStub(): ScopeShareServiceContract & {
+    add: ReturnType<typeof vi.fn<ScopeShareServiceContract["add"]>>;
     create: ReturnType<typeof vi.fn<ScopeShareServiceContract["create"]>>;
+    getOwner: ReturnType<typeof vi.fn<ScopeShareServiceContract["getOwner"]>>;
     replicaSessionHistory: ReturnType<
         typeof vi.fn<ScopeShareServiceContract["replicaSessionHistory"]>
     >;
     revoke: ReturnType<typeof vi.fn<ScopeShareServiceContract["revoke"]>>;
+    stop: ReturnType<typeof vi.fn<ScopeShareServiceContract["stop"]>>;
 } {
     const create = vi.fn<ScopeShareServiceContract["create"]>(async () => owner);
     const replicaSessionHistory = vi.fn<ScopeShareServiceContract["replicaSessionHistory"]>(
