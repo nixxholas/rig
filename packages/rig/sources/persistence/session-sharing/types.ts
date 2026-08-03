@@ -1,3 +1,5 @@
+import type { SharedToolOutput } from "../../session-sharing/SharedToolOutput.js";
+
 export type SessionShareState = "active" | "degraded" | "stopped";
 export type SessionShareMemberState = "active" | "revoked" | "stopped";
 export type SessionShareGrantState = "active" | "revoked" | "stopped";
@@ -11,6 +13,8 @@ export interface SessionShareRecord {
     ownerSessionId: string;
     state: SessionShareState;
     includeFriendMessages: boolean;
+    /** How much of each tool's work this share replicates. */
+    toolOutput: SharedToolOutput;
     ownerPeerId: string;
     snapshotThroughPosition?: number;
     snapshotThroughEventId?: string;

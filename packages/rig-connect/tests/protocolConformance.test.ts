@@ -16,8 +16,10 @@ import {
     rigInitializedDataSchema as daemonRigInitializedDataSchema,
     rigInstallationDataSchema as daemonRigInstallationDataSchema,
     sessionShareOwnerResponseSchema as daemonSessionShareOwnerResponseSchema,
+    setSessionShareToolOutputRequestSchema as daemonSetSessionShareToolOutputRequestSchema,
     systemNoticePayloadSchema as daemonSystemNoticePayloadSchema,
 } from "../../rig/sources/protocol/index.js";
+import { describeSharedToolOutput as daemonDescribeSharedToolOutput } from "../../rig/sources/session-sharing/index.js";
 // Presentation is owned by the agent layer rather than the protocol module, but
 // it travels on the wire all the same, so it is checked the same way.
 import type * as daemonAgent from "../../rig/sources/agent/index.js";
@@ -29,7 +31,9 @@ import {
     computeServiceErrorSchema,
     createSessionShareRequestSchema,
     projectWorkspaceSchema,
+    describeSessionShareToolOutput,
     sessionShareOwnerResponseSchema,
+    setSessionShareToolOutputRequestSchema,
     systemNoticePayloadSchema,
 } from "@/protocol.js";
 import {
@@ -448,6 +452,9 @@ describe("protocol conformance", () => {
                 memberCount: 1,
                 shareId: "share-1",
                 state: "active",
+                toolOutput: "summaries",
+                toolOutputDescription:
+                    "Friends see what each tool did, without the output it produced.",
             },
         };
 
@@ -455,6 +462,31 @@ describe("protocol conformance", () => {
         expect(Value.Decode(daemonCreateSessionShareRequestSchema, request)).toEqual(request);
         expect(Value.Decode(sessionShareOwnerResponseSchema, response)).toEqual(response);
         expect(Value.Decode(daemonSessionShareOwnerResponseSchema, response)).toEqual(response);
+
+        // Both sides agree on which tool-output settings exist, so a client
+        // cannot name one the daemon would read as something else.
+        const disclose = { mutationId: "mutation-2", toolOutput: "full" };
+        expect(Value.Decode(setSessionShareToolOutputRequestSchema, disclose)).toEqual(disclose);
+        expect(Value.Decode(daemonSetSessionShareToolOutputRequestSchema, disclose)).toEqual(
+            disclose,
+        );
+        // Rig Connect predicts this sentence locally before the daemon confirms
+        // it, so the two must agree word for word or the prediction is a lie
+        // about a privacy setting.
+        for (const toolOutput of ["summaries", "full"] as const) {
+            expect(describeSessionShareToolOutput(toolOutput)).toBe(
+                daemonDescribeSharedToolOutput(toolOutput),
+            );
+        }
+        for (const schema of [
+            setSessionShareToolOutputRequestSchema,
+            daemonSetSessionShareToolOutputRequestSchema,
+        ]) {
+            expect(Value.Check(schema, { mutationId: "mutation-2" })).toBe(false);
+            expect(
+                Value.Check(schema, { mutationId: "mutation-2", toolOutput: "everything" }),
+            ).toBe(false);
+        }
     });
 
     it("rejects compute error detail beyond the daemon's canonical bound", () => {

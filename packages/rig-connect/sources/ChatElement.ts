@@ -386,6 +386,7 @@ export type MutationAction =
     | "revoke_session_share_member"
     | "stop_session_share"
     | "set_session_share_friend_messages"
+    | "set_session_share_tool_output"
     | "apply_happy_cloud_command";
 
 export interface MutationRejectedDelta {

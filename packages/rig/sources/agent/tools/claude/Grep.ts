@@ -14,6 +14,7 @@ import {
     toTextBlocks,
 } from "../../../tools/utils/index.js";
 import { searchToolCallPresentation } from "../../../tools/utils/createExplorationToolCallPresentation.js";
+import { countTextLines } from "../../../tools/utils/countTextLines.js";
 
 const CLAUDE_GREP_DESCRIPTION = `A powerful search tool built on ripgrep
 
@@ -152,5 +153,14 @@ export const claudeGrepTool = defineTool({
         result.text === "No matches found"
             ? `Searched "${args.pattern}" (no matches)`
             : `Searched "${args.pattern}" (${formatOutputLineCount(result.text)})`,
+    toSharedCall: ({ pattern, path }) =>
+        path === undefined ? `Searched for "${pattern}".` : `Searched ${path} for "${pattern}".`,
+    // Counting the matching lines is safe; the lines themselves never leak.
+    toSharedResult: (result) => {
+        if (result.text === "No matches found") return "Found no matches.";
+        const count = countTextLines(result.text);
+        return `Found ${count} matching line${count === 1 ? "" : "s"}.`;
+    },
+    sharedOutputDisclosable: true,
     locks: [],
 });

@@ -3,6 +3,7 @@ import { sql } from "drizzle-orm";
 import type { Message } from "../../agent/types.js";
 import { createEventIdFactory } from "../../protocol/createEventIdFactory.js";
 import { projectSessionShareEntry } from "../../session-sharing/projectSessionShareEntry.js";
+import type { SharedToolOutput } from "../../session-sharing/SharedToolOutput.js";
 import {
     sessionShareGrants,
     sessionShareMembers,
@@ -28,6 +29,7 @@ export function sessionShareCreate(
         ownerPeerId: string;
         ownerSessionId: string;
         shareId: string;
+        toolOutput: SharedToolOutput;
     },
 ): SessionShareRecord {
     return inTx(tx, (tx) => {
@@ -85,6 +87,7 @@ export function sessionShareCreate(
                     position: row.position,
                     ...(row.run_id === null ? {} : { runId: row.run_id }),
                 },
+                toolOutput: input.toolOutput,
             });
             if (projected === undefined) {
                 publishedMessagePosition = row.position;
@@ -116,6 +119,7 @@ export function sessionShareCreate(
                 snapshotThroughEventId: snapshotThroughEventId ?? null,
                 snapshotThroughPosition: snapshotThroughPosition ?? null,
                 state: degraded ? "degraded" : "active",
+                toolOutput: input.toolOutput,
                 updatedAtMs: input.now,
             })
             .run();
@@ -180,6 +184,7 @@ export function sessionShareCreate(
             ...(snapshotThroughEventId === undefined ? {} : { snapshotThroughEventId }),
             ...(snapshotThroughPosition === undefined ? {} : { snapshotThroughPosition }),
             state: degraded ? "degraded" : "active",
+            toolOutput: input.toolOutput,
             updatedAt: input.now,
         };
     });

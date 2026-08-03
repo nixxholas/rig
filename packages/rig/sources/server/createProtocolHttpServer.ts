@@ -159,6 +159,7 @@ import {
     signupMurmurAccountRequestSchema,
     startMurmurServiceRequestSchema,
     setSessionShareFriendMessagesRequestSchema,
+    setSessionShareToolOutputRequestSchema,
     stopSessionShareRequestSchema,
     submitContextMessageRequestSchema,
     updateProjectSettingsRequestSchema,
@@ -897,7 +898,8 @@ async function handleRequest(
             route.name === "session-share-members" ||
             route.name === "session-share-member-revoke" ||
             route.name === "session-share-stop" ||
-            route.name === "session-share-friend-messages"
+            route.name === "session-share-friend-messages" ||
+            route.name === "session-share-tool-output"
         ) {
             const ownerSession = store.get(route.sessionId);
             if (ownerSession === undefined) {
@@ -979,6 +981,19 @@ async function handleRequest(
                 response,
                 200,
                 await sessionShares.setFriendMessages(route.sessionId, body),
+            );
+            return;
+        }
+        if (request.method === "POST" && route.name === "session-share-tool-output") {
+            const body = await readCheckedBody(request, setSessionShareToolOutputRequestSchema);
+            if (body === undefined) {
+                sendJson(response, 400, { error: "The tool-output setting is invalid." });
+                return;
+            }
+            sendJson<SessionShareOwnerResponse>(
+                response,
+                200,
+                await sessionShares.setToolOutput(route.sessionId, body),
             );
             return;
         }
@@ -4300,6 +4315,7 @@ function matchRoute(pathname: string):
               | "session-share-friend-messages"
               | "session-share-members"
               | "session-share-stop"
+              | "session-share-tool-output"
               | "session"
               | "stream"
               | "session-state"
@@ -4669,6 +4685,9 @@ function matchRoute(pathname: string):
     }
     if (parts.length === 4 && parts[2] === "share" && parts[3] === "friend-messages") {
         return { name: "session-share-friend-messages", sessionId };
+    }
+    if (parts.length === 4 && parts[2] === "share" && parts[3] === "tool-output") {
+        return { name: "session-share-tool-output", sessionId };
     }
     if (
         parts.length === 6 &&

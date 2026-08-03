@@ -339,6 +339,12 @@ export const sessionShares = sqliteTable(
         createdAtMs: integer("created_at_ms").notNull(),
         updatedAtMs: integer("updated_at_ms").notNull(),
         stoppedAtMs: integer("stopped_at_ms"),
+        /**
+         * How much of each tool's work this share replicates: `summaries` or
+         * `full`. Last because the migration that added it appends it, and the
+         * Drizzle schema has to describe the columns in the order they exist.
+         */
+        toolOutput: text("tool_output").notNull().default("summaries"),
     },
     (table) => [
         uniqueIndex("session_shares_one_current_per_owner")

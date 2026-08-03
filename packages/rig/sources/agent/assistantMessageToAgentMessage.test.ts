@@ -29,7 +29,7 @@ describe("assistantMessageToAgentMessage", () => {
         });
     });
 
-    it("stores a model-invisible tool call presentation on the durable block", () => {
+    it("stores the model-invisible presentation and shared summary on the durable block", () => {
         const source = providerMessage();
         const message = assistantMessageToAgentMessage(
             {
@@ -46,8 +46,11 @@ describe("assistantMessageToAgentMessage", () => {
             "rig-message-1",
             { providerId: "pi", requestedModelId: "openai/gpt-5.6" },
             () => ({
-                type: "exploration",
-                operations: [{ kind: "read", name: "index.ts" }],
+                presentation: {
+                    type: "exploration",
+                    operations: [{ kind: "read", name: "index.ts" }],
+                },
+                shared: { disclosable: true, summary: "Read src/index.ts." },
             }),
         );
 
@@ -61,6 +64,7 @@ describe("assistantMessageToAgentMessage", () => {
                     type: "exploration",
                     operations: [{ kind: "read", name: "index.ts" }],
                 },
+                shared: { disclosable: true, summary: "Read src/index.ts." },
             },
         ]);
     });

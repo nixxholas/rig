@@ -66,5 +66,16 @@ Usage:
     ],
     toUI: (result) =>
         `Read ${result.path} (${result.returnedLines}/${result.totalLines} lines${result.truncated ? ", truncated" : ""})`,
+    toSharedCall: ({ target_file, offset, limit }) => {
+        if (offset !== undefined && limit !== undefined) {
+            return `Read up to ${limit} lines of ${target_file} starting at line ${offset}.`;
+        }
+        if (limit !== undefined) return `Read up to ${limit} lines of ${target_file}.`;
+        if (offset !== undefined) return `Read ${target_file} starting at line ${offset}.`;
+        return `Read ${target_file}.`;
+    },
+    toSharedResult: (result) =>
+        `Read ${result.returnedLines} line${result.returnedLines === 1 ? "" : "s"} of ${result.path}${result.truncated ? ", truncated" : ""}.`,
+    sharedOutputDisclosable: true,
     locks: [],
 });

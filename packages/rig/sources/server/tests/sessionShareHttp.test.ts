@@ -37,6 +37,8 @@ const owner = {
         memberCount: 1,
         shareId: "share-1",
         state: "active" as const,
+        toolOutput: "summaries" as const,
+        toolOutputDescription: "Friends see what each tool did, without the output it produced.",
     },
 };
 const replica = {
@@ -90,8 +92,12 @@ describe("session share HTTP API", () => {
                 includeFriendMessagesInModel: false,
                 mutationId: "mutation-4",
             });
-            await request(server.socketPath, "POST", "/sessions/session-1/share/stop", {
+            await request(server.socketPath, "POST", "/sessions/session-1/share/tool-output", {
                 mutationId: "mutation-5",
+                toolOutput: "full",
+            });
+            await request(server.socketPath, "POST", "/sessions/session-1/share/stop", {
+                mutationId: "mutation-6",
             });
             expect(
                 await request(server.socketPath, "POST", "/session-shares/friend-messages", {
@@ -131,6 +137,54 @@ describe("session share HTTP API", () => {
                 mutationId: "mutation-3",
             });
             expect(service.replicaHistory).toHaveBeenCalledWith("share-1", "event-0");
+            expect(service.setToolOutput).toHaveBeenCalledWith("session-1", {
+                mutationId: "mutation-5",
+                toolOutput: "full",
+            });
+        } finally {
+            await server.close();
+        }
+    });
+
+    it("only ever raises tool-output disclosure to a setting the owner named", async () => {
+        const service = createStub();
+        const server = await startServer(service);
+        try {
+            // A share created without saying anything about tool output is asking
+            // for none, so the request carries no setting at all rather than one
+            // the client guessed.
+            expect(
+                await request(server.socketPath, "POST", "/sessions/session-1/share", {
+                    friends: [{ displayName: "Friend", peerId: "peer-friend" }],
+                    includeFriendMessagesInModel: true,
+                    mutationId: "mutation-1",
+                }),
+            ).toMatchObject({ status: 201 });
+            expect(service.create).toHaveBeenCalledWith(
+                "session-1",
+                expect.not.objectContaining({ toolOutput: expect.anything() }),
+            );
+
+            // A setting nobody defined is refused outright: it must not be read as
+            // an instruction to disclose, and it must not be quietly accepted.
+            for (const body of [
+                { mutationId: "mutation-2", toolOutput: "everything" },
+                { mutationId: "mutation-3" },
+                { mutationId: "mutation-4", toolOutput: true },
+            ]) {
+                expect(
+                    await request(
+                        server.socketPath,
+                        "POST",
+                        "/sessions/session-1/share/tool-output",
+                        body,
+                    ),
+                ).toMatchObject({
+                    body: { error: "The tool-output setting is invalid." },
+                    status: 400,
+                });
+            }
+            expect(service.setToolOutput).not.toHaveBeenCalled();
         } finally {
             await server.close();
         }
@@ -198,6 +252,10 @@ describe("session share HTTP API", () => {
                     includeFriendMessagesInModel: false,
                     mutationId: "mutation-toggle",
                 }),
+                request(server.socketPath, "POST", "/sessions/subagent-1/share/tool-output", {
+                    mutationId: "mutation-tool-output",
+                    toolOutput: "full",
+                }),
             ];
             for (const response of await Promise.all(rejectedOwnerRequests)) {
                 expect(response).toMatchObject({
@@ -211,6 +269,7 @@ describe("session share HTTP API", () => {
             expect(service.revoke).not.toHaveBeenCalled();
             expect(service.stop).not.toHaveBeenCalled();
             expect(service.setFriendMessages).not.toHaveBeenCalled();
+            expect(service.setToolOutput).not.toHaveBeenCalled();
 
             expect(
                 await request(server.socketPath, "GET", "/session-share-replicas"),
@@ -314,6 +373,7 @@ function createStub(): SessionShareServiceContract & {
         setFriendMessages: vi.fn<SessionShareServiceContract["setFriendMessages"]>(
             async () => owner,
         ),
+        setToolOutput: vi.fn<SessionShareServiceContract["setToolOutput"]>(async () => owner),
         stop: vi.fn<SessionShareServiceContract["stop"]>(async () => ({
             ...owner,
             share: { ...owner.share, state: "stopped" as const },

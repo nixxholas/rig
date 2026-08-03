@@ -1,5 +1,6 @@
 import { asc, desc, eq, sql } from "drizzle-orm";
 
+import { toSharedToolOutput } from "../../session-sharing/SharedToolOutput.js";
 import { sessionShareMembers, sessionShares } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 import type { SessionShareMemberRecord, SessionShareRecord } from "./types.js";
@@ -27,6 +28,7 @@ export function querySessionShare(tx: TX, shareId: string): SessionShareRecord |
                   : { snapshotThroughPosition: row.snapshotThroughPosition }),
               state: row.state as SessionShareRecord["state"],
               ...(row.stoppedAtMs === null ? {} : { stoppedAt: row.stoppedAtMs }),
+              toolOutput: toSharedToolOutput(row.toolOutput),
               updatedAt: row.updatedAtMs,
           };
 }

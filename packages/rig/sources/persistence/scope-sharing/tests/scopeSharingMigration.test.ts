@@ -13,6 +13,9 @@ import { openSessionDatabase } from "../../database/openSessionDatabase.js";
 
 const directories: string[] = [];
 
+/** The schema version this feature's migration produces. */
+const SCOPE_SHARING_SCHEMA_VERSION = 24;
+
 const SCOPE_SHARING_TABLES = [
     "scope_share_entries",
     "scope_share_grants",
@@ -35,12 +38,17 @@ describe("scope sharing migration", () => {
         const opened = openTestDatabase();
         try {
             migrateSessionDatabase(opened.database);
-            // Rewind to the schema this feature was written against and replay forward.
+            // Rewind to the schema this feature was written against and replay
+            // forward. Everything a later migration added has to go with it, or
+            // the replay meets its own output; the rewind is pinned to this
+            // feature's own schema version rather than to whatever happens to be
+            // last, because migrations keep landing behind it.
             for (const table of SCOPE_SHARING_TABLES) {
                 opened.database.run(sql.raw(`DROP TABLE "${table}"`));
             }
+            opened.database.run(sql.raw("ALTER TABLE session_shares DROP COLUMN tool_output"));
             opened.database.run(
-                sql.raw(`PRAGMA user_version = ${String(CURRENT_SESSION_DATABASE_VERSION - 1)}`),
+                sql.raw(`PRAGMA user_version = ${String(SCOPE_SHARING_SCHEMA_VERSION - 1)}`),
             );
 
             migrateSessionDatabase(opened.database);

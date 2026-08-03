@@ -11,6 +11,7 @@ import {
     type SessionShareRecord,
     type SessionShareReplicaRecord,
 } from "../SessionShareService.js";
+import type { SharedToolOutput } from "../SharedToolOutput.js";
 import type {
     ShareOpaqueEntry,
     ShareTransportGrant,
@@ -38,6 +39,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: false,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
 
         expect(share.members).toHaveLength(2);
@@ -85,6 +87,7 @@ describe("SessionShareService", () => {
                 includeFriendMessagesInModel: true,
                 ownerPeerId: "peer-owner",
                 ownerSessionId: "session-1",
+                toolOutput: "summaries",
             }),
         ).rejects.toThrow("relay offline");
         expect(store.queryShare("share-1")?.state).toBe("degraded");
@@ -95,6 +98,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
         expect(store.outbox).toHaveLength(0);
         expect(store.acknowledgements).toEqual([100, 200, 205]);
@@ -116,6 +120,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
         const oldGrant = toGrant(share.members[0]!);
         await service.joinReplica({
@@ -165,6 +170,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
         const grant = toGrant(share.members[0]!);
         await service.joinReplica({
@@ -209,6 +215,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
         const grant = toGrant(share.members[0]!);
 
@@ -240,6 +247,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
         const grant = toGrant(share.members[0]!);
         await service.revoke(share.shareId, grant.shareMemberId);
@@ -272,6 +280,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
         const grant = toGrant(share.members[0]!);
         await service.joinReplica({
@@ -322,6 +331,7 @@ describe("SessionShareService", () => {
             includeFriendMessagesInModel: true,
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
+            toolOutput: "summaries",
         });
 
         const stopped = await service.stopForArchivedSession("session-1");
@@ -354,6 +364,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
         ownerPeerId: string;
         ownerSessionId: string;
         shareId: string;
+        toolOutput: SharedToolOutput;
     }): SessionShareRecord {
         this.operations.push(`create:${input.shareId}`);
         let memberIndex = 0;
@@ -370,6 +381,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
             ownerSessionId: input.ownerSessionId,
             shareId: input.shareId,
             state: "active",
+            toolOutput: input.toolOutput,
         };
         for (let sequence = 1; sequence <= this.#seedCount; sequence += 1) {
             this.outbox.push(entry(input.shareId, sequence));
@@ -575,6 +587,11 @@ class MemorySessionShareStore implements SessionShareCoreStore {
         return "ended";
     }
 
+    setToolOutput(shareId: string, toolOutput: SharedToolOutput): SessionShareRecord {
+        this.#requireShare(shareId).toolOutput = toolOutput;
+        return this.#cloneShare();
+    }
+
     #requireShare(shareId: string): MutableShare {
         if (this.#share?.shareId !== shareId) throw new Error("Unknown share");
         return this.#share;
@@ -596,6 +613,7 @@ interface MutableMember {
 
 interface MutableShare {
     includeFriendMessagesInModel: boolean;
+    toolOutput: SharedToolOutput;
     members: MutableMember[];
     ownerPeerId: string;
     ownerSessionId: string;

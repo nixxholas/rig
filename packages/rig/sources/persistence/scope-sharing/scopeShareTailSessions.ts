@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import type { SessionEvent } from "../../protocol/index.js";
 import { createEventIdFactory } from "../../protocol/createEventIdFactory.js";
 import { projectSessionShareProjection } from "../../session-sharing/projectSessionShareEntry.js";
+import { DEFAULT_SHARED_TOOL_OUTPUT } from "../../session-sharing/SharedToolOutput.js";
 import { scopeShareSessionCursors, scopeShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
@@ -317,16 +318,21 @@ function tailTranscript(
     let publishedEventSeq = input.publishedEventSeq;
     let served = 0;
     for (const row of rows) {
-        const projection = projectSessionShareProjection({
-            event: {
-                createdAt: row.created_at_ms,
-                data: JSON.parse(row.data_json) as Record<string, unknown>,
-                id: row.event_id,
-                sessionId: input.sessionId,
-                type: row.type,
-            } as SessionEvent,
-            kind: "event",
-        });
+        const projection = projectSessionShareProjection(
+            {
+                event: {
+                    createdAt: row.created_at_ms,
+                    data: JSON.parse(row.data_json) as Record<string, unknown>,
+                    id: row.event_id,
+                    sessionId: input.sessionId,
+                    type: row.type,
+                } as SessionEvent,
+                kind: "event",
+            },
+            // A shared scope has no setting of its own for how much of each
+            // tool's work it replicates, so it replicates the private one.
+            DEFAULT_SHARED_TOOL_OUTPUT,
+        );
         // An event with no place in a transcript still moves the cursor: skipping it
         // silently is what keeps a session full of internal traffic from stalling.
         if (projection === undefined) {

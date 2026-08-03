@@ -228,8 +228,11 @@ export {
     sessionShareOwnerResponseSchema,
     sessionShareReplicaHistoryEntrySchema,
     sessionShareReplicaSchema,
+    describeSessionShareToolOutput,
     sessionShareStateSchema,
+    sessionShareToolOutputSchema,
     setSessionShareFriendMessagesRequestSchema,
+    setSessionShareToolOutputRequestSchema,
     stopSessionShareRequestSchema,
 } from "./protocol.js";
 export type {
@@ -313,7 +316,9 @@ export type {
     SessionShareReplica,
     SessionShareReplicaHistoryEntry,
     SessionShareState,
+    SessionShareToolOutput,
     SetSessionShareFriendMessagesRequest,
+    SetSessionShareToolOutputRequest,
     StopSessionShareRequest,
     ServiceNotice,
     SystemNoticePayload,

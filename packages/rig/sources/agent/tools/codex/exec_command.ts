@@ -10,6 +10,7 @@ import {
 } from "./impl/unifiedExecOutput.js";
 import { readSessionWithProgress } from "../../../tools/utils/readSessionWithProgress.js";
 import { shellExplorationPresentation } from "../../../tools/utils/shellExplorationPresentation.js";
+import { describeSharedCommand } from "../../describeSharedCommand.js";
 
 export const codexExecCommandTool = defineTool({
     name: "exec_command",
@@ -205,5 +206,19 @@ export const codexExecCommandTool = defineTool({
         if (summary !== "") return summary;
         return `Command finished${result.exit_code === undefined ? "." : ` with exit code ${result.exit_code}.`}`;
     },
+    // The command is named, never its output; see describeSharedCommand for why
+    // even the command itself is abbreviated.
+    toSharedCall: ({ cmd }) => describeSharedCommand(cmd),
+    toSharedResult: (result) => {
+        const seconds = result.wall_time_seconds.toFixed(1);
+        if (result.session_id !== undefined) {
+            return `The command is still running after ${seconds} seconds.`;
+        }
+        if (result.exit_code !== undefined) {
+            return `The command exited with code ${result.exit_code} after ${seconds} seconds.`;
+        }
+        return `The command finished after ${seconds} seconds.`;
+    },
+    sharedOutputDisclosable: true,
     locks: [],
 });

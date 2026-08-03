@@ -8,6 +8,10 @@ import type {
     SessionUnreadReason,
 } from "../../protocol/index.js";
 import { parsePermissionMode } from "../../permissions/index.js";
+import {
+    describeSharedToolOutput,
+    toSharedToolOutput,
+} from "../../session-sharing/SharedToolOutput.js";
 import type { DockerExecutionConfig } from "../../execution/index.js";
 import { summarizeDockerExecution } from "../../execution/index.js";
 import type { TX } from "../Transaction.js";
@@ -28,6 +32,7 @@ export function querySessionSummaries(
             session_shares.share_id AS share_id,
             session_shares.state AS share_state,
             session_shares.include_friend_messages AS share_include_friend_messages,
+            session_shares.tool_output AS share_tool_output,
             (
                 SELECT COUNT(*)
                 FROM session_share_members
@@ -90,6 +95,9 @@ export function querySessionSummaries(
         // An empty stored key means the session has no place in an ordered
         // list, which the protocol says by leaving the position out.
         const orderKey = readString(row, "order_key");
+        // An unshared session has no joined share row, so this column is absent
+        // rather than empty; anything unreadable is read as the private setting.
+        const toolOutput = toSharedToolOutput(readOptionalString(row, "share_tool_output"));
         return {
             id: readString(row, "id"),
             archived: readNumber(row, "archived") !== 0,
@@ -108,6 +116,8 @@ export function querySessionSummaries(
                               | "active"
                               | "degraded"
                               | "stopped",
+                          toolOutput,
+                          toolOutputDescription: describeSharedToolOutput(toolOutput),
                       },
                   }),
             trackUnread: readNumber(row, "track_unread") !== 0,

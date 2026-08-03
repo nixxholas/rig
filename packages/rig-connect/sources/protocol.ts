@@ -59,12 +59,42 @@ export const sessionShareMemberSchema = Type.Object(
 );
 export type SessionShareMember = Static<typeof sessionShareMemberSchema>;
 
+/**
+ * How much of each tool's work a share replicates.
+ *
+ * `summaries` is what a share has unless its owner asked for more, including a
+ * request that leaves the field out. `full` additionally replicates the raw
+ * arguments and output of the tools that declared themselves disclosable.
+ */
+export const sessionShareToolOutputSchema = Type.Union([
+    Type.Literal("summaries"),
+    Type.Literal("full"),
+]);
+export type SessionShareToolOutput = Static<typeof sessionShareToolOutputSchema>;
+
+/**
+ * The sentence the daemon sends for a given setting.
+ *
+ * `rig-connect` predicts an owner's change locally before the daemon confirms
+ * it, so it has to know the wording the daemon will echo back. This mirrors
+ * `describeSharedToolOutput` in the daemon's own session-sharing module, the
+ * same way every schema here mirrors its daemon original.
+ */
+export function describeSessionShareToolOutput(toolOutput: SessionShareToolOutput): string {
+    return toolOutput === "full"
+        ? "Friends see what each tool did and the output it produced."
+        : "Friends see what each tool did, without the output it produced.";
+}
+
 export const sessionSharedMetadataSchema = Type.Object(
     {
         includeFriendMessagesInModel: Type.Boolean(),
         memberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
         shareId: sessionShareIdentifierSchema,
         state: sessionShareStateSchema,
+        toolOutput: sessionShareToolOutputSchema,
+        /** Sentence describing what friends currently see, ready to show as-is. */
+        toolOutputDescription: Type.String({ maxLength: 512, minLength: 1 }),
     },
     sessionShareExact,
 );
@@ -88,6 +118,8 @@ export const createSessionShareRequestSchema = Type.Object(
         }),
         includeFriendMessagesInModel: Type.Boolean(),
         mutationId: sessionShareIdentifierSchema,
+        /** Omitted means summaries: full output is only ever something asked for. */
+        toolOutput: Type.Optional(sessionShareToolOutputSchema),
     },
     sessionShareExact,
 );
@@ -123,6 +155,17 @@ export const setSessionShareFriendMessagesRequestSchema = Type.Object(
 );
 export type SetSessionShareFriendMessagesRequest = Static<
     typeof setSessionShareFriendMessagesRequestSchema
+>;
+
+export const setSessionShareToolOutputRequestSchema = Type.Object(
+    {
+        mutationId: sessionShareIdentifierSchema,
+        toolOutput: sessionShareToolOutputSchema,
+    },
+    sessionShareExact,
+);
+export type SetSessionShareToolOutputRequest = Static<
+    typeof setSessionShareToolOutputRequestSchema
 >;
 
 export const postSessionShareFriendMessageRequestSchema = Type.Object(

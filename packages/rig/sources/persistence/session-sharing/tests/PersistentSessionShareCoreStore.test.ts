@@ -37,6 +37,7 @@ describe("PersistentSessionShareCoreStore with the deterministic transport", () 
                 includeFriendMessagesInModel: false,
                 ownerPeerId: "peer-owner",
                 ownerSessionId: "session-1",
+                toolOutput: "summaries",
             });
             expect(
                 querySessionShareOutbox(database, { limit: 100, shareId: share.shareId }),

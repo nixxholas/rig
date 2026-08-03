@@ -268,6 +268,7 @@ describe("session sharing persistence", () => {
                 ownerPeerId: "peer-owner",
                 ownerSessionId: "session-1",
                 shareId: "share-2",
+                toolOutput: "summaries",
             });
             expect(querySessionShare(opened.database, "share-2")).toMatchObject({
                 includeFriendMessages: false,
@@ -580,6 +581,7 @@ describe("session sharing persistence", () => {
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
             shareId: "share-1",
+            toolOutput: "summaries",
         });
         expect(querySessionShare(opened.database, "share-1")).toMatchObject({
             publishedMessagePosition: 0,
@@ -820,6 +822,7 @@ function createShare(tx: Parameters<typeof sessionShareCreate>[0]): void {
         ownerPeerId: "peer-owner",
         ownerSessionId: "session-1",
         shareId: "share-1",
+        toolOutput: "summaries",
     });
 }
 

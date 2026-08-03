@@ -176,7 +176,13 @@ function say(
             .insert(sessionEvents)
             .values({
                 createdAtMs: 10,
-                dataJson: JSON.stringify({ notice: text }),
+                dataJson: JSON.stringify({
+                    message: {
+                        blocks: [{ text, type: "text" }],
+                        id: `${sessionId}-${id}-message`,
+                        role: "system",
+                    },
+                }),
                 eventId: `${sessionId}-${id}`,
                 sessionId,
                 type: "system_notice",

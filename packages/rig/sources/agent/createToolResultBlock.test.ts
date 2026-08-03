@@ -62,6 +62,50 @@ describe("createToolResultBlock", () => {
             expect.objectContaining({ type: "text", text: expect.stringContaining("truncated") }),
         );
     });
+
+    it("records nothing shareable for a tool that never said anything about sharing", () => {
+        const tool = toolReturning([{ type: "text", text: "AKIAIOSFODNN7EXAMPLE" }]);
+
+        expect(tool.sharedOutputDisclosable).toBe(false);
+        expect(createToolResultBlock(tool, {}, {}, "call-shared-1").shared).toBeUndefined();
+    });
+
+    it("records the sentence a tool wrote, and disclosure only where a tool asked for it", () => {
+        const summarized = defineTool({
+            ...definition(),
+            name: "summarized_tool",
+            toSharedResult: () => "Read 3 lines of notes.md.",
+        });
+        const disclosable = defineTool({
+            ...definition(),
+            name: "disclosable_tool",
+            sharedOutputDisclosable: true,
+            toSharedResult: () => "Read 3 lines of notes.md.",
+        });
+
+        expect(createToolResultBlock(summarized, {}, {}, "call-shared-2").shared).toEqual({
+            summary: "Read 3 lines of notes.md.",
+        });
+        expect(createToolResultBlock(disclosable, {}, {}, "call-shared-3").shared).toEqual({
+            disclosable: true,
+            summary: "Read 3 lines of notes.md.",
+        });
+    });
+
+    it("keeps a tool whose summary threw out of the shared transcript entirely", () => {
+        const throwing = defineTool({
+            ...definition(),
+            name: "throwing_tool",
+            sharedOutputDisclosable: true,
+            toSharedResult: () => {
+                throw new Error("Summarizing failed.");
+            },
+        });
+
+        // Losing the sentence loses the disclosure with it: a summary Rig could
+        // not produce is not one it can vouch for.
+        expect(createToolResultBlock(throwing, {}, {}, "call-shared-4").shared).toBeUndefined();
+    });
 });
 
 describe("createErrorToolResultBlock", () => {
@@ -86,7 +130,11 @@ describe("createErrorToolResultBlock", () => {
 });
 
 function toolReturning(blocks: readonly ContentBlock[]) {
-    return defineTool({
+    return defineTool({ ...definition(), toLLM: () => blocks });
+}
+
+function definition() {
+    return {
         name: "test_tool",
         label: "Test tool",
         description: "Returns test content.",
@@ -94,8 +142,8 @@ function toolReturning(blocks: readonly ContentBlock[]) {
         returnType: Type.Object({}),
         shouldReviewInAutoMode: () => false,
         execute: () => ({}),
-        toLLM: () => blocks,
+        toLLM: (): readonly ContentBlock[] => [],
         toUI: () => "Test output",
         locks: [],
-    });
+    };
 }

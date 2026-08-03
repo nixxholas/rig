@@ -1,3 +1,4 @@
+import type { SharedToolActivity } from "./SharedToolActivity.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { AgentBlock, AgentMessage, ToolCallBlock } from "./types.js";
 import type {
@@ -6,17 +7,23 @@ import type {
     ToolCall as ProviderToolCall,
 } from "@slopus/rig-execution";
 
+/** Durable per-call data produced by the tool that owns the call. */
+export interface ToolCallDurableDetails {
+    presentation?: ToolCallPresentation;
+    shared?: SharedToolActivity;
+}
+
 export function assistantMessageToAgentMessage(
     message: ProviderAssistantMessage,
     messageId: string,
     attribution: { providerId: string; requestedModelId: string },
-    toToolCallPresentation?: (toolCall: ProviderToolCall) => ToolCallPresentation | undefined,
+    toToolCallDetails?: (toolCall: ProviderToolCall) => ToolCallDurableDetails | undefined,
 ): AgentMessage {
     return {
         role: "agent",
         id: messageId,
         blocks: message.content.map((content) =>
-            providerAssistantContentToAgentBlock(content, toToolCallPresentation),
+            providerAssistantContentToAgentBlock(content, toToolCallDetails),
         ),
         ...(message.contextTokens === undefined ? {} : { contextTokens: message.contextTokens }),
         usage: message.usage,
@@ -29,7 +36,7 @@ export function assistantMessageToAgentMessage(
 
 function providerAssistantContentToAgentBlock(
     content: ProviderAssistantContent,
-    toToolCallPresentation?: (toolCall: ProviderToolCall) => ToolCallPresentation | undefined,
+    toToolCallDetails?: (toolCall: ProviderToolCall) => ToolCallDurableDetails | undefined,
 ): AgentBlock {
     if (content.type === "text") {
         return {
@@ -47,12 +54,12 @@ function providerAssistantContentToAgentBlock(
         };
     }
 
-    return providerToolCallToAgentBlock(content, toToolCallPresentation?.(content));
+    return providerToolCallToAgentBlock(content, toToolCallDetails?.(content));
 }
 
 function providerToolCallToAgentBlock(
     toolCall: ProviderToolCall,
-    presentation: ToolCallPresentation | undefined,
+    details: ToolCallDurableDetails | undefined,
 ): ToolCallBlock {
     return {
         type: "tool_call",
@@ -66,6 +73,7 @@ function providerToolCallToAgentBlock(
         ...(toolCall.incomplete === true ? { incomplete: true } : {}),
         ...(toolCall.kind === undefined ? {} : { kind: toolCall.kind }),
         ...(toolCall.vendor === undefined ? {} : { vendor: toolCall.vendor }),
-        ...(presentation === undefined ? {} : { presentation }),
+        ...(details?.presentation === undefined ? {} : { presentation: details.presentation }),
+        ...(details?.shared === undefined ? {} : { shared: details.shared }),
     };
 }

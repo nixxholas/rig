@@ -12,6 +12,7 @@ import type {
     Tool as ExecutorTool,
     Usage,
 } from "@slopus/rig-execution";
+import type { SharedToolActivity } from "./SharedToolActivity.js";
 import type { ToolResultPresentation } from "./ToolResultPresentation.js";
 import type { ToolCallPresentation } from "./ToolCallPresentation.js";
 import type { UnansweredUserInput, UserInputResponse } from "../user-input/types.js";
@@ -61,6 +62,8 @@ export interface ToolCallBlock {
     vendor?: unknown;
     /** Durable model-invisible data defined by the tool for rich transcript rendering. */
     presentation?: ToolCallPresentation;
+    /** What a replicated transcript may say about this call instead of its arguments. */
+    shared?: SharedToolActivity;
 }
 
 /** Result of executing a tool call, embedded in an agent message. */
@@ -86,6 +89,8 @@ export interface ToolResultBlock {
     failure?: ToolResultFailure;
     /** Durable model-invisible data used for rich transcript rendering. */
     presentation?: ToolResultPresentation;
+    /** What a replicated transcript may say about this result instead of its output. */
+    shared?: SharedToolActivity;
     /** Exact user-authored or user-selected content that Auto review may trust. */
     trustedUserEvidence?: readonly ContentBlock[];
     /** Opaque provider metadata copied from the originating tool call. */
@@ -117,6 +122,14 @@ export interface UserMessage {
     friendAuthor?: FriendAuthor;
     /** Durable origin for non-human messages that use a user-role provider input shape. */
     provenance?: "agent";
+    /**
+     * Names the command this message is the output of, when the user ran one.
+     *
+     * The blocks of such a message are the command's own stdout and stderr
+     * rather than anything a person wrote, so a shared transcript reports the
+     * command through its own session events and never replicates this message.
+     */
+    shellCommandId?: string;
     /** Durable sender identity for rendering and navigating agent-authored messages. */
     agentSource?: {
         /** Stable agent capability ID used for replies. */
@@ -303,6 +316,15 @@ export interface DefinedTool<
         args: Static<TArgsSchema>,
     ) => readonly ContentBlock[];
     toUI: (result: Static<TReturnSchema>, args: Static<TArgsSchema>) => string;
+    /** One sentence a replicated transcript may show instead of this call's arguments. */
+    toSharedCall?: (args: Static<TArgsSchema>) => string | undefined;
+    /** One sentence a replicated transcript may show instead of this result's output. */
+    toSharedResult?: (
+        result: Static<TReturnSchema>,
+        args: Static<TArgsSchema>,
+    ) => string | undefined;
+    /** Whether an owner may deliberately replicate this tool's raw call and output. */
+    sharedOutputDisclosable: boolean;
     /** Model- and user-facing result text when the tool invocation is interrupted. */
     interruptionMessage?: string;
     /** Provider-specific Auto-mode guidance included only while this tool is active. */
@@ -345,6 +367,9 @@ export interface AnyDefinedTool {
     toPresentation?: (result: never, args: never) => ToolResultPresentation | undefined;
     toTrustedUserEvidence?: (result: never, args: never) => readonly ContentBlock[];
     toUI: (result: never, args: never) => string;
+    toSharedCall?: (args: never) => string | undefined;
+    toSharedResult?: (result: never, args: never) => string | undefined;
+    sharedOutputDisclosable: boolean;
     interruptionMessage?: string;
     autoPermissionInstructions?: string;
     availableToPermissionReviewer: boolean;
@@ -406,6 +431,12 @@ export function defineTool<
         args: Static<TArgsSchema>,
     ) => readonly ContentBlock[];
     toUI: (result: Static<TReturnSchema>, args: Static<TArgsSchema>) => string;
+    toSharedCall?: (args: Static<TArgsSchema>) => string | undefined;
+    toSharedResult?: (
+        result: Static<TReturnSchema>,
+        args: Static<TArgsSchema>,
+    ) => string | undefined;
+    sharedOutputDisclosable?: boolean;
     interruptionMessage?: string;
     autoPermissionInstructions?: string;
     availableToPermissionReviewer?: boolean;
@@ -423,6 +454,9 @@ export function defineTool<
         steerable: tool.steerable ?? false,
         availableToPermissionReviewer: tool.availableToPermissionReviewer ?? false,
         requiresAutoOrFullAccess: tool.requiresAutoOrFullAccess ?? false,
+        // Silence is never disclosure. A tool that says nothing about sharing
+        // keeps its raw call and result on the owner's machine.
+        sharedOutputDisclosable: tool.sharedOutputDisclosable ?? false,
         shouldRunInFullAccessInAutoMode: tool.shouldRunInFullAccessInAutoMode ?? (() => false),
     };
 }

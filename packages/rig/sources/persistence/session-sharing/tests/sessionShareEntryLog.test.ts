@@ -280,6 +280,7 @@ function createShare(tx: Parameters<typeof sessionShareCreate>[0]): void {
         ownerPeerId: "peer-owner",
         ownerSessionId: "session-1",
         shareId: "share-1",
+        toolOutput: "summaries",
     });
 }
 

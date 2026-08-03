@@ -4,35 +4,22 @@ import type { Message } from "../agent/types.js";
 import type { SessionEvent } from "../protocol/index.js";
 import { canonicalShareJson, shareContentHash } from "../sharing/canonicalShareJson.js";
 import type { ShareOpaqueEntry } from "../sharing/ShareTransport.js";
+import { shareProjectEvent } from "./impl/shareProjectEvent.js";
+import { shareProjectMessage } from "./impl/shareProjectMessage.js";
+import type { SharedToolOutput } from "./SharedToolOutput.js";
 
 const exact = { additionalProperties: false } as const;
-const VISIBLE_TRANSCRIPT_EVENT_TYPES = new Set<SessionEvent["type"]>([
-    "abort_requested",
-    "agent_event",
-    "agent_message",
-    "external_tool_call_requested",
-    "external_tool_call_resolved",
-    "goal_changed",
-    "message_submitted",
-    "run_error",
-    "run_finished",
-    "run_started",
-    "session_archived",
-    "session_reset",
-    "session_rewound",
-    "session_workspace_archived",
-    "shell_command_finished",
-    "shell_command_started",
-    "steering_applied",
-    "subagents_suspended",
-    "system_notice",
-    "user_input_detached",
-    "user_input_requested",
-    "user_input_resolved",
-    "workflow_changed",
-]);
 
-export const sessionShareProjectionSchema = Type.Object(
+/**
+ * Version 1 replicated a transcript entry with five field names removed.
+ *
+ * Entries already delivered under it stay readable, which is why it is still
+ * described here, but nothing produces it any more. Its shape was a denylist:
+ * everything crossed the boundary except a handful of named fields, so a tool's
+ * complete output, a file's complete contents, and a command's complete stdout
+ * all replicated verbatim.
+ */
+export const sessionShareProjectionV1Schema = Type.Object(
     {
         kind: Type.Union([Type.Literal("event"), Type.Literal("message")]),
         payload: Type.Unknown(),
@@ -42,7 +29,34 @@ export const sessionShareProjectionSchema = Type.Object(
     },
     exact,
 );
+export type SessionShareProjectionV1 = Static<typeof sessionShareProjectionV1Schema>;
+
+/**
+ * Version 2 replicates what the agent did rather than what the agent saw.
+ *
+ * Every field in a payload is one this projection chose to include. A tool call
+ * arrives as the sentence its own definition wrote for it, and its arguments and
+ * output arrive only when that tool declared them disclosable and the owner set
+ * this share to replicate full output.
+ */
+export const sessionShareProjectionSchema = Type.Object(
+    {
+        kind: Type.Union([Type.Literal("event"), Type.Literal("message")]),
+        payload: Type.Unknown(),
+        position: Type.Optional(Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 })),
+        runId: Type.Optional(Type.String({ maxLength: 256, minLength: 1 })),
+        version: Type.Literal(2),
+    },
+    exact,
+);
 export type SessionShareProjection = Static<typeof sessionShareProjectionSchema>;
+
+/** Any projection a replica may hold, including entries delivered before version 2. */
+export const sessionShareAnyProjectionSchema = Type.Union([
+    sessionShareProjectionV1Schema,
+    sessionShareProjectionSchema,
+]);
+export type SessionShareAnyProjection = Static<typeof sessionShareAnyProjectionSchema>;
 
 export type SessionShareProjectionSource =
     | {
@@ -62,8 +76,14 @@ export function projectSessionShareEntry(options: {
     shareId: string;
     shareSequence: number;
     source: SessionShareProjectionSource;
+    /**
+     * How much of each tool's work this share replicates. Required rather than
+     * defaulted, so a caller that has not read the owner's setting cannot
+     * accidentally publish under someone else's.
+     */
+    toolOutput: SharedToolOutput;
 }): ShareOpaqueEntry | undefined {
-    const projection = projectSessionShareProjection(options.source);
+    const projection = projectSessionShareProjection(options.source, options.toolOutput);
     if (projection === undefined) return undefined;
     const canonicalJson = canonicalShareJson(projection);
     return {
@@ -80,39 +100,25 @@ export function projectSessionShareEntry(options: {
  * The transcript projection on its own, without the entry it usually travels in.
  *
  * A shared scope carries the same projection nested inside its own envelope, so
- * both kinds of share decide what is visible and how it is sanitized right here.
- * `undefined` means the source is not part of a shared transcript at all.
+ * both kinds of share decide what is visible right here, including how much of
+ * each tool's work crosses. `undefined` means the source is not part of a shared
+ * transcript at all.
  */
 export function projectSessionShareProjection(
     source: SessionShareProjectionSource,
+    toolOutput: SharedToolOutput,
 ): SessionShareProjection | undefined {
     if (source.kind === "event") {
-        if (!VISIBLE_TRANSCRIPT_EVENT_TYPES.has(source.event.type)) return undefined;
-        return { kind: "event", payload: sanitize(source.event), version: 1 };
+        const payload = shareProjectEvent(source.event, toolOutput);
+        return payload === undefined ? undefined : { kind: "event", payload, version: 2 };
     }
-    if (source.message.internal === true) return undefined;
+    const payload = shareProjectMessage(source.message, toolOutput);
+    if (payload === undefined) return undefined;
     return {
         kind: "message",
-        payload: sanitize(source.message),
+        payload,
         position: source.position,
         ...(source.runId === undefined ? {} : { runId: source.runId }),
-        version: 1,
+        version: 2,
     };
-}
-
-function sanitize(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(sanitize);
-    if (value === null || typeof value !== "object") return value;
-    const source = value as Record<string, unknown>;
-    return Object.fromEntries(
-        Object.entries(source).flatMap(([key, child]) =>
-            key === "encrypted" ||
-            key === "encryptedAgentMessage" ||
-            key === "internal" ||
-            key === "replacementMessages" ||
-            key === "vendor"
-                ? []
-                : [[key, sanitize(child)]],
-        ),
-    );
 }

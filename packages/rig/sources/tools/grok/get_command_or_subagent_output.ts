@@ -53,5 +53,11 @@ export const grokGetCommandOrSubagentOutputTool = defineTool({
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
         `Checked ${result.results.length} background task${result.results.length === 1 ? "" : "s"}.`,
+    toSharedCall: ({ task_ids }) =>
+        `Checked ${task_ids.length} background task${task_ids.length === 1 ? "" : "s"}.`,
+    // Report how many tasks were queried; their captured output never leaks.
+    toSharedResult: (result) =>
+        `Retrieved the status of ${result.results.length} background task${result.results.length === 1 ? "" : "s"}.`,
+    sharedOutputDisclosable: true,
     locks: [],
 });

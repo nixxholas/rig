@@ -144,6 +144,13 @@ To complete your request, use WebFetch again with these parameters:
         toLLM: (result) => [{ type: "text", text: result.result }],
         toUI: (result) =>
             `Received ${formatFileSize(result.bytes)} (${result.code} ${result.codeText})`,
+        toSharedCall: ({ url }) => `Fetched ${url}.`,
+        // Size and HTTP status are safe; the fetched page body never leaks.
+        toSharedResult: (result) =>
+            result.code >= 400
+                ? `The fetch failed with HTTP ${result.code} ${result.codeText}.`
+                : `Fetched ${formatFileSize(result.bytes)} with HTTP ${result.code} ${result.codeText}.`,
+        sharedOutputDisclosable: true,
         locks: [],
     });
 }

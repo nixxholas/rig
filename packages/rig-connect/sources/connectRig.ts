@@ -103,8 +103,10 @@ import type {
     SessionSharedMetadata,
     SessionShareFriendInput,
     SessionShareOwnerResponse,
+    SessionShareToolOutput,
 } from "./protocol.js";
 import {
+    describeSessionShareToolOutput,
     getSessionShareHealthResponseSchema,
     getSessionShareReplicaHistoryResponseSchema,
     listSessionShareReplicasResponseSchema,
@@ -652,6 +654,11 @@ export interface RigConnection {
     setSessionShareFriendMessages: (
         sessionId: string,
         includeFriendMessagesInModel: boolean,
+    ) => MutationId;
+    /** Raises or lowers how much of each tool's work friends receive from now on. */
+    setSessionShareToolOutput: (
+        sessionId: string,
+        toolOutput: SessionShareToolOutput,
     ) => MutationId;
     /** Posts through an authenticated member grant; this is not an optimistic owner mutation. */
     postSessionShareFriendMessage: (
@@ -3068,6 +3075,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             | "create_session_share"
             | "revoke_session_share_member"
             | "set_session_share_friend_messages"
+            | "set_session_share_tool_output"
             | "stop_session_share"
         >,
         sessionId: string,
@@ -3167,6 +3175,22 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             "/friend-messages",
             { includeFriendMessagesInModel },
             (shared) => ({ ...shared, includeFriendMessagesInModel }),
+        );
+
+    const setSessionShareToolOutput: RigConnection["setSessionShareToolOutput"] = (
+        sessionId,
+        toolOutput,
+    ) =>
+        enqueueSessionShareMutation(
+            "set_session_share_tool_output",
+            sessionId,
+            "/tool-output",
+            { toolOutput },
+            (shared) => ({
+                ...shared,
+                toolOutput,
+                toolOutputDescription: describeSessionShareToolOutput(toolOutput),
+            }),
         );
 
     const postSessionShareFriendMessage: RigConnection["postSessionShareFriendMessage"] = (
@@ -5011,6 +5035,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         setGoalStatus,
         setSessionArchived,
         setSessionShareFriendMessages,
+        setSessionShareToolOutput,
         stopRun,
         startMurmurService,
         stopMurmurService,
@@ -5373,6 +5398,7 @@ function isSessionShareMutationAction(
     | "create_session_share"
     | "revoke_session_share_member"
     | "set_session_share_friend_messages"
+    | "set_session_share_tool_output"
     | "stop_session_share"
 > {
     return (
@@ -5380,6 +5406,7 @@ function isSessionShareMutationAction(
         action === "create_session_share" ||
         action === "revoke_session_share_member" ||
         action === "set_session_share_friend_messages" ||
+        action === "set_session_share_tool_output" ||
         action === "stop_session_share"
     );
 }

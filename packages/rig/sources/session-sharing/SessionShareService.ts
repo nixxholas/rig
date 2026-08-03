@@ -6,6 +6,7 @@ import { asyncQueue, type AsyncQueue } from "../concurrency/index.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { SessionShareReplicaEndedReason } from "../persistence/session-sharing/types.js";
 import { ShareUnauthorizedPostError } from "../sharing/ShareUnauthorizedPostError.js";
+import type { SharedToolOutput } from "./SharedToolOutput.js";
 import type { FriendAuthor } from "./FriendAuthor.js";
 import type {
     ShareOpaqueEntry,
@@ -31,6 +32,8 @@ export interface SessionShareRecord {
     readonly ownerSessionId: string;
     readonly shareId: string;
     readonly state: SessionShareState;
+    /** How much of each tool's work this share replicates. */
+    readonly toolOutput: SharedToolOutput;
 }
 
 export interface SessionShareMemberRecord {
@@ -83,6 +86,7 @@ export interface SessionShareCoreStore {
         ownerPeerId: string;
         ownerSessionId: string;
         shareId: string;
+        toolOutput: SharedToolOutput;
     }): SessionShareRecord;
     queryShare(shareId: string): SessionShareRecord | undefined;
     queryActiveShareForSession(ownerSessionId: string): SessionShareRecord | undefined;
@@ -97,6 +101,7 @@ export interface SessionShareCoreStore {
     revokeMember(shareId: string, shareMemberId: string): SessionShareMemberRecord;
     stopShare(shareId: string): SessionShareRecord;
     setIncludeFriendMessages(shareId: string, include: boolean): SessionShareRecord;
+    setToolOutput(shareId: string, toolOutput: SharedToolOutput): SessionShareRecord;
     setShareHealth(shareId: string, state: "active" | "degraded"): void;
     acceptFriendMessage(
         post: ShareTransportMemberPost,
@@ -162,6 +167,7 @@ export class SessionShareService {
         includeFriendMessagesInModel: boolean;
         ownerPeerId: string;
         ownerSessionId: string;
+        toolOutput: SharedToolOutput;
     }): Promise<SessionShareRecord> {
         this.#assertOpen();
         if (input.friends.length === 0)
@@ -240,6 +246,11 @@ export class SessionShareService {
     toggle(shareId: string, includeFriendMessagesInModel: boolean): SessionShareRecord {
         this.#assertOpen();
         return this.#store.setIncludeFriendMessages(shareId, includeFriendMessagesInModel);
+    }
+
+    setToolOutput(shareId: string, toolOutput: SharedToolOutput): SessionShareRecord {
+        this.#assertOpen();
+        return this.#store.setToolOutput(shareId, toolOutput);
     }
 
     async recover(): Promise<void> {

@@ -11,6 +11,7 @@ import type {
     SessionShareOwnerResponse,
     SessionShareReplica,
     SetSessionShareFriendMessagesRequest,
+    SetSessionShareToolOutputRequest,
     StopSessionShareRequest,
 } from "../protocol/index.js";
 import type {
@@ -19,6 +20,7 @@ import type {
 } from "../persistence/session-sharing/types.js";
 import type { SessionShareServiceContract } from "./SessionShareServiceContract.js";
 import type { SessionShareRecord, SessionShareService } from "./SessionShareService.js";
+import { describeSharedToolOutput, DEFAULT_SHARED_TOOL_OUTPUT } from "./SharedToolOutput.js";
 
 const MAX_HISTORY_PAGE = 100;
 
@@ -95,6 +97,8 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
             includeFriendMessagesInModel: request.includeFriendMessagesInModel,
             ownerPeerId,
             ownerSessionId: sessionId,
+            // A request that says nothing about tool output is asking for none.
+            toolOutput: request.toolOutput ?? DEFAULT_SHARED_TOOL_OUTPUT,
         });
         return this.#ownerResponse(share.shareId);
     }
@@ -141,6 +145,15 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
     ): Promise<SessionShareOwnerResponse> {
         const shareId = this.#requireShareId(sessionId);
         this.#service.toggle(shareId, request.includeFriendMessagesInModel);
+        return this.#ownerResponse(shareId);
+    }
+
+    async setToolOutput(
+        sessionId: string,
+        request: SetSessionShareToolOutputRequest,
+    ): Promise<SessionShareOwnerResponse> {
+        const shareId = this.#requireShareId(sessionId);
+        this.#service.setToolOutput(shareId, request.toolOutput);
         return this.#ownerResponse(shareId);
     }
 
@@ -222,6 +235,8 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
                 memberCount: members.filter((member) => member.state === "active").length,
                 shareId,
                 state: share.state,
+                toolOutput: share.toolOutput,
+                toolOutputDescription: describeSharedToolOutput(share.toolOutput),
             },
         };
     }

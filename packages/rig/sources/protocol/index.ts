@@ -59,7 +59,9 @@ export {
     sessionShareReplicaHistoryEntrySchema,
     sessionShareReplicaSchema,
     sessionShareStateSchema,
+    sessionShareToolOutputSchema,
     setSessionShareFriendMessagesRequestSchema,
+    setSessionShareToolOutputRequestSchema,
     stopSessionShareRequestSchema,
     type AddSessionShareMemberRequest,
     type CreateSessionShareRequest,
@@ -79,7 +81,9 @@ export {
     type SessionShareReplica,
     type SessionShareReplicaHistoryEntry,
     type SessionShareState,
+    type SessionShareToolOutput,
     type SetSessionShareFriendMessagesRequest,
+    type SetSessionShareToolOutputRequest,
     type StopSessionShareRequest,
 } from "./SessionShareProtocol.js";
 export {

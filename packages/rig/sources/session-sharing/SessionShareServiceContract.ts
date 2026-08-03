@@ -9,6 +9,7 @@ import type {
     RevokeSessionShareMemberRequest,
     SessionShareOwnerResponse,
     SetSessionShareFriendMessagesRequest,
+    SetSessionShareToolOutputRequest,
     StopSessionShareRequest,
 } from "../protocol/index.js";
 
@@ -37,6 +38,10 @@ export interface SessionShareServiceContract {
     setFriendMessages(
         sessionId: string,
         request: SetSessionShareFriendMessagesRequest,
+    ): Promise<SessionShareOwnerResponse>;
+    setToolOutput(
+        sessionId: string,
+        request: SetSessionShareToolOutputRequest,
     ): Promise<SessionShareOwnerResponse>;
     health(shareId: string): GetSessionShareHealthResponse | undefined;
     listReplicas(): ListSessionShareReplicasResponse;

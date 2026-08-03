@@ -51,5 +51,14 @@ export const claudeWriteTool = defineTool({
         type: "file_diff",
     }),
     toUI: (_result, args) => `Wrote ${args.file_path}`,
+    toSharedCall: ({ file_path }) => `Wrote ${file_path}.`,
+    toSharedResult: (result) => {
+        const { added = 0, deleted = 0, kind, path } = result.fileDiff;
+        if (kind === "add") {
+            return `Created ${path} with ${added} line${added === 1 ? "" : "s"}.`;
+        }
+        return `Updated ${path}, adding ${added} line${added === 1 ? "" : "s"} and deleting ${deleted} line${deleted === 1 ? "" : "s"}.`;
+    },
+    sharedOutputDisclosable: true,
     locks: [(args) => args.file_path],
 });

@@ -11,10 +11,21 @@ export {
 } from "./FriendAuthor.js";
 export {
     projectSessionShareEntry,
+    sessionShareAnyProjectionSchema,
     sessionShareProjectionSchema,
+    sessionShareProjectionV1Schema,
+    type SessionShareAnyProjection,
     type SessionShareProjection,
     type SessionShareProjectionSource,
+    type SessionShareProjectionV1,
 } from "./projectSessionShareEntry.js";
+export {
+    DEFAULT_SHARED_TOOL_OUTPUT,
+    describeSharedToolOutput,
+    sharedToolOutputSchema,
+    toSharedToolOutput,
+    type SharedToolOutput,
+} from "./SharedToolOutput.js";
 export {
     SessionShareService,
     type SessionShareAcceptedFriendMessage,

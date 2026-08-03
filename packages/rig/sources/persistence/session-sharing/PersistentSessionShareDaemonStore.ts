@@ -92,6 +92,7 @@ export class PersistentSessionShareDaemonStore implements SessionShareDaemonStor
             ownerSessionId: share.ownerSessionId,
             shareId: share.shareId,
             state: share.state,
+            toolOutput: share.toolOutput,
         };
     }
 }

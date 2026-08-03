@@ -73,5 +73,19 @@ Use it to answer a prompt, drive a REPL, or interrupt with Ctrl-C ("\\u0003"). E
         result.status === "running"
             ? "Sent input to the background command."
             : "Sent input; the background command has finished.",
+    // The keystrokes sent may be a secret, so name only the task, not `input`.
+    toSharedCall: ({ input, task_id }) =>
+        input.length > 0
+            ? `Sent input to background command ${task_id}.`
+            : `Checked background command ${task_id}.`,
+    toSharedResult: (result) => {
+        if (result.exit_code !== undefined) {
+            return `The background command exited with code ${result.exit_code}.`;
+        }
+        return result.status === "running"
+            ? "The background command is still running."
+            : "The background command has finished.";
+    },
+    sharedOutputDisclosable: true,
     locks: [],
 });

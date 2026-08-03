@@ -309,6 +309,9 @@ describe("connectRig mutations", () => {
                         memberCount: 1,
                         shareId: "share-1",
                         state: "active",
+                        toolOutput: "summaries",
+                        toolOutputDescription:
+                            "Friends see what each tool did, without the output it produced.",
                     };
                 } else if (url.pathname.endsWith("/members")) {
                     authoritative = { ...authoritative!, memberCount: 3 };

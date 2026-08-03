@@ -72,7 +72,7 @@ describe("projectScopeShareEntry", () => {
 
     it("carries a transcript entry in the session-share projection unchanged", () => {
         const transcript: ScopeShareProjection = {
-            payload: { kind: "event", payload: { type: "system_notice" }, version: 1 },
+            payload: { kind: "event", payload: { type: "system_notice" }, version: 2 },
             sessionId: "session-a",
             subject: "session_event",
             version: 1,

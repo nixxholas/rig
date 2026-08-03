@@ -4,7 +4,14 @@ export function toToolExecutionEndResult(
     result: ToolResultBlock,
 ): Pick<
     ToolResultBlock,
-    "display" | "failure" | "isError" | "presentation" | "toolCallId" | "toolName" | "type"
+    | "display"
+    | "failure"
+    | "isError"
+    | "presentation"
+    | "shared"
+    | "toolCallId"
+    | "toolName"
+    | "type"
 > {
     return {
         type: "tool_result",
@@ -14,5 +21,6 @@ export function toToolExecutionEndResult(
         ...(result.failure === undefined ? {} : { failure: result.failure }),
         ...(result.isError === undefined ? {} : { isError: result.isError }),
         ...(result.presentation === undefined ? {} : { presentation: result.presentation }),
+        ...(result.shared === undefined ? {} : { shared: result.shared }),
     };
 }

@@ -121,7 +121,18 @@ export function insertSessionEvents(
             .insert(sessionEvents)
             .values({
                 createdAtMs: 10 + index,
-                dataJson: JSON.stringify({ notice: `${input.sessionId}-${String(index)}` }),
+                dataJson: JSON.stringify({
+                    message: {
+                        blocks: [
+                            {
+                                text: `${input.sessionId}-${String(index)}`,
+                                type: "text",
+                            },
+                        ],
+                        id: `${input.sessionId}-notice-${String(index)}`,
+                        role: "system",
+                    },
+                }),
                 eventId: `${input.sessionId}-event-${String(index)}`,
                 sessionId: input.sessionId,
                 type: "system_notice",

@@ -97,6 +97,16 @@ export function createClaudeWebSearchTool(dependencies: ClaudeWebSearchDependenc
                     : `${Math.round(result.durationSeconds * 1000)}ms`;
             return `Completed ${searches} web ${searches === 1 ? "search" : "searches"} in ${duration}`;
         },
+        toSharedCall: ({ query }) => `Searched the web for "${query}".`,
+        // Count the result links only; their titles and URLs never leak.
+        toSharedResult: (result) => {
+            const links = result.results.reduce(
+                (sum, item) => sum + (typeof item === "string" ? 0 : item.content.length),
+                0,
+            );
+            return `Found ${links} search result${links === 1 ? "" : "s"}.`;
+        },
+        sharedOutputDisclosable: true,
         locks: [],
     });
 }

@@ -7,6 +7,7 @@ import type {
     SessionShareRecord as CoreShare,
     SessionShareReplicaRecord as CoreReplica,
 } from "../../session-sharing/SessionShareService.js";
+import type { SharedToolOutput } from "../../session-sharing/SharedToolOutput.js";
 import type {
     ShareOpaqueEntry,
     ShareTransportGrant,
@@ -32,6 +33,7 @@ import { sessionShareReplicaSave } from "./sessionShareReplicaSave.js";
 import { sessionShareRevoke } from "./sessionShareRevoke.js";
 import { sessionShareSetDegraded } from "./sessionShareSetDegraded.js";
 import { sessionShareSetIncludeFriendMessages } from "./sessionShareSetIncludeFriendMessages.js";
+import { sessionShareSetToolOutput } from "./sessionShareSetToolOutput.js";
 import { sessionShareStop } from "./sessionShareStop.js";
 import { sessionShareTailEvents } from "./sessionShareTailEvents.js";
 
@@ -62,6 +64,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
         ownerPeerId: string;
         ownerSessionId: string;
         shareId: string;
+        toolOutput: SharedToolOutput;
     }): CoreShare {
         const now = this.#now();
         const share = sessionShareCreate(this.#tx(), {
@@ -76,6 +79,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
             ownerPeerId: input.ownerPeerId,
             ownerSessionId: input.ownerSessionId,
             shareId: input.shareId,
+            toolOutput: input.toolOutput,
         });
         return this.#shareWithMembers(share.shareId);
     }
@@ -132,6 +136,11 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
 
     setIncludeFriendMessages(shareId: string, include: boolean): CoreShare {
         sessionShareSetIncludeFriendMessages(this.#tx(), shareId, include, this.#now());
+        return this.#shareWithMembers(shareId);
+    }
+
+    setToolOutput(shareId: string, toolOutput: SharedToolOutput): CoreShare {
+        sessionShareSetToolOutput(this.#tx(), shareId, toolOutput, this.#now());
         return this.#shareWithMembers(shareId);
     }
 
@@ -272,6 +281,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
             ownerSessionId: share.ownerSessionId,
             shareId: share.shareId,
             state: share.state,
+            toolOutput: share.toolOutput,
         };
     }
 }

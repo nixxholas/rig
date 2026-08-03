@@ -166,6 +166,7 @@ export type AgentLoopEvent =
               | "failure"
               | "isError"
               | "presentation"
+              | "shared"
               | "toolCallId"
               | "toolName"
               | "type"
@@ -554,7 +555,7 @@ export async function runAgentLoop(options: RunAgentLoopOptions): Promise<AgentL
                 providerId: options.provider.id,
                 requestedModelId: model.id,
             },
-            (toolCall) => presentedToolCalls.get(toolCall.id)?.presentation,
+            (toolCall) => presentedToolCalls.get(toolCall.id),
         );
         const finalizedCompaction = finalizeCompactionMessage(
             contextTranscript,

@@ -1319,6 +1319,7 @@ export class InMemorySession {
             blocks: [{ type: "text", text: formatShellCommandContext(result) }],
             id: createId(),
             role: "user",
+            shellCommandId: result.commandId,
         };
         const runtime = this.#runtime;
         if (runtime === undefined) {

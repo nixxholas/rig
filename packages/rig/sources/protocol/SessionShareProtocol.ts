@@ -6,6 +6,19 @@ const displayNameSchema = Type.String({ maxLength: 512, minLength: 1 });
 const timestampSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
 const mutationIdSchema = Type.String({ maxLength: 256, minLength: 1 });
 
+/**
+ * How much of each tool's work a share replicates.
+ *
+ * `summaries` is what a share has unless its owner asked for more, including a
+ * request that leaves the field out. `full` additionally replicates the raw
+ * arguments and output of the tools that declared themselves disclosable.
+ */
+export const sessionShareToolOutputSchema = Type.Union([
+    Type.Literal("summaries"),
+    Type.Literal("full"),
+]);
+export type SessionShareToolOutput = Static<typeof sessionShareToolOutputSchema>;
+
 export const sessionShareStateSchema = Type.Union([
     Type.Literal("active"),
     Type.Literal("degraded"),
@@ -52,6 +65,9 @@ export const sessionSharedMetadataSchema = Type.Object(
         memberCount: Type.Integer({ maximum: 10_000, minimum: 0 }),
         shareId: identifierSchema,
         state: sessionShareStateSchema,
+        toolOutput: sessionShareToolOutputSchema,
+        /** Sentence describing what friends currently see, ready to show as-is. */
+        toolOutputDescription: Type.String({ maxLength: 512, minLength: 1 }),
     },
     exact,
 );
@@ -75,6 +91,8 @@ export const createSessionShareRequestSchema = Type.Object(
         }),
         includeFriendMessagesInModel: Type.Boolean(),
         mutationId: mutationIdSchema,
+        /** Omitted means summaries: full output is only ever something asked for. */
+        toolOutput: Type.Optional(sessionShareToolOutputSchema),
     },
     exact,
 );
@@ -107,6 +125,17 @@ export const setSessionShareFriendMessagesRequestSchema = Type.Object(
 );
 export type SetSessionShareFriendMessagesRequest = Static<
     typeof setSessionShareFriendMessagesRequestSchema
+>;
+
+export const setSessionShareToolOutputRequestSchema = Type.Object(
+    {
+        mutationId: mutationIdSchema,
+        toolOutput: sessionShareToolOutputSchema,
+    },
+    exact,
+);
+export type SetSessionShareToolOutputRequest = Static<
+    typeof setSessionShareToolOutputRequestSchema
 >;
 
 export const postSessionShareFriendMessageRequestSchema = Type.Object(

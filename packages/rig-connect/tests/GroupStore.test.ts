@@ -567,6 +567,9 @@ describe("GroupStore", () => {
             memberCount: 2,
             shareId: "share-1",
             state: "active" as const,
+            toolOutput: "summaries" as const,
+            toolOutputDescription:
+                "Friends see what each tool did, without the output it produced.",
         };
         store.applyHello(
             hello({

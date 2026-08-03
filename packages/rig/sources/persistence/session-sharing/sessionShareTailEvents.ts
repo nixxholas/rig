@@ -4,6 +4,7 @@ import type { Message } from "../../agent/types.js";
 import type { SessionEvent } from "../../protocol/index.js";
 import { createEventIdFactory } from "../../protocol/createEventIdFactory.js";
 import { projectSessionShareEntry } from "../../session-sharing/projectSessionShareEntry.js";
+import { toSharedToolOutput } from "../../session-sharing/SharedToolOutput.js";
 import { sessionShareOutbox, sessionShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
@@ -34,6 +35,7 @@ export function sessionShareTailEvents(
             };
         }
         const createShareEventId = createEventIdFactory({ now: () => input.now });
+        const toolOutput = toSharedToolOutput(share.toolOutput);
         let nextSequence = share.nextShareSequence;
         let outboxBytes = share.outboxBytes;
         let outboxCount = share.outboxCount;
@@ -70,6 +72,7 @@ export function sessionShareTailEvents(
                         position: row.position,
                         ...(row.run_id === null ? {} : { runId: row.run_id }),
                     },
+                    toolOutput,
                 });
                 if (projected === undefined) {
                     publishedMessagePosition = row.position;
@@ -154,6 +157,7 @@ export function sessionShareTailEvents(
                         } as SessionEvent,
                         kind: "event",
                     },
+                    toolOutput,
                 });
                 if (projected === undefined) {
                     publishedEventSeq = row.seq;
