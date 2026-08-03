@@ -34,12 +34,18 @@ import type { GitHubFetch } from "./fetchBoundedGitHubResource.js";
 import { getPluginDataDirectory } from "./getPluginDataDirectory.js";
 import { getPluginsDirectory } from "./getPluginsDirectory.js";
 import type {
-    GitHubPluginIndex,
-    GitHubPluginInstallSource,
+    GitHubPluginCatalog,
+    GitHubPluginInstallationSource,
     GitHubPluginSource,
 } from "./githubPluginCatalog.js";
 import { installGitHubPlugin } from "./installGitHubPlugin.js";
-import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
+import {
+    installPluginFromPath,
+    toPluginFolderName,
+    type InstalledPlugin,
+} from "./installPluginFromPath.js";
+import { comparePluginVersions } from "./comparePluginVersions.js";
+import { PluginInstallationRequests } from "./PluginInstallationRequests.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import { PluginIconSummaryCache, readPluginIcon } from "./readPluginIcon.js";
@@ -149,6 +155,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
     readonly #networkRegistry: PluginNetworkRegistry;
     readonly #listProviderUsage: StartPluginOptions["listProviderUsage"];
+    readonly #installationRequests = new PluginInstallationRequests();
     readonly #running = new Map<string, RunningPlugin>();
     readonly #startupGenerations = new Map<string, symbol>();
     readonly #states = new Map<string, PluginRuntimeState>();
@@ -244,10 +251,26 @@ export class PluginManager implements ManagedNetworkInterceptor {
     /** Installs a plugin from a folder on this machine and starts it. */
     async install(options: {
         fs: FileSystemContext;
+        requestId?: string;
         signal?: AbortSignal;
         sourceDirectory: string;
     }): Promise<InstalledPlugin> {
         this.#assertOpen();
+        if (options.requestId !== undefined) {
+            return this.#installationRequests.run(
+                options.requestId,
+                `local:${options.sourceDirectory}`,
+                () => this.#installFromPath(options),
+            );
+        }
+        return this.#installFromPath(options);
+    }
+
+    async #installFromPath(options: {
+        fs: FileSystemContext;
+        signal?: AbortSignal;
+        sourceDirectory: string;
+    }): Promise<InstalledPlugin> {
         const installed = await installPluginFromPath({
             docker: this.#docker,
             fs: options.fs,
@@ -263,20 +286,74 @@ export class PluginManager implements ManagedNetworkInterceptor {
     async discoverRepository(
         source: GitHubPluginSource,
         signal?: AbortSignal,
-    ): Promise<GitHubPluginIndex> {
+    ): Promise<GitHubPluginCatalog> {
         this.#assertOpen();
-        return discoverGitHubPlugins(source, {
+        const catalog = await discoverGitHubPlugins(source, {
             ...(this.#githubFetch === undefined ? {} : { fetcher: this.#githubFetch }),
             ...(signal === undefined ? {} : { signal }),
         });
+        const installed = (await this.list()).plugins;
+        return {
+            catalogId: catalog.catalogId,
+            plugins: catalog.plugins.map((plugin) => {
+                const folder = toPluginFolderName(plugin.name);
+                const match = installed.find((candidate) => candidate.folder === folder);
+                const availability =
+                    match === undefined
+                        ? ("not-installed" as const)
+                        : comparePluginVersions(plugin.version, match.version) > 0
+                          ? ("update-available" as const)
+                          : comparePluginVersions(plugin.version, match.version) < 0
+                            ? ("downgrade-available" as const)
+                            : ("reinstall-available" as const);
+                return {
+                    availability,
+                    description: plugin.description,
+                    displayName: plugin.displayName,
+                    ...(match === undefined
+                        ? {}
+                        : {
+                              installed: {
+                                  folder: match.folder,
+                                  name: match.name,
+                                  version: match.version,
+                              },
+                          }),
+                    name: plugin.name,
+                    source: {
+                        catalogId: catalog.catalogId,
+                        plugin,
+                        ...(catalog.ref === undefined ? {} : { ref: catalog.ref }),
+                        repository: catalog.repository,
+                        revision: catalog.revision,
+                        type: "github" as const,
+                    },
+                    version: plugin.version,
+                };
+            }),
+            ...(catalog.ref === undefined ? {} : { ref: catalog.ref }),
+            repository: catalog.repository,
+            revision: catalog.revision,
+        };
     }
 
     /** Installs one indexed plugin from a GitHub repository and starts it. */
     async installFromGitHub(
-        source: GitHubPluginInstallSource,
-        options: { fs: FileSystemContext; signal?: AbortSignal },
+        source: GitHubPluginInstallationSource,
+        options: { fs: FileSystemContext; requestId?: string; signal?: AbortSignal },
     ): Promise<InstalledPlugin> {
         this.#assertOpen();
+        if (options.requestId === undefined) return this.#installFromGitHub(source, options);
+        const sourceIdentity = `github:${JSON.stringify(source)}`;
+        return this.#installationRequests.run(options.requestId, sourceIdentity, () =>
+            this.#installFromGitHub(source, options),
+        );
+    }
+
+    async #installFromGitHub(
+        source: GitHubPluginInstallationSource,
+        options: { fs: FileSystemContext; signal?: AbortSignal },
+    ): Promise<InstalledPlugin> {
         const installed = await installGitHubPlugin({
             docker: this.#docker,
             ...(this.#githubFetch === undefined ? {} : { fetcher: this.#githubFetch }),

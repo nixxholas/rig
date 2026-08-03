@@ -55,18 +55,31 @@ export {
 } from "./PluginStartupState.js";
 export { getPluginsDirectory } from "./getPluginsDirectory.js";
 export {
+    githubPluginAvailabilitySchema,
     githubPluginCatalogEntrySchema,
+    githubPluginCatalogIdSchema,
+    githubPluginCatalogSchema,
     githubPluginIndexSchema,
+    githubPluginInstallationSourceSchema,
     githubPluginInstallSourceSchema,
+    githubPluginOfferSchema,
+    githubPluginPackageSourceSchema,
     githubPluginSourceSchema,
+    githubRevisionSchema,
     githubRepositorySchema,
     HAPPY_PLUGINS_INDEX_FILE_NAME,
     MAXIMUM_GITHUB_PLUGIN_INDEX_BYTES,
+    type GitHubPluginAvailability,
+    type GitHubPluginCatalog,
     type GitHubPluginCatalogEntry,
     type GitHubPluginIndex,
+    type GitHubPluginInstallationSource,
     type GitHubPluginInstallSource,
+    type GitHubPluginOffer,
+    type GitHubPluginPackageSource,
     type GitHubPluginSource,
 } from "./githubPluginCatalog.js";
+export { PluginCatalogError, type PluginCatalogErrorCode } from "./PluginCatalogError.js";
 export { installGitHubPlugin } from "./installGitHubPlugin.js";
 export { readPluginManifest } from "./readPluginManifest.js";
 export { readPluginIcon } from "./readPluginIcon.js";

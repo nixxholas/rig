@@ -41,6 +41,7 @@ export { MurmurFriendsStore } from "./MurmurFriendElement.js";
 export type { MurmurFriendsState } from "./MurmurFriendElement.js";
 export {
     PluginAppRequestError,
+    PluginCatalogRequestError,
     PluginIconRequestError,
     PluginManagementRequestError,
     PluginStore,
@@ -50,13 +51,20 @@ export type {
     PluginApp,
     PluginAppResource,
     PluginCatalogFailure,
+    PluginCatalogRequestErrorCode,
     PluginIconRequestErrorCode,
+    PluginManagementRequestErrorCode,
     PluginsState,
     ReadPluginAppResourceResult,
     ReadPluginIconResult,
 } from "./PluginElement.js";
 export type {
     InstalledPluginSummary,
+    DiscoverPluginCatalogRequest,
+    GitHubPluginCatalog,
+    GitHubPluginCatalogEntry,
+    GitHubPluginPackageSource,
+    PluginCatalogErrorCode,
     PluginInstallClassification,
     PluginManagementErrorCode,
     UninstalledPluginSummary,

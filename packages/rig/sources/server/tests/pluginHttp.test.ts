@@ -139,7 +139,13 @@ describe("plugin HTTP protocol", () => {
         expect(
             (
                 await request(port, {
-                    body: JSON.stringify({ sourceDirectory: "/plugins/source" }),
+                    body: JSON.stringify({
+                        requestId: "local-install-1",
+                        source: {
+                            sourceDirectory: "/plugins/source",
+                            type: "local-directory",
+                        },
+                    }),
                     method: "POST",
                     path: "/plugins",
                     token: "wrong",
@@ -147,7 +153,13 @@ describe("plugin HTTP protocol", () => {
             ).status,
         ).toBe(401);
         await expect(
-            requestJson(port, "/plugins", { sourceDirectory: "/plugins/source" }),
+            requestJson(port, "/plugins", {
+                requestId: "local-install-1",
+                source: {
+                    sourceDirectory: "/plugins/source",
+                    type: "local-directory",
+                },
+            }),
         ).resolves.toEqual({
             plugin: {
                 classification: "fresh-install",
@@ -160,13 +172,17 @@ describe("plugin HTTP protocol", () => {
         });
         expect(plugins.install).toHaveBeenCalledWith(
             expect.objectContaining({
+                requestId: "local-install-1",
                 signal: expect.any(AbortSignal),
                 sourceDirectory: "/plugins/source",
             }),
         );
 
         const relative = await request(port, {
-            body: JSON.stringify({ sourceDirectory: "plugins/source" }),
+            body: JSON.stringify({
+                requestId: "local-install-2",
+                source: { sourceDirectory: "plugins/source", type: "local-directory" },
+            }),
             method: "POST",
             path: "/plugins",
         });
@@ -179,7 +195,11 @@ describe("plugin HTTP protocol", () => {
             },
         });
         const malformed = await request(port, {
-            body: JSON.stringify({ sourceDirectory: "/plugins/source", unexpected: true }),
+            body: JSON.stringify({
+                requestId: "local-install-3",
+                source: { sourceDirectory: "/plugins/source", type: "local-directory" },
+                unexpected: true,
+            }),
             method: "POST",
             path: "/plugins",
         });
@@ -228,7 +248,13 @@ describe("plugin HTTP protocol", () => {
         const port = await listen(server);
 
         const install = await request(port, {
-            body: JSON.stringify({ sourceDirectory: "/plugins/broken" }),
+            body: JSON.stringify({
+                requestId: "broken-install",
+                source: {
+                    sourceDirectory: "/plugins/broken",
+                    type: "local-directory",
+                },
+            }),
             method: "POST",
             path: "/plugins",
         });
@@ -248,6 +274,84 @@ describe("plugin HTTP protocol", () => {
                 message: "No plugin named Missing is installed.",
             },
         });
+    });
+
+    it("authenticates discovery and installs the exact discovered package source", async () => {
+        const plugins = context();
+        const source = {
+            catalogId: "a".repeat(64),
+            plugin: {
+                description: "A clock.",
+                displayName: "Clock",
+                name: "clock",
+                path: "plugins/clock",
+                version: "1.2.0",
+            },
+            ref: "release/1.2.0",
+            repository: "happy-dev/plugins",
+            revision: "b".repeat(40),
+            type: "github" as const,
+        };
+        vi.mocked(plugins.discoverRepository).mockResolvedValueOnce({
+            catalogId: source.catalogId,
+            plugins: [
+                {
+                    availability: "update-available",
+                    description: "A clock.",
+                    displayName: "Clock",
+                    installed: { folder: "clock", name: "Clock", version: "1.0.0" },
+                    name: "clock",
+                    source,
+                    version: "1.2.0",
+                },
+            ],
+            ref: source.ref,
+            repository: source.repository,
+            revision: source.revision,
+        });
+        vi.mocked(plugins.installFromGitHub).mockResolvedValueOnce({
+            classification: "upgrade",
+            description: "A clock.",
+            directory: "/managed/clock",
+            folder: "clock",
+            name: "Clock",
+            version: "1.2.0",
+        });
+        const server = createProtocolHttpServer({ plugins, token: "secret" });
+        servers.push(server);
+        const port = await listen(server);
+
+        expect(
+            (
+                await request(port, {
+                    body: JSON.stringify({ repository: "happy-dev/plugins" }),
+                    method: "POST",
+                    path: "/plugin-catalogs/github",
+                    token: "wrong",
+                })
+            ).status,
+        ).toBe(401);
+        await expect(
+            requestJson(port, "/plugin-catalogs/github", {
+                ref: "release/1.2.0",
+                repository: "happy-dev/plugins",
+            }),
+        ).resolves.toMatchObject({
+            plugins: [{ availability: "update-available", source }],
+            revision: source.revision,
+        });
+        await expect(
+            requestJson(port, "/plugins", { requestId: "install-clock-1", source }),
+        ).resolves.toMatchObject({
+            plugin: { classification: "upgrade", version: "1.2.0" },
+        });
+        expect(plugins.installFromGitHub).toHaveBeenCalledWith(
+            source,
+            expect.objectContaining({
+                requestId: "install-clock-1",
+                signal: expect.any(AbortSignal),
+            }),
+        );
     });
 
     it("authenticates MCP App resources, tools, and namespaced storage and closes stale errors", async () => {
@@ -322,7 +426,9 @@ describe("plugin HTTP protocol", () => {
 function context(): Pick<
     PluginContext,
     | "callAppTool"
+    | "discoverRepository"
     | "install"
+    | "installFromGitHub"
     | "list"
     | "readAppResource"
     | "readIcon"
@@ -346,6 +452,9 @@ function context(): Pick<
                 ],
             };
         },
+        discoverRepository: vi.fn(async () => {
+            throw new Error("Unexpected plugin catalog discovery.");
+        }),
         install: vi.fn(async () => ({
             classification: "fresh-install" as const,
             description: "A clock.",
@@ -354,6 +463,9 @@ function context(): Pick<
             name: "Clock",
             version: "0.0.0",
         })),
+        installFromGitHub: vi.fn(async () => {
+            throw new Error("Unexpected GitHub plugin installation.");
+        }),
         async list() {
             return {
                 failures: [],

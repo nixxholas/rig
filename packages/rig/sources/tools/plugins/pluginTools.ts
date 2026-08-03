@@ -41,17 +41,20 @@ export const pluginDiscoverTool = defineTool({
     shouldReviewInAutoMode: () => true,
     describeAutoPermissionAction: ({ repository, ref }) =>
         `read the plugin catalog from ${quoteVisibleExact(repository)} on GitHub at ${quoteVisibleExact(ref ?? "the default branch")}. ${GITHUB_ACCESS}`,
-    execute: async ({ repository, ref }, context, execution) => ({
-        ...(await requirePlugins(context).discoverRepository(
+    execute: async ({ repository, ref }, context, execution) => {
+        const catalog = await requirePlugins(context).discoverRepository(
             {
                 ...(ref === undefined ? {} : { ref }),
                 repository,
             },
             execution.signal,
-        )),
-        ...(ref === undefined ? {} : { ref }),
-        repository,
-    }),
+        );
+        return {
+            plugins: catalog.plugins.map((plugin) => plugin.source.plugin),
+            ...(ref === undefined ? {} : { ref }),
+            repository,
+        };
+    },
     toLLM: (result) => [{ type: "text", text: JSON.stringify(result) }],
     toUI: (result) =>
         result.plugins.length === 0

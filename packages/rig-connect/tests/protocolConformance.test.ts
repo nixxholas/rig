@@ -148,6 +148,14 @@ type _PluginLog = Assignable<local.PluginLogSnapshot, daemon.PluginLogSnapshot>;
 type _PluginList = Assignable<local.ListPluginsResponse, daemon.ListPluginsResponse>;
 type _PluginLogResponse = Assignable<local.PluginLogResponse, daemon.PluginLogResponse>;
 type _InstallPluginRequest = Assignable<daemon.InstallPluginRequest, local.InstallPluginRequest>;
+type _DiscoverPluginCatalogRequest = Assignable<
+    daemon.DiscoverPluginCatalogRequest,
+    local.DiscoverPluginCatalogRequest
+>;
+type _DiscoverPluginCatalogResponse = Assignable<
+    local.GitHubPluginCatalog,
+    daemon.DiscoverPluginCatalogResponse
+>;
 type _InstallPluginResponse = Assignable<local.InstallPluginResponse, daemon.InstallPluginResponse>;
 type _UninstallPluginResponse = Assignable<
     local.UninstallPluginResponse,

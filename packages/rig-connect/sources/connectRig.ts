@@ -29,6 +29,7 @@ import type {
 } from "./PluginElement.js";
 import {
     PluginAppRequestError,
+    PluginCatalogRequestError,
     PluginIconRequestError,
     PluginManagementRequestError,
     PluginStore,
@@ -51,6 +52,8 @@ import type {
     ExternalToolCallResolution,
     GitChangeSnapshot,
     GitWatchResponse,
+    GitHubPluginCatalog,
+    GitHubPluginPackageSource,
     GlobalEvent,
     MutationId,
     Project,
@@ -72,6 +75,7 @@ import type {
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
+    DiscoverPluginCatalogRequest,
     SessionStateResponse,
     TimelineScope,
     UninstalledPluginSummary,
@@ -108,6 +112,9 @@ import {
     listMurmurContactsResponseSchema,
     listMurmurFriendRequestsResponseSchema,
     listPluginsResponseSchema,
+    discoverPluginCatalogRequestSchema,
+    githubPluginCatalogSchema,
+    githubPluginPackageSourceSchema,
     pluginInstallClassificationSchema,
     projectRegistrationErrorResponseSchema,
     projectResponseSchema,
@@ -124,6 +131,7 @@ import { endpointUrl } from "./endpointUrl.js";
 const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
 const PROJECT_REGISTRATION_MAX_ATTEMPTS = 3;
+const PLUGIN_INSTALLATION_MAX_ATTEMPTS = 3;
 const MAXIMUM_PENDING_PER_ENTITY = 256;
 const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
 /** Well inside the fifteen minutes the daemon refreshes provider usage on. */
@@ -196,10 +204,35 @@ const pluginManagementErrorResponseSchema = Type.Object(
             {
                 code: Type.Union([
                     Type.Literal("install_failed"),
+                    Type.Literal("catalog_invalid"),
+                    Type.Literal("catalog_not_found"),
                     Type.Literal("invalid_request"),
                     Type.Literal("plugin_not_found"),
                     Type.Literal("plugins_unavailable"),
+                    Type.Literal("repository_not_found"),
+                    Type.Literal("source_changed"),
+                    Type.Literal("source_unavailable"),
                     Type.Literal("uninstall_failed"),
+                ]),
+                message: Type.String(),
+            },
+            { additionalProperties: false },
+        ),
+    },
+    { additionalProperties: false },
+);
+const pluginCatalogErrorResponseSchema = Type.Object(
+    {
+        error: Type.Object(
+            {
+                code: Type.Union([
+                    Type.Literal("catalog_invalid"),
+                    Type.Literal("catalog_not_found"),
+                    Type.Literal("invalid_request"),
+                    Type.Literal("plugins_unavailable"),
+                    Type.Literal("repository_not_found"),
+                    Type.Literal("source_changed"),
+                    Type.Literal("source_unavailable"),
                 ]),
                 message: Type.String(),
             },
@@ -533,14 +566,19 @@ export interface RigConnection {
     }>;
     /** Reads one bounded current-run log or startup-failure diagnostic snapshot. */
     readPluginLog: (name: string, options?: { signal?: AbortSignal }) => Promise<PluginLogSnapshot>;
+    /** Resolves and validates one explicit GitHub repository plugin catalog. */
+    discoverPluginCatalog: (
+        source: DiscoverPluginCatalogRequest,
+        options?: { signal?: AbortSignal },
+    ) => Promise<GitHubPluginCatalog>;
     /**
      * Installs and starts a plugin from an absolute source-folder path on the machine running Rig.
      *
      * The source folder belongs to the daemon machine, not to the browser or other remote client.
      */
     installPlugin: (
-        sourceDirectory: string,
-        options?: { signal?: AbortSignal },
+        source: string | GitHubPluginPackageSource,
+        options?: { requestId?: string; signal?: AbortSignal },
     ) => Promise<InstalledPluginSummary>;
     /** Stops a plugin, removes its managed code, and keeps its writable data folder. */
     uninstallPlugin: (
@@ -4247,23 +4285,126 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return ((await response.json()) as PluginLogResponse).log;
     };
 
-    const installPlugin: RigConnection["installPlugin"] = async (
-        sourceDirectory,
+    const discoverPluginCatalog: RigConnection["discoverPluginCatalog"] = async (
+        source,
         operationOptions = {},
     ) => {
         if (closed) throw new Error("This Rig connection is closed.");
-        const response = await request(endpointUrl(options.endpoint, "plugins"), {
-            body: JSON.stringify({ sourceDirectory }),
-            headers: {
-                accept: "application/json",
-                authorization: `Bearer ${options.token}`,
-                "content-type": "application/json",
-            },
-            method: "POST",
-            ...(operationOptions.signal === undefined ? {} : { signal: operationOptions.signal }),
-        });
-        const payload = await readPluginManagementResponse(response, installPluginResponseSchema);
-        return payload.plugin;
+        let requestBody: DiscoverPluginCatalogRequest;
+        try {
+            requestBody = Value.Decode(discoverPluginCatalogRequestSchema, source);
+        } catch {
+            throw new PluginCatalogRequestError(
+                "invalid_request",
+                0,
+                "A plugin catalog source must use GitHub owner/repo form and a valid optional ref.",
+            );
+        }
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        try {
+            const response = await request(
+                endpointUrl(options.endpoint, "plugin-catalogs/github"),
+                {
+                    body: JSON.stringify(requestBody),
+                    headers: {
+                        accept: "application/json",
+                        authorization: `Bearer ${options.token}`,
+                        "content-type": "application/json",
+                    },
+                    method: "POST",
+                    signal: operation.signal,
+                },
+            );
+            const body = await readBoundedResponseBytes(response, 4 * 1024 * 1024);
+            if (!response.ok) throw pluginCatalogResponseError(response.status, body);
+            try {
+                return Value.Decode(
+                    githubPluginCatalogSchema,
+                    JSON.parse(new TextDecoder().decode(body)) as unknown,
+                );
+            } catch {
+                throw new PluginCatalogRequestError(
+                    "invalid_response",
+                    response.status,
+                    "Rig returned an invalid plugin catalog response.",
+                );
+            }
+        } catch (error) {
+            if (error instanceof PluginCatalogRequestError || operation.signal.aborted) {
+                throw error;
+            }
+            throw new PluginCatalogRequestError(
+                "request_failed",
+                0,
+                "Rig could not complete plugin catalog discovery.",
+            );
+        } finally {
+            operation.detach();
+        }
+    };
+
+    const installPlugin: RigConnection["installPlugin"] = async (source, operationOptions = {}) => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const requestId = operationOptions.requestId ?? nextEntityId();
+        let installSource;
+        if (typeof source === "string") {
+            installSource = { sourceDirectory: source, type: "local-directory" as const };
+        } else {
+            try {
+                installSource = Value.Decode(githubPluginPackageSourceSchema, source);
+            } catch {
+                throw new PluginManagementRequestError(
+                    "invalid_request",
+                    0,
+                    "The selected plugin package source is invalid.",
+                );
+            }
+        }
+        const operation = combinedSignal(rootController.signal, operationOptions.signal);
+        let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+        try {
+            for (let attempt = 1; ; attempt += 1) {
+                operation.signal.throwIfAborted();
+                try {
+                    const response = await request(endpointUrl(options.endpoint, "plugins"), {
+                        body: JSON.stringify({ requestId, source: installSource }),
+                        headers: {
+                            accept: "application/json",
+                            authorization: `Bearer ${options.token}`,
+                            "content-type": "application/json",
+                        },
+                        method: "POST",
+                        signal: operation.signal,
+                    });
+                    const payload = await readPluginManagementResponse(
+                        response,
+                        installPluginResponseSchema,
+                    );
+                    return payload.plugin;
+                } catch (error) {
+                    if (
+                        error instanceof PluginManagementRequestError ||
+                        (error instanceof Error &&
+                            error.message ===
+                                "Rig returned an invalid plugin management response.") ||
+                        !isRetryableMutationError(error)
+                    ) {
+                        throw error;
+                    }
+                    if (attempt >= PLUGIN_INSTALLATION_MAX_ATTEMPTS) {
+                        throw new PluginManagementRequestError(
+                            "request_failed",
+                            0,
+                            "Rig could not confirm plugin installation after repeated transport failures.",
+                        );
+                    }
+                    await wait(retryDelay, operation.signal);
+                    retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
+                }
+            }
+        } finally {
+            operation.detach();
+        }
     };
 
     const uninstallPlugin: RigConnection["uninstallPlugin"] = async (
@@ -4367,6 +4508,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         addSessionShareMember,
         deleteMurmurAccount,
         detachSecret,
+        discoverPluginCatalog,
         forkSession,
         installPlugin,
         getMurmurAccount,
@@ -4530,7 +4672,7 @@ async function readBoundedResponseBytes(
     const declaredLength = Number(response.headers.get("content-length"));
     if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
         await response.body?.cancel().catch(() => undefined);
-        throw new Error("Rig returned more plugin application data than the host can accept.");
+        throw new Error("Rig returned more plugin data than the host can accept.");
     }
     if (response.body === null) return new Uint8Array();
     const reader = response.body.getReader();
@@ -4543,9 +4685,7 @@ async function readBoundedResponseBytes(
             length += value.byteLength;
             if (length > maximumBytes) {
                 await reader.cancel().catch(() => undefined);
-                throw new Error(
-                    "Rig returned more plugin application data than the host can accept.",
-                );
+                throw new Error("Rig returned more plugin data than the host can accept.");
             }
             chunks.push(value);
         }
@@ -4606,7 +4746,21 @@ async function readPluginManagementResponse<TSchema_ extends TSchema>(
     try {
         return Value.Decode(schema, JSON.parse(new TextDecoder().decode(body)) as unknown);
     } catch {
-        throw new Error("Rig returned an invalid plugin management response.");
+        throw new PluginManagementRequestError(
+            "invalid_response",
+            response.status,
+            "Rig returned an invalid plugin management response.",
+        );
+    }
+}
+
+function pluginCatalogResponseError(status: number, body: Uint8Array): Error {
+    const text = new TextDecoder().decode(body);
+    try {
+        const payload = Value.Decode(pluginCatalogErrorResponseSchema, JSON.parse(text));
+        return new PluginCatalogRequestError(payload.error.code, status, payload.error.message);
+    } catch {
+        return new Error(`Rig rejected the plugin catalog request (${String(status)}).`);
     }
 }
 

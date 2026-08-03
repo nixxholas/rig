@@ -6,6 +6,7 @@ import {
     pluginAppContributionSchema,
     pluginSummarySchema,
     type PluginCategory,
+    type PluginCatalogErrorCode,
     type PluginIcon,
     type PluginManagementErrorCode,
     type PluginAppContribution,
@@ -93,12 +94,32 @@ export class PluginIconRequestError extends Error {
 
 export class PluginManagementRequestError extends Error {
     constructor(
-        readonly code: PluginManagementErrorCode,
+        readonly code: PluginManagementRequestErrorCode,
         readonly status: number,
         message: string,
     ) {
         super(message);
         this.name = "PluginManagementRequestError";
+    }
+}
+
+export type PluginManagementRequestErrorCode =
+    | PluginManagementErrorCode
+    | "invalid_response"
+    | "request_failed";
+export type PluginCatalogRequestErrorCode =
+    | PluginCatalogErrorCode
+    | "invalid_response"
+    | "request_failed";
+
+export class PluginCatalogRequestError extends Error {
+    constructor(
+        readonly code: PluginCatalogRequestErrorCode,
+        readonly status: number,
+        message: string,
+    ) {
+        super(message);
+        this.name = "PluginCatalogRequestError";
     }
 }
 

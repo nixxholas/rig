@@ -401,7 +401,32 @@ and the plugin's code.
 
 Rig validates the complete index before returning any catalog entries. Repository names use
 `owner/repo` form, and callers may select a branch, tag, or commit; omitting the ref uses the
-repository's default branch. Discovery reads at most 1 MiB and times out after 10 seconds.
-Installation downloads a bounded GitHub tarball, extracts only the indexed subdirectory into a
-temporary staging folder, and then uses the same copy-and-validate installation path as every other
-plugin.
+repository's default branch. Discovery first resolves that selection to a full commit SHA, then
+reads the index at that immutable revision. The returned source descriptor binds the repository,
+requested ref, revision, SHA-256 catalog identity, and exact indexed entry. The daemon also compares
+each entry to the installed folder it would replace and reports `not-installed`,
+`update-available`, `reinstall-available`, or `downgrade-available`; versions are compared as
+Semantic Versions because both catalog and plugin manifests require that format.
+
+Discovery is available to authenticated clients through `POST /plugin-catalogs/github`.
+Installation through `POST /plugins` accepts either a daemon-local absolute folder or one returned
+GitHub package descriptor. It never accepts arbitrary URLs. Before installing a GitHub package,
+Rig rereads the catalog at the pinned revision, verifies the catalog identity and every selected
+entry field, downloads the tarball for that revision, extracts only the indexed subdirectory, and
+requires the extracted plugin manifest version to equal the catalog version. Both agent tools and
+the client route call this same domain implementation.
+
+Every fetch has a ten-second deadline and a byte bound: 1 MiB for revision/catalog metadata and
+64 MiB for the compressed archive. Redirects are followed manually for at most five hops and only
+across fixed HTTPS GitHub hosts with no credentials or custom port, preventing a repository
+response from turning discovery into an SSRF primitive. Extraction caps expanded archive bytes at
+256 MiB and the selected plugin at 32 MiB, 2,000 files, and 4,000 entries. Absolute paths,
+traversal, backslashes, symbolic links, hard links, devices, and other non-file entries are
+rejected. The ordinary local installer then rejects source symlinks and validates the manifest,
+icon, entry point, and all existing plugin bounds in a hidden staging folder before replacement.
+
+Client installation requests carry a required identity. The daemon retains at most 256 operations,
+joins concurrent retries for the same identity and exact source, replays completed results, and
+rejects identity reuse for another source. Failed and aborted attempts are removed so a retry can
+restart. A successful install starts the plugin, publishes the authoritative whole
+`plugins_changed` catalog with its install classification, and only then returns.

@@ -98,15 +98,33 @@ describe("plugin tools", () => {
 
     it("discovers and installs an indexed GitHub plugin through the plugin context", async () => {
         const discoverRepository = vi.fn(async () => ({
+            catalogId: "a".repeat(64),
             plugins: [
                 {
+                    availability: "not-installed" as const,
                     description: "A small clock.",
                     displayName: "Clock",
                     name: "clock",
-                    path: "plugins/clock",
+                    source: {
+                        catalogId: "a".repeat(64),
+                        plugin: {
+                            description: "A small clock.",
+                            displayName: "Clock",
+                            name: "clock",
+                            path: "plugins/clock",
+                            version: "1.2.0",
+                        },
+                        ref: "v1.2.0",
+                        repository: "happy-dev/plugins",
+                        revision: "b".repeat(40),
+                        type: "github" as const,
+                    },
                     version: "1.2.0",
                 },
             ],
+            ref: "v1.2.0",
+            repository: "happy-dev/plugins",
+            revision: "b".repeat(40),
         }));
         const installFromGitHub = vi.fn(async () => ({
             classification: "fresh-install" as const,

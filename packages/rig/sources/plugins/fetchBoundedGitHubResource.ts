@@ -1,5 +1,13 @@
 export type GitHubFetch = (url: string, init: RequestInit) => Promise<Response>;
 
+const GITHUB_RESOURCE_HOSTS = new Set([
+    "api.github.com",
+    "codeload.github.com",
+    "github.com",
+    "raw.githubusercontent.com",
+]);
+const MAXIMUM_REDIRECTS = 5;
+
 export class GitHubResourceFetchError extends Error {
     readonly status: number | undefined;
 
@@ -28,14 +36,17 @@ export async function fetchBoundedGitHubResource(options: {
             ? timeout.signal
             : AbortSignal.any([options.signal, timeout.signal]);
     try {
-        const response = await (options.fetcher ?? globalThis.fetch)(options.url, {
-            headers: {
-                accept: options.accept,
-                "user-agent": "Rig plugin discovery",
+        const response = await fetchWithSafeRedirects(
+            options.fetcher ?? globalThis.fetch,
+            options.url,
+            {
+                headers: {
+                    accept: options.accept,
+                    "user-agent": "Rig plugin discovery",
+                },
+                signal,
             },
-            redirect: "follow",
-            signal,
-        });
+        );
         if (!response.ok) {
             await response.body?.cancel().catch(() => undefined);
             throw new GitHubResourceFetchError(
@@ -90,6 +101,51 @@ export async function fetchBoundedGitHubResource(options: {
     } finally {
         clearTimeout(timer);
     }
+}
+
+async function fetchWithSafeRedirects(
+    fetcher: GitHubFetch,
+    initialUrl: string,
+    init: RequestInit,
+): Promise<Response> {
+    let url = validateGitHubResourceUrl(initialUrl);
+    for (let redirect = 0; ; redirect += 1) {
+        const response = await fetcher(url, { ...init, redirect: "manual" });
+        if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+        if (redirect >= MAXIMUM_REDIRECTS) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new GitHubResourceFetchError("GitHub returned too many redirects.");
+        }
+        const location = response.headers.get("location");
+        if (location === null) {
+            await response.body?.cancel().catch(() => undefined);
+            throw new GitHubResourceFetchError("GitHub returned a redirect without a location.");
+        }
+        const next = new URL(location, url).toString();
+        await response.body?.cancel().catch(() => undefined);
+        url = validateGitHubResourceUrl(next);
+    }
+}
+
+function validateGitHubResourceUrl(value: string): string {
+    let url: URL;
+    try {
+        url = new URL(value);
+    } catch {
+        throw new GitHubResourceFetchError("GitHub returned an invalid resource URL.");
+    }
+    if (
+        url.protocol !== "https:" ||
+        url.port !== "" ||
+        url.username !== "" ||
+        url.password !== "" ||
+        !GITHUB_RESOURCE_HOSTS.has(url.hostname)
+    ) {
+        throw new GitHubResourceFetchError(
+            "Rig refused a GitHub resource URL outside the allowed GitHub hosts.",
+        );
+    }
+    return url.toString();
 }
 
 function tooLarge(description: string, maximumBytes: number): GitHubResourceFetchError {

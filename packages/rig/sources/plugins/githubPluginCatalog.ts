@@ -24,6 +24,20 @@ export const githubPluginNameSchema = Type.String({
     minLength: 1,
 });
 
+export const githubRevisionSchema = Type.String({
+    description: "The resolved Git commit containing the catalog.",
+    maxLength: 40,
+    minLength: 40,
+    pattern: "^[a-f0-9]{40}$",
+});
+
+export const githubPluginCatalogIdSchema = Type.String({
+    description: "SHA-256 identity of the validated catalog at the resolved revision.",
+    maxLength: 64,
+    minLength: 64,
+    pattern: "^[a-f0-9]{64}$",
+});
+
 export const githubPluginSourceSchema = Type.Object(
     {
         ref: Type.Optional(githubGitRefSchema),
@@ -74,3 +88,78 @@ export const githubPluginIndexSchema = Type.Object(
     { additionalProperties: false },
 );
 export type GitHubPluginIndex = Static<typeof githubPluginIndexSchema>;
+
+export const resolvedGitHubPluginIndexSchema = Type.Object(
+    {
+        catalogId: githubPluginCatalogIdSchema,
+        plugins: Type.Array(githubPluginCatalogEntrySchema, { maxItems: 1_000 }),
+        ref: Type.Optional(githubGitRefSchema),
+        repository: githubRepositorySchema,
+        revision: githubRevisionSchema,
+    },
+    { additionalProperties: false },
+);
+export type ResolvedGitHubPluginIndex = Static<typeof resolvedGitHubPluginIndexSchema>;
+
+export const githubPluginPackageSourceSchema = Type.Object(
+    {
+        catalogId: githubPluginCatalogIdSchema,
+        plugin: githubPluginCatalogEntrySchema,
+        ref: Type.Optional(githubGitRefSchema),
+        repository: githubRepositorySchema,
+        revision: githubRevisionSchema,
+        type: Type.Literal("github"),
+    },
+    { additionalProperties: false },
+);
+export type GitHubPluginPackageSource = Static<typeof githubPluginPackageSourceSchema>;
+
+export const githubPluginInstallationSourceSchema = Type.Union([
+    githubPluginInstallSourceSchema,
+    githubPluginPackageSourceSchema,
+]);
+export type GitHubPluginInstallationSource = Static<typeof githubPluginInstallationSourceSchema>;
+
+export const githubPluginAvailabilitySchema = Type.Union([
+    Type.Literal("not-installed"),
+    Type.Literal("update-available"),
+    Type.Literal("downgrade-available"),
+    Type.Literal("reinstall-available"),
+]);
+export type GitHubPluginAvailability = Static<typeof githubPluginAvailabilitySchema>;
+
+export const githubInstalledPluginMatchSchema = Type.Object(
+    {
+        folder: Type.String({ maxLength: 128, minLength: 1 }),
+        name: Type.String({ maxLength: 128, minLength: 1 }),
+        version: pluginVersionSchema,
+    },
+    { additionalProperties: false },
+);
+export type GitHubInstalledPluginMatch = Static<typeof githubInstalledPluginMatchSchema>;
+
+export const githubPluginOfferSchema = Type.Object(
+    {
+        availability: githubPluginAvailabilitySchema,
+        description: githubPluginCatalogEntrySchema.properties.description,
+        displayName: githubPluginCatalogEntrySchema.properties.displayName,
+        installed: Type.Optional(githubInstalledPluginMatchSchema),
+        name: githubPluginCatalogEntrySchema.properties.name,
+        source: githubPluginPackageSourceSchema,
+        version: githubPluginCatalogEntrySchema.properties.version,
+    },
+    { additionalProperties: false },
+);
+export type GitHubPluginOffer = Static<typeof githubPluginOfferSchema>;
+
+export const githubPluginCatalogSchema = Type.Object(
+    {
+        catalogId: githubPluginCatalogIdSchema,
+        plugins: Type.Array(githubPluginOfferSchema, { maxItems: 1_000 }),
+        ref: Type.Optional(githubGitRefSchema),
+        repository: githubRepositorySchema,
+        revision: githubRevisionSchema,
+    },
+    { additionalProperties: false },
+);
+export type GitHubPluginCatalog = Static<typeof githubPluginCatalogSchema>;

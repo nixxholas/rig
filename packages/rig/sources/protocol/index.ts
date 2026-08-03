@@ -56,6 +56,8 @@ export type {
     BaseProjectEvent,
     BaseProjectWorkspaceEvent,
     ComputePreparationEvent,
+    DiscoverPluginCatalogRequest,
+    DiscoverPluginCatalogResponse,
     ComputePreparationPhase,
     CreateProjectWorkspaceRequest,
     GitChangeSnapshot,
@@ -81,6 +83,7 @@ export type {
     PluginManagementErrorCode,
     PluginManagementErrorResponse,
     PluginInstallClassification,
+    PluginInstallSource,
     PluginLogResponse,
     PluginLogSnapshot,
     PluginSummary,
@@ -166,6 +169,10 @@ export type {
 export type { WorkflowRun, WorkflowRunStatus, WorkflowRunUpdate } from "../workflows/index.js";
 export { isLiveGlobalEvent } from "./ProjectProtocol.js";
 export {
+    discoverPluginCatalogRequestSchema,
+    discoverPluginCatalogResponseSchema,
+    installPluginRequestSchema,
+    pluginInstallSourceSchema,
     pluginInstallClassificationSchema,
     projectSettingsSchema,
     projectSettingsUpdateSchema,

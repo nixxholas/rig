@@ -14,6 +14,7 @@ import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { PluginManager } from "../PluginManager.js";
 import { PluginComputeRegistry } from "../PluginComputeRegistry.js";
+import type { GitHubFetch } from "../fetchBoundedGitHubResource.js";
 import { PluginMcpRegistry, type PluginMcpRegistrationRetirement } from "../PluginMcpRegistry.js";
 import { DEFAULT_PLUGIN_STARTUP_TIMEOUT_MS, PluginStartupState } from "../PluginStartupState.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES } from "../readBoundedPluginLog.js";
@@ -188,6 +189,62 @@ describe("plugin registration", () => {
             expect(event.createdAt).toEqual(expect.any(Number));
         }
         expect(new Set(harness.events.map((event) => event.id)).size).toBe(harness.events.length);
+    });
+
+    it("classifies discovered catalog versions against the exact installed target folder", async () => {
+        let offeredVersion = "1.2.0";
+        const revision = "a".repeat(40);
+        const githubFetch = vi.fn<GitHubFetch>(async (url) =>
+            url.includes("/commits/")
+                ? Response.json({ sha: revision })
+                : Response.json({
+                      plugins: [
+                          {
+                              description: "A small clock.",
+                              displayName: "Clock",
+                              name: "clock",
+                              path: "plugins/clock",
+                              version: offeredVersion,
+                          },
+                      ],
+                  }),
+        );
+        const harness = await createHarness({ githubFetch });
+        await harness.manager.start();
+
+        const beforeInstall = await harness.manager.discoverRepository({
+            repository: "happy-dev/plugins",
+        });
+        expect(beforeInstall).toMatchObject({
+            plugins: [{ availability: "not-installed" }],
+            revision,
+        });
+        expect(beforeInstall.plugins[0]).not.toHaveProperty("installed");
+
+        await createPluginSource(join(harness.workspace, "clock"), "1.0.0");
+        await harness.manager.install({
+            fs: harness.fs,
+            sourceDirectory: join(harness.workspace, "clock"),
+        });
+        await expect(
+            harness.manager.discoverRepository({ repository: "happy-dev/plugins" }),
+        ).resolves.toMatchObject({
+            plugins: [
+                {
+                    availability: "update-available",
+                    installed: { folder: "clock", name: "Clock", version: "1.0.0" },
+                },
+            ],
+        });
+
+        offeredVersion = "1.0.0";
+        await expect(
+            harness.manager.discoverRepository({ repository: "happy-dev/plugins" }),
+        ).resolves.toMatchObject({ plugins: [{ availability: "reinstall-available" }] });
+        offeredVersion = "0.9.0";
+        await expect(
+            harness.manager.discoverRepository({ repository: "happy-dev/plugins" }),
+        ).resolves.toMatchObject({ plugins: [{ availability: "downgrade-available" }] });
     });
 
     it("announces compute provider health and disappearance through plugins_changed", async () => {
@@ -1356,6 +1413,7 @@ async function createHarness(
         computeRegistry?: PluginComputeRegistry;
         docker?: Dockerode;
         dockerCleanupTimeoutMs?: number;
+        githubFetch?: GitHubFetch;
         startError?: Error | ((plugin: RegisteredPlugin, attempt: number) => Error | undefined);
         startup?: (plugin: RegisteredPlugin, startup: PluginStartupState) => void;
         startupTimeoutMs?: number;
@@ -1427,6 +1485,7 @@ async function createHarness(
             ? {}
             : { dockerCleanupTimeoutMs: options.dockerCleanupTimeoutMs }),
         environment: { HAPPY_PLUGIN_DATA_DIRECTORY: dataRoot } as NodeJS.ProcessEnv,
+        ...(options.githubFetch === undefined ? {} : { githubFetch: options.githubFetch }),
         mcpRegistry: new PluginMcpRegistry(),
         ...(options.startupTimeoutMs === undefined
             ? {}

@@ -90,17 +90,56 @@ bounded 16 KiB snapshot, its source, and whether older output was omitted. Insta
 Plugin management uses the same authenticated connection:
 
 ```ts
-const installed = await rig.installPlugin("/Users/steve/Developer/plugins/packages/hello-world");
+const catalog = await rig.discoverPluginCatalog({
+    repository: "owner/repository",
+    // ref: "v1.2.0", // Optional; omission means the repository's default branch.
+});
+const offered = catalog.plugins[0];
+if (offered === undefined) throw new Error("The repository offers no plugins.");
+
+// availability is not-installed, update-available, reinstall-available, or downgrade-available.
+// When installed is present it names the exact installed folder, name, and Semantic Version that
+// Rig compared against the offered version.
+console.log(offered.availability, offered.installed);
+
+const installed = await rig.installPlugin(offered.source);
 await rig.uninstallPlugin(installed.name);
+
+// Daemon-local folders remain useful for development.
+await rig.installPlugin("/Users/steve/Developer/plugins/packages/hello-world");
 ```
 
-The install path is an absolute ready-to-run plugin folder on the machine running the Rig daemon.
-It is not a browser upload and is not resolved on the client machine. Rig stages and validates the
-folder before replacing an existing installation, starts the accepted plugin before the call
-returns, and announces the resulting catalog through `connectPlugins()`. Uninstall stops the
-plugin, removes its managed code, and keeps its writable data folder. Both operations accept
-`{ signal }` and reject with `PluginManagementRequestError`, whose `code`, `status`, and message are
-safe for a client to present.
+`discoverPluginCatalog` accepts only a GitHub `owner/repo` plus an optional branch, tag, or commit.
+Rig resolves that selection to a 40-character commit, validates the complete bounded
+`happy-plugins.json`, and returns a closed catalog of actual entries. Each entry's `source` is the
+only remote-install input: it binds the repository, requested ref, resolved commit, catalog digest,
+and exact indexed package metadata. A client never sends an arbitrary URL or accesses a daemon
+filesystem path.
+
+Before download, Rig fetches the catalog again at the resolved commit and rejects a descriptor that
+does not match. It downloads the archive for that commit, extracts only the indexed subdirectory,
+and checks that the plugin manifest declares the indexed Semantic Version before replacing
+anything. The install response and the next `plugins_changed` catalog event carry the authoritative
+`fresh-install`, `upgrade`, `reinstall`, or `downgrade` result.
+
+Installs carry a caller-stable request identity. `rig-connect` creates one automatically and
+reuses it for up to three transport attempts; callers that must resume an operation in another
+connection may pass `{ requestId }`. Rig retains a bounded replay registry, joins concurrent
+duplicates, returns a completed result without applying it again, and rejects the same identity
+with a different source. A failed or aborted attempt releases the identity for a clean retry.
+`{ signal }` cancels the caller's operation, and closing `RigConnection` cancels every operation it
+owns.
+
+The local install path is an absolute ready-to-run plugin folder on the machine running the Rig
+daemon. It is not a browser upload and is not resolved on the client machine. Rig stages and
+validates the folder before replacing an existing installation. Uninstall stops the plugin, removes
+its managed code, and keeps its writable data folder.
+
+Discovery rejects with `PluginCatalogRequestError`; install and uninstall reject with
+`PluginManagementRequestError`. Both expose stable `code`, `status`, and human-readable `message`
+fields, including `request_failed` for exhausted transport retries and `invalid_response` when the
+daemon's success envelope fails validation. Successful envelopes are runtime-validated before they
+reach the caller.
 
 MCP App mounting is a host concern. To make clicking instant, prefetch every declared resource
 by generation as soon as it enters the catalog, then expose navigation only when that bounded

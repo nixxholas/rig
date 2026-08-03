@@ -1958,6 +1958,127 @@ export const pluginInstallClassificationSchema = Type.Union([
 ]);
 export type PluginInstallClassification = Static<typeof pluginInstallClassificationSchema>;
 
+const pluginVersionSchema = Type.String({
+    pattern:
+        "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\\+[0-9A-Za-z-]+(?:\\.[0-9A-Za-z-]+)*)?$",
+});
+const githubRepositorySchema = Type.String({
+    maxLength: 201,
+    pattern: "^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,99})/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,99})$",
+});
+const githubGitRefSchema = Type.String({
+    maxLength: 1024,
+    minLength: 1,
+    pattern: "^(?!/)(?!.*//)(?!.*(?:^|/)\\.{1,2}(?:/|$))[A-Za-z0-9._/-]*[A-Za-z0-9._-]$",
+});
+const githubRevisionSchema = Type.String({
+    maxLength: 40,
+    minLength: 40,
+    pattern: "^[a-f0-9]{40}$",
+});
+const githubPluginCatalogIdSchema = Type.String({
+    maxLength: 64,
+    minLength: 64,
+    pattern: "^[a-f0-9]{64}$",
+});
+export const githubPluginCatalogEntrySchema = Type.Object(
+    {
+        description: Type.String({ maxLength: 4096, minLength: 1 }),
+        displayName: Type.String({ maxLength: 128, minLength: 1 }),
+        name: Type.String({
+            maxLength: 128,
+            minLength: 1,
+            pattern: "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,127})$",
+        }),
+        path: Type.String({
+            maxLength: 1024,
+            minLength: 1,
+            pattern:
+                "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*(?:^|/)\\.(?:/|$))(?!.*\\\\)(?:[^/]+/)*[^/]+$",
+        }),
+        version: pluginVersionSchema,
+    },
+    exact,
+);
+export type GitHubPluginCatalogEntry = Static<typeof githubPluginCatalogEntrySchema>;
+
+export const githubPluginPackageSourceSchema = Type.Object(
+    {
+        catalogId: githubPluginCatalogIdSchema,
+        plugin: githubPluginCatalogEntrySchema,
+        ref: Type.Optional(githubGitRefSchema),
+        repository: githubRepositorySchema,
+        revision: githubRevisionSchema,
+        type: Type.Literal("github"),
+    },
+    exact,
+);
+export type GitHubPluginPackageSource = Static<typeof githubPluginPackageSourceSchema>;
+
+export const githubPluginCatalogSchema = Type.Object(
+    {
+        catalogId: githubPluginCatalogIdSchema,
+        plugins: Type.Array(
+            Type.Object(
+                {
+                    availability: Type.Union([
+                        Type.Literal("not-installed"),
+                        Type.Literal("update-available"),
+                        Type.Literal("downgrade-available"),
+                        Type.Literal("reinstall-available"),
+                    ]),
+                    description: githubPluginCatalogEntrySchema.properties.description,
+                    displayName: githubPluginCatalogEntrySchema.properties.displayName,
+                    installed: Type.Optional(
+                        Type.Object(
+                            {
+                                folder: Type.String({ maxLength: 128, minLength: 1 }),
+                                name: Type.String({ maxLength: 128, minLength: 1 }),
+                                version: pluginVersionSchema,
+                            },
+                            exact,
+                        ),
+                    ),
+                    name: githubPluginCatalogEntrySchema.properties.name,
+                    source: githubPluginPackageSourceSchema,
+                    version: pluginVersionSchema,
+                },
+                exact,
+            ),
+            { maxItems: 1_000 },
+        ),
+        ref: Type.Optional(githubGitRefSchema),
+        repository: githubRepositorySchema,
+        revision: githubRevisionSchema,
+    },
+    exact,
+);
+export type GitHubPluginCatalog = Static<typeof githubPluginCatalogSchema>;
+
+export const discoverPluginCatalogRequestSchema = Type.Object(
+    { ref: Type.Optional(githubGitRefSchema), repository: githubRepositorySchema },
+    exact,
+);
+export type DiscoverPluginCatalogRequest = Static<typeof discoverPluginCatalogRequestSchema>;
+
+export const installPluginRequestSchema = Type.Object(
+    {
+        requestId: Type.String({ maxLength: 256, minLength: 1 }),
+        source: Type.Union([
+            Type.Object(
+                {
+                    sourceDirectory: Type.String({ maxLength: 16_384, minLength: 1 }),
+                    type: Type.Literal("local-directory"),
+                },
+                exact,
+            ),
+            githubPluginPackageSourceSchema,
+        ]),
+    },
+    exact,
+);
+export type InstallPluginRequest = Static<typeof installPluginRequestSchema>;
+
 export interface InstalledPluginSummary {
     classification: PluginInstallClassification;
     description: string;
@@ -1973,11 +2094,6 @@ export interface UninstalledPluginSummary {
     name: string;
 }
 
-export interface InstallPluginRequest {
-    /** Absolute path on the machine running Rig. */
-    sourceDirectory: string;
-}
-
 export interface InstallPluginResponse {
     plugin: InstalledPluginSummary;
 }
@@ -1987,11 +2103,25 @@ export interface UninstallPluginResponse {
 }
 
 export type PluginManagementErrorCode =
+    | "catalog_invalid"
+    | "catalog_not_found"
     | "install_failed"
     | "invalid_request"
     | "plugin_not_found"
     | "plugins_unavailable"
+    | "repository_not_found"
+    | "source_changed"
+    | "source_unavailable"
     | "uninstall_failed";
+
+export type PluginCatalogErrorCode =
+    | "catalog_invalid"
+    | "catalog_not_found"
+    | "invalid_request"
+    | "plugins_unavailable"
+    | "repository_not_found"
+    | "source_changed"
+    | "source_unavailable";
 
 export interface PluginManagementErrorResponse {
     error: {

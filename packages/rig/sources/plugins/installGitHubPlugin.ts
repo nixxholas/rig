@@ -9,18 +9,21 @@ import type Dockerode from "dockerode";
 import { extract as extractTar } from "tar-stream";
 
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
-import { discoverGitHubPlugins } from "./discoverGitHubPlugins.js";
+import { discoverGitHubPlugins, discoverGitHubPluginsAtRevision } from "./discoverGitHubPlugins.js";
 import {
     fetchBoundedGitHubResource,
     GitHubResourceFetchError,
     type GitHubFetch,
 } from "./fetchBoundedGitHubResource.js";
 import {
-    githubPluginInstallSourceSchema,
+    githubPluginInstallationSourceSchema,
+    githubPluginPackageSourceSchema,
     type GitHubPluginCatalogEntry,
-    type GitHubPluginInstallSource,
+    type GitHubPluginInstallationSource,
+    type GitHubPluginPackageSource,
 } from "./githubPluginCatalog.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
+import { PluginCatalogError } from "./PluginCatalogError.js";
 
 const MAXIMUM_ARCHIVE_DOWNLOAD_BYTES = 64 * 1024 * 1024;
 const MAXIMUM_EXPANDED_ARCHIVE_BYTES = 256 * 1024 * 1024;
@@ -34,43 +37,26 @@ export async function installGitHubPlugin(options: {
     fs: FileSystemContext;
     pluginsDirectory: string;
     signal?: AbortSignal;
-    source: GitHubPluginInstallSource;
+    source: GitHubPluginInstallationSource;
 }): Promise<InstalledPlugin> {
-    let source: GitHubPluginInstallSource;
+    let source: GitHubPluginInstallationSource;
     try {
-        source = Value.Decode(githubPluginInstallSourceSchema, options.source);
+        source = Value.Decode(githubPluginInstallationSourceSchema, options.source);
     } catch {
-        throw new Error(
-            "A GitHub plugin installation needs a repository in owner/repo form, a plugin name, and a valid optional git ref.",
+        throw new PluginCatalogError(
+            "invalid_source",
+            "A GitHub plugin installation needs an exact discovered package source.",
         );
     }
-    const catalog = await discoverGitHubPlugins(
-        {
-            ...(source.ref === undefined ? {} : { ref: source.ref }),
-            repository: source.repository,
-        },
-        {
-            ...(options.fetcher === undefined ? {} : { fetcher: options.fetcher }),
-            ...(options.signal === undefined ? {} : { signal: options.signal }),
-        },
-    );
-    const wanted = source.plugin.toLowerCase();
-    const plugin = catalog.plugins.find((entry) => entry.name.toLowerCase() === wanted);
-    if (plugin === undefined) {
-        const available = catalog.plugins.map((entry) => entry.name);
-        throw new Error(
-            available.length === 0
-                ? `The GitHub repository ${source.repository} does not list any plugins.`
-                : `The GitHub repository ${source.repository} does not list a plugin named ${source.plugin}. Available plugins: ${available.join(", ")}.`,
-        );
-    }
+    const pinned = await pinInstallationSource(source, options);
+    const plugin = pinned.plugin;
 
-    const archiveUrl = `https://api.github.com/repos/${source.repository}/tarball${source.ref === undefined ? "" : `/${source.ref}`}`;
+    const archiveUrl = `https://api.github.com/repos/${pinned.repository}/tarball/${pinned.revision}`;
     let archive: Uint8Array;
     try {
         archive = await fetchBoundedGitHubResource({
             accept: "application/vnd.github+json",
-            description: `the repository archive for ${source.repository}`,
+            description: `the repository archive for ${pinned.repository}`,
             ...(options.fetcher === undefined ? {} : { fetcher: options.fetcher }),
             maximumBytes: MAXIMUM_ARCHIVE_DOWNLOAD_BYTES,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -78,9 +64,13 @@ export async function installGitHubPlugin(options: {
         });
     } catch (error) {
         if (error instanceof GitHubResourceFetchError && error.status === 404) {
-            throw new Error(
-                `GitHub could not find ${source.repository} at ${source.ref ?? "its default branch"}.`,
+            throw new PluginCatalogError(
+                "source_unavailable",
+                `GitHub could not download ${pinned.repository} at ${pinned.revision}.`,
             );
+        }
+        if (error instanceof GitHubResourceFetchError) {
+            throw new PluginCatalogError("source_unavailable", error.message);
         }
         throw error;
     }
@@ -99,6 +89,7 @@ export async function installGitHubPlugin(options: {
         });
         return await installPluginFromPath({
             ...(options.docker === undefined ? {} : { docker: options.docker }),
+            expectedVersion: plugin.version,
             fs: options.fs,
             pluginsDirectory: options.pluginsDirectory,
             ...(options.signal === undefined ? {} : { signal: options.signal }),
@@ -107,6 +98,63 @@ export async function installGitHubPlugin(options: {
     } finally {
         await options.fs.rm(stagingRoot, { force: true, recursive: true }).catch(() => undefined);
     }
+}
+
+async function pinInstallationSource(
+    source: GitHubPluginInstallationSource,
+    options: { fetcher?: GitHubFetch; signal?: AbortSignal },
+): Promise<GitHubPluginPackageSource> {
+    if (Value.Check(githubPluginPackageSourceSchema, source)) {
+        const catalog = await discoverGitHubPluginsAtRevision(
+            {
+                ...(source.ref === undefined ? {} : { ref: source.ref }),
+                repository: source.repository,
+            },
+            source.revision,
+            options,
+        );
+        const exact = catalog.plugins.find(
+            (entry) =>
+                entry.name === source.plugin.name &&
+                entry.path === source.plugin.path &&
+                entry.version === source.plugin.version &&
+                entry.displayName === source.plugin.displayName &&
+                entry.description === source.plugin.description,
+        );
+        if (catalog.catalogId !== source.catalogId || exact === undefined) {
+            throw new PluginCatalogError(
+                "source_changed",
+                "The selected plugin package no longer matches its discovered catalog identity.",
+            );
+        }
+        return source;
+    }
+    const catalog = await discoverGitHubPlugins(
+        {
+            ...(source.ref === undefined ? {} : { ref: source.ref }),
+            repository: source.repository,
+        },
+        options,
+    );
+    const wanted = source.plugin.toLowerCase();
+    const plugin = catalog.plugins.find((entry) => entry.name.toLowerCase() === wanted);
+    if (plugin === undefined) {
+        const available = catalog.plugins.map((entry) => entry.name);
+        throw new PluginCatalogError(
+            "catalog_invalid",
+            available.length === 0
+                ? `The GitHub repository ${source.repository} does not list any plugins.`
+                : `The GitHub repository ${source.repository} does not list a plugin named ${source.plugin}. Available plugins: ${available.join(", ")}.`,
+        );
+    }
+    return {
+        catalogId: catalog.catalogId,
+        plugin,
+        ...(catalog.ref === undefined ? {} : { ref: catalog.ref }),
+        repository: catalog.repository,
+        revision: catalog.revision,
+        type: "github",
+    };
 }
 
 async function extractPluginDirectory(options: {
@@ -156,7 +204,15 @@ async function extractPluginDirectory(options: {
         });
     });
     try {
-        await pipeline(Readable.from([options.archive]), createGunzip(), expansionLimit, extractor);
+        await pipeline(
+            Readable.from([options.archive]),
+            createGunzip(),
+            expansionLimit,
+            extractor,
+            {
+                signal: options.signal,
+            },
+        );
     } catch (error) {
         if (options.signal?.aborted === true) options.signal.throwIfAborted();
         throw new Error(

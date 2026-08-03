@@ -19,6 +19,12 @@ import type {
 import type { RemoteTerminalSummary } from "../terminal/types.js";
 import type { SlotsChangedEvent } from "./SlotProtocol.js";
 import type { WebappsChangedEvent } from "./WebappProtocol.js";
+import {
+    githubGitRefSchema,
+    githubPluginCatalogSchema,
+    githubPluginPackageSourceSchema,
+    githubRepositorySchema,
+} from "../plugins/githubPluginCatalog.js";
 
 export type ProjectKind = "regular" | "home";
 export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
@@ -498,6 +504,39 @@ export const pluginInstallClassificationSchema = Type.Union([
 ]);
 export type PluginInstallClassification = Static<typeof pluginInstallClassificationSchema>;
 
+export const discoverPluginCatalogRequestSchema = Type.Object(
+    {
+        ref: Type.Optional(githubGitRefSchema),
+        repository: githubRepositorySchema,
+    },
+    { additionalProperties: false },
+);
+export type DiscoverPluginCatalogRequest = Static<typeof discoverPluginCatalogRequestSchema>;
+
+export const discoverPluginCatalogResponseSchema = githubPluginCatalogSchema;
+export type DiscoverPluginCatalogResponse = Static<typeof discoverPluginCatalogResponseSchema>;
+
+export const pluginInstallSourceSchema = Type.Union([
+    Type.Object(
+        {
+            sourceDirectory: Type.String({ maxLength: 16_384, minLength: 1 }),
+            type: Type.Literal("local-directory"),
+        },
+        { additionalProperties: false },
+    ),
+    githubPluginPackageSourceSchema,
+]);
+export type PluginInstallSource = Static<typeof pluginInstallSourceSchema>;
+
+export const installPluginRequestSchema = Type.Object(
+    {
+        requestId: Type.String({ maxLength: 256, minLength: 1 }),
+        source: pluginInstallSourceSchema,
+    },
+    { additionalProperties: false },
+);
+export type InstallPluginRequest = Static<typeof installPluginRequestSchema>;
+
 export interface InstalledPluginSummary {
     classification: PluginInstallClassification;
     description: string;
@@ -513,11 +552,6 @@ export interface UninstalledPluginSummary {
     name: string;
 }
 
-export interface InstallPluginRequest {
-    /** Absolute path on the machine running Rig. */
-    sourceDirectory: string;
-}
-
 export interface InstallPluginResponse {
     plugin: InstalledPluginSummary;
 }
@@ -527,10 +561,15 @@ export interface UninstallPluginResponse {
 }
 
 export type PluginManagementErrorCode =
+    | "catalog_invalid"
+    | "catalog_not_found"
     | "install_failed"
     | "invalid_request"
     | "plugin_not_found"
     | "plugins_unavailable"
+    | "repository_not_found"
+    | "source_changed"
+    | "source_unavailable"
     | "uninstall_failed";
 
 export interface PluginManagementErrorResponse {

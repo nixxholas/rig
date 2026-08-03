@@ -9,8 +9,8 @@ import type { HappySystemPromptHookInput, HappyTracingEvent } from "happy-plugin
 import type { PluginAppResource } from "../../plugins/PluginAppRegistry.js";
 import type { PluginIconResource } from "../../plugins/types.js";
 import type {
-    GitHubPluginIndex,
-    GitHubPluginInstallSource,
+    GitHubPluginCatalog,
+    GitHubPluginInstallationSource,
     GitHubPluginSource,
 } from "../../plugins/githubPluginCatalog.js";
 import type { FileSystemContext } from "./FileSystemContext.js";
@@ -30,15 +30,16 @@ export interface PluginContext {
     discoverRepository(
         source: GitHubPluginSource,
         signal?: AbortSignal,
-    ): Promise<GitHubPluginIndex>;
+    ): Promise<GitHubPluginCatalog>;
     install(options: {
         fs: FileSystemContext;
+        requestId?: string;
         signal?: AbortSignal;
         sourceDirectory: string;
     }): Promise<InstalledPluginSummary>;
     installFromGitHub(
-        source: GitHubPluginInstallSource,
-        options: { fs: FileSystemContext; signal?: AbortSignal },
+        source: GitHubPluginInstallationSource,
+        options: { fs: FileSystemContext; requestId?: string; signal?: AbortSignal },
     ): Promise<InstalledPluginSummary>;
     loadSkills(fs: FileSystemContext): Promise<readonly Skill[]>;
     loadSystemPrompt?(): Promise<string | undefined>;

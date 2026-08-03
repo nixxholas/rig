@@ -127,7 +127,9 @@ import {
     addSessionShareMemberRequestSchema,
     answerMurmurFriendRequestRequestSchema,
     createSessionShareRequestSchema,
+    discoverPluginCatalogRequestSchema,
     globalSecurityPolicySchema,
+    installPluginRequestSchema,
     listFileTreeRequestSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
@@ -211,7 +213,12 @@ import type {
     ResizeRemoteTerminalRequest,
 } from "../terminal/index.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
-import { PluginAppError, PluginIconError, PluginNotFoundError } from "../plugins/index.js";
+import {
+    PluginAppError,
+    PluginCatalogError,
+    PluginIconError,
+    PluginNotFoundError,
+} from "../plugins/index.js";
 import { SlotEntryInvalidError, SlotEntryNotFoundError } from "../slots/index.js";
 import {
     describeWebappScopeNotAllowed,
@@ -294,7 +301,9 @@ export interface ProtocolHttpServerOptions {
     plugins?: Pick<
         PluginContext,
         | "callAppTool"
+        | "discoverRepository"
         | "install"
+        | "installFromGitHub"
         | "list"
         | "readAppResource"
         | "readIcon"
@@ -422,7 +431,9 @@ interface ProtocolServerRuntimeConfig {
         | Pick<
               PluginContext,
               | "callAppTool"
+              | "discoverRepository"
               | "install"
+              | "installFromGitHub"
               | "list"
               | "readAppResource"
               | "readIcon"
@@ -456,12 +467,6 @@ const pluginAppToolCallBodySchema = Type.Object(
 );
 const pluginAppStorageBodySchema = Type.Object(
     { key: Type.String({ minLength: 1 }), value: Type.Optional(Type.Unknown()) },
-    { additionalProperties: false },
-);
-const installPluginRequestSchema = Type.Object(
-    {
-        sourceDirectory: Type.String({ maxLength: 16_384, minLength: 1 }),
-    },
     { additionalProperties: false },
 );
 const emptyObjectSchema = Type.Object({}, { additionalProperties: false });
@@ -780,6 +785,83 @@ async function handleRequest(
         sendJson(response, 200, { cursor, ...(await runtimeConfig.plugins.list()) });
         return;
     }
+    if (request.method === "POST" && route.name === "plugin-catalog") {
+        const plugins = runtimeConfig.plugins;
+        if (plugins === undefined) {
+            sendPluginManagementError(
+                response,
+                503,
+                "plugins_unavailable",
+                "Plugins are unavailable while Rig is starting.",
+            );
+            return;
+        }
+        let body;
+        try {
+            body = Value.Decode(
+                discoverPluginCatalogRequestSchema,
+                await readJson<unknown>(request, 64 * 1024),
+            );
+        } catch (error) {
+            if (error instanceof InvalidJsonBodyError) {
+                sendPluginManagementError(
+                    response,
+                    400,
+                    "invalid_request",
+                    "Plugin discovery settings must be valid JSON.",
+                );
+                return;
+            }
+            if (error instanceof RequestBodyTooLargeError) {
+                sendPluginManagementError(
+                    response,
+                    413,
+                    "invalid_request",
+                    "Plugin discovery settings are larger than the allowed limit.",
+                );
+                return;
+            }
+            sendPluginManagementError(
+                response,
+                400,
+                "invalid_request",
+                "Plugin discovery settings are invalid.",
+            );
+            return;
+        }
+        const operation = requestOperationSignal(request, response);
+        try {
+            const catalog = await plugins.discoverRepository(body, operation.signal);
+            if (!response.destroyed) sendJson(response, 200, catalog);
+        } catch (error) {
+            if (!response.destroyed && !operation.signal.aborted) {
+                if (error instanceof PluginCatalogError) {
+                    const status =
+                        error.code === "catalog_not_found" || error.code === "repository_not_found"
+                            ? 404
+                            : error.code === "invalid_source"
+                              ? 400
+                              : 422;
+                    sendPluginManagementError(
+                        response,
+                        status,
+                        error.code === "invalid_source" ? "invalid_request" : error.code,
+                        error.message,
+                    );
+                } else {
+                    sendPluginManagementError(
+                        response,
+                        502,
+                        "source_unavailable",
+                        errorToMessage(error),
+                    );
+                }
+            }
+        } finally {
+            operation.detach();
+        }
+        return;
+    }
     if (request.method === "POST" && route.name === "plugins") {
         const plugins = runtimeConfig.plugins;
         if (plugins === undefined) {
@@ -797,7 +879,10 @@ async function handleRequest(
                 installPluginRequestSchema,
                 await readJson<unknown>(request, 64 * 1024),
             );
-            if (!isAbsolute(body.sourceDirectory)) {
+            if (
+                body.source.type === "local-directory" &&
+                !isAbsolute(body.source.sourceDirectory)
+            ) {
                 sendPluginManagementError(
                     response,
                     400,
@@ -835,19 +920,44 @@ async function handleRequest(
         }
         const operation = requestOperationSignal(request, response);
         try {
-            const plugin = await plugins.install({
-                fs: createNodeFileSystemContext(body.sourceDirectory, {
-                    permissionMode: () => "full_access",
-                }),
-                signal: operation.signal,
-                sourceDirectory: body.sourceDirectory,
-            });
+            const plugin =
+                body.source.type === "local-directory"
+                    ? await plugins.install({
+                          fs: createNodeFileSystemContext(body.source.sourceDirectory, {
+                              permissionMode: () => "full_access",
+                          }),
+                          requestId: body.requestId,
+                          signal: operation.signal,
+                          sourceDirectory: body.source.sourceDirectory,
+                      })
+                    : await plugins.installFromGitHub(body.source, {
+                          fs: createNodeFileSystemContext(process.cwd(), {
+                              permissionMode: () => "full_access",
+                          }),
+                          requestId: body.requestId,
+                          signal: operation.signal,
+                      });
             if (!response.destroyed) {
                 sendJson<InstallPluginResponse>(response, 201, { plugin });
             }
         } catch (error) {
             if (!response.destroyed && !operation.signal.aborted) {
-                sendPluginManagementError(response, 422, "install_failed", errorToMessage(error));
+                if (error instanceof PluginCatalogError) {
+                    const status = error.code === "invalid_source" ? 400 : 409;
+                    sendPluginManagementError(
+                        response,
+                        status,
+                        error.code === "invalid_source" ? "invalid_request" : error.code,
+                        error.message,
+                    );
+                } else {
+                    sendPluginManagementError(
+                        response,
+                        422,
+                        "install_failed",
+                        errorToMessage(error),
+                    );
+                }
             }
         } finally {
             operation.detach();
@@ -3754,6 +3864,7 @@ function matchRoute(pathname: string):
               | "murmur-service-start"
               | "murmur-service-stop"
               | "presence"
+              | "plugin-catalog"
               | "plugins"
               | "projects"
               | "provider-usage"
@@ -3949,6 +4060,7 @@ function matchRoute(pathname: string):
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/presence") return { name: "presence" };
     if (pathname === "/plugins") return { name: "plugins" };
+    if (pathname === "/plugin-catalogs/github") return { name: "plugin-catalog" };
     if (pathname === "/projects") return { name: "projects" };
     if (pathname === "/provider-usage") return { name: "provider-usage" };
     if (pathname === "/secrets") return { name: "secret-registrations" };
@@ -4519,10 +4631,15 @@ function sendPluginManagementError(
     response: ServerResponse,
     status: number,
     code:
+        | "catalog_invalid"
+        | "catalog_not_found"
         | "install_failed"
         | "invalid_request"
         | "plugin_not_found"
         | "plugins_unavailable"
+        | "repository_not_found"
+        | "source_changed"
+        | "source_unavailable"
         | "uninstall_failed",
     message: string,
 ): void {
@@ -4601,6 +4718,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
     if (route.name === "plugins") return request.method === "POST";
+    if (route.name === "plugin-catalog") return false;
     if (
         [
             "murmur-account",

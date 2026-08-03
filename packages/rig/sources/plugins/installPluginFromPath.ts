@@ -8,6 +8,7 @@ import { comparePluginVersions } from "./comparePluginVersions.js";
 import { preparePluginDockerImage } from "./preparePluginDockerImage.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import { PLUGIN_MANIFEST_FILE_NAME } from "./types.js";
+import { PluginCatalogError } from "./PluginCatalogError.js";
 
 /** Local and generated state never travels with a plugin. */
 const EXCLUDED_ENTRIES = new Set([".git", ".runtime", "node_modules", "plugin.log"]);
@@ -24,6 +25,7 @@ export type InstalledPlugin = InstalledPluginSummary;
  */
 export async function installPluginFromPath(options: {
     docker?: Dockerode;
+    expectedVersion?: string;
     fs: FileSystemContext;
     pluginsDirectory: string;
     signal?: AbortSignal;
@@ -41,7 +43,7 @@ export async function installPluginFromPath(options: {
         );
     }
 
-    const folder = toFolderName(basename(sourceDirectory));
+    const folder = toPluginFolderName(basename(sourceDirectory));
     const stagingDirectory = join(pluginsDirectory, `.installing-${folder}`);
     await fs.rm(stagingDirectory, { force: true, recursive: true });
     await fs.mkdir(stagingDirectory, { recursive: true });
@@ -50,6 +52,15 @@ export async function installPluginFromPath(options: {
         // Registration runs against the staged copy, so an invalid manifest or escaping or missing
         // asset is reported before anything is installed.
         const staged = await readPluginManifest(stagingDirectory, { folderName: folder });
+        if (
+            options.expectedVersion !== undefined &&
+            staged.manifest.version !== options.expectedVersion
+        ) {
+            throw new PluginCatalogError(
+                "source_changed",
+                `The selected package declares version ${options.expectedVersion}, but its plugin manifest declares ${staged.manifest.version}.`,
+            );
+        }
         await preparePluginDockerImage(staged, {
             ...(options.docker === undefined ? {} : { docker: options.docker }),
             ...(signal === undefined ? {} : { signal }),
@@ -90,7 +101,7 @@ async function classifyInstall(
     return comparison === 0 ? "reinstall" : comparison > 0 ? "upgrade" : "downgrade";
 }
 
-function toFolderName(value: string): string {
+export function toPluginFolderName(value: string): string {
     const folder = value
         .trim()
         .toLowerCase()
