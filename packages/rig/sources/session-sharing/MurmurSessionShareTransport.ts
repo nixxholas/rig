@@ -78,6 +78,8 @@ type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<v
 type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
 
 interface OwnerSession {
+    /** Whether this process has committed an append, which bounds duplicate skipping. */
+    appendedThisSession: boolean;
     lastAppendedSequence: number;
     readonly session: SharedSessionOwner;
     state: SharedSessionState | undefined;
@@ -120,6 +122,7 @@ function entryFromMurmur(shareId: string, entry: SharedSessionEntry): SessionSha
  * Murmur's numbering leak into Rig's records.
  */
 export class MurmurSessionShareTransport implements SessionShareTransport {
+    readonly #deferred = new Set<string>();
     readonly #directory: SessionShareMurmurDirectory;
     readonly #entrySource: MurmurSessionShareTransportOptions["entrySource"];
     readonly #grants = new Map<string, Map<string, SessionShareTransportGrant>>();
@@ -167,6 +170,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
             store: runtime.store,
         });
         this.#owners.set(owner.shareId, {
+            appendedThisSession: false,
             lastAppendedSequence: 0,
             session,
             state: session.state,
@@ -194,13 +198,16 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                     shareSequence: entry.shareSequence,
                     timestamp: entry.createdAt,
                 });
+                owner.appendedThisSession = true;
             } catch (error: unknown) {
-                // Rig only acknowledges an outbox page after Murmur has durably committed
-                // it, so recovery re-sends a prefix Murmur already has and a gap here is
-                // that duplicate. The one way Murmur could be genuinely behind is losing
-                // its own store, which `createOwner` refuses outright, so skipping is the
-                // idempotent answer rather than a silent drop.
-                if (!isSequenceGap(error)) throw error;
+                // Murmur raises one code whichever side is ahead, and it exposes no way to
+                // read its committed maximum, so the two are told apart by when the gap
+                // happens. Rig acknowledges an outbox page only after Murmur has durably
+                // committed it, so the sole prefix Murmur can already hold is the page a
+                // restart left unacknowledged — before this session has appended anything.
+                // A gap after a successful append means Murmur is genuinely behind, and
+                // skipping there would drop an entry every member is then missing forever.
+                if (!isSequenceGap(error) || owner.appendedThisSession) throw error;
             }
             owner.lastAppendedSequence = entry.shareSequence;
         }
@@ -351,11 +358,12 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
             await this.#emitOwner(shareId, {
                 error: failures[0]!.message,
                 recoverable: true,
+                shareId,
                 type: "transport_failed",
             });
             return;
         }
-        await this.#emitOwner(shareId, { type: "transport_recovered" });
+        await this.#emitOwner(shareId, { shareId, type: "transport_recovered" });
     }
 
     /**
@@ -374,9 +382,39 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         }
         for (const member of this.#members.values()) {
             const outcome = outcomeOf(await member.session.handleEvent(received));
-            if (outcome !== "unowned") return outcome;
+            if (outcome === "unowned") continue;
+            // A member defers because its history is incomplete, and only `retry` fetches
+            // the missing pages. Without recording the share here, the live tail buffers to
+            // Murmur's pending bound and every later event defers forever.
+            if (outcome === "retained") this.#deferred.add(member.grant.shareId);
+            return outcome;
         }
         return "unowned";
+    }
+
+    /** Shares whose replicas are waiting on history, cleared as the caller takes them. */
+    takeDeferredShares(): readonly string[] {
+        const shareIds = [...this.#deferred];
+        this.#deferred.clear();
+        return shareIds;
+    }
+
+    /**
+     * Drop every cached session because the Murmur runtime behind them changed.
+     *
+     * The cached owner and member sessions hold the client and store they were built
+     * on. After a stop, a restart, or an account deletion that replaces the store
+     * outright, writing through them would write into a store that is gone.
+     */
+    resetRuntime(): void {
+        for (const owner of this.#owners.values()) owner.session.destroy();
+        for (const member of this.#members.values()) member.session.destroy();
+        this.#owners.clear();
+        this.#members.clear();
+        this.#grants.clear();
+        this.#deferred.clear();
+        // Handlers deliberately survive: they belong to the service's subscriptions, and a
+        // runtime that comes back rebuilds the sessions behind the same subscribers.
     }
 
     /** Release every in-memory epoch secret; durable state stays loadable. */
@@ -388,6 +426,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         this.#ownerHandlers.clear();
         this.#memberHandlers.clear();
         this.#grants.clear();
+        this.#deferred.clear();
     }
 
     #requireRuntime(): MurmurRuntimeHandle {
@@ -424,7 +463,12 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         } catch {
             return undefined;
         }
-        const owner: OwnerSession = { lastAppendedSequence: 0, session, state: session.state };
+        const owner: OwnerSession = {
+            appendedThisSession: false,
+            lastAppendedSequence: 0,
+            session,
+            state: session.state,
+        };
         this.#owners.set(shareId, owner);
         return owner;
     }
@@ -503,6 +547,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 await this.#emitOwner(shareId, {
                     error: terminationMessage(termination),
                     recoverable: false,
+                    shareId,
                     type: "transport_failed",
                 });
             },

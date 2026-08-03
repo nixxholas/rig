@@ -66,12 +66,14 @@ export const sessionShareTransportOwnerEventSchema = Type.Union([
     Type.Object(
         {
             error: Type.String({ maxLength: 4_096, minLength: 1 }),
+            // An unrecoverable failure means Murmur retired the group; no retry brings it back.
             recoverable: Type.Boolean(),
+            shareId: identifierSchema,
             type: Type.Literal("transport_failed"),
         },
         exact,
     ),
-    Type.Object({ type: Type.Literal("transport_recovered") }, exact),
+    Type.Object({ shareId: identifierSchema, type: Type.Literal("transport_recovered") }, exact),
 ]);
 export type SessionShareTransportOwnerEvent = Static<typeof sessionShareTransportOwnerEventSchema>;
 

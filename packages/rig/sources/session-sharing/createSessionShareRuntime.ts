@@ -3,6 +3,7 @@ import type { MurmurServiceContract } from "../murmur/types.js";
 import type { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
 import type { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
 import type { SessionShareReplicaRecord } from "../persistence/session-sharing/types.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { SessionEvent } from "../protocol/index.js";
 import { MurmurShareDirectory, type ReceivedShareInvitation } from "./MurmurShareDirectory.js";
 import { MurmurSessionShareTransport } from "./MurmurSessionShareTransport.js";
@@ -29,6 +30,8 @@ export interface SessionShareRuntimeOptions {
         },
     ) => void;
     readonly murmur: MurmurServiceContract;
+    /** Surfaces an error the event router absorbed so it is not silently lost. */
+    readonly reportFailure?: (error: unknown) => void;
     readonly shareStore: PersistentSessionShareCoreStore;
     readonly daemonStore: PersistentSessionShareDaemonStore;
 }
@@ -140,10 +143,39 @@ export function createSessionShareRuntime(
         await backfillReplica(transport, replica.shareId);
     };
 
+    // Draining deferred backfills is coalesced: a member that is waiting on history defers
+    // every event that arrives, and one retry pass serves all of them.
+    let draining: Promise<void> | undefined;
+    const drainDeferred = (): void => {
+        if (draining !== undefined) return;
+        draining = (async () => {
+            for (const shareId of transport.takeDeferredShares()) {
+                await backfillReplica(transport, shareId);
+            }
+        })().finally(() => {
+            draining = undefined;
+        });
+    };
     const unregisterRouter = options.murmur.registerEventRouter(async (received) => {
-        const outcome = await transport.handleReceivedEvent(received);
-        if (outcome !== "unowned") return outcome;
-        return (await directory.handleReceivedEvent(received)) ? "applied" : "unowned";
+        // The router must be total. Murmur's synchronization loop absorbs a thrown
+        // non-database error and simply retries the same event, so anything escaping here
+        // stalls every topic — friendships included — silently and permanently.
+        try {
+            const outcome = await transport.handleReceivedEvent(received);
+            if (outcome === "retained") drainDeferred();
+            if (outcome !== "unowned") return outcome;
+            return (await directory.handleReceivedEvent(received)) ? "applied" : "unowned";
+        } catch (error: unknown) {
+            rethrowDatabaseFailure(error);
+            options.reportFailure?.(error);
+            // Murmur rolled its own transaction back, so nothing was applied. Letting the
+            // caller advance past the event drops it; retaining it stalls every topic
+            // behind this one forever, which is strictly worse, and every error that can
+            // reach here — an entry for an epoch this replica has moved past, a rejected
+            // friend message, a directory envelope that will be re-sent — is either
+            // already stale or replayed by its own sender.
+            return "unowned";
+        }
     });
     // A friend's fresh key package is exactly what a deferred invitation was waiting for.
     const unobserveOffers = directory.onKeyPackageOffered(() => {
@@ -162,6 +194,10 @@ export function createSessionShareRuntime(
         });
     };
     const unobserveRuntime = options.murmur.onRuntimeChanged((runtime) => {
+        // Every cached Murmur session holds the client and store it was built on, so a
+        // runtime swap — a restart, or an account deletion that replaces the store — makes
+        // all of them dead handles that must be rebuilt rather than written through.
+        transport.resetRuntime();
         if (runtime !== undefined) startAll();
     });
     if (options.murmur.runtime() !== undefined) startAll();

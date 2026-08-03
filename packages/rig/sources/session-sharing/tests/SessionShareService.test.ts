@@ -149,6 +149,78 @@ describe("SessionShareService", () => {
         expect(store.replicaEntries.length).toBeGreaterThan(0);
     });
 
+    it("keeps a replica's transcript when re-joining its next epoch fails", async () => {
+        const transport = new FakeSessionShareTransport();
+        transport.setAutoDeliver(false);
+        const store = new MemorySessionShareStore(1);
+        const service = new SessionShareService({
+            deliverFriendMessage: () => undefined,
+            idFactory: sequenceIds("share-1", "member-1"),
+            store,
+            transport,
+        });
+        const share = await service.create({
+            friends: [{ displayName: "Casey", murmurPeerId: "peer-casey" }],
+            includeFriendMessagesInModel: true,
+            ownerPeerId: "peer-owner",
+            ownerSessionId: "session-1",
+        });
+        const grant = toGrant(share.members[0]!);
+        await service.joinReplica({
+            grant,
+            memberCount: 1,
+            ownerPeerId: "peer-owner",
+            state: "active",
+            title: "Shared session",
+        });
+        await transport.flushAll();
+        const replicated = store.replicaEntries.length;
+        expect(replicated).toBeGreaterThan(0);
+
+        // A replayed invitation spends a one-use bundle that is already gone, so the join
+        // fails. Adopting its epoch anyway would discard everything the live epoch holds.
+        transport.failNext("join");
+        await expect(
+            service.joinReplica({
+                grant: { ...grant, grantEpoch: grant.grantEpoch + 1 },
+                memberCount: 1,
+                ownerPeerId: "peer-owner",
+                state: "active",
+                title: "Shared session",
+            }),
+        ).rejects.toThrow("Fake join failure");
+
+        expect(store.replica?.grant.grantEpoch).toBe(grant.grantEpoch);
+        expect(store.replicaEntries).toHaveLength(replicated);
+    });
+
+    it("recovers a share whose member was revoked and keeps publishing", async () => {
+        const transport = new FakeSessionShareTransport();
+        const store = new MemorySessionShareStore();
+        const service = new SessionShareService({
+            deliverFriendMessage: () => undefined,
+            idFactory: sequenceIds("share-1", "member-1"),
+            store,
+            transport,
+        });
+        const share = await service.create({
+            friends: [{ displayName: "Casey", murmurPeerId: "peer-casey" }],
+            includeFriendMessagesInModel: true,
+            ownerPeerId: "peer-owner",
+            ownerSessionId: "session-1",
+        });
+        await service.revoke(share.shareId, share.members[0]!.shareMemberId);
+        expect(store.endedGrants).toHaveLength(1);
+
+        // Recovery must never replay an ended grant. Murmur rejects revoking a grant it has
+        // already ended, and a revocation names only the peer, so replaying an old epoch
+        // would remove the membership that same friend holds today.
+        transport.failNext("revoke");
+        await service.recover();
+
+        expect(store.queryShare(share.shareId)?.state).not.toBe("degraded");
+    });
+
     it("stops a share terminally when its owner session is archived", async () => {
         const transport = new FakeSessionShareTransport();
         const store = new MemorySessionShareStore();

@@ -540,6 +540,14 @@ async function runOwnedLocalProtocolServer(
                 activeStore.get(ownerSessionId)?.applyPersistedFriendMessage(message, persisted);
             },
             murmur: activeMurmur,
+            reportFailure: (error) => {
+                daemonLog.record(
+                    "warning",
+                    "session_share_event_dropped",
+                    "A session-sharing event could not be applied and was skipped.",
+                    { error: error instanceof Error ? error.message : String(error) },
+                );
+            },
             shareStore: activeStore.sessionShares,
         });
         shutdown.register("session-sharing", async () => {

@@ -306,16 +306,28 @@ export class SessionShareService {
 
     async joinReplica(replica: SessionShareReplicaRecord): Promise<void> {
         this.#assertOpen();
-        this.#store.saveReplica(replica);
         const key = grantKey(replica.grant);
-        this.#memberSubscriptions.get(key)?.();
+        const previous = this.#memberSubscriptions.get(key);
+        previous?.();
         this.#memberSubscriptions.set(
             key,
             this.#transport.handleMemberEvents(replica.grant, (event) =>
                 this.#handleMemberEvent(event),
             ),
         );
-        await this.#transport.joinMember(replica.grant);
+        try {
+            // Saving the replica adopts the new grant epoch, which discards everything the
+            // previous epoch replicated. A join that fails — a replayed invitation whose
+            // one-use bundle is already spent, say — must not cost the member the
+            // transcript it still holds, so the durable epoch moves only after Murmur has
+            // accepted the membership.
+            await this.#transport.joinMember(replica.grant);
+        } catch (error: unknown) {
+            this.#memberSubscriptions.get(key)?.();
+            this.#memberSubscriptions.delete(key);
+            throw error;
+        }
+        this.#store.saveReplica(replica);
     }
 
     // A replica restored on daemon start is already durable and its Murmur session is
@@ -363,9 +375,10 @@ export class SessionShareService {
                     shareId: share.shareId,
                 });
             }
-            for (const endedGrant of this.#store.queryEndedGrants(share.shareId)) {
-                await this.#transport.revoke(endedGrant);
-            }
+            // Ended grants are deliberately not replayed. Murmur's own durable state
+            // already records every removal, and asking it to revoke a grant it has
+            // already ended fails; worse, a revocation names only the peer, so replaying
+            // an old epoch would remove the membership that same friend holds today.
             const grants = activeGrants(share);
             if (grants.length > 0) await this.#transport.inviteMany(grants);
             await this.#transport.retry(share.shareId);
@@ -397,10 +410,20 @@ export class SessionShareService {
             throw new Error("The session-share owner transport event is invalid.");
         }
         if (event.type === "transport_failed") {
-            for (const share of this.#store.queryRecoverableShares()) {
-                if (share.state !== "stopped")
-                    this.#store.setShareHealth(share.shareId, "degraded");
+            // Only the share whose transport failed is affected; degrading the others would
+            // report an outage none of them is having. An unrecoverable failure means Murmur
+            // has already retired the group, so the share is stopped rather than left
+            // degraded forever against state that no longer exists.
+            if (event.recoverable) {
+                this.#store.setShareHealth(event.shareId, "degraded");
+                return;
             }
+            // Murmur already deleted this group's rows, so no retry can revive the share.
+            // Recording it as stopped is the honest end state; left degraded, recovery
+            // would retry forever against owner state that no longer exists.
+            this.#store.stopShare(event.shareId);
+            this.#ownerSubscriptions.get(event.shareId)?.();
+            this.#ownerSubscriptions.delete(event.shareId);
             return;
         }
         if (event.type === "transport_recovered") return;
@@ -456,11 +479,12 @@ export class SessionShareService {
             this.#store.appendReplicaEntries(event.grant, event.entries);
             return;
         }
-        const outcome = this.#store.endReplica(event.grant, event.reason);
-        if (outcome === "ended") {
-            this.#memberSubscriptions.get(grantKey(event.grant))?.();
-            this.#memberSubscriptions.delete(grantKey(event.grant));
-        }
+        // The subscription goes either way: an end for a grant this replica has already
+        // moved past is stale for the store but still retires that epoch's handler, and
+        // keeping it would leak one handler per epoch for the daemon's lifetime.
+        this.#store.endReplica(event.grant, event.reason);
+        this.#memberSubscriptions.get(grantKey(event.grant))?.();
+        this.#memberSubscriptions.delete(grantKey(event.grant));
     }
 
     #assertOpen(): void {

@@ -5,6 +5,19 @@ import { sessionShareEntries } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 
+/**
+ * Highest sequence a history offer can ever reach.
+ *
+ * Murmur builds an offer from sequence one and stops after
+ * `MAX_SHARED_SESSION_OFFER_PAGES` pages, so nothing past that point is ever offered
+ * to a late member — it only arrives live, to members who were already present.
+ * Retaining entries beyond it would grow a second copy of the transcript forever for
+ * no reader, so the log stops there. The page size is Rig's own, chosen by the
+ * runtime's `readPage`, so the bound is stated in entries rather than pages.
+ */
+// 256 offer pages of `HISTORY_PAGE_ENTRIES` entries each, per `createSessionShareRuntime`.
+const MAX_OFFERABLE_SEQUENCE = 256 * 100;
+
 export function sessionShareEntryLogAppend(
     tx: TX,
     input: { entries: readonly SessionShareOpaqueEntry[]; shareId: string },
@@ -15,6 +28,7 @@ export function sessionShareEntryLogAppend(
             if (entry.shareId !== input.shareId) {
                 throw new Error("The session share entry does not belong to this share.");
             }
+            if (entry.shareSequence > MAX_OFFERABLE_SEQUENCE) continue;
             const existing = tx
                 .select()
                 .from(sessionShareEntries)

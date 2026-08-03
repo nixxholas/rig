@@ -1,4 +1,6 @@
 import {
+    createPrivateMessage,
+    encryptPrivateMessageForContact,
     generateIdentityKeyPair,
     identityId,
     identityInboxTopic,
@@ -11,6 +13,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import { encodeMurmurIdentityToken } from "../../murmur/impl/identityToken.js";
+import { encodeSharePrivateEnvelope } from "../impl/shareCodec.js";
 import { InMemoryMurmurRelay } from "../../murmur/InMemoryMurmurRelay.js";
 import type {
     MurmurEventRouter,
@@ -148,7 +151,11 @@ class FakeMurmurService implements MurmurServiceContract {
     /** Route one event, returning whether the cursor is free to continue past it. */
     async #route(received: ReceivedEvent): Promise<boolean> {
         for (const router of this.#routers) {
-            if (await router(received)) return true;
+            const outcome = await router(received);
+            // `retained` means the owning router deliberately left the cursor where it is,
+            // exactly as `MurmurService` treats it: the pass stops rather than advancing.
+            if (outcome === "retained") return false;
+            if (outcome === "applied") return true;
         }
         try {
             await this.#peer.store.transaction(async (transaction) => {
@@ -428,6 +435,46 @@ describe("session sharing between two peers over the real Murmur transport", () 
         expect(history.entries.map((entry) => entry.canonicalJson)).toEqual(
             published.entries.map((entry) => entry.canonicalJson),
         );
+    }, 30_000);
+});
+
+/** A router failure must never escape into the Murmur synchronization loop. */
+describe("the session-sharing event router", () => {
+    it("absorbs a handler failure instead of stalling every Murmur topic", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const peer = await createPeer(relay);
+        const murmur = new FakeMurmurService(peer, { firstName: "Dana", lastName: "Owner" }, () => [
+            /* friendships are never returned: the stub below fails first */
+        ]);
+        // Friendship lookup is the directory's first step for any inbox envelope, and it is
+        // the sort of failure that must not escape: Murmur absorbs a thrown non-database
+        // error and simply re-reads the same event, stalling every topic behind it forever.
+        murmur.getFriends = () => Promise.reject(new Error("Friendship lookup exploded."));
+
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        cleanups.push(() => store.close());
+        const reported: unknown[] = [];
+        const runtime = createSessionShareRuntime({
+            daemonStore: store.sessionShareDaemonStore,
+            deliverFriendMessage: () => {},
+            murmur,
+            reportFailure: (error) => reported.push(error),
+            shareStore: store.sessionShares,
+        });
+        cleanups.push(() => void runtime.close());
+
+        const envelope = encodeSharePrivateEnvelope(
+            encryptPrivateMessageForContact(
+                peer.identity,
+                peer.identity,
+                createPrivateMessage("{}"),
+            ),
+        );
+        await peer.client.publishUnlinkable(identityInboxTopic(peer.identity), envelope);
+        await expect(murmur.pump()).resolves.toBeUndefined();
+
+        expect(reported).toHaveLength(1);
+        expect((reported[0] as Error).message).toBe("Friendship lookup exploded.");
     }, 30_000);
 });
 
