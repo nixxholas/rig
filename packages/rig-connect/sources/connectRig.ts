@@ -244,6 +244,7 @@ export interface RigSessionSubscriptionOptions {
 export interface RigGroupsSubscriptionOptions {
     onChange: (projects: readonly ProjectGroup[], state: GroupsState) => void;
     onDelta?: (delta: GroupDelta) => void;
+    /** Reports terminal catalog failures and recoverable live protocol diagnostics. */
     onError?: (error: unknown) => void;
 }
 
@@ -1359,21 +1360,6 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (
                         error instanceof MutationHttpError &&
                         error.status === 409 &&
-                        mutation.expectsWorkspaceResponse === true &&
-                        !isWorkspaceResponse(error.data)
-                    ) {
-                        queue.shift();
-                        rejectMutation(
-                            mutation,
-                            "Rig returned an invalid workspace response.",
-                            error.data,
-                        );
-                        retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
-                        continue;
-                    }
-                    if (
-                        error instanceof MutationHttpError &&
-                        error.status === 409 &&
                         mutation.matchesAuthoritative?.(error.data) === true
                     ) {
                         recordAcceptedResponse(mutation, error.data);
@@ -1388,6 +1374,21 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         mutation.retryOnConflict === true
                     ) {
                         recordAcceptedResponse(mutation, error.data);
+                        continue;
+                    }
+                    if (
+                        error instanceof MutationHttpError &&
+                        error.status === 409 &&
+                        mutation.expectsWorkspaceResponse === true &&
+                        hasInvalidWorkspaceField(error.data)
+                    ) {
+                        queue.shift();
+                        rejectMutation(
+                            mutation,
+                            "Rig returned an invalid workspace response.",
+                            error.data,
+                        );
+                        retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
                         continue;
                     }
                     if (isRetryableMutationError(error)) {
@@ -1580,14 +1581,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             throw error;
         }
         if (version !== entry.bootstrapVersion) return;
+        const catalogCompatibility = serverCompatibility(hello.protocolVersion);
+        if (catalogCompatibility.status !== "compatible") {
+            throw new Error(describeServerCompatibility(catalogCompatibility));
+        }
         if (
             !hello.workspaces.every((workspace) => Value.Check(projectWorkspaceSchema, workspace))
         ) {
             throw new Error("Rig returned an invalid workspace catalog.");
-        }
-        const catalogCompatibility = serverCompatibility(hello.protocolVersion);
-        if (catalogCompatibility.status !== "compatible") {
-            throw new Error(describeServerCompatibility(catalogCompatibility));
         }
         for (const project of hello.projects) {
             rememberGroupVersion(projectKey(project.id), project.version);
@@ -1633,6 +1634,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             for (const subscriber of [...inboxEntry.subscribers]) {
                 subscriber.onError?.(error);
             }
+        }
+    };
+
+    const reportInvalidWorkspaceEvent = (): void => {
+        const error = new Error("Rig ignored an invalid live workspace update.");
+        if (groupsEntry !== undefined) {
+            for (const subscriber of [...groupsEntry.subscribers]) subscriber.onError?.(error);
+        }
+        if (inboxEntry !== undefined) {
+            for (const subscriber of [...inboxEntry.subscribers]) subscriber.onError?.(error);
         }
     };
 
@@ -1953,7 +1964,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 return true;
             },
             onEvent: (event, cursor) => {
-                if (!isValidWorkspaceEvent(event)) return;
+                if (!isValidWorkspaceEvent(event)) {
+                    reportInvalidWorkspaceEvent();
+                    return;
+                }
                 rememberGlobalIdentity(event);
                 if (event.type === "murmur_friendship_changed") {
                     const entry = murmurFriendsEntry;
@@ -3040,10 +3054,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const key = workspaceKey(input.projectId, id);
         const createdAt = now();
         const optimistic: ProjectWorkspace = {
-            // gitCommonDir and storageKey are empty placeholders: both are daemon-owned and
-            // unknown until the authoritative answer replaces this row.
             ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
             createdAt,
+            // Daemon-owned and unknown until the authoritative answer replaces this row.
             gitCommonDir: "",
             id,
             kind: "git_worktree",
@@ -3053,6 +3066,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             presence: "missing",
             projectId: input.projectId,
             status: "initializing",
+            // Daemon-owned and unknown until the authoritative answer replaces this row.
             storageKey: "",
             updatedAt: createdAt,
             version: 0,
@@ -4426,6 +4440,15 @@ function responseEntity(
 function isWorkspaceResponse(data: unknown): boolean {
     const workspace = responseEntity(data, "workspace");
     return workspace !== undefined && Value.Check(projectWorkspaceSchema, workspace);
+}
+
+function hasInvalidWorkspaceField(data: unknown): boolean {
+    return (
+        data !== null &&
+        typeof data === "object" &&
+        Object.hasOwn(data, "workspace") &&
+        !isWorkspaceResponse(data)
+    );
 }
 
 function isValidWorkspaceEvent(event: GlobalEvent): boolean {

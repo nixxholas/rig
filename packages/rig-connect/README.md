@@ -140,7 +140,9 @@ reach the daemon's Unix socket without adding Node built-ins to this package.
 `onDelta` is optional and receives ordered notifications for callers that would rather react than
 re-render. It always fires after `onChange` for the same update, so a consumer handling a delta
 already sees state that reflects it. `onError` reports a failure that ended the connection for
-good; ordinary disconnections are not failures and are handled by reconnecting.
+good; ordinary disconnections are not failures and are handled by reconnecting. Group
+subscriptions also receive recoverable protocol diagnostics there while their connection state
+stays live.
 
 ## The chat state
 
@@ -350,7 +352,7 @@ for (const group of groups.projects()) {
     group.unread.count; // chats in the project itself waiting for the person
     group.sessions; // sessions in the project root
     group.workspaces; // worktrees, each with its own sessions and Git state
-    group.workspaces[0]?.error; // daemon-bounded failure reason when setup failed
+    group.workspaces[0]?.error; // protocol-enforced bounded failure reason when setup failed
 }
 ```
 

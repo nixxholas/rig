@@ -1676,6 +1676,58 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("surfaces the daemon error when workspace creation conflicts without an entity", async () => {
+        const stream = streamResponse();
+        const rejections: MutationRejectedDelta[] = [];
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify(groupsCatalog()), { status: 200 }),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                return Promise.resolve(
+                    new Response(JSON.stringify({ error: "That workspace already exists." }), {
+                        status: 409,
+                    }),
+                );
+            },
+            onMutationRejected: (rejection) => rejections.push(rejection),
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const mutationId = rig.createWorkspace({
+                name: "Feature",
+                projectId: "project-1",
+            });
+            await settle();
+
+            expect(connection.projects()[0]?.workspaces).toEqual([]);
+            expect(rejections).toContainEqual({
+                action: "create_workspace",
+                message: "That workspace already exists.",
+                mutationId,
+                type: "mutation_rejected",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("restores a workspace rename when the update response is schema-invalid", async () => {
         const stream = streamResponse();
         const rejections: MutationRejectedDelta[] = [];
@@ -1706,7 +1758,7 @@ describe("connectRig mutations", () => {
                         JSON.stringify({
                             workspace: {
                                 ...workspace,
-                                name: "Renamed",
+                                name: "Wrong",
                                 unexpected: true,
                                 version: 2,
                             },
@@ -1745,8 +1797,118 @@ describe("connectRig mutations", () => {
         }
     });
 
+    it("surfaces the daemon error when a renamed workspace no longer exists", async () => {
+        const stream = streamResponse();
+        const rejections: MutationRejectedDelta[] = [];
+        const workspace = daemonWorkspace("workspace-1");
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({ ...groupsCatalog(), workspaces: [workspace] }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                return Promise.resolve(
+                    new Response(JSON.stringify({ error: "That workspace no longer exists." }), {
+                        status: 409,
+                    }),
+                );
+            },
+            onMutationRejected: (rejection) => rejections.push(rejection),
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            const mutationId = rig.renameGroup(
+                { kind: "workspace", projectId: "project-1", workspaceId: workspace.id },
+                "Renamed",
+            );
+            await settle();
+
+            expect(connection.projects()[0]?.workspaces).toHaveLength(1);
+            expect(connection.projects()[0]?.workspaces[0]?.name).toBe("Feature");
+            expect(rejections).toContainEqual({
+                action: "rename_group",
+                message: "That workspace no longer exists.",
+                mutationId,
+                type: "mutation_rejected",
+            });
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("keeps an archive committed when its 409 body has no workspace entity", async () => {
+        const stream = streamResponse();
+        const rejections: MutationRejectedDelta[] = [];
+        const workspace = daemonWorkspace("workspace-1");
+        let archiveRequests = 0;
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                if (url.pathname === "/catalog") {
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({ ...groupsCatalog(), workspaces: [workspace] }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                archiveRequests += 1;
+                return Promise.resolve(
+                    new Response(JSON.stringify({ error: "The workspace is already archived." }), {
+                        status: 409,
+                    }),
+                );
+            },
+            onMutationRejected: (rejection) => rejections.push(rejection),
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({ onChange: () => undefined });
+        try {
+            stream.write(liveHello());
+            await settle();
+
+            rig.archiveWorkspace("project-1", workspace.id);
+            expect(connection.projects()[0]?.workspaces).toEqual([]);
+            await settle();
+
+            expect(connection.projects()[0]?.workspaces).toEqual([]);
+            expect(archiveRequests).toBe(1);
+            expect(rejections).toEqual([]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
     it("skips an invalid live workspace entity and keeps following the stream", async () => {
         const stream = streamResponse();
+        const errors: unknown[] = [];
         const workspace = daemonWorkspace("workspace-1");
         const rig = connectRig({
             endpoint: "http://daemon.test",
@@ -1771,7 +1933,10 @@ describe("connectRig mutations", () => {
             randomValues,
             token: "secret",
         });
-        const connection = rig.connectGroups({ onChange: () => undefined });
+        const connection = rig.connectGroups({
+            onChange: () => undefined,
+            onError: (error) => errors.push(error),
+        });
         try {
             stream.write(liveHello());
             await settle();
@@ -1811,6 +1976,12 @@ describe("connectRig mutations", () => {
                 error: "Authoritative failure.",
                 status: "failed",
             });
+            expect(connection.state().connection).toBe("live");
+            expect(errors).toEqual([
+                expect.objectContaining({
+                    message: "Rig ignored an invalid live workspace update.",
+                }),
+            ]);
         } finally {
             connection.close();
             rig.close();
@@ -1860,6 +2031,53 @@ describe("connectRig mutations", () => {
             expect(errors).toEqual([
                 expect.objectContaining({ message: "Rig returned an invalid workspace catalog." }),
             ]);
+        } finally {
+            connection.close();
+            rig.close();
+        }
+    });
+
+    it("reports protocol incompatibility before validating newer workspace fields", async () => {
+        const stream = streamResponse();
+        const reported = deferred<unknown>();
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") return Promise.resolve(stream.response);
+                return Promise.resolve(
+                    new Response(
+                        JSON.stringify({
+                            ...groupsCatalog(),
+                            protocolVersion: 999,
+                            workspaces: [
+                                {
+                                    ...daemonWorkspace("workspace-1"),
+                                    futureField: true,
+                                },
+                            ],
+                        }),
+                        { status: 200 },
+                    ),
+                );
+            },
+            randomValues,
+            token: "secret",
+        });
+        const connection = rig.connectGroups({
+            onChange: () => undefined,
+            onError: (error) => reported.resolve(error),
+        });
+        try {
+            stream.write(liveHello());
+            const error = await reported.promise;
+
+            expect(error).toEqual(
+                expect.objectContaining({
+                    message:
+                        "The Rig server protocol is version 999, but this rig-connect build supports at most version 5.",
+                }),
+            );
         } finally {
             connection.close();
             rig.close();
