@@ -10,7 +10,7 @@ export function validateRelease(
         environment: { ...process.env, CI: "true" },
     });
     run("pnpm", ["run", "check"]);
-    run("pnpm", ["test"], {
+    run("pnpm", ["run", "test:release"], {
         environment: createReleaseTestEnvironment(),
     });
     run("pnpm", releasePackage.buildArguments);

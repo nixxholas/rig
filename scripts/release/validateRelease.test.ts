@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { createReleaseTestEnvironment } from "./createReleaseTestEnvironment.js";
 import type { ReleasePackage } from "./ReleasePackage.js";
 import { validateRelease } from "./validateRelease.js";
 
@@ -37,7 +38,7 @@ test("synchronizes the frozen workspace install before release validation", () =
                 command: "pnpm",
             },
             {
-                arguments_: ["test"],
+                arguments_: ["run", "test:release"],
                 command: "pnpm",
             },
             {
@@ -47,4 +48,5 @@ test("synchronizes the frozen workspace install before release validation", () =
         ],
     );
     assert.equal(commands[0]?.environment?.CI, "true");
+    assert.deepEqual(commands[2]?.environment, createReleaseTestEnvironment());
 });
