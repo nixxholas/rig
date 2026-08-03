@@ -18,6 +18,7 @@ import { scopeShareTailSessions, type ScopeShareTailLimits } from "../scopeShare
 import {
     createScopeShareFixture,
     insertSession,
+    insertWorkspace,
     insertSessionEvents,
     PROJECT_ID,
     WORKSPACE_ID,
@@ -61,7 +62,7 @@ describe("scope share lifecycle", () => {
         }
     });
 
-    it("refuses to share a workspace whose project is already shared", () => {
+    it("refuses a share that would overlap one already covering the same sessions", () => {
         const fixture = openFixture();
         try {
             createShare(fixture.database, {
@@ -69,7 +70,6 @@ describe("scope share lifecycle", () => {
                 scopeKind: "project",
                 shareId: "share-project",
             });
-
             expect(() => createShare(fixture.database, { shareId: "share-workspace" })).toThrow(
                 /already shared/,
             );
@@ -78,22 +78,38 @@ describe("scope share lifecycle", () => {
         }
     });
 
-    it("orders a project's live shares with the project's own share last", () => {
+    it("refuses a project share while a workspace inside it is shared on its own", () => {
         const fixture = openFixture();
         try {
             createShare(fixture.database, { shareId: "share-workspace" });
-            createShare(fixture.database, {
-                scopeId: PROJECT_ID,
-                scopeKind: "project",
-                shareId: "share-project",
-            });
 
-            // Archiving a project stops every workspace share beneath it before its own.
+            // The overlap is one fact, so it is refused from whichever side arrives second.
+            // Without this the project's sessions would be replicated by two MLS groups at
+            // once, with nothing able to reconcile them.
+            expect(() =>
+                createShare(fixture.database, {
+                    scopeId: PROJECT_ID,
+                    scopeKind: "project",
+                    shareId: "share-project",
+                }),
+            ).toThrow(/already shared/);
+        } finally {
+            fixture.close();
+        }
+    });
+
+    it("lists every live share in a project so archiving it can stop them all", () => {
+        const fixture = openFixture();
+        try {
+            insertWorkspace(fixture.database, { id: "workspace-2" });
+            createShare(fixture.database, { shareId: "share-workspace-1" });
+            createShare(fixture.database, { scopeId: "workspace-2", shareId: "share-workspace-2" });
+
             expect(
                 queryLiveScopeSharesInProject(fixture.database, PROJECT_ID).map(
                     (share) => share.shareId,
                 ),
-            ).toEqual(["share-workspace", "share-project"]);
+            ).toEqual(["share-workspace-1", "share-workspace-2"]);
         } finally {
             fixture.close();
         }

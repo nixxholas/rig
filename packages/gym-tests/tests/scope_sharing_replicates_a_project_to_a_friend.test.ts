@@ -152,15 +152,16 @@ describe("project sharing is reachable from a real daemon", () => {
 
         const before = await callDaemon(gym, "GET", "/projects/{project}/share");
         expect(before.status).toBe(404);
-        expect(JSON.stringify(before.body)).not.toContain("without workspace sharing");
+        expect(JSON.stringify(before.body)).not.toContain("without project and workspace sharing");
 
-        // Without a Murmur account there is nobody to own a share, and the daemon says
-        // exactly that rather than failing anonymously.
+        // Without a Murmur account there is nobody to own a share. That is a state the
+        // request conflicts with and the person asking can fix, so it is answered as one
+        // rather than as an internal failure a client cannot interpret.
         const unowned = await callDaemon(gym, "POST", "/projects/{project}/share", {
             friends: [{ displayName: "Dana", peerId: "not-a-peer" }],
             mutationId: "mutation-1",
         });
-        expect(unowned.status).toBe(500);
+        expect(unowned.status).toBe(409);
         expect(String(unowned.body.error)).toContain("Set up a Murmur account");
 
         expect(await callDaemon(gym, "GET", "/scope-share-replicas")).toMatchObject({
@@ -288,7 +289,10 @@ describe("project sharing is reachable from a real daemon", () => {
         );
         expect(history.status).toBe(200);
 
-        // A shared scope has no member write path: the friend has nowhere to post.
+        // A shared scope has no member write path, and the daemon does not offer one
+        // either: unlike a session share, there is no route a member could post to.
+        // The transport-level refusal is pinned in ScopeShareService.test.ts, because
+        // only a modified client can reach it and no HTTP call ever does.
         expect(
             await callDaemon(friend, "POST", `/scope-share-replicas/${shareId}`, { text: "Hello" }),
         ).toMatchObject({ status: 405 });

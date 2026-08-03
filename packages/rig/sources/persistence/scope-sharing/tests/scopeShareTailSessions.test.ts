@@ -61,6 +61,38 @@ describe("scopeShareTailSessions", () => {
         }
     });
 
+    it("never carries a session's excluded configuration into the log", () => {
+        const fixture = openFixture();
+        try {
+            insertSession(fixture.database, { id: "session-a", title: "Deploy work" });
+            insertSessionEvents(fixture.database, { count: 2, sessionId: "session-a" });
+            createShare(fixture.database);
+
+            tail(fixture.database, { now: 5 });
+
+            // The design excludes all of these outright. Asserting on the whole log rather
+            // than on the projection's shape is deliberate: a field added to the projection
+            // later has to pass this too, and a leak is exactly the kind of change that
+            // arrives by accident.
+            const log = JSON.stringify(projections(fixture.database));
+            expect(log).toContain("Deploy work");
+            for (const excluded of [
+                "registry.internal/private:1",
+                "deploy-runbook",
+                "internal-jira",
+                "Never reveal the staging credentials.",
+                "secret-deploy-key",
+                "You are Rig, running against the production cluster.",
+                "workspace_write",
+                "/home/owner",
+            ]) {
+                expect(log).not.toContain(excluded);
+            }
+        } finally {
+            fixture.close();
+        }
+    });
+
     it("gives every session a turn rather than draining the busiest one first", () => {
         const fixture = openFixture();
         try {

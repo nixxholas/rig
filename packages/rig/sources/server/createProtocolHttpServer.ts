@@ -169,6 +169,7 @@ import {
 import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
 import { HappyCloudPersistenceError } from "../persistence/happy-cloud/HappyCloudPersistenceError.js";
 import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
+import { ScopeShareRequestError } from "../scope-sharing/ScopeShareRequestError.js";
 import type {
     ScopeShareServiceContract,
     ScopeShareTarget,
@@ -771,7 +772,7 @@ async function handleRequest(
         const scopeShares = runtimeConfig.scopeShares;
         if (scopeShares === undefined) {
             sendJson(response, 503, {
-                error: "This Rig server was started without workspace sharing.",
+                error: "This Rig server was started without project and workspace sharing.",
             });
             return;
         }
@@ -786,6 +787,17 @@ async function handleRequest(
             // below this line is one path.
             const scope: ScopeShareTarget = { scopeId: route.scopeId, scopeKind: route.scopeKind };
             const subject = route.scopeKind === "project" ? "Project" : "Workspace";
+            // The scope has to exist, and a workspace has to be the one this project
+            // actually holds. Without this a share could be created for a workspace
+            // under any project id at all, or for a project that was never added.
+            const exists =
+                route.scopeKind === "project"
+                    ? store.getProject(route.projectId) !== undefined
+                    : store.getWorkspace(route.projectId, route.scopeId) !== undefined;
+            if (!exists) {
+                sendJson(response, 404, { error: `${subject} not found.` });
+                return;
+            }
             if (request.method === "GET" && route.name === "scope-share-scope") {
                 const share = scopeShares.getOwner(scope);
                 if (share === undefined) {
@@ -793,58 +805,70 @@ async function handleRequest(
                 } else sendJson<ScopeShareOwnerResponse>(response, 200, share);
                 return;
             }
-            if (request.method === "POST" && route.name === "scope-share-scope") {
-                const body = await readCheckedBody(request, createScopeShareRequestSchema);
-                if (body === undefined) {
-                    sendJson(response, 400, {
-                        error: `The ${subject.toLowerCase()} share request is invalid.`,
-                    });
+            // A refusal the caller can act on — nothing to share with, a scope already
+            // covered by another share, no Murmur account yet — is an answer to their
+            // request, not a fault in the daemon, so it must not be reported as one.
+            try {
+                if (request.method === "POST" && route.name === "scope-share-scope") {
+                    const body = await readCheckedBody(request, createScopeShareRequestSchema);
+                    if (body === undefined) {
+                        sendJson(response, 400, {
+                            error: `The ${subject.toLowerCase()} share request is invalid.`,
+                        });
+                        return;
+                    }
+                    sendJson<ScopeShareOwnerResponse>(
+                        response,
+                        201,
+                        await scopeShares.create(scope, body),
+                    );
                     return;
                 }
-                sendJson<ScopeShareOwnerResponse>(
-                    response,
-                    201,
-                    await scopeShares.create(scope, body),
-                );
-                return;
-            }
-            if (request.method === "POST" && route.name === "scope-share-scope-members") {
-                const body = await readCheckedBody(request, addScopeShareMemberRequestSchema);
-                if (body === undefined) {
-                    sendJson(response, 400, { error: "The member request is invalid." });
+                if (request.method === "POST" && route.name === "scope-share-scope-members") {
+                    const body = await readCheckedBody(request, addScopeShareMemberRequestSchema);
+                    if (body === undefined) {
+                        sendJson(response, 400, { error: "The member request is invalid." });
+                        return;
+                    }
+                    sendJson<ScopeShareOwnerResponse>(
+                        response,
+                        200,
+                        await scopeShares.add(scope, body),
+                    );
                     return;
                 }
-                sendJson<ScopeShareOwnerResponse>(
-                    response,
-                    200,
-                    await scopeShares.add(scope, body),
-                );
-                return;
-            }
-            if (request.method === "POST" && route.name === "scope-share-scope-member-revoke") {
-                const body = await readCheckedBody(request, revokeScopeShareMemberRequestSchema);
-                if (body === undefined) {
-                    sendJson(response, 400, { error: "The revocation request is invalid." });
+                if (request.method === "POST" && route.name === "scope-share-scope-member-revoke") {
+                    const body = await readCheckedBody(
+                        request,
+                        revokeScopeShareMemberRequestSchema,
+                    );
+                    if (body === undefined) {
+                        sendJson(response, 400, { error: "The revocation request is invalid." });
+                        return;
+                    }
+                    sendJson<ScopeShareOwnerResponse>(
+                        response,
+                        200,
+                        await scopeShares.revoke(scope, route.shareMemberId, body),
+                    );
                     return;
                 }
-                sendJson<ScopeShareOwnerResponse>(
-                    response,
-                    200,
-                    await scopeShares.revoke(scope, route.shareMemberId, body),
-                );
-                return;
-            }
-            if (request.method === "POST" && route.name === "scope-share-scope-stop") {
-                const body = await readCheckedBody(request, stopScopeShareRequestSchema);
-                if (body === undefined) {
-                    sendJson(response, 400, { error: "The stop request is invalid." });
+                if (request.method === "POST" && route.name === "scope-share-scope-stop") {
+                    const body = await readCheckedBody(request, stopScopeShareRequestSchema);
+                    if (body === undefined) {
+                        sendJson(response, 400, { error: "The stop request is invalid." });
+                        return;
+                    }
+                    sendJson<ScopeShareOwnerResponse>(
+                        response,
+                        200,
+                        await scopeShares.stop(scope, body),
+                    );
                     return;
                 }
-                sendJson<ScopeShareOwnerResponse>(
-                    response,
-                    200,
-                    await scopeShares.stop(scope, body),
-                );
+            } catch (error) {
+                if (!(error instanceof ScopeShareRequestError)) throw error;
+                sendJson(response, scopeShareRequestErrorStatus(error), { error: error.message });
                 return;
             }
             sendJson(response, 405, { error: "Method not allowed" });
@@ -2271,8 +2295,16 @@ async function handleRequest(
                 return;
             }
             // Archiving a project retires its own share and every workspace share
-            // beneath it, because none of those workspaces is there to replicate.
-            await runtimeConfig.scopeShares?.stopForArchivedProject(route.projectId);
+            // beneath it, because none of those workspaces is there to replicate. The
+            // archive is already committed, so a share that cannot be stopped must not
+            // turn this into a failure: the share is durably stopped either way, only
+            // its relay notice is late, and answering 409 would tell the client to redo
+            // an archive that already happened.
+            try {
+                await runtimeConfig.scopeShares?.stopForArchivedProject(route.projectId);
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+            }
             sendJson<ProjectResponse>(response, 202, { project });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -2464,8 +2496,14 @@ async function handleRequest(
                 return;
             }
             // Archiving one workspace stops its share and nothing else's: a project
-            // share above it still covers everything that is left.
-            await runtimeConfig.scopeShares?.stopForArchivedWorkspace(route.workspaceId);
+            // share above it still covers everything that is left. The archive is
+            // already committed, so a share that cannot be stopped is not allowed to
+            // report it as failed.
+            try {
+                await runtimeConfig.scopeShares?.stopForArchivedWorkspace(route.workspaceId);
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+            }
             sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -4840,6 +4878,15 @@ function matchScopeShareRoute(
             : { name: "scope-share-scope-member-revoke", shareMemberId, ...scope };
     }
     return undefined;
+}
+
+/** What a scope-share refusal the caller can act on looks like over HTTP. */
+function scopeShareRequestErrorStatus(error: ScopeShareRequestError): number {
+    if (error.code === "invalid_request") return 400;
+    if (error.code === "not_shared") return 404;
+    // A missing Murmur account and a scope another share already covers are both
+    // states the request conflicts with rather than malformed requests.
+    return 409;
 }
 
 function decodeUrlComponent(value: string | undefined): string | undefined {

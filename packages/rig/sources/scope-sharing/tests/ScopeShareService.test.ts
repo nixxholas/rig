@@ -7,6 +7,7 @@ import type {
 import { FakeShareTransport } from "../../sharing/FakeShareTransport.js";
 import { shareKindOf } from "../../sharing/shareId.js";
 import type { ShareOpaqueEntry, ShareTransportGrant } from "../../sharing/ShareTransport.js";
+import { ShareUnauthorizedPostError } from "../../sharing/ShareUnauthorizedPostError.js";
 import {
     ScopeShareService,
     type ScopeShareCoreStore,
@@ -48,6 +49,36 @@ describe("ScopeShareService", () => {
 
         expect(store.operations[0]).toMatch(/^create:wsp_/u);
         expect(store.operations[1]).toMatch(/^health:wsp_.*:active$/u);
+    });
+
+    it("refuses a member post as unauthorized rather than as a fault", async () => {
+        const { service, transport } = createService();
+        const share = await service.create({
+            friends: [{ displayName: "Casey", murmurPeerId: "peer-casey" }],
+            ownerPeerId: "peer-owner",
+            scopeId: "workspace-1",
+            scopeKind: "workspace",
+        });
+        const grant = share.members[0]!;
+
+        // A shared scope has no member write path, but a modified member client can
+        // still put a post on the wire. The refusal runs inside the transport's own
+        // store transaction, where only ShareUnauthorizedPostError is dropped: anything
+        // else escapes, holds the relay cursor, and makes the owner replay that one
+        // event forever with every other share and every friendship stalled behind it.
+        await expect(
+            transport.postMember({
+                clientMessageId: "member-message-1",
+                displayName: "Casey",
+                grant: {
+                    grantEpoch: grant.grantEpoch,
+                    murmurPeerId: grant.murmurPeerId,
+                    shareId: share.shareId,
+                    shareMemberId: grant.shareMemberId,
+                },
+                text: "Let me in.",
+            }),
+        ).rejects.toThrow(ShareUnauthorizedPostError);
     });
 
     it("records a stop the transport refuses so recovery can replay it", async () => {

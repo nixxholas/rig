@@ -17,6 +17,7 @@ import type {
     ScopeShareScopeKind,
 } from "../persistence/scope-sharing/types.js";
 import type { ScopeShareSubjectKind } from "./projectScopeShareEntry.js";
+import { ScopeShareRequestError } from "./ScopeShareRequestError.js";
 import type { ScopeShareRecord, ScopeShareService } from "./ScopeShareService.js";
 import type { ScopeShareServiceContract, ScopeShareTarget } from "./ScopeShareServiceContract.js";
 
@@ -94,7 +95,10 @@ export class ScopeShareDaemonService implements ScopeShareServiceContract {
     ): Promise<ScopeShareOwnerResponse> {
         const ownerPeerId = await this.#localPeerId();
         if (ownerPeerId === undefined) {
-            throw new Error("Set up a Murmur account before sharing a workspace.");
+            throw new ScopeShareRequestError(
+                "no_murmur_account",
+                "Set up a Murmur account before sharing a workspace or project.",
+            );
         }
         const share = await this.#service.create({
             friends: request.friends.map((friend) => ({
@@ -230,7 +234,12 @@ export class ScopeShareDaemonService implements ScopeShareServiceContract {
 
     #requireShareId(scope: ScopeShareTarget): string {
         const share = this.#store.queryActiveShareForScope(scope);
-        if (share === undefined) throw new Error("This workspace is not shared.");
+        if (share === undefined) {
+            throw new ScopeShareRequestError(
+                "not_shared",
+                "This workspace or project is not shared.",
+            );
+        }
         return share.shareId;
     }
 

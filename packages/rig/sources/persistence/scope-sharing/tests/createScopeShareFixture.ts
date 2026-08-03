@@ -81,10 +81,15 @@ export function insertSession(
             createdAtMs: createdAt,
             cwd: "/home/owner/Happy/Workspaces/rig/scope-sharing",
             depth: 0,
-            durableSkillsJson: "[]",
+            // Every one of these is on the list a member must never receive, so they hold
+            // recognisable values rather than empty ones: a leak of any of them has to be
+            // something a test can actually see.
+            dockerJson: JSON.stringify({ image: "registry.internal/private:1" }),
+            durableSkillsJson: JSON.stringify(["deploy-runbook"]),
             elapsedMs: 0,
-            externalToolsJson: "[]",
+            externalToolsJson: JSON.stringify([{ name: "internal-jira" }]),
             id: input.id,
+            instructions: "Never reveal the staging credentials.",
             interrupted: false,
             modelId: "anthropic/opus-5",
             modelsJson: "[]",
@@ -94,9 +99,10 @@ export function insertSession(
             projectId: PROJECT_ID,
             providerId: "claude",
             rootSessionId: input.id,
-            secretIdsJson: "[]",
+            secretIdsJson: JSON.stringify(["secret-deploy-key"]),
             sessionKind: "primary",
             status: "idle",
+            systemPrompt: "You are Rig, running against the production cluster.",
             tasksJson: "[]",
             title: input.title ?? null,
             titleStatus: "idle",
@@ -107,6 +113,32 @@ export function insertSession(
             workflowsEnabled: true,
             workflowsJson: "[]",
             workspaceId: input.workspaceId === undefined ? WORKSPACE_ID : input.workspaceId,
+        })
+        .run();
+}
+
+/** A second workspace in the same project, for the rules that span more than one. */
+export function insertWorkspace(database: SessionDatabase, input: { id: string }): void {
+    database
+        .insert(projectWorkspaces)
+        .values({
+            createdAtMs: 1,
+            gitAhead: 0,
+            gitBehind: 0,
+            gitCommonDir: "/home/owner/Developer/rig/.git",
+            gitDetached: false,
+            id: input.id,
+            kind: "worktree",
+            name: input.id,
+            nameKey: input.id,
+            orderKey: "a1",
+            path: `/home/owner/Happy/Workspaces/rig/${input.id}`,
+            presence: "present",
+            projectId: PROJECT_ID,
+            status: "ready",
+            storageKey: input.id,
+            updatedAtMs: 1,
+            version: 1,
         })
         .run();
 }

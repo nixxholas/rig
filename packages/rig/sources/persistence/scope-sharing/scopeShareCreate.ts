@@ -8,6 +8,7 @@ import {
 } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import { ScopeShareRequestError } from "../../scope-sharing/ScopeShareRequestError.js";
 import { queryScopeShare } from "./queryScopeShare.js";
 import type { ScopeShareRecord, ScopeShareScopeKind } from "./types.js";
 
@@ -24,29 +25,34 @@ export function scopeShareCreate(
 ): ScopeShareRecord {
     return inTx(tx, (tx) => {
         if (input.members.length === 0) {
-            throw new Error("A shared workspace or project needs at least one friend.");
+            throw new ScopeShareRequestError(
+                "invalid_request",
+                "A shared workspace or project needs at least one friend.",
+            );
         }
         const projectId = resolveProjectId(tx, input.scopeKind, input.scopeId);
-        // A workspace inside a shared project is already replicated by that share, so
-        // sharing it again would build a second MLS group over the same sessions and
-        // let the two diverge with nothing to reconcile them.
-        if (input.scopeKind === "workspace") {
-            const projectShare = tx
-                .select({ shareId: scopeShares.shareId })
-                .from(scopeShares)
-                .where(
-                    and(
-                        eq(scopeShares.scopeKind, "project"),
-                        eq(scopeShares.scopeId, projectId),
-                        ne(scopeShares.state, "stopped"),
-                    ),
-                )
-                .get();
-            if (projectShare !== undefined) {
-                throw new Error(
-                    "This workspace's project is already shared, so the workspace is shared with it.",
-                );
-            }
+        // A project share and a workspace share beneath it replicate the same sessions.
+        // Allowing both would build two MLS groups over one set of subjects and let them
+        // diverge with nothing to reconcile them, so whichever came first wins and the
+        // rule is enforced from both directions: it is one overlap, not two rules.
+        const overlapping = tx
+            .select({ scopeKind: scopeShares.scopeKind })
+            .from(scopeShares)
+            .where(
+                and(
+                    eq(scopeShares.projectId, projectId),
+                    ne(scopeShares.scopeKind, input.scopeKind),
+                    ne(scopeShares.state, "stopped"),
+                ),
+            )
+            .get();
+        if (overlapping !== undefined) {
+            throw new ScopeShareRequestError(
+                "already_shared",
+                input.scopeKind === "workspace"
+                    ? "This workspace's project is already shared, so the workspace is shared with it."
+                    : "A workspace in this project is already shared on its own, so stop that share first.",
+            );
         }
         tx.insert(scopeShares)
             .values({

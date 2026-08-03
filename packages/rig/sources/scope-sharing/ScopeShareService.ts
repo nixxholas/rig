@@ -17,6 +17,8 @@ import {
     shareTransportMemberEventSchema,
     shareTransportOwnerEventSchema,
 } from "../sharing/ShareTransport.js";
+import { ShareUnauthorizedPostError } from "../sharing/ShareUnauthorizedPostError.js";
+import { ScopeShareRequestError } from "./ScopeShareRequestError.js";
 
 const MAX_PAGE_COUNT = 100;
 const MAX_PAGE_BYTES = 256 * 1024;
@@ -135,7 +137,10 @@ export class ScopeShareService {
     }): Promise<ScopeShareRecord> {
         this.#assertOpen();
         if (input.friends.length === 0) {
-            throw new Error("A shared workspace or project needs at least one friend.");
+            throw new ScopeShareRequestError(
+                "invalid_request",
+                "A shared workspace or project needs at least one friend.",
+            );
         }
         const existing = this.#store.queryActiveShareForScope(input);
         if (existing !== undefined) {
@@ -415,8 +420,13 @@ export class ScopeShareService {
         if (event.type === "transport_recovered") return;
         if (event.type !== "transport_failed") {
             // A shared scope has no member write path at all: nothing a member sends is
-            // ever applied to the owner's workspace, project, or sessions.
-            throw new Error("A shared scope does not accept member posts.");
+            // ever applied to the owner's workspace, project, or sessions. A modified
+            // member client can still put a post on the wire, and this runs inside
+            // Murmur's store transaction — so it is refused as an unauthorized post,
+            // which the transport drops. Any other rejection would escape, hold the
+            // relay cursor where it is, and make the owner replay that one event
+            // forever with every friendship and every other share stalled behind it.
+            throw new ShareUnauthorizedPostError("A shared scope does not accept member posts.");
         }
         // Only the share whose transport failed is affected; degrading the others would
         // report an outage none of them is having.
