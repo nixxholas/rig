@@ -58,4 +58,34 @@ describe("toExecutorTool", () => {
 
         expect(toExecutorTool(tool)).toBe(executorTool);
     });
+
+    it("explains steerability in an exact provider-facing definition", () => {
+        const executorTool = {
+            kind: "custom" as const,
+            name: "wait",
+            description: "Wait for an update.",
+        };
+        const tool = defineTool({
+            name: "wait",
+            label: "Wait",
+            description: "Wait for an update.",
+            executorTool,
+            arguments: Type.Object({}),
+            returnType: Type.Object({}),
+            shouldReviewInAutoMode: () => false,
+            steerable: true,
+            execute: async () => ({}),
+            toLLM: () => [],
+            toUI: () => "Finished waiting.",
+            locks: [],
+        });
+
+        expect(toExecutorTool(tool)).toEqual({
+            ...executorTool,
+            description:
+                "Wait for an update.\n\nThis tool is steerable: Rig interrupts it when new steering arrives so the agent can respond immediately.",
+        });
+        expect(executorTool).not.toHaveProperty("steerable");
+        expect(executorTool.description).toBe("Wait for an update.");
+    });
 });

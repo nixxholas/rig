@@ -715,7 +715,60 @@ describe("createCodingAssistantAgent", () => {
 
             expect(prompt).toContain("You are the parent agent");
             expect(prompt).toContain("explicitly allowed to spawn subagents");
+            if (runtime.executor.type === "codex") {
+                expect(prompt).toContain(
+                    "`collaboration.wait_agent` is also steerable, even though the canonical tool description does not say so",
+                );
+            } else {
+                expect(prompt).not.toContain("`collaboration.wait_agent` is also steerable");
+            }
         }
+    });
+
+    it("explains incoming steering whenever steerable tools are available", async () => {
+        const runtimes = [
+            createCodingAssistantAgent({
+                cwd: "/tmp/rig-app-test",
+                modelId: modelOpenaiGpt56Sol.id,
+            }),
+            createCodingAssistantAgent({
+                cwd: "/tmp/rig-app-test",
+                modelId: modelAnthropicFable5.id,
+            }),
+            createCodingAssistantAgent({
+                cwd: "/tmp/rig-app-test",
+                env: { XAI_API_KEY: "xai-test-key" },
+                modelId: modelXaiGrok45.id,
+            }),
+        ];
+
+        for (const runtime of runtimes) {
+            const prompt = await createSystemPrompt({
+                context: runtime.context,
+                messages: [],
+                model: runtime.agent.model,
+                provider: runtime.executor,
+                tools: runtime.agent.tools,
+            });
+
+            expect(prompt).toContain("Tools described as steerable are interrupted");
+            expect(prompt).toContain("new user messages");
+            expect(prompt).toContain("messages from other agents");
+            expect(prompt).toContain("background completion notifications");
+        }
+
+        const runtime = runtimes[0]!;
+        const promptWithoutSteerableTools = await createSystemPrompt({
+            context: runtime.context,
+            messages: [],
+            model: runtime.agent.model,
+            provider: runtime.executor,
+            tools: runtime.agent.tools.filter((tool) => !tool.steerable),
+        });
+
+        expect(promptWithoutSteerableTools).not.toContain(
+            "Tools described as steerable are interrupted",
+        );
     });
 
     it("explains workspace isolation only when workspace tools are present", async () => {

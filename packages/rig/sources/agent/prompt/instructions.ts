@@ -15,6 +15,10 @@ export const RIG_AGENT_TOOL_INSTRUCTIONS = `## Agent tool portability
 - \`rig\` is provider-neutral. Use it when selecting or crossing models, providers, or regions, when native collaboration is unavailable, and when setting effort.
 - If a native collaboration call rejects the target, retry with the matching \`rig\` tool and provide the normal task text. Never copy or reinterpret encrypted content.`;
 
+export const STEERABLE_TOOL_INSTRUCTIONS = `## Steerable tools
+
+Tools described as steerable are interrupted when new steering arrives, including new user messages, messages from other agents, and background completion notifications. Rig closes the interrupted tool call, adds the new information to the conversation, and continues the same turn so you can respond immediately.`;
+
 /**
  * Describes what a sandboxed command cannot do, so the model recognizes a boundary instead of
  * rediscovering it as a mysterious failure.

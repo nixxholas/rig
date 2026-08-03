@@ -61,6 +61,7 @@ describe("toRigProviderSessionTools", () => {
         ]);
         expect(JSON.stringify(tools)).not.toContain("incompatible");
         expect(JSON.stringify(tools)).not.toContain("Caller replacement");
+        expect(JSON.stringify(tools)).not.toContain("This tool is steerable");
     });
 
     it("locks native collaboration while preserving cross-provider spawn separately", () => {

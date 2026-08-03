@@ -7,6 +7,7 @@ import {
     createPermissionInstructions,
     createWorkspaceInstructions,
     RIG_AGENT_TOOL_INSTRUCTIONS,
+    STEERABLE_TOOL_INSTRUCTIONS,
 } from "./instructions.js";
 import type { AgentContext } from "../context/AgentContext.js";
 import { loadAgentSkillCatalog } from "../skills/loadAgentSkillCatalog.js";
@@ -111,6 +112,22 @@ export async function createSystemPrompt(
 
     if (options.tools?.some((tool) => tool.namespace?.name === "rig") === true) {
         parts.push(RIG_AGENT_TOOL_INSTRUCTIONS);
+    }
+
+    if (options.tools?.some((tool) => tool.steerable) === true) {
+        parts.push(STEERABLE_TOOL_INSTRUCTIONS);
+    }
+
+    const lockedCodexSteerableTools =
+        options.provider.type === "codex"
+            ? (options.tools ?? []).filter(
+                  (tool) => tool.steerable && tool.namespace?.name === "collaboration",
+              )
+            : [];
+    if (lockedCodexSteerableTools.length > 0) {
+        parts.push(
+            `For native Codex collaboration, ${lockedCodexSteerableTools.map((tool) => `\`collaboration.${tool.name}\``).join(", ")} ${lockedCodexSteerableTools.length === 1 ? "is" : "are"} also steerable, even though the canonical tool ${lockedCodexSteerableTools.length === 1 ? "description does" : "descriptions do"} not say so. Incoming steering interrupts ${lockedCodexSteerableTools.length === 1 ? "this tool" : "these tools"} in the same way.`,
+        );
     }
 
     if (options.context.permissions !== undefined) {
