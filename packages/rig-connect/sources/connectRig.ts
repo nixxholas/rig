@@ -104,6 +104,7 @@ import { endpointUrl } from "./endpointUrl.js";
 
 const INITIAL_MUTATION_RETRY_MS = 100;
 const MAXIMUM_MUTATION_RETRY_MS = 5_000;
+const PROJECT_REGISTRATION_MAX_ATTEMPTS = 3;
 const MAXIMUM_PENDING_PER_ENTITY = 256;
 const MAXIMUM_BUFFERED_SESSION_EVENTS = 1_000;
 /** Well inside the fifteen minutes the daemon refreshes provider usage on. */
@@ -451,6 +452,17 @@ export class ProjectRegistrationError extends Error {
     ) {
         super(message);
         this.name = "ProjectRegistrationError";
+    }
+}
+
+export class ProjectRegistrationProtocolError extends Error {
+    constructor(
+        readonly code: "invalid_response" | "request_failed",
+        readonly status: number | undefined,
+        message: string,
+    ) {
+        super(message);
+        this.name = "ProjectRegistrationProtocolError";
     }
 }
 
@@ -2696,9 +2708,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             const projectId = addOptions.projectId ?? nextEntityId();
             const operation = combinedSignal(rootController.signal, addOptions.signal);
             let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+            let attempts = 0;
             try {
                 for (;;) {
                     operation.signal.throwIfAborted();
+                    attempts += 1;
                     try {
                         const response = await requestJson("projects", {
                             body: JSON.stringify({ path, projectId }),
@@ -2720,7 +2734,11 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         try {
                             return Value.Decode(projectResponseSchema, response.data).project;
                         } catch {
-                            throw new ProjectRegistrationProtocolError();
+                            throw new ProjectRegistrationProtocolError(
+                                "invalid_response",
+                                response.status,
+                                "Rig returned an invalid project registration response.",
+                            );
                         }
                     } catch (error) {
                         if (
@@ -2736,8 +2754,21 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                             );
                             if (registrationError !== undefined) throw registrationError;
                         }
-                        if (!isRetryableMutationError(error)) throw error;
-                        await wait(retryDelay, operation.signal);
+                        if (!isRetryableMutationError(error)) {
+                            if (error instanceof DOMException && error.name === "AbortError") {
+                                throw error;
+                            }
+                            throw projectRegistrationRequestFailure(error);
+                        }
+                        if (attempts >= PROJECT_REGISTRATION_MAX_ATTEMPTS) {
+                            throw projectRegistrationRequestFailure(error);
+                        }
+                        await wait(
+                            error instanceof MutationHttpError
+                                ? (error.retryAfterMs ?? retryDelay)
+                                : retryDelay,
+                            operation.signal,
+                        );
                         operation.signal.throwIfAborted();
                         retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
                     }
@@ -4220,13 +4251,6 @@ class MutationHttpError extends Error {
     }
 }
 
-class ProjectRegistrationProtocolError extends Error {
-    constructor() {
-        super("Rig returned an invalid project registration response.");
-        this.name = "ProjectRegistrationProtocolError";
-    }
-}
-
 function projectRegistrationResponseError(
     status: number,
     data: unknown,
@@ -4237,6 +4261,21 @@ function projectRegistrationResponseError(
     } catch {
         return undefined;
     }
+}
+
+function projectRegistrationRequestFailure(error: unknown): ProjectRegistrationProtocolError {
+    if (error instanceof MutationHttpError) {
+        return new ProjectRegistrationProtocolError(
+            "request_failed",
+            error.status,
+            `Rig could not register the project (${String(error.status)}): ${error.message}`,
+        );
+    }
+    return new ProjectRegistrationProtocolError(
+        "request_failed",
+        undefined,
+        "Rig could not confirm project registration after repeated transport failures.",
+    );
 }
 
 function isRetryableMutationError(error: unknown): boolean {

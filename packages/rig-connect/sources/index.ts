@@ -1,4 +1,8 @@
-export { connectRig, ProjectRegistrationError } from "./connectRig.js";
+export {
+    connectRig,
+    ProjectRegistrationError,
+    ProjectRegistrationProtocolError,
+} from "./connectRig.js";
 export type {
     ConnectRigOptions,
     CreateSessionInput,

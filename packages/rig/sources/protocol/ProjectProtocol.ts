@@ -257,6 +257,8 @@ export const projectRegistrationErrorCodeSchema = Type.Union([
     Type.Literal("path_inaccessible"),
     Type.Literal("not_git_repository"),
     Type.Literal("not_git_top_level"),
+    Type.Literal("project_id_conflict"),
+    Type.Literal("managed_workspace_unavailable"),
 ]);
 export type ProjectRegistrationErrorCode = Static<typeof projectRegistrationErrorCodeSchema>;
 

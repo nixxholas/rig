@@ -139,11 +139,11 @@ export interface ProjectSessionSettings {
 }
 
 export class ProjectRegistrationError extends Error {
-    constructor(
-        readonly code: ProjectRegistrationErrorCode,
-        message: string,
-    ) {
+    readonly code: ProjectRegistrationErrorCode;
+
+    constructor(code: ProjectRegistrationErrorCode, message: string) {
         super(message);
+        this.code = code;
         this.name = "ProjectRegistrationError";
     }
 }
@@ -284,15 +284,21 @@ export class ProjectRepository {
         const workspace = queryWorkspaceByPath(this.#database, path);
         if (workspace !== undefined) {
             if (workspace.status !== "ready") {
-                throw new Error(
-                    `Workspace '${workspace.name}' is ${workspace.status.replaceAll("_", " ")}.`,
+                throw new ProjectRegistrationError(
+                    "managed_workspace_unavailable",
+                    `The managed workspace '${workspace.name}' is ${workspace.status.replaceAll("_", " ")}.`,
                 );
             }
             if (assertedWorkspaceId !== undefined && assertedWorkspaceId !== workspace.id) {
                 throw new Error("The workspace ID does not match the session directory.");
             }
             const project = this.getProject(workspace.projectId);
-            if (project === undefined) throw new Error("The workspace project was not found.");
+            if (project === undefined) {
+                throw new ProjectRegistrationError(
+                    "managed_workspace_unavailable",
+                    "The managed workspace's project was not found.",
+                );
+            }
             return { project: this.unarchiveProject(project.id) ?? project, workspace };
         }
         if (assertedWorkspaceId !== undefined) {
@@ -922,7 +928,10 @@ export class ProjectRepository {
     #assertUnusedProjectId(id: string, path: string): void {
         const known = queryProject(this.#database, id);
         if (known !== undefined && known.path !== path) {
-            throw new Error("That project ID already names another folder.");
+            throw new ProjectRegistrationError(
+                "project_id_conflict",
+                "That project ID already names another folder.",
+            );
         }
     }
 

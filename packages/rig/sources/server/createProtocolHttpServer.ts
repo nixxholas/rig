@@ -4169,6 +4169,9 @@ function projectRegistrationStatus(error: ProjectRegistrationError): number {
     if (error.code === "path_missing") return 404;
     if (error.code === "path_inaccessible") return 403;
     if (error.code === "invalid_request") return 400;
+    if (error.code === "project_id_conflict" || error.code === "managed_workspace_unavailable") {
+        return 409;
+    }
     return 422;
 }
 
@@ -4347,6 +4350,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
         return request.method === "POST";
     }
     if (route.name === "sessions") return request.method === "POST";
+    if (route.name === "projects") return request.method !== "GET";
     if (
         [
             "project",

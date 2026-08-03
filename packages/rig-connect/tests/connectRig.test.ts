@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { ChatDelta } from "@/ChatElement.js";
-import { connectRig, ProjectRegistrationError } from "@/index.js";
+import { connectRig, ProjectRegistrationError, ProjectRegistrationProtocolError } from "@/index.js";
 import type { SessionFinished } from "@/connectRig.js";
 import type {
     GlobalStreamHello,
@@ -286,6 +286,77 @@ describe("connectRig mutations", () => {
             });
         } finally {
             rig.close();
+        }
+    });
+
+    it("terminates permanent and undecodable project registration failures", async () => {
+        let serverAttempts = 0;
+        const serverFailure = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: () => {
+                serverAttempts += 1;
+                return Promise.resolve(new Response("unavailable", { status: 500 }));
+            },
+            mutationRetryDelayMs: 1,
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        try {
+            const error = await serverFailure.projects
+                .add("/projects/server-failure")
+                .catch((reason) => reason);
+            expect(error).toBeInstanceOf(ProjectRegistrationProtocolError);
+            expect(error).toMatchObject({
+                code: "request_failed",
+                status: 500,
+            });
+            expect(serverAttempts).toBe(3);
+        } finally {
+            serverFailure.close();
+        }
+
+        let refusalAttempts = 0;
+        const malformedRefusal = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: () => {
+                refusalAttempts += 1;
+                return Promise.resolve(new Response("invalid", { status: 409 }));
+            },
+            randomValues,
+            token: "secret",
+        });
+        try {
+            const error = await malformedRefusal.projects
+                .add("/projects/malformed-refusal")
+                .catch((reason) => reason);
+            expect(error).toBeInstanceOf(ProjectRegistrationProtocolError);
+            expect(error).toMatchObject({
+                code: "request_failed",
+                status: 409,
+            });
+            expect(refusalAttempts).toBe(1);
+        } finally {
+            malformedRefusal.close();
+        }
+
+        const malformedSuccess = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: () => Promise.resolve(new Response("{}", { status: 200 })),
+            randomValues,
+            token: "secret",
+        });
+        try {
+            const error = await malformedSuccess.projects
+                .add("/projects/malformed-success")
+                .catch((reason) => reason);
+            expect(error).toBeInstanceOf(ProjectRegistrationProtocolError);
+            expect(error).toMatchObject({
+                code: "invalid_response",
+                status: 200,
+            });
+        } finally {
+            malformedSuccess.close();
         }
     });
 

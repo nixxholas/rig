@@ -153,6 +153,49 @@ describe("projects", () => {
         );
     });
 
+    it("returns typed conflicts and resolves only ready managed workspace paths", async () => {
+        const fixture = await createFixture();
+        const repository = await createRepository(fixture.root, "managed-registration");
+        const owner = await fixture.store.registerProject({ path: repository });
+        const workspace = await fixture.store.createWorkspace(owner.id, {
+            baseRef: "HEAD",
+            name: "Managed Registration",
+        });
+        if (workspace === undefined) throw new Error("Expected a managed workspace.");
+        const ready = await waitForWorkspace(
+            fixture.store,
+            owner.id,
+            workspace.id,
+            (value) => value.status === "ready",
+        );
+
+        await expect(fixture.store.registerProject({ path: ready.path })).resolves.toMatchObject({
+            id: owner.id,
+        });
+
+        const database = new Database(fixture.databasePath);
+        try {
+            database
+                .prepare("UPDATE project_workspaces SET status = 'failed' WHERE id = ?")
+                .run(ready.id);
+        } finally {
+            database.close();
+        }
+        await expect(fixture.store.registerProject({ path: ready.path })).rejects.toMatchObject({
+            code: "managed_workspace_unavailable",
+            name: "ProjectRegistrationError",
+        } satisfies Partial<ProjectRegistrationError>);
+
+        const otherRepository = await createRepository(fixture.root, "conflicting-registration");
+        await expect(
+            fixture.store.registerProject({ path: otherRepository, projectId: owner.id }),
+        ).rejects.toMatchObject({
+            code: "project_id_conflict",
+            name: "ProjectRegistrationError",
+        } satisfies Partial<ProjectRegistrationError>);
+        expect(fixture.store.listProjects()).toHaveLength(1);
+    });
+
     it("rolls back a project mutation when its durable event cannot be stored", () => {
         const opened = openSessionDatabase(":memory:");
         migrateSessionDatabase(opened.database);

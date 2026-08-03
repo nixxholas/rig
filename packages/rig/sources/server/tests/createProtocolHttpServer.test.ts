@@ -30,6 +30,7 @@ import { CONTAINER_DOCS_PATH, getBundledDocsRoot } from "../../execution/getBund
 import { CONTAINER_GENERATED_PATH } from "../../execution/getGeneratedMount.js";
 import { getGeneratedDirectory } from "../../generated-media/index.js";
 import type { GlobalEventQueue } from "../../global-event/GlobalEventQueue.js";
+import { ProjectRegistrationError } from "../../project/ProjectRepository.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { TrackedTaskDrain } from "../../utils/TrackedTaskDrain.js";
 import type { ProviderQuota } from "@slopus/rig-providers";
@@ -727,6 +728,24 @@ describe("createProtocolHttpServer", () => {
                 error: {
                     code: "path_missing",
                     message: "The project folder does not exist.",
+                },
+            });
+
+            vi.spyOn(store, "registerProject").mockRejectedValueOnce(
+                new ProjectRegistrationError(
+                    "managed_workspace_unavailable",
+                    "The managed workspace is not ready.",
+                ),
+            );
+            const unavailableWorkspace = await requestRawJson(socketPath, "/projects", {
+                body: JSON.stringify({ path: repository }),
+                method: "POST",
+            });
+            expect(unavailableWorkspace.statusCode).toBe(409);
+            expect(JSON.parse(unavailableWorkspace.body)).toEqual({
+                error: {
+                    code: "managed_workspace_unavailable",
+                    message: "The managed workspace is not ready.",
                 },
             });
         } finally {
@@ -3207,6 +3226,9 @@ describe("createProtocolHttpServer", () => {
             });
             await expect(
                 client.submitMessage(created.session.id, { text: "Too late" }),
+            ).rejects.toThrow("local daemon is shutting down");
+            await expect(
+                client.registerProject({ path: "/tmp/rig-closing-project" }),
             ).rejects.toThrow("local daemon is shutting down");
             await expect(client.getSession(created.session.id)).resolves.toMatchObject({
                 session: { id: created.session.id },

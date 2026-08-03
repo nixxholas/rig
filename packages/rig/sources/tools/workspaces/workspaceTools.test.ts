@@ -209,7 +209,7 @@ describe("workspace tools", () => {
                 { path: "/projects/another" },
                 harness.context,
             ),
-        ).toBe(true);
+        ).toBe(false);
     });
 
     it("delegates within the current project without cross-workspace access", async () => {

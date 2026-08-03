@@ -321,7 +321,6 @@ export const addProjectTool = defineTool({
     }),
     requiresAutoOrFullAccess: true,
     shouldReviewInAutoMode: () => true,
-    shouldRunInFullAccessInAutoMode: () => true,
     describeAutoPermissionAction: ({ path }) =>
         `inspect and register the local Git repository at ${JSON.stringify(path)} as a Rig project`,
     execute: ({ path }, context) => requireCrossWorkspace(context).addProject(path),
