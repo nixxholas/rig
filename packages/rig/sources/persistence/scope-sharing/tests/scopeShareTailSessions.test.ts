@@ -133,14 +133,14 @@ describe("scopeShareTailSessions", () => {
             insertSession(fixture.database, { id: "session-a", title: "First title" });
             createShare(fixture.database);
 
-            tail(fixture.database, { includeTranscript: false, now: 5 });
-            tail(fixture.database, { includeTranscript: false, now: 6 });
+            tail(fixture.database, { now: 5 });
+            tail(fixture.database, { now: 6 });
             fixture.database.run(
                 sql.raw(
                     "UPDATE sessions SET title = 'Second title', updated_at_ms = 50 WHERE id = 'session-a'",
                 ),
             );
-            tail(fixture.database, { includeTranscript: false, now: 7 });
+            tail(fixture.database, { now: 7 });
 
             const indexes = projections(fixture.database).filter(
                 (projection) => projection.subject === "session_index",
@@ -156,24 +156,6 @@ describe("scopeShareTailSessions", () => {
             ).toMatchObject({ modelLabel: "anthropic/opus-5", providerLabel: "claude" });
             // None of what the session was configured with belongs to a member.
             expect(JSON.stringify(indexes)).not.toContain("workspace_write");
-        } finally {
-            fixture.close();
-        }
-    });
-
-    it("leaves the transcript out until it is turned on", () => {
-        const fixture = openFixture();
-        try {
-            insertSession(fixture.database, { id: "session-a" });
-            insertSessionEvents(fixture.database, { count: 4, sessionId: "session-a" });
-            createShare(fixture.database);
-
-            tail(fixture.database, { includeTranscript: false, now: 5 });
-
-            expect(projections(fixture.database).map((projection) => projection.subject)).toEqual([
-                "scope",
-                "session_index",
-            ]);
         } finally {
             fixture.close();
         }
@@ -219,12 +201,8 @@ function openFixture(): { close: () => void; database: SessionDatabase } {
     return createScopeShareFixture(join(directory, "sessions.db"));
 }
 
-function tail(
-    database: SessionDatabase,
-    options: { includeTranscript?: boolean; limits?: ScopeShareTailLimits; now: number },
-) {
+function tail(database: SessionDatabase, options: { limits?: ScopeShareTailLimits; now: number }) {
     return scopeShareTailSessions(database, {
-        includeTranscript: options.includeTranscript ?? true,
         limits: options.limits ?? limits,
         now: options.now,
         shareId: "share-1",

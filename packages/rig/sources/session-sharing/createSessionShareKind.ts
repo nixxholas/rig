@@ -154,6 +154,7 @@ export function createSessionShareKind(
                     }
                 }
             },
+            shareKinds: ["session"],
             wake: (ownerSessionId) => {
                 const share = options.daemonStore.queryActiveShareForSession(ownerSessionId);
                 if (share !== undefined) service.wake(share.shareId);

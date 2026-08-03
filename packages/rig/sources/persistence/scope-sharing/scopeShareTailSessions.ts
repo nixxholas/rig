@@ -49,8 +49,6 @@ export interface ScopeShareTailResult {
 export function scopeShareTailSessions(
     tx: TX,
     input: {
-        /** Whether transcript entries travel yet. Scope and session facts always do. */
-        includeTranscript: boolean;
         limits: ScopeShareTailLimits;
         now: number;
         resolveLabels?: ScopeShareLabelResolver;
@@ -154,11 +152,7 @@ export function scopeShareTailSessions(
                     served += 1;
                 }
 
-                if (
-                    input.includeTranscript &&
-                    !budget.exhausted &&
-                    served < input.limits.sessionPageSize
-                ) {
+                if (!budget.exhausted && served < input.limits.sessionPageSize) {
                     const transcript = tailTranscript(tx, {
                         budget,
                         enqueue,

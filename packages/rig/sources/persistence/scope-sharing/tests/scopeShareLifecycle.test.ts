@@ -106,7 +106,6 @@ describe("scope share lifecycle", () => {
             insertSessionEvents(fixture.database, { count: 3, sessionId: "session-a" });
             createShare(fixture.database, { shareId: "share-1" });
             scopeShareTailSessions(fixture.database, {
-                includeTranscript: true,
                 limits,
                 now: 5,
                 shareId: "share-1",
@@ -151,7 +150,6 @@ describe("scope share lifecycle", () => {
             insertSession(fixture.database, { id: "session-a" });
             createShare(fixture.database, { shareId: "share-1" });
             scopeShareTailSessions(fixture.database, {
-                includeTranscript: true,
                 limits,
                 now: 5,
                 shareId: "share-1",

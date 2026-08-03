@@ -131,6 +131,9 @@ export function createScopeShareKind(
                     }
                 }
             },
+            // Both kinds of scope are one service over one set of tables: what differs
+            // is how wide the subject query reaches, not how any of it replicates.
+            shareKinds: ["project", "workspace"],
             wakeForSession: (scope) => {
                 // A session belongs to at most one workspace and always to one project, so
                 // both the workspace share and the project share above it may be waiting on

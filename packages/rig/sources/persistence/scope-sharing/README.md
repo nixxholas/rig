@@ -24,6 +24,13 @@ subject tag so the member can tell the three apart without a second channel:
 - `session_event` — the transcript, reusing the session-share projection verbatim with the owning
   session id in the envelope.
 
+A session share seeds itself from `session_messages` and then follows `session_events`. A scope
+share follows `session_events` alone, from the first event each session ever recorded, because a
+scope's session list is open-ended: sessions join and leave the scope while the share runs, so
+there is no single moment at which a snapshot of "the transcript so far" could be taken. A session
+whose durable messages predate its own event log — an imported or repaired transcript — is
+therefore carried only from its first event.
+
 ## The round-robin tail
 
 `sessionShareTailEvents` tails one session and can read until its page is full.

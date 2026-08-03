@@ -45,25 +45,17 @@ const TAIL_LIMITS: ScopeShareTailLimits = {
 
 export interface PersistentScopeShareCoreStoreOptions {
     readonly idFactory?: () => string;
-    /**
-     * Whether transcript entries travel yet. Scope facts and the session list always
-     * do; the transcript is turned on separately so a shared workspace can be brought
-     * up without waiting for every session's history to replicate.
-     */
-    readonly includeTranscript?: boolean;
     readonly now?: () => number;
     readonly tx: () => TX;
 }
 
 export class PersistentScopeShareCoreStore implements ScopeShareCoreStore {
     readonly #idFactory: () => string;
-    readonly #includeTranscript: boolean;
     readonly #now: () => number;
     readonly #tx: () => TX;
 
     constructor(options: PersistentScopeShareCoreStoreOptions) {
         this.#idFactory = options.idFactory ?? createId;
-        this.#includeTranscript = options.includeTranscript ?? false;
         this.#now = options.now ?? Date.now;
         this.#tx = options.tx;
     }
@@ -149,7 +141,6 @@ export class PersistentScopeShareCoreStore implements ScopeShareCoreStore {
 
     tailOutbox(shareId: string): number {
         return scopeShareTailSessions(this.#tx(), {
-            includeTranscript: this.#includeTranscript,
             limits: TAIL_LIMITS,
             now: this.#now(),
             shareId,

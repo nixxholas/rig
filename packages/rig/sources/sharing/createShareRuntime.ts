@@ -42,26 +42,35 @@ export interface ShareKindRuntime {
     readonly recoverShares: () => Promise<void>;
     /** Resume every replica of this kind that an earlier run had already joined. */
     readonly resumeReplicas: () => Promise<void>;
+    /**
+     * The share kinds this runtime replicates, which is how a shareId reaches it.
+     *
+     * One runtime may serve several kinds: a scope share replicates workspaces and
+     * projects through a single service over a single set of tables. Routing reads
+     * the kind out of the shareId and asks whichever runtime claimed it, rather than
+     * assuming the name a caller filed the factory under is itself a share kind.
+     */
+    readonly shareKinds: readonly ShareKind[];
 }
 
 export type ShareKindFactory<Runtime extends ShareKindRuntime = ShareKindRuntime> = (
     context: ShareKindContext,
 ) => Runtime;
 
-export interface ShareRuntimeOptions<Kinds extends Partial<Record<ShareKind, ShareKindFactory>>> {
-    /** One factory per kind of share this daemon replicates. */
+export interface ShareRuntimeOptions<Kinds extends Record<string, ShareKindFactory>> {
+    /** The factories this daemon builds, each one named by what it replicates. */
     readonly kinds: Kinds;
     readonly murmur: MurmurServiceContract;
     /** Surfaces an error the event router absorbed so it is not silently lost. */
     readonly reportFailure?: (error: unknown) => void;
 }
 
-/** The runtimes a set of factories produces, keyed by the kind each one serves. */
-export type ShareKindRuntimes<Kinds extends Partial<Record<ShareKind, ShareKindFactory>>> = {
+/** The runtimes a set of factories produces, under the names they were given. */
+export type ShareKindRuntimes<Kinds extends Record<string, ShareKindFactory>> = {
     [Kind in keyof Kinds]: Kinds[Kind] extends ShareKindFactory<infer Runtime> ? Runtime : never;
 };
 
-export interface ShareRuntime<Kinds extends Partial<Record<ShareKind, ShareKindFactory>>> {
+export interface ShareRuntime<Kinds extends Record<string, ShareKindFactory>> {
     readonly close: () => Promise<void>;
     /** The runtimes the factories produced, so a caller can reach each kind's own surface. */
     readonly kinds: ShareKindRuntimes<Kinds>;
@@ -76,7 +85,7 @@ export interface ShareRuntime<Kinds extends Partial<Record<ShareKind, ShareKindF
  * workspace, a project — rides the same transport, directory, and router, and is
  * told apart by the kind its shareId carries.
  */
-export function createShareRuntime<Kinds extends Partial<Record<ShareKind, ShareKindFactory>>>(
+export function createShareRuntime<Kinds extends Record<string, ShareKindFactory>>(
     options: ShareRuntimeOptions<Kinds>,
 ): ShareRuntime<Kinds> {
     const directory = new MurmurShareDirectory({
@@ -90,6 +99,10 @@ export function createShareRuntime<Kinds extends Partial<Record<ShareKind, Share
     });
 
     const built = new Map<ShareKind, ShareKindRuntime>();
+    // One runtime can be reached under several kinds, so the passes that touch each
+    // runtime once — closing, flushing, recovering — walk this list instead of the
+    // routing map, which would otherwise hand them the same runtime twice.
+    const runtimes: ShareKindRuntime[] = [];
     const kindOf = (shareId: string): ShareKindRuntime | undefined =>
         built.get(shareKindOf(shareId));
     const requireKind = (shareId: string): ShareKindRuntime => {
@@ -116,7 +129,7 @@ export function createShareRuntime<Kinds extends Partial<Record<ShareKind, Share
         }
     };
     const flushAll = (): void => {
-        for (const kind of built.values()) kind.flushReplicaEnds();
+        for (const kind of runtimes) kind.flushReplicaEnds();
     };
     const context: ShareKindContext = {
         backfill,
@@ -125,14 +138,16 @@ export function createShareRuntime<Kinds extends Partial<Record<ShareKind, Share
         transport,
     };
     const kinds = {} as ShareKindRuntimes<Kinds>;
-    for (const [kind, factory] of Object.entries(options.kinds) as [
-        ShareKind,
-        ShareKindFactory | undefined,
-    ][]) {
-        if (factory === undefined) continue;
+    for (const [name, factory] of Object.entries(options.kinds)) {
         const runtime = factory(context);
-        built.set(kind, runtime);
-        kinds[kind as keyof Kinds] = runtime as ShareKindRuntimes<Kinds>[keyof Kinds];
+        runtimes.push(runtime);
+        for (const shareKind of runtime.shareKinds) {
+            if (built.has(shareKind)) {
+                throw new Error("Two share runtimes claim the same kind of share.");
+            }
+            built.set(shareKind, runtime);
+        }
+        kinds[name as keyof Kinds] = runtime as ShareKindRuntimes<Kinds>[keyof Kinds];
     }
 
     // A member that is waiting on history defers every event that arrives, and Murmur
@@ -218,7 +233,7 @@ export function createShareRuntime<Kinds extends Partial<Record<ShareKind, Share
         await kindOf(invitation.shareId)?.joinReplica(invitation);
     };
     const recoverAll = async (): Promise<void> => {
-        for (const kind of built.values()) await kind.recoverShares();
+        for (const kind of runtimes) await kind.recoverShares();
     };
     // A friend's fresh key package is exactly what a deferred invitation was waiting for.
     const unobserveOffers = directory.onKeyPackageOffered(() => {
@@ -228,7 +243,7 @@ export function createShareRuntime<Kinds extends Partial<Record<ShareKind, Share
         void joinReplica(invitation);
     });
     const startAll = (): void => {
-        void startForRuntime({ directory, joinReplica, kinds: built, recoverAll });
+        void startForRuntime({ directory, joinReplica, kinds: runtimes, recoverAll });
     };
     const unobserveRuntime = options.murmur.onRuntimeChanged((runtime) => {
         // Every cached Murmur session holds the client and store it was built on, so a
@@ -246,7 +261,7 @@ export function createShareRuntime<Kinds extends Partial<Record<ShareKind, Share
             unobserveOffers();
             unobserveInvitations();
             unobserveRuntime();
-            for (const kind of built.values()) kind.close();
+            for (const kind of runtimes) kind.close();
             transport.close();
         },
         kinds,
@@ -278,11 +293,11 @@ export function shareHistoryPageLimits(request: { maximumBytes: number; maximumE
 async function startForRuntime(context: {
     directory: MurmurShareDirectory;
     joinReplica: (invitation: ReceivedShareInvitation) => Promise<void>;
-    kinds: ReadonlyMap<ShareKind, ShareKindRuntime>;
+    kinds: readonly ShareKindRuntime[];
     recoverAll: () => Promise<void>;
 }): Promise<void> {
     await context.recoverAll();
-    for (const kind of context.kinds.values()) {
+    for (const kind of context.kinds) {
         try {
             await kind.resumeReplicas();
         } catch {
