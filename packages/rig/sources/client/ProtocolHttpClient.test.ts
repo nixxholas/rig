@@ -9,6 +9,34 @@ import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 
 describe("ProtocolHttpClient", () => {
+    it("targets a paginated workspace file-tree directory", async () => {
+        const directory = await createTestSocketDirectory();
+        const socketPath = join(directory, "server.sock");
+        let path = "";
+        const server = createServer((request, response) => {
+            path = request.url ?? "";
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end('{"entries":[],"nextCursor":null,"path":"src"}');
+        });
+        try {
+            await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+            const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
+
+            await expect(
+                client.listFileTree(
+                    { projectId: "project/one", workspaceId: "workspace/two" },
+                    { cursor: "next/page", limit: 75, path: "src" },
+                ),
+            ).resolves.toEqual({ entries: [], nextCursor: null, path: "src" });
+            expect(path).toBe(
+                "/projects/project%2Fone/workspaces/workspace%2Ftwo/file-tree?path=src&cursor=next%2Fpage&limit=75",
+            );
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it("targets every Murmur account, service, friend, and contact operation", async () => {
         const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");

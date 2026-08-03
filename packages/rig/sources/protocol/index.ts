@@ -82,8 +82,14 @@ export type {
     UninstallPluginResponse,
 } from "./ProjectProtocol.js";
 export {
+    fileTreeEntrySchema,
+    listFileTreeRequestSchema,
+    listFileTreeResponseSchema,
     writeProjectFileRequestSchema,
     type FileSearchResult,
+    type FileTreeEntry,
+    type ListFileTreeRequest,
+    type ListFileTreeResponse,
     type ListProjectFilePathsResponse,
     type ReadProjectFileResponse,
     type ReadProjectFileRevisionResponse,

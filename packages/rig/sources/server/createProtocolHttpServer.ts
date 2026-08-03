@@ -49,6 +49,8 @@ import type {
     ListModelsResponse,
     ListMurmurContactsResponse,
     ListMurmurFriendRequestsResponse,
+    ListFileTreeRequest,
+    ListFileTreeResponse,
     ListProjectFilePathsResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
@@ -118,6 +120,7 @@ import type {
 import {
     answerMurmurFriendRequestRequestSchema,
     globalSecurityPolicySchema,
+    listFileTreeRequestSchema,
     RIG_PROTOCOL_VERSION,
     sendMurmurFriendRequestRequestSchema,
     SESSION_DRAFT_MAX_LENGTH,
@@ -241,6 +244,13 @@ import {
 } from "./projectFileApi.js";
 import { listGitWorkingTreeFiles } from "../git/listGitWorkingTreeFiles.js";
 import { createNodeFileSystemContext } from "../agent/context/createNodeFileSystemContext.js";
+import {
+    FileTreeChangedError,
+    FileTreeInvalidRequestError,
+    FileTreeProtectedPathError,
+    FileTreeSymlinkTraversalError,
+    listFileTree,
+} from "../file-tree/index.js";
 
 export interface ProtocolHttpServerOptions {
     codexStreamMaxRetries?: number;
@@ -1177,6 +1187,7 @@ async function handleRequest(
         route.name === "project-file" ||
         route.name === "project-file-paths" ||
         route.name === "project-file-revision" ||
+        route.name === "project-file-tree" ||
         route.name === "project-files"
     ) {
         const directory = resolveProjectScopeDirectory(store, route);
@@ -1198,6 +1209,49 @@ async function handleRequest(
             } catch (error) {
                 if (isDatabaseFailure(error)) throw error;
                 sendJson(response, 400, { error: errorToMessage(error) });
+            }
+            return;
+        }
+        if (route.name === "project-file-tree") {
+            if (request.method !== "GET") {
+                sendJson(response, 405, { error: "Method not allowed" });
+                return;
+            }
+            const treeRequest = parseFileTreeRequest(url);
+            if (treeRequest === undefined) {
+                sendJson(response, 400, { error: "File-tree settings are invalid." });
+                return;
+            }
+            try {
+                const fileSystem = createNodeFileSystemContext(directory.path, {
+                    permissionMode: () => "read_only",
+                });
+                sendJson<ListFileTreeResponse>(
+                    response,
+                    200,
+                    await listFileTree(fileSystem, treeRequest),
+                );
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                if (error instanceof FileTreeChangedError) {
+                    sendJson(response, 409, {
+                        error: error.message,
+                        reason: "directory_changed",
+                    });
+                    return;
+                }
+                if (
+                    error instanceof FileTreeProtectedPathError ||
+                    error instanceof FileTreeSymlinkTraversalError
+                ) {
+                    sendJson(response, 403, { error: error.message });
+                    return;
+                }
+                if (error instanceof FileTreeInvalidRequestError) {
+                    sendJson(response, 400, { error: error.message });
+                    return;
+                }
+                throw error;
             }
             return;
         }
@@ -3433,6 +3487,17 @@ function parseFileSearchLimit(value: string | null): number {
     return Math.min(limit, 50);
 }
 
+function parseFileTreeRequest(url: URL): ListFileTreeRequest | undefined {
+    const candidate: Record<string, unknown> = Object.fromEntries(url.searchParams);
+    candidate.path ??= "";
+    if (typeof candidate.limit === "string") {
+        candidate.limit = Number(candidate.limit);
+    }
+    return Value.Check(listFileTreeRequestSchema, candidate)
+        ? (candidate as ListFileTreeRequest)
+        : undefined;
+}
+
 function matchRoute(pathname: string):
     | {
           name:
@@ -3530,7 +3595,12 @@ function matchRoute(pathname: string):
           workspaceId: string;
       }
     | {
-          name: "project-file" | "project-file-paths" | "project-file-revision" | "project-files";
+          name:
+              | "project-file"
+              | "project-file-paths"
+              | "project-file-revision"
+              | "project-file-tree"
+              | "project-files";
           projectId: string;
           sessionId?: undefined;
           workspaceId?: string;
@@ -3748,6 +3818,9 @@ function matchRoute(pathname: string):
         if (globalParts.length === 3 && globalParts[2] === "file-revision") {
             return { name: "project-file-revision", projectId };
         }
+        if (globalParts.length === 3 && globalParts[2] === "file-tree") {
+            return { name: "project-file-tree", projectId };
+        }
         if (globalParts.length === 3 && globalParts[2] === "files") {
             return { name: "project-files", projectId };
         }
@@ -3800,6 +3873,9 @@ function matchRoute(pathname: string):
             }
             if (globalParts.length === 5 && globalParts[4] === "file-revision") {
                 return { name: "project-file-revision", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "file-tree") {
+                return { name: "project-file-tree", projectId, workspaceId };
             }
             if (globalParts.length === 5 && globalParts[4] === "files") {
                 return { name: "project-files", projectId, workspaceId };
@@ -4229,6 +4305,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
             "project-file",
             "project-file-paths",
             "project-file-revision",
+            "project-file-tree",
             "project-files",
             "project-refresh",
             "project-reorder",

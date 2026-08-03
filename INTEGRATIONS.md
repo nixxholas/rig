@@ -100,7 +100,15 @@ sent back in place of `code`.
         "reasoningSelection": true,
         "permissionModeSelection": true,
         "resume": false,
-        "rpcMethods": ["abort", "bash", "communication", "readFile", "writeFile", "ripgrep"],
+        "rpcMethods": [
+            "abort",
+            "bash",
+            "communication",
+            "listFileTree",
+            "readFile",
+            "writeFile",
+            "ripgrep"
+        ],
         "shell": true,
         "steering": true
     },
@@ -205,12 +213,27 @@ existing encrypted file event followed by user text convention. Rig downloads
 and decrypts every preceding image in memory and includes it in that text
 submission; it does not persist plaintext attachment bytes.
 
-The current Happy app actually invokes `bash`, `readFile`, `writeFile`, and
-`ripgrep` for its file list, file viewer/editor, Git status/diffs, and file
-search. Rig implements those methods plus `abort`, and publishes the exact list
-in `capabilities.rpcMethods`. Happy currently exports `listDirectory` and
-`getDirectoryTree` client helpers but does not call them from its UI, so Rig
-does not advertise or implement them.
+Rig exposes `listFileTree` as its lazy file browser session RPC. It deliberately
+uses a new name because Happy's older unpaginated `listDirectory` helper has a
+different contract. `listFileTree` requires a POSIX-relative path (`""` is the
+root), returns names in UTF-8 byte order, and requires callers to follow
+`nextCursor` until it is `null`.
+
+Each call
+returns one bounded page of one directory at a time, including hidden and
+Git-ignored entries such as `.context`, without recursively materializing the
+workspace or invoking the agent's shell tool. Opaque cursors are bound to the
+directory snapshot, and `reason: "directory_changed"` tells RPC callers to
+restart a page sequence. `.git` directories are not exposed, and symbolic links
+are visible but cannot be expanded through the tree API.
+
+The current Happy app also invokes `bash`, `readFile`, `writeFile`, and
+`ripgrep` for its legacy flat all-files list, Git status/diffs, file
+viewing/editing, and file search. Its all-files UI can move to `listFileTree`
+with a new paginated client operation and lazy expansion. Rig publishes the
+exact RPC list in `capabilities.rpcMethods`. The older recursive
+`getDirectoryTree` helper is not advertised because an eager recursive tree
+cannot stay bounded on large workspaces.
 
 Native Rig sessions use the platform-specific ripgrep binary bundled with the
 Rig package, so Happy file search does not depend on `rg` being installed on the

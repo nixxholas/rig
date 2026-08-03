@@ -26,6 +26,17 @@ export function createJustBashFileSystemContext(bash: Bash, cwd: string): FileSy
         async lstat(path) {
             return toFileSystemStat(await bash.fs.lstat(path));
         },
+        async lstatMany(paths) {
+            return Promise.all(
+                paths.map(async (path) => {
+                    try {
+                        return await this.lstat(path);
+                    } catch {
+                        return undefined;
+                    }
+                }),
+            );
+        },
         async mkdir(path, mkdirOptions) {
             await bash.fs.mkdir(path, mkdirOptions);
         },
@@ -55,6 +66,20 @@ export function createJustBashFileSystemContext(bash: Bash, cwd: string): FileSy
         },
         async readdir(path) {
             return bash.fs.readdir(path);
+        },
+        async readdirPage(path, options) {
+            const after = options.after === undefined ? undefined : Buffer.from(options.after);
+            const entries = (await bash.fs.readdir(path))
+                .map((name) => ({ bytes: Buffer.from(name), name }))
+                .filter((entry) => after === undefined || Buffer.compare(entry.bytes, after) > 0)
+                .sort((left, right) => Buffer.compare(left.bytes, right.bytes));
+            const hasMore = entries.length > options.limit;
+            return {
+                entries: (hasMore ? entries.slice(0, options.limit) : entries).map(
+                    (entry) => entry.name,
+                ),
+                hasMore,
+            };
         },
         async rm(path, rmOptions) {
             await bash.fs.rm(path, rmOptions);

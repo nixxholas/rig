@@ -14,6 +14,8 @@ import { resolveDockerPath } from "./resolveDockerPath.js";
 import { runDockerExec } from "./runDockerExec.js";
 
 const MAX_FILE_READ_BYTES = 32 * 1024 * 1024;
+// Linux NAME_MAX is 255 bytes. One extra byte carries the terminating NUL.
+const MAX_DOCKER_DIRECTORY_ENTRY_BYTES = 256;
 
 export function createDockerFileSystemContext(
     environment: DockerEnvironment,
@@ -57,6 +59,25 @@ export function createDockerFileSystemContext(
             ]);
             if (result.exitCode !== 0) throw dockerCommandError("inspect", target, result.stderr);
             return parseDockerLstat(result.stdout, target);
+        },
+        async lstatMany(paths) {
+            if (paths.length === 0) return [];
+            const targets = paths.map((path) => assertDockerReadPath(cwd, path));
+            const result = await runDockerExec(
+                await environment.container(),
+                [
+                    "/bin/sh",
+                    "-c",
+                    'set -e\nfor target do\nif [ ! -e "$target" ] && [ ! -L "$target" ]; then printf "missing\\n0\\n0\\n0\\n"; continue; fi\nkind=other\nif [ -L "$target" ]; then kind=symlink; elif [ -d "$target" ]; then kind=directory; elif [ -f "$target" ]; then kind=file; fi\nprintf "%s\\n" "$kind"\nstat -c "%s" -- "$target"\nstat -c "%Y" -- "$target"\nstat -c "%a" -- "$target"\ndone',
+                    "rig-directory-metadata",
+                    ...targets,
+                ],
+                { maxOutputBytes: targets.length * 128 },
+            );
+            if (result.exitCode !== 0) {
+                throw dockerCommandError("inspect directory entries", cwd, result.stderr);
+            }
+            return parseDockerLstatMany(result.stdout, targets);
         },
         async mkdir(path, options) {
             const target = await assertDockerWritePath(cwd, path, permissions.mode, resolvePath);
@@ -129,6 +150,38 @@ export function createDockerFileSystemContext(
                 .toString("utf8")
                 .split("\0")
                 .filter((entry) => entry.length > 0);
+        },
+        async readdirPage(path, options) {
+            const target = assertDockerReadPath(cwd, path);
+            const capacity = options.limit + 1;
+            const maxOutputBytes = capacity * MAX_DOCKER_DIRECTORY_ENTRY_BYTES;
+            const result = await runDockerExec(
+                await environment.container(),
+                [
+                    "/bin/sh",
+                    "-c",
+                    'set -e\nexport LC_ALL=C\ncd "$1"\nfind . -mindepth 1 -maxdepth 1 -exec /bin/sh -c \'after=$1; shift; for entry do name=${entry#./}; if [ "$name" \\> "$after" ]; then printf "%s\\\\0" "$name"; fi; done\' rig-directory-page "$2" {} + | sort -z | head -c "$3"',
+                    "rig",
+                    target,
+                    options.after ?? "",
+                    String(maxOutputBytes),
+                ],
+                {
+                    maxOutputBytes,
+                },
+            );
+            if (result.exitCode !== 0) throw dockerCommandError("list", target, result.stderr);
+            const lastTerminator = result.stdout.lastIndexOf(0);
+            const completeOutput =
+                lastTerminator < 0
+                    ? Buffer.alloc(0)
+                    : result.stdout.subarray(0, lastTerminator + 1);
+            const entries = completeOutput
+                .toString("utf8")
+                .split("\0")
+                .filter((entry) => entry.length > 0);
+            const hasMore = entries.length > options.limit;
+            return { entries: entries.slice(0, options.limit), hasMore };
         },
         async rm(path, options) {
             const target = await assertDockerWritePath(cwd, path, permissions.mode, resolvePath);
@@ -275,6 +328,22 @@ function parseDockerLstat(output: Buffer, path: string): FileSystemStat {
         mtimeMs: mtimeSeconds * 1000,
         size,
     };
+}
+
+function parseDockerLstatMany(
+    output: Buffer,
+    paths: readonly string[],
+): readonly (FileSystemStat | undefined)[] {
+    const lines = output.toString("utf8").trimEnd().split("\n");
+    if (lines.length !== paths.length * 4) {
+        throw new Error("Docker returned incomplete directory-entry metadata.");
+    }
+    return paths.map((path, index) => {
+        const record = lines.slice(index * 4, index * 4 + 4);
+        return record[0] === "missing"
+            ? undefined
+            : parseDockerLstat(Buffer.from(record.join("\n")), path);
+    });
 }
 
 function fileReadLimitError(path: string, maxBytes: number): Error {

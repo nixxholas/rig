@@ -1,6 +1,17 @@
 import { createHash } from "node:crypto";
 
+import { Value } from "@sinclair/typebox/value";
+
 import type { AgentContext } from "../agent/index.js";
+import {
+    FileTreeChangedError,
+    FileTreeInvalidRequestError,
+    listFileTree,
+} from "../file-tree/index.js";
+import {
+    listFileTreeRequestSchema,
+    type ListFileTreeRequest,
+} from "../protocol/ProjectFileProtocol.js";
 import { resolveHappyRipgrepExecutable } from "./resolveHappyRipgrepExecutable.js";
 
 const MAX_OUTPUT_BYTES = 1024 * 1024;
@@ -9,6 +20,7 @@ export const HAPPY_SESSION_RPC_METHODS = [
     "abort",
     "bash",
     "communication",
+    "listFileTree",
     "readFile",
     "writeFile",
     "ripgrep",
@@ -60,6 +72,26 @@ export async function handleHappySessionRpc(options: {
             exitCode: result.exitCode ?? -1,
             ...(result.timedOut ? { error: "Command timed out" } : {}),
         };
+    }
+    if (method === "listFileTree") {
+        if (!Value.Check(listFileTreeRequestSchema, params)) {
+            throw new FileTreeInvalidRequestError("File-tree settings are invalid.");
+        }
+        try {
+            return {
+                success: true,
+                ...(await listFileTree(context.fs, params as ListFileTreeRequest)),
+            };
+        } catch (error) {
+            if (error instanceof FileTreeChangedError) {
+                return {
+                    success: false,
+                    error: error.message,
+                    reason: "directory_changed",
+                };
+            }
+            throw error;
+        }
     }
     if (method === "readFile") {
         const content = await context.fs.readFileBuffer(requireString(params.path, "path"));

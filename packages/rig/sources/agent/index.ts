@@ -83,6 +83,8 @@ export type {
 } from "./context/BashContext.js";
 export type {
     FileSystemContext,
+    FileSystemDirectoryPage,
+    FileSystemDirectoryPageOptions,
     FileSystemReadOptions,
     FileSystemStat,
 } from "./context/FileSystemContext.js";

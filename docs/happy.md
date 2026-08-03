@@ -143,7 +143,7 @@ silently creating directories on your machine.
 
 A small set of remote procedures is also exposed against a synchronized
 session, so the client can act on the machine through the agent's own
-boundaries: `abort`, `bash`, `readFile`, `writeFile`, `ripgrep`, and
+boundaries: `abort`, `bash`, `listFileTree`, `readFile`, `writeFile`, `ripgrep`, and
 `communication` (the reply channel for interactive questions). These run
 through the same `AgentContext`, filesystem boundary, and sandbox as the
 agent's own tools — the app does not get a wider door than the agent has.

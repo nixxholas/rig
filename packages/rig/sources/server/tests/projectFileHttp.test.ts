@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { request as httpRequest } from "node:http";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,6 +22,77 @@ afterEach(async () => {
 });
 
 describe("Project files over HTTP", () => {
+    it("pages the physical file tree, including ignored scratch and empty directories", async () => {
+        const fixture = await startServer();
+        const repository = await createRepository(fixture.root);
+        await mkdir(join(repository, ".context"));
+        await mkdir(join(repository, "empty"));
+        await writeFile(join(repository, ".context", "notes.md"), "scratch\n");
+        await writeFile(join(repository, ".gitignore"), ".context/\n");
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+
+        const first = await fixture.get(`/projects/${projectId}/file-tree?path=&limit=2`);
+
+        expect(first.status).toBe(200);
+        expect(first.body).toMatchObject({
+            entries: [
+                { name: ".context", path: ".context", type: "directory" },
+                { name: ".gitignore", path: ".gitignore", type: "file" },
+            ],
+            nextCursor: expect.any(String),
+            path: "",
+        });
+        expect(first.body.entries.some((entry: { name: string }) => entry.name === ".git")).toBe(
+            false,
+        );
+
+        const second = await fixture.get(
+            `/projects/${projectId}/file-tree?path=&limit=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+        );
+        expect(second.status).toBe(200);
+        expect(second.body.entries.map((entry: { name: string }) => entry.name)).toContain("empty");
+
+        const scratch = await fixture.get(
+            `/projects/${projectId}/file-tree?path=.context&limit=10`,
+        );
+        expect(scratch.status).toBe(200);
+        expect(scratch.body.entries).toEqual([
+            expect.objectContaining({
+                name: "notes.md",
+                path: ".context/notes.md",
+                type: "file",
+            }),
+        ]);
+
+        const changed = new Date(Date.now() + 10_000);
+        await utimes(repository, changed, changed);
+        const stale = await fixture.get(
+            `/projects/${projectId}/file-tree?path=&limit=2&cursor=${encodeURIComponent(first.body.nextCursor)}`,
+        );
+        expect(stale.status).toBe(409);
+        expect(stale.body).toMatchObject({ reason: "directory_changed" });
+    });
+
+    it("rejects protected, malformed, and symlinked file-tree paths", async () => {
+        const fixture = await startServer();
+        const repository = await createRepository(fixture.root);
+        await mkdir(join(repository, "target"));
+        await symlink(join(repository, "target"), join(repository, "link"));
+        const projectId = fixture.store.create({ cwd: repository }).snapshot().projectId;
+
+        expect((await fixture.get(`/projects/${projectId}/file-tree?path=.git`)).status).toBe(403);
+        expect((await fixture.get(`/projects/${projectId}/file-tree?path=.GIT`)).status).toBe(403);
+        expect(
+            (
+                await fixture.get(
+                    `/projects/${projectId}/file-tree?path=${encodeURIComponent("../outside")}`,
+                )
+            ).status,
+        ).toBe(400);
+        expect((await fixture.get(`/projects/${projectId}/file-tree?path=link`)).status).toBe(403);
+        expect((await fixture.get(`/projects/${projectId}/file-tree?limit=501`)).status).toBe(400);
+    });
+
     it("lists what Git tracks and what it would add, and leaves out what it ignores", async () => {
         const fixture = await startServer();
         const repository = await createRepository(fixture.root);
@@ -143,10 +214,15 @@ describe("Project files over HTTP", () => {
         const scope = `/projects/${projectId}/workspaces/${workspace!.id}`;
 
         const paths = await fixture.get(`${scope}/file-paths`);
+        const tree = await fixture.get(`${scope}/file-tree?path=&limit=10`);
         const revision = await fixture.get(`${scope}/file-revision?path=seed.txt&revision=HEAD`);
 
         expect(paths.status).toBe(200);
         expect(paths.body.paths).toContain("seed.txt");
+        expect(tree.status).toBe(200);
+        expect(tree.body.entries).toContainEqual(
+            expect.objectContaining({ name: "seed.txt", type: "file" }),
+        );
         expect(revision.status).toBe(200);
         expect(Buffer.from(revision.body.content, "base64").toString("utf8")).toBe("seed\n");
     });

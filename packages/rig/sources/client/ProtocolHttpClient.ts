@@ -44,6 +44,8 @@ import type {
     ListModelsResponse,
     ListMurmurContactsResponse,
     ListMurmurFriendRequestsResponse,
+    ListFileTreeRequest,
+    ListFileTreeResponse,
     ListProjectFilePathsResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
@@ -768,6 +770,18 @@ export class ProtocolHttpClient {
 
     listFilePaths(scope: ProjectScope): Promise<ListProjectFilePathsResponse> {
         return this.#requestJson("GET", `${this.#projectScopePath(scope)}/file-paths`);
+    }
+
+    listFileTree(scope: ProjectScope, request: ListFileTreeRequest): Promise<ListFileTreeResponse> {
+        const parameters = new URLSearchParams({
+            path: request.path,
+            ...(request.cursor === undefined ? {} : { cursor: request.cursor }),
+            ...(request.limit === undefined ? {} : { limit: String(request.limit) }),
+        });
+        return this.#requestJson(
+            "GET",
+            `${this.#projectScopePath(scope)}/file-tree?${parameters.toString()}`,
+        );
     }
 
     readFile(scope: ProjectScope, path: string): Promise<ReadProjectFileResponse> {

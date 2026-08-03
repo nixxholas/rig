@@ -1,8 +1,8 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { createNodeAgentContext } from "../../agent/context/createNodeAgentContext.js";
 import { NativeProcessManager } from "../../processes/index.js";
@@ -18,6 +18,61 @@ afterEach(async () => {
 });
 
 describe("handleHappySessionRpc", () => {
+    it("lists a bounded directory page without invoking a shell", async () => {
+        const cwd = await mkdtemp(join(tmpdir(), "rig-happy-rpc-"));
+        directories.push(cwd);
+        await mkdir(join(cwd, ".context"));
+        await mkdir(join(cwd, ".git"));
+        await writeFile(join(cwd, ".gitignore"), ".context/\n");
+        await writeFile(join(cwd, "visible.txt"), "visible\n");
+        const context = createNodeAgentContext({
+            cwd,
+            permissionMode: "read_only",
+            processManager: new NativeProcessManager(),
+        });
+        const run = vi.fn(context.bash.run.bind(context.bash));
+        context.bash.run = run;
+
+        const result = (await handleHappySessionRpc({
+            abort: async () => ({ aborted: true }),
+            answerQuestion: () => {},
+            cancelQuestion: () => {},
+            context: () => context,
+            method: "listFileTree",
+            params: { limit: 2, path: "" },
+        })) as {
+            entries: { name: string; type: string }[];
+            nextCursor: string | null;
+            success: boolean;
+        };
+
+        expect(result).toMatchObject({
+            entries: [
+                { name: ".context", type: "directory" },
+                { name: ".gitignore", type: "file" },
+            ],
+            nextCursor: expect.any(String),
+            success: true,
+        });
+        expect(run).not.toHaveBeenCalled();
+
+        const changed = new Date(Date.now() + 10_000);
+        await utimes(cwd, changed, changed);
+        await expect(
+            handleHappySessionRpc({
+                abort: async () => ({ aborted: true }),
+                answerQuestion: () => {},
+                cancelQuestion: () => {},
+                context: () => context,
+                method: "listFileTree",
+                params: { cursor: result.nextCursor, limit: 2, path: "" },
+            }),
+        ).resolves.toMatchObject({
+            reason: "directory_changed",
+            success: false,
+        });
+    });
+
     it("runs Happy shell and file operations through Rig's permission-aware context", async () => {
         const cwd = await mkdtemp(join(tmpdir(), "rig-happy-rpc-"));
         directories.push(cwd);

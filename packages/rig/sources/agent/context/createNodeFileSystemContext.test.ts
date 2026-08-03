@@ -42,6 +42,30 @@ describe("createNodeFileSystemContext", () => {
         );
     });
 
+    it("pages a directory in stable UTF-8 byte order", async () => {
+        const root = await mkdtemp(join(tmpdir(), "rig-fs-directory-page-"));
+        temporaryDirectories.push(root);
+        const workspace = join(root, "workspace");
+        await mkdir(workspace);
+        await Promise.all(
+            ["zeta", ".context", "alpha", "line\nbreak", "middle", "éclair"].map((name) =>
+                writeFile(join(workspace, name), ""),
+            ),
+        );
+        const context = createNodeFileSystemContext(workspace);
+
+        await expect(context.readdirPage(".", { limit: 3 })).resolves.toEqual({
+            entries: [".context", "alpha", "line\nbreak"],
+            hasMore: true,
+        });
+        await expect(context.readdirPage(".", { after: "line\nbreak", limit: 3 })).resolves.toEqual(
+            {
+                entries: ["middle", "zeta", "éclair"],
+                hasMore: false,
+            },
+        );
+    });
+
     it("atomically refuses a symbolic link when requested", async () => {
         const root = await mkdtemp(join(tmpdir(), "rig-fs-no-follow-"));
         temporaryDirectories.push(root);
