@@ -9,6 +9,79 @@ import { createTestSocketDirectory } from "../testing/createTestSocketDirectory.
 import { ProtocolHttpClient } from "./ProtocolHttpClient.js";
 
 describe("ProtocolHttpClient", () => {
+    it("targets every Murmur account, service, friend, and contact operation", async () => {
+        const directory = await createTestSocketDirectory();
+        const socketPath = join(directory, "server.sock");
+        const requests: Array<{ body: unknown; method: string | undefined; path: string }> = [];
+        const server = createServer((request, response) => {
+            const chunks: Buffer[] = [];
+            request.on("data", (chunk: Buffer) => chunks.push(chunk));
+            request.on("end", () => {
+                const text = Buffer.concat(chunks).toString("utf8");
+                requests.push({
+                    body: text.length === 0 ? undefined : (JSON.parse(text) as unknown),
+                    method: request.method,
+                    path: request.url ?? "",
+                });
+                response.writeHead(200, { "content-type": "application/json" });
+                response.end("{}");
+            });
+        });
+        try {
+            await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+            const client = new ProtocolHttpClient({ socketPath, token: "test-token" });
+
+            await client.getMurmurAccount();
+            await client.signupMurmurAccount({
+                firstName: "Ada",
+                lastName: "Lovelace",
+                photo: { data: "AQID", mediaType: "image/png" },
+            });
+            await client.startMurmurService({ relayUrls: ["https://relay.example"] });
+            await client.stopMurmurService();
+            await client.sendMurmurFriendRequest({ token: "peer-token" });
+            await client.listMurmurFriendRequests();
+            await client.answerMurmurFriendRequest("request/one", { answer: "accept" });
+            await client.listMurmurContacts();
+            await client.deleteMurmurAccount();
+
+            expect(requests).toEqual([
+                { body: undefined, method: "GET", path: "/murmur/account" },
+                {
+                    body: {
+                        firstName: "Ada",
+                        lastName: "Lovelace",
+                        photo: { data: "AQID", mediaType: "image/png" },
+                    },
+                    method: "POST",
+                    path: "/murmur/account",
+                },
+                {
+                    body: { relayUrls: ["https://relay.example"] },
+                    method: "POST",
+                    path: "/murmur/service/start",
+                },
+                { body: undefined, method: "POST", path: "/murmur/service/stop" },
+                {
+                    body: { token: "peer-token" },
+                    method: "POST",
+                    path: "/murmur/friend-requests",
+                },
+                { body: undefined, method: "GET", path: "/murmur/friend-requests" },
+                {
+                    body: { answer: "accept" },
+                    method: "POST",
+                    path: "/murmur/friend-requests/request%2Fone/answer",
+                },
+                { body: undefined, method: "GET", path: "/murmur/contacts" },
+                { body: undefined, method: "DELETE", path: "/murmur/account" },
+            ]);
+        } finally {
+            await new Promise<void>((resolve) => server.close(() => resolve()));
+            await rm(directory, { recursive: true, force: true });
+        }
+    });
+
     it("sends session transfers to the daemon operation", async () => {
         const directory = await createTestSocketDirectory();
         const socketPath = join(directory, "server.sock");

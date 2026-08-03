@@ -61,6 +61,8 @@ import type {
     GetTimelineResponse,
     ListProviderUsageResponse,
     InstalledPluginSummary,
+    ListMurmurContactsResponse,
+    ListMurmurFriendRequestsResponse,
     ListPluginsResponse,
     PluginLogResponse,
     PluginLogSnapshot,
@@ -68,8 +70,28 @@ import type {
     SessionStateResponse,
     TimelineScope,
     UninstalledPluginSummary,
+    AnswerMurmurFriendRequestResponse,
+    DeleteMurmurAccountResponse,
+    GetMurmurAccountResponse,
+    SendMurmurFriendRequestResponse,
+    SignupMurmurAccountRequest,
+    SignupMurmurAccountResponse,
+    StartMurmurServiceRequest,
+    StartMurmurServiceResponse,
+    StopMurmurServiceResponse,
 } from "./protocol.js";
-import { pluginInstallClassificationSchema } from "./protocol.js";
+import {
+    answerMurmurFriendRequestResponseSchema,
+    deleteMurmurAccountResponseSchema,
+    getMurmurAccountResponseSchema,
+    listMurmurContactsResponseSchema,
+    listMurmurFriendRequestsResponseSchema,
+    pluginInstallClassificationSchema,
+    sendMurmurFriendRequestResponseSchema,
+    signupMurmurAccountResponseSchema,
+    startMurmurServiceResponseSchema,
+    stopMurmurServiceResponseSchema,
+} from "./protocol.js";
 import { streamLiveEvents } from "./streamLiveEvents.js";
 import { endpointUrl } from "./endpointUrl.js";
 
@@ -428,6 +450,30 @@ export interface RigConnection {
         name: string,
         options?: { signal?: AbortSignal },
     ) => Promise<UninstalledPluginSummary>;
+    getMurmurAccount: (options?: MurmurOperationOptions) => Promise<GetMurmurAccountResponse>;
+    signupMurmurAccount: (
+        request: SignupMurmurAccountRequest,
+        options?: MurmurOperationOptions,
+    ) => Promise<SignupMurmurAccountResponse>;
+    startMurmurService: (
+        request?: StartMurmurServiceRequest,
+        options?: MurmurOperationOptions,
+    ) => Promise<StartMurmurServiceResponse>;
+    stopMurmurService: (options?: MurmurOperationOptions) => Promise<StopMurmurServiceResponse>;
+    deleteMurmurAccount: (options?: MurmurOperationOptions) => Promise<DeleteMurmurAccountResponse>;
+    sendMurmurFriendRequest: (
+        token: string,
+        options?: MurmurOperationOptions,
+    ) => Promise<SendMurmurFriendRequestResponse>;
+    listMurmurFriendRequests: (
+        options?: MurmurOperationOptions,
+    ) => Promise<ListMurmurFriendRequestsResponse>;
+    answerMurmurFriendRequest: (
+        requestId: string,
+        answer: "accept" | "reject",
+        options?: MurmurOperationOptions,
+    ) => Promise<AnswerMurmurFriendRequestResponse>;
+    listMurmurContacts: (options?: MurmurOperationOptions) => Promise<ListMurmurContactsResponse>;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -488,6 +534,10 @@ export interface RigConnection {
     setSessionArchived: (sessionId: string, archived: boolean) => MutationId;
     renameGroup: (target: GroupTarget, name: string) => MutationId;
     close: () => void;
+}
+
+export interface MurmurOperationOptions {
+    signal?: AbortSignal;
 }
 
 interface SessionSubscriber extends RigSessionSubscriptionOptions {
@@ -2393,6 +2443,111 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         return { data, status: response.status };
     };
 
+    const requestMurmur = async <Schema extends TSchema>(
+        path: string,
+        schema: Schema,
+        init: RequestInit = {},
+    ): Promise<Static<Schema>> => {
+        const { data, status } = await requestJson(path, init);
+        if (status >= 400) {
+            throw new MutationHttpError(status, humanMutationError(data, status), undefined, data);
+        }
+        try {
+            return Value.Decode(schema, data);
+        } catch {
+            throw new Error("Rig returned an invalid Murmur response.");
+        }
+    };
+
+    const murmurJsonInit = (
+        method: "DELETE" | "GET" | "POST",
+        body: object | undefined,
+        operationOptions: MurmurOperationOptions,
+    ): RequestInit => ({
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        ...(body === undefined ? {} : { headers: { "content-type": "application/json" } }),
+        method,
+        ...(operationOptions.signal === undefined ? {} : { signal: operationOptions.signal }),
+    });
+
+    const getMurmurAccount: RigConnection["getMurmurAccount"] = (operationOptions = {}) =>
+        requestMurmur(
+            "murmur/account",
+            getMurmurAccountResponseSchema,
+            murmurJsonInit("GET", undefined, operationOptions),
+        );
+
+    const signupMurmurAccount: RigConnection["signupMurmurAccount"] = (
+        signup,
+        operationOptions = {},
+    ) =>
+        requestMurmur(
+            "murmur/account",
+            signupMurmurAccountResponseSchema,
+            murmurJsonInit("POST", signup, operationOptions),
+        );
+
+    const startMurmurService: RigConnection["startMurmurService"] = (
+        start = {},
+        operationOptions = {},
+    ) =>
+        requestMurmur(
+            "murmur/service/start",
+            startMurmurServiceResponseSchema,
+            murmurJsonInit("POST", start, operationOptions),
+        );
+
+    const stopMurmurService: RigConnection["stopMurmurService"] = (operationOptions = {}) =>
+        requestMurmur(
+            "murmur/service/stop",
+            stopMurmurServiceResponseSchema,
+            murmurJsonInit("POST", undefined, operationOptions),
+        );
+
+    const deleteMurmurAccount: RigConnection["deleteMurmurAccount"] = (operationOptions = {}) =>
+        requestMurmur(
+            "murmur/account",
+            deleteMurmurAccountResponseSchema,
+            murmurJsonInit("DELETE", undefined, operationOptions),
+        );
+
+    const sendMurmurFriendRequest: RigConnection["sendMurmurFriendRequest"] = (
+        token,
+        operationOptions = {},
+    ) =>
+        requestMurmur(
+            "murmur/friend-requests",
+            sendMurmurFriendRequestResponseSchema,
+            murmurJsonInit("POST", { token }, operationOptions),
+        );
+
+    const listMurmurFriendRequests: RigConnection["listMurmurFriendRequests"] = (
+        operationOptions = {},
+    ) =>
+        requestMurmur(
+            "murmur/friend-requests",
+            listMurmurFriendRequestsResponseSchema,
+            murmurJsonInit("GET", undefined, operationOptions),
+        );
+
+    const answerMurmurFriendRequest: RigConnection["answerMurmurFriendRequest"] = (
+        requestId,
+        answer,
+        operationOptions = {},
+    ) =>
+        requestMurmur(
+            `murmur/friend-requests/${encodeURIComponent(requestId)}/answer`,
+            answerMurmurFriendRequestResponseSchema,
+            murmurJsonInit("POST", { answer }, operationOptions),
+        );
+
+    const listMurmurContacts: RigConnection["listMurmurContacts"] = (operationOptions = {}) =>
+        requestMurmur(
+            "murmur/contacts",
+            listMurmurContactsResponseSchema,
+            murmurJsonInit("GET", undefined, operationOptions),
+        );
+
     const enqueueSessionUpdate = (
         action: MutationAction,
         sessionId: string,
@@ -3440,6 +3595,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             timelineEntries.clear();
         },
         answerUserInput,
+        answerMurmurFriendRequest,
         attachSecret,
         cancelScheduledMessage,
         clearGoal,
@@ -3453,9 +3609,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         connectTimeline,
         createWorkspace,
         createSession,
+        deleteMurmurAccount,
         detachSecret,
         forkSession,
         installPlugin,
+        getMurmurAccount,
+        listMurmurContacts,
+        listMurmurFriendRequests,
         readBackgroundProcess,
         readPluginLog,
         recordActivity,
@@ -3464,6 +3624,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         resetSession,
         rewindSession,
         runShellCommand,
+        sendMurmurFriendRequest,
         sendMessage,
         setDraft,
         setAppendSystemPrompt,
@@ -3474,10 +3635,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         setGoalStatus,
         setSessionArchived,
         stopRun,
+        startMurmurService,
+        stopMurmurService,
         stopBackgroundProcess,
         stopBackgroundProcesses,
         stopWorkflow,
         switchModel,
+        signupMurmurAccount,
         uninstallPlugin,
     };
 }

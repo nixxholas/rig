@@ -1,0 +1,195 @@
+import { Type, type Static } from "@sinclair/typebox";
+
+const exact = { additionalProperties: false } as const;
+const base64Schema = Type.String({
+    maxLength: 32 * 1024 * 1024,
+    minLength: 1,
+    pattern: "^[A-Za-z0-9+/]*={0,2}$",
+});
+const identifierSchema = Type.String({ maxLength: 256, minLength: 1 });
+const nameSchema = Type.String({ maxLength: 128, minLength: 1 });
+const thumbhashSchema = Type.String({ maxLength: 1_024, minLength: 1 });
+const timestampSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
+const tokenSchema = Type.String({ maxLength: 4_096, minLength: 1 });
+
+export const murmurPhotoInputSchema = Type.Object(
+    {
+        data: base64Schema,
+        mediaType: Type.String({ maxLength: 128, minLength: 1 }),
+    },
+    exact,
+);
+export type MurmurPhotoInput = Static<typeof murmurPhotoInputSchema>;
+
+export const murmurPhotoSchema = Type.Object(
+    {
+        bytes: Type.Integer({ maximum: 24 * 1024 * 1024, minimum: 0 }),
+        data: base64Schema,
+        height: Type.Integer({ maximum: 16_384, minimum: 1 }),
+        mediaType: Type.Literal("image/webp"),
+        thumbhash: thumbhashSchema,
+        width: Type.Integer({ maximum: 16_384, minimum: 1 }),
+    },
+    exact,
+);
+export type MurmurPhoto = Static<typeof murmurPhotoSchema>;
+
+export const murmurProfileSchema = Type.Object(
+    {
+        firstName: nameSchema,
+        lastName: nameSchema,
+        photo: Type.Optional(murmurPhotoSchema),
+    },
+    exact,
+);
+export type MurmurProfile = Static<typeof murmurProfileSchema>;
+
+export const murmurAccountSchema = Type.Object(
+    {
+        id: identifierSchema,
+        profile: murmurProfileSchema,
+        token: tokenSchema,
+    },
+    exact,
+);
+export type MurmurAccount = Static<typeof murmurAccountSchema>;
+
+export const murmurServiceStateSchema = Type.Object(
+    {
+        relayUrls: Type.Array(Type.String({ maxLength: 2_048, minLength: 1 }), {
+            maxItems: 16,
+            uniqueItems: true,
+        }),
+        status: Type.Union([Type.Literal("running"), Type.Literal("stopped")]),
+    },
+    exact,
+);
+export type MurmurServiceState = Static<typeof murmurServiceStateSchema>;
+
+export const getMurmurAccountResponseSchema = Type.Object(
+    {
+        account: Type.Optional(murmurAccountSchema),
+        service: murmurServiceStateSchema,
+    },
+    exact,
+);
+export type GetMurmurAccountResponse = Static<typeof getMurmurAccountResponseSchema>;
+
+export const signupMurmurAccountRequestSchema = Type.Object(
+    {
+        firstName: nameSchema,
+        lastName: nameSchema,
+        photo: Type.Optional(murmurPhotoInputSchema),
+    },
+    exact,
+);
+export type SignupMurmurAccountRequest = Static<typeof signupMurmurAccountRequestSchema>;
+
+export const signupMurmurAccountResponseSchema = Type.Object(
+    {
+        account: murmurAccountSchema,
+        service: murmurServiceStateSchema,
+    },
+    exact,
+);
+export type SignupMurmurAccountResponse = Static<typeof signupMurmurAccountResponseSchema>;
+
+export const startMurmurServiceRequestSchema = Type.Object(
+    {
+        relayUrls: Type.Optional(
+            Type.Array(Type.String({ maxLength: 2_048, minLength: 1 }), {
+                maxItems: 16,
+                uniqueItems: true,
+            }),
+        ),
+    },
+    exact,
+);
+export type StartMurmurServiceRequest = Static<typeof startMurmurServiceRequestSchema>;
+
+export const startMurmurServiceResponseSchema = Type.Object(
+    { service: murmurServiceStateSchema },
+    exact,
+);
+export type StartMurmurServiceResponse = Static<typeof startMurmurServiceResponseSchema>;
+
+export const stopMurmurServiceResponseSchema = Type.Object(
+    { service: murmurServiceStateSchema },
+    exact,
+);
+export type StopMurmurServiceResponse = Static<typeof stopMurmurServiceResponseSchema>;
+
+export const deleteMurmurAccountResponseSchema = Type.Object({ deleted: Type.Boolean() }, exact);
+export type DeleteMurmurAccountResponse = Static<typeof deleteMurmurAccountResponseSchema>;
+
+export const sendMurmurFriendRequestRequestSchema = Type.Object({ token: tokenSchema }, exact);
+export type SendMurmurFriendRequestRequest = Static<typeof sendMurmurFriendRequestRequestSchema>;
+
+export const sendMurmurFriendRequestResponseSchema = Type.Object(
+    { recipientId: identifierSchema },
+    exact,
+);
+export type SendMurmurFriendRequestResponse = Static<typeof sendMurmurFriendRequestResponseSchema>;
+
+export const murmurFriendRequestSchema = Type.Object(
+    {
+        id: identifierSchema,
+        profile: murmurProfileSchema,
+        receivedAt: timestampSchema,
+        senderId: identifierSchema,
+        senderToken: tokenSchema,
+    },
+    exact,
+);
+export type MurmurFriendRequest = Static<typeof murmurFriendRequestSchema>;
+
+export const listMurmurFriendRequestsResponseSchema = Type.Object(
+    {
+        requests: Type.Array(murmurFriendRequestSchema, { maxItems: 1_000 }),
+    },
+    exact,
+);
+export type ListMurmurFriendRequestsResponse = Static<
+    typeof listMurmurFriendRequestsResponseSchema
+>;
+
+export const answerMurmurFriendRequestRequestSchema = Type.Object(
+    {
+        answer: Type.Union([Type.Literal("accept"), Type.Literal("reject")]),
+    },
+    exact,
+);
+export type AnswerMurmurFriendRequestRequest = Static<
+    typeof answerMurmurFriendRequestRequestSchema
+>;
+
+export const murmurContactSchema = Type.Object(
+    {
+        addedAt: timestampSchema,
+        id: identifierSchema,
+        profile: murmurProfileSchema,
+        token: tokenSchema,
+        updatedAt: timestampSchema,
+    },
+    exact,
+);
+export type MurmurContact = Static<typeof murmurContactSchema>;
+
+export const answerMurmurFriendRequestResponseSchema = Type.Object(
+    {
+        answer: Type.Union([Type.Literal("accept"), Type.Literal("reject")]),
+        contact: Type.Optional(murmurContactSchema),
+    },
+    exact,
+);
+export type AnswerMurmurFriendRequestResponse = Static<
+    typeof answerMurmurFriendRequestResponseSchema
+>;
+
+export const listMurmurContactsResponseSchema = Type.Object(
+    {
+        contacts: Type.Array(murmurContactSchema, { maxItems: 10_000 }),
+    },
+    exact,
+);
+export type ListMurmurContactsResponse = Static<typeof listMurmurContactsResponseSchema>;

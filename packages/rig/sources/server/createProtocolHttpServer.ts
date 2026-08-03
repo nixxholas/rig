@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { basename, extname, isAbsolute, relative } from "node:path";
 
 import { isCuid } from "@paralleldrive/cuid2";
-import { Type } from "@sinclair/typebox";
+import { Type, type Static, type TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import type {
@@ -46,6 +46,8 @@ import type {
     GitWatchResponse,
     GoalSessionResponse,
     ListModelsResponse,
+    ListMurmurContactsResponse,
+    ListMurmurFriendRequestsResponse,
     ListProjectFilePathsResponse,
     ListProjectsResponse,
     ListProjectWorkspacesResponse,
@@ -69,6 +71,7 @@ import type {
     RegisterSecretRequest,
     RegisterSecretResponse,
     SearchFilesResponse,
+    SendMurmurFriendRequestResponse,
     SecretSessionResponse,
     ProtocolSession,
     SessionEvent,
@@ -83,9 +86,12 @@ import type {
     SetGoalRequest,
     ShutdownServerResponse,
     StartInspectorResponse,
+    StartMurmurServiceResponse,
     SteerMessageResponse,
     StopBackgroundProcessResponse,
     StopWorkflowResponse,
+    StopMurmurServiceResponse,
+    SignupMurmurAccountResponse,
     SubagentSummary,
     SubmitMessageResponse,
     TrimGlobalEventsRequest,
@@ -103,15 +109,23 @@ import type {
     UpdateSessionRequest,
     WriteProjectFileRequest,
     WriteProjectFileResponse,
+    AnswerMurmurFriendRequestResponse,
+    DeleteMurmurAccountResponse,
+    GetMurmurAccountResponse,
 } from "../protocol/index.js";
 import {
+    answerMurmurFriendRequestRequestSchema,
     globalSecurityPolicySchema,
     RIG_PROTOCOL_VERSION,
+    sendMurmurFriendRequestRequestSchema,
     SESSION_DRAFT_MAX_LENGTH,
+    signupMurmurAccountRequestSchema,
+    startMurmurServiceRequestSchema,
     updateProjectSettingsRequestSchema,
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
+import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
 import { errorToMessage } from "../errorToMessage.js";
@@ -235,6 +249,7 @@ export interface ProtocolHttpServerOptions {
     gitStateTracker?: GitStateTracker;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
+    murmur?: MurmurServiceContract;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
     getProviderQuota?: (providerId: string) => Promise<ProviderQuota | undefined>;
@@ -289,6 +304,7 @@ export function createProtocolHttpServer(
         globalInstructionsPath: options.globalInstructionsPath ?? getGlobalAgentsMdPath(),
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
+        murmur: options.murmur,
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
@@ -365,6 +381,7 @@ interface ProtocolServerRuntimeConfig {
     globalInstructionsPath: string;
     globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
+    murmur: MurmurServiceContract | undefined;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
@@ -468,6 +485,106 @@ async function handleRequest(
             healthResponse(modelCatalog, identity, runtimeConfig.globalEventQueue.durable),
         );
         return;
+    }
+
+    if (route.name.startsWith("murmur-")) {
+        const murmur = runtimeConfig.murmur;
+        if (murmur === undefined) {
+            sendJson(response, 503, { error: "Murmur is unavailable while Rig is starting." });
+            return;
+        }
+        try {
+            if (request.method === "GET" && route.name === "murmur-account") {
+                sendJson<GetMurmurAccountResponse>(response, 200, await murmur.getAccount());
+                return;
+            }
+            if (request.method === "POST" && route.name === "murmur-account") {
+                const body = decodeMurmurRequest(
+                    signupMurmurAccountRequestSchema,
+                    await readJson<unknown>(request, 34 * 1024 * 1024),
+                );
+                sendJson<SignupMurmurAccountResponse>(response, 201, await murmur.signup(body));
+                return;
+            }
+            if (request.method === "DELETE" && route.name === "murmur-account") {
+                sendJson<DeleteMurmurAccountResponse>(response, 200, await murmur.deleteAccount());
+                return;
+            }
+            if (request.method === "POST" && route.name === "murmur-service-start") {
+                const body = decodeMurmurRequest(
+                    startMurmurServiceRequestSchema,
+                    await readJson<unknown>(request, 64 * 1024),
+                );
+                sendJson<StartMurmurServiceResponse>(response, 200, await murmur.start(body));
+                return;
+            }
+            if (request.method === "POST" && route.name === "murmur-service-stop") {
+                sendJson<StopMurmurServiceResponse>(response, 200, await murmur.stop());
+                return;
+            }
+            if (request.method === "POST" && route.name === "murmur-friend-requests") {
+                const body = decodeMurmurRequest(
+                    sendMurmurFriendRequestRequestSchema,
+                    await readJson<unknown>(request, 8 * 1024),
+                );
+                sendJson<SendMurmurFriendRequestResponse>(
+                    response,
+                    202,
+                    await murmur.sendFriendRequest(body),
+                );
+                return;
+            }
+            if (request.method === "GET" && route.name === "murmur-friend-requests") {
+                sendJson<ListMurmurFriendRequestsResponse>(
+                    response,
+                    200,
+                    await murmur.listFriendRequests(),
+                );
+                return;
+            }
+            if (request.method === "POST" && route.name === "murmur-friend-request-answer") {
+                const body = decodeMurmurRequest(
+                    answerMurmurFriendRequestRequestSchema,
+                    await readJson<unknown>(request, 8 * 1024),
+                );
+                sendJson<AnswerMurmurFriendRequestResponse>(
+                    response,
+                    200,
+                    await murmur.answerFriendRequest(route.requestId, body),
+                );
+                return;
+            }
+            if (request.method === "GET" && route.name === "murmur-contacts") {
+                sendJson<ListMurmurContactsResponse>(response, 200, await murmur.listContacts());
+                return;
+            }
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            if (
+                error instanceof InvalidJsonBodyError ||
+                error instanceof RequestBodyTooLargeError
+            ) {
+                throw error;
+            }
+            if (error instanceof InvalidMurmurRequestError) {
+                sendJson(response, 400, { error: "The Murmur request is invalid." });
+                return;
+            }
+            if (error instanceof MurmurServiceError) {
+                const status =
+                    error.code === "invalid_identity_token" || error.code === "invalid_profile"
+                        ? 400
+                        : error.code === "account_missing" || error.code === "request_not_found"
+                          ? 404
+                          : error.code === "relay_unavailable"
+                            ? 502
+                            : 409;
+                sendJson(response, status, { code: error.code, error: error.message });
+                return;
+            }
+            sendJson(response, 409, { error: errorToMessage(error) });
+            return;
+        }
     }
 
     if (request.method === "POST" && route.name === "shutdown") {
@@ -3290,6 +3407,11 @@ function matchRoute(pathname: string):
               | "happy-reload"
               | "messages"
               | "models"
+              | "murmur-account"
+              | "murmur-contacts"
+              | "murmur-friend-requests"
+              | "murmur-service-start"
+              | "murmur-service-stop"
               | "presence"
               | "plugins"
               | "projects"
@@ -3300,6 +3422,11 @@ function matchRoute(pathname: string):
               | "slots"
               | "timeline"
               | "webapps";
+          sessionId?: undefined;
+      }
+    | {
+          name: "murmur-friend-request-answer";
+          requestId: string;
           sessionId?: undefined;
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
@@ -3444,6 +3571,11 @@ function matchRoute(pathname: string):
     if (pathname === "/external-tool-calls") return { name: "external-tool-calls" };
     if (pathname === "/models") return { name: "models" };
     if (pathname === "/messages") return { name: "messages" };
+    if (pathname === "/murmur/account") return { name: "murmur-account" };
+    if (pathname === "/murmur/contacts") return { name: "murmur-contacts" };
+    if (pathname === "/murmur/friend-requests") return { name: "murmur-friend-requests" };
+    if (pathname === "/murmur/service/start") return { name: "murmur-service-start" };
+    if (pathname === "/murmur/service/stop") return { name: "murmur-service-stop" };
     if (pathname === "/git/watch") return { name: "git-watch" };
     if (pathname === "/presence") return { name: "presence" };
     if (pathname === "/plugins") return { name: "plugins" };
@@ -3497,6 +3629,18 @@ function matchRoute(pathname: string):
     }
 
     const globalParts = pathname.split("/").filter(Boolean);
+    if (
+        globalParts.length === 4 &&
+        globalParts[0] === "murmur" &&
+        globalParts[1] === "friend-requests" &&
+        globalParts[2] !== undefined &&
+        globalParts[3] === "answer"
+    ) {
+        const requestId = decodeUrlComponent(globalParts[2]);
+        return requestId === undefined
+            ? undefined
+            : { name: "murmur-friend-request-answer", requestId };
+    }
     const appOperation =
         /^\/plugin-apps\/([^/]+)\/generations\/([^/]+)\/(resources\/read|tools\/call|extensions\/io\.slopus\.happy\/storage\/(get|set|delete|list))$/u.exec(
             pathname,
@@ -4003,6 +4147,17 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
     if (route.name === "plugins") return request.method === "POST";
+    if (
+        [
+            "murmur-account",
+            "murmur-friend-request-answer",
+            "murmur-friend-requests",
+            "murmur-service-start",
+            "murmur-service-stop",
+        ].includes(route.name)
+    ) {
+        return request.method !== "GET";
+    }
     if (route.name === "plugin-uninstall") return request.method === "DELETE";
     if (route.name === "plugin-app-tool-call" || route.name === "plugin-app-storage") {
         return request.method === "POST";
@@ -4154,7 +4309,20 @@ function requestMutationId(request: IncomingMessage): string | undefined {
 
 class InvalidJsonBodyError extends Error {}
 
+class InvalidMurmurRequestError extends Error {}
+
 class RequestBodyTooLargeError extends Error {}
+
+function decodeMurmurRequest<Schema extends TSchema>(
+    schema: Schema,
+    value: unknown,
+): Static<Schema> {
+    try {
+        return Value.Decode(schema, value);
+    } catch {
+        throw new InvalidMurmurRequestError();
+    }
+}
 
 function isExternalToolCallResolution(value: unknown): value is ResolveExternalToolCallRequest {
     if (value === null || typeof value !== "object" || Array.isArray(value)) return false;

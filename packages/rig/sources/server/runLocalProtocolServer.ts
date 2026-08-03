@@ -1,5 +1,6 @@
 import { chmod, open } from "node:fs/promises";
 import { createServer } from "node:http";
+import { dirname, join } from "node:path";
 
 import { createProtocolHttpServer } from "./createProtocolHttpServer.js";
 import { DaemonLog } from "./DaemonLog.js";
@@ -52,6 +53,8 @@ import { writeDaemonCrashReport } from "./writeDaemonCrashReport.js";
 import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
+import { MurmurService } from "../murmur/index.js";
+import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -117,6 +120,7 @@ async function runOwnedLocalProtocolServer(
 
     let startupState: DaemonStartupState = { status: "starting" };
     let mcpToolProvider: McpToolProvider | undefined;
+    let murmurService: MurmurService | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -510,6 +514,14 @@ async function runOwnedLocalProtocolServer(
             },
             taskDrain,
         });
+        murmurService = new MurmurService({
+            storeFactory: () =>
+                new SqliteMurmurStore(join(dirname(paths.databasePath), "murmur.sqlite")),
+        });
+        await murmurService.getAccount();
+        shutdown.register("murmur", async () => {
+            await murmurService?.close();
+        });
         const startedPluginManager = (pluginManager = new PluginManager({
             daemonLog,
             ...(loadedConfig.config.docker === undefined
@@ -601,6 +613,7 @@ async function runOwnedLocalProtocolServer(
                     : { globalEventQueue: store.globalEventQueue }),
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
+                murmur: murmurService,
                 plugins,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 listProviderUsage: () => providerUsageTracker?.all() ?? [],

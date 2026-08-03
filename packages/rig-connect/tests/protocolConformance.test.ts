@@ -116,6 +116,20 @@ type _PluginManagementErrorResponse = Assignable<
     local.PluginManagementErrorResponse,
     daemon.PluginManagementErrorResponse
 >;
+type _MurmurAccount = Assignable<local.MurmurAccount, daemon.MurmurAccount>;
+type _MurmurProfile = Assignable<local.MurmurProfile, daemon.MurmurProfile>;
+type _MurmurPhoto = Assignable<local.MurmurPhoto, daemon.MurmurPhoto>;
+type _MurmurServiceState = Assignable<local.MurmurServiceState, daemon.MurmurServiceState>;
+type _SignupMurmurRequest = Assignable<
+    daemon.SignupMurmurAccountRequest,
+    local.SignupMurmurAccountRequest
+>;
+type _SignupMurmurResponse = Assignable<
+    local.SignupMurmurAccountResponse,
+    daemon.SignupMurmurAccountResponse
+>;
+type _MurmurFriendRequest = Assignable<local.MurmurFriendRequest, daemon.MurmurFriendRequest>;
+type _MurmurContact = Assignable<local.MurmurContact, daemon.MurmurContact>;
 type _TimelineScope = Assignable<local.TimelineScope, daemon.TimelineScope>;
 type _TimelineSpan = Assignable<local.TimelineSpan, daemon.TimelineSpan>;
 type _TimelineSpanKind = Assignable<local.TimelineSpanKind, daemon.TimelineSpanKind>;

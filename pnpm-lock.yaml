@@ -170,6 +170,9 @@ importers:
       '@slopus/ghostty-wasm':
         specifier: 1.3.6
         version: 1.3.6
+      '@slopus/murmur':
+        specifier: 0.1.9
+        version: 0.1.9
       '@types/node':
         specifier: ^24.0.10
         version: 24.13.2
@@ -1237,6 +1240,18 @@ packages:
       '@emnapi/core': ^1.7.1
       '@emnapi/runtime': ^1.7.1
 
+  '@noble/ciphers@1.3.0':
+    resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
+
   '@noble/hashes@2.2.0':
     resolution: {integrity: sha512-IYqDGiTXab6FniAgnSdZwgWbomxpy9FtYvLKs7wCUs2a8RkITG+DFGO1DM9cr+E3/RgADRpFjrKVaJ1z6sjtEg==}
     engines: {node: '>= 20.19.0'}
@@ -1740,6 +1755,10 @@ packages:
 
   '@slopus/ghostty-wasm@1.3.6':
     resolution: {integrity: sha512-S8KS9VyGgv451D8ZrRoS5vAg1Eqk8dZJWzM28HrjXVmD1B8g3Ec1QsjUWAIVqReuZyZqLFxZfjH6rU0N/f7n2Q==}
+
+  '@slopus/murmur@0.1.9':
+    resolution: {integrity: sha512-L3N0fSuROBKcujFPNy149kwSS9xuX9zIiZOXspWoeBjzLKAsj5Rej45fea/nQfzBBYfFdsNjfGIFi6eSj8j1eA==}
+    engines: {node: '>=20'}
 
   '@smithy/abort-controller@2.2.0':
     resolution: {integrity: sha512-wRlta7GuLWpTqtFfGo+nZyOO1vEvewdNR1R4rTxpC8XU6vG/NDyrFBhwLZsqg1NUoR1noVaXJPC/7ZK47QCySw==}
@@ -4734,6 +4753,14 @@ snapshots:
       '@tybys/wasm-util': 0.10.3
     optional: true
 
+  '@noble/ciphers@1.3.0': {}
+
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
+  '@noble/hashes@1.8.0': {}
+
   '@noble/hashes@2.2.0': {}
 
   '@nodable/entities@2.2.0': {}
@@ -5049,6 +5076,12 @@ snapshots:
   '@sinclair/typebox@0.34.49': {}
 
   '@slopus/ghostty-wasm@1.3.6': {}
+
+  '@slopus/murmur@0.1.9':
+    dependencies:
+      '@noble/ciphers': 1.3.0
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
 
   '@smithy/abort-controller@2.2.0':
     dependencies:
