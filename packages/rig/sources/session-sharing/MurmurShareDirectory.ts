@@ -56,8 +56,6 @@ const OWN_BUNDLE_PREFIX = `${STORE_PREFIX}own-bundle/`;
 const OFFERED_PREFIX = `${STORE_PREFIX}offered/`;
 const INVITATION_PREFIX = `${STORE_PREFIX}invitation/`;
 
-/** Own generated one-use bundles retained globally while unconsumed. */
-const MAX_OWN_BUNDLES = 32;
 /** Friend-offered key packages retained per peer before the oldest is dropped. */
 const MAX_OFFERED_PER_PEER = 8;
 /** Received invitations retained globally while unresolved. */
@@ -84,8 +82,12 @@ export interface MurmurShareDirectoryOptions {
     readonly runtime: () => MurmurRuntimeHandle | undefined;
 }
 
-function ownBundleKey(referenceId: string): string {
-    return `${OWN_BUNDLE_PREFIX}${referenceId}`;
+function ownBundlePeerPrefix(murmurPeerId: string): string {
+    return `${OWN_BUNDLE_PREFIX}${murmurPeerId}/`;
+}
+
+function ownBundleKey(murmurPeerId: string, referenceId: string): string {
+    return `${ownBundlePeerPrefix(murmurPeerId)}${referenceId}`;
 }
 
 function offeredPeerPrefix(murmurPeerId: string): string {
@@ -96,8 +98,20 @@ function offeredKey(murmurPeerId: string, referenceId: string): string {
     return `${offeredPeerPrefix(murmurPeerId)}${referenceId}`;
 }
 
-function invitationKey(shareId: string): string {
-    return `${INVITATION_PREFIX}${shareId}`;
+// Invitations are keyed by owner peer as well as shareId. A shareId is chosen by
+// the inviting owner, so keying on it alone would let one friend overwrite
+// another friend's stored invitation by reusing the same shareId.
+function invitationKey(ownerPeerId: string, shareId: string): string {
+    return `${INVITATION_PREFIX}${ownerPeerId}/${shareId}`;
+}
+
+function parseInvitationKey(key: string): { ownerPeerId: string; shareId: string } | undefined {
+    const rest = key.slice(INVITATION_PREFIX.length);
+    // A peer ID is base64url and a shareId carries no slash, so the first slash
+    // separates the two halves the key was built from.
+    const slash = rest.indexOf("/");
+    if (slash <= 0 || slash >= rest.length - 1) return undefined;
+    return { ownerPeerId: rest.slice(0, slash), shareId: rest.slice(slash + 1) };
 }
 
 function destroyPublicIdentity(identity: IdentityPublicKeys): void {
@@ -209,38 +223,49 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
         | undefined
     > {
         const runtime = this.#requireRuntime();
-        const storedBytes = await runtime.store.get(invitationKey(shareId));
-        if (storedBytes === undefined) return undefined;
-        const stored = decodeStoredShareInvitation(storedBytes);
-        zeroBytes(storedBytes);
-        const owner = deserializeSharePublicIdentity(stored.owner);
-        let decoded: ReturnType<typeof decodeSharedSessionInvitation>;
-        try {
-            decoded = decodeSharedSessionInvitation(stored.invitationText, owner);
-        } catch {
-            destroyPublicIdentity(owner);
-            return undefined;
-        }
-        if (decoded.shareId !== shareId) {
-            destroyPublicIdentity(owner);
+        // The transport hands us only the shareId, but invitations are keyed by
+        // owner peer too, so several friends may hold an invitation for the same
+        // shareId. Scan every owner that invited us to it and return the first
+        // whose one-use bundle we still hold; the bundle is deleted as it is read.
+        const stored = await runtime.store.list(INVITATION_PREFIX);
+        for (const [key, bytes] of stored) {
+            const parsed = parseInvitationKey(key);
+            if (parsed === undefined || parsed.shareId !== shareId) {
+                zeroBytes(bytes);
+                continue;
+            }
+            const record = decodeStoredShareInvitation(bytes);
+            zeroBytes(bytes);
+            const owner = deserializeSharePublicIdentity(record.owner);
+            let decoded: ReturnType<typeof decodeSharedSessionInvitation>;
+            try {
+                decoded = decodeSharedSessionInvitation(record.invitationText, owner);
+            } catch {
+                destroyPublicIdentity(owner);
+                continue;
+            }
+            const matches = decoded.shareId === shareId;
+            const reference = decoded.keyPackageReference;
             zeroBytes(decoded.groupId);
             zeroBytes(decoded.welcome);
             zeroBytes(decoded.tree);
-            zeroBytes(decoded.keyPackageReference);
             zeroBytes(decoded.commitFingerprint);
-            return undefined;
+            if (!matches) {
+                zeroBytes(reference);
+                destroyPublicIdentity(owner);
+                continue;
+            }
+            const bundle = await runtime.store.transaction((transaction) =>
+                this.#consumeOwnBundle(transaction, parsed.ownerPeerId, reference),
+            );
+            zeroBytes(reference);
+            if (bundle === undefined) {
+                destroyPublicIdentity(owner);
+                continue;
+            }
+            return { bundle, invitation: record.invitationText, owner };
         }
-        const bundle = await this.#readOwnBundle(runtime.store, decoded.keyPackageReference);
-        zeroBytes(decoded.groupId);
-        zeroBytes(decoded.welcome);
-        zeroBytes(decoded.tree);
-        zeroBytes(decoded.keyPackageReference);
-        zeroBytes(decoded.commitFingerprint);
-        if (bundle === undefined) {
-            destroyPublicIdentity(owner);
-            return undefined;
-        }
-        return { bundle, invitation: stored.invitationText, owner };
+        return undefined;
     }
 
     /** Generate a fresh one-use bundle and offer its public half to one friend. */
@@ -257,7 +282,7 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
             const bundle = createMlsKeyPackage(runtime.identity);
             try {
                 await runtime.store.transaction((transaction) =>
-                    this.#saveOwnBundle(transaction, bundle, this.#now()),
+                    this.#saveOwnBundle(transaction, murmurPeerId, bundle, this.#now()),
                 );
                 const keyPackageBytes = encodeMlsKeyPackage(bundle.keyPackage);
                 try {
@@ -364,14 +389,12 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
         const stored = await runtime.store.list(INVITATION_PREFIX);
         const invitations: ReceivedShareInvitation[] = [];
         for (const [key, bytes] of stored) {
-            const record = decodeStoredShareInvitation(bytes);
             zeroBytes(bytes);
-            const owner = deserializeSharePublicIdentity(record.owner);
-            invitations.push({
-                ownerPeerId: identityId(owner),
-                shareId: key.slice(INVITATION_PREFIX.length),
-            });
-            destroyPublicIdentity(owner);
+            // Both owner peer and shareId live in the key, so there is no need to
+            // decode the record just to list what is still pending.
+            const parsed = parseInvitationKey(key);
+            if (parsed === undefined) continue;
+            invitations.push({ ownerPeerId: parsed.ownerPeerId, shareId: parsed.shareId });
         }
         return invitations;
     }
@@ -533,7 +556,10 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
             version: 1,
         });
         try {
-            await transaction.set(invitationKey(decoded.shareId), record.slice());
+            await transaction.set(
+                invitationKey(identityId(ownerIdentity), decoded.shareId),
+                record.slice(),
+            );
         } finally {
             zeroBytes(record);
         }
@@ -558,8 +584,13 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
                 return { key, keyPackage: record.keyPackage, offeredAt: record.offeredAt };
             })
             .sort(
+                // Consume newest first. The offering peer caps its own retained
+                // private bundles and evicts them oldest-first, so the oldest
+                // offer we hold is the one whose private half the peer has most
+                // likely already dropped — using it would make its later join
+                // fail silently.
                 (left, right) =>
-                    left.offeredAt - right.offeredAt || left.key.localeCompare(right.key),
+                    right.offeredAt - left.offeredAt || right.key.localeCompare(left.key),
             );
         const nowSeconds = Math.floor(this.#now() / 1000);
         for (const entry of entries) {
@@ -581,6 +612,7 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
 
     async #saveOwnBundle(
         transaction: StoreTransaction,
+        murmurPeerId: string,
         bundle: MlsKeyPackageBundle,
         createdAt: number,
     ): Promise<void> {
@@ -593,28 +625,41 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
                 version: 1,
             });
             try {
-                await transaction.set(ownBundleKey(referenceId), encoded.slice());
+                await transaction.set(ownBundleKey(murmurPeerId, referenceId), encoded.slice());
             } finally {
                 zeroBytes(encoded);
             }
         } finally {
             zeroBytes(serialized);
         }
+        // Retain our own private bundles per peer, bounded by exactly what that
+        // peer keeps of the public halves we offered it (MAX_OFFERED_PER_PEER,
+        // both sides evicting oldest-first). The newest offer a peer can invite
+        // us with is therefore always a bundle we still hold. A single global cap
+        // instead evicts a still-held bundle once a few friends each retain their
+        // MAX_OFFERED_PER_PEER share.
         await evictOldest(
             transaction,
-            OWN_BUNDLE_PREFIX,
-            MAX_OWN_BUNDLES,
+            ownBundlePeerPrefix(murmurPeerId),
+            MAX_OFFERED_PER_PEER,
             (bytes) => decodeStoredShareOwnBundle(bytes).createdAt,
         );
     }
 
-    async #readOwnBundle(
-        store: Pick<StoreTransaction, "get">,
+    async #consumeOwnBundle(
+        transaction: StoreTransaction,
+        murmurPeerId: string,
         referenceBytes: Uint8Array,
     ): Promise<MlsKeyPackageBundle | undefined> {
         const referenceId = encodeBase64Url(referenceBytes);
-        const bytes = await store.get(ownBundleKey(referenceId));
+        const key = ownBundleKey(murmurPeerId, referenceId);
+        const bytes = await transaction.get(key);
         if (bytes === undefined) return undefined;
+        // One-use private material: delete it as it is read so a bundle is never
+        // reused. If the join that follows fails, `acceptedInvitation` finds
+        // nothing here on the next attempt and the caller
+        // (MurmurSessionShareTransport.joinMember) throws rather than looping.
+        await transaction.delete(key);
         const record = decodeStoredShareOwnBundle(bytes);
         zeroBytes(bytes);
         const serialized = decodeBase64Url(record.bundle);

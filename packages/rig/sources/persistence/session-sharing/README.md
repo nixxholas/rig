@@ -8,3 +8,9 @@ Acknowledging the outbox (`sessionShareOutboxAcknowledge`) copies each published
 append-only `session_share_entries` log in the same transaction before deleting it from the
 outbox, so an owner can always page durable history back to a newly invited member through
 `querySessionShareEntryLog`.
+
+Retention: the entry log exists only to offer past history to a member that joins later, so it is
+bounded by the share's lifetime rather than kept forever. Stopping a share flips its state without
+deleting the share row, so the `ON DELETE CASCADE` never fires; `sessionShareStop` therefore prunes
+the log (`sessionShareEntryLogPrune`) in the same transaction as the stop. A stopped share can never
+admit a new member, so it keeps no transcript duplicate.

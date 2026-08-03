@@ -54,6 +54,7 @@ import {
     type MurmurFriendshipChangedEvent,
 } from "./MurmurFriendshipManager.js";
 import type {
+    MurmurEventOutcome,
     MurmurEventRouter,
     MurmurLifecycleStore,
     MurmurRuntimeHandle,
@@ -761,10 +762,17 @@ export class MurmurService implements MurmurServiceContract {
                     await this.#requireFriendships().drainGlobalEventOutbox();
                     await this.#flushRelayOutbox(runtime);
                 } else {
+                    let retained = false;
                     for (const received of result.events) {
-                        await this.#persistReceivedEvent(runtime, received);
+                        if ((await this.#persistReceivedEvent(runtime, received)) === "retained") {
+                            // The cursor stayed put on purpose, so re-reading immediately
+                            // would spin on the same event. Back off and let whatever the
+                            // owning router is waiting for arrive.
+                            retained = true;
+                            break;
+                        }
                     }
-                    if (result.events.length === 0) await abortableDelay(50, signal);
+                    if (retained || result.events.length === 0) await abortableDelay(50, signal);
                 }
             } catch (error: unknown) {
                 const databaseFailure = runtime.observedStore.takeDatabaseFailure();
@@ -781,21 +789,26 @@ export class MurmurService implements MurmurServiceContract {
         for (const listener of this.#runtimeListeners) listener(handle);
     }
 
-    async #routeReceivedEvent(received: ReceivedEvent): Promise<boolean> {
+    async #routeReceivedEvent(received: ReceivedEvent): Promise<MurmurEventOutcome> {
         for (const router of this.#eventRouters) {
-            if (await router(received)) return true;
+            const outcome = await router(received);
+            if (outcome !== "unowned") return outcome;
         }
-        return false;
+        return "unowned";
     }
 
-    async #persistReceivedEvent(runtime: MurmurRuntime, received: ReceivedEvent): Promise<void> {
-        if (await this.#routeReceivedEvent(received)) return;
+    async #persistReceivedEvent(
+        runtime: MurmurRuntime,
+        received: ReceivedEvent,
+    ): Promise<MurmurEventOutcome> {
+        const routed = await this.#routeReceivedEvent(received);
+        if (routed !== "unowned") return routed;
         const inbox = identityInboxTopic(runtime.account.identity);
         if (received.event.topic !== inbox) {
             await this.#requireStore().transaction(async (transaction) => {
                 await received.advanceCursor(transaction);
             });
-            return;
+            return "applied";
         }
         await this.#requireStore().transaction(async (transaction) => {
             const processed = await this.#requireFriendships().processInboundPayload(
@@ -812,6 +825,7 @@ export class MurmurService implements MurmurServiceContract {
         });
         await this.#requireFriendships().drainGlobalEventOutbox();
         await this.#flushRelayOutbox(runtime);
+        return "applied";
     }
 
     #flushRelayOutbox(runtime: MurmurRuntime): Promise<void> {

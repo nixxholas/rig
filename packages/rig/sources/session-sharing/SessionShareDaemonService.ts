@@ -195,7 +195,10 @@ export class SessionShareDaemonService implements SessionShareServiceContract {
         }
         await this.#service.post({
             clientMessageId: request.clientMessageId,
-            displayName: replica.title.length === 0 ? "You" : replica.title,
+            // The member is posting its own message, so label it honestly rather
+            // than with the share title. This name is only advisory: the owner
+            // relabels every post with the name it registered for this member.
+            displayName: "You",
             grant: request.grant,
             text: request.text,
         });

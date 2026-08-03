@@ -116,13 +116,15 @@ export function createSessionShareRuntime(
         } catch {
             // A share whose invitation cannot be joined yet stays stored; the next
             // service start replays it from the directory's pending invitations.
+            return;
         }
+        await backfillReplica(transport, invitation.shareId);
     };
 
     const unregisterRouter = options.murmur.registerEventRouter(async (received) => {
         const outcome = await transport.handleReceivedEvent(received);
-        if (outcome !== "unowned") return true;
-        return directory.handleReceivedEvent(received);
+        if (outcome !== "unowned") return outcome;
+        return (await directory.handleReceivedEvent(received)) ? "applied" : "unowned";
     });
     // A friend's fresh key package is exactly what a deferred invitation was waiting for.
     const unobserveOffers = directory.onKeyPackageOffered(() => {
@@ -131,13 +133,19 @@ export function createSessionShareRuntime(
     const unobserveInvitations = directory.onInvitation((invitation) => {
         void joinReplica(invitation);
     });
+    const startAll = (): void => {
+        void startForRuntime({
+            daemonStore: options.daemonStore,
+            directory,
+            joinReplica,
+            service,
+            transport,
+        });
+    };
     const unobserveRuntime = options.murmur.onRuntimeChanged((runtime) => {
-        if (runtime === undefined) return;
-        void startForRuntime(service, directory, joinReplica);
+        if (runtime !== undefined) startAll();
     });
-    if (options.murmur.runtime() !== undefined) {
-        void startForRuntime(service, directory, joinReplica);
-    }
+    if (options.murmur.runtime() !== undefined) startAll();
 
     return {
         close: async () => {
@@ -157,23 +165,49 @@ export function createSessionShareRuntime(
 }
 
 /**
+ * Catch one replica up with the history the owner offered it.
+ *
+ * Murmur backfills history only through `retry`, so a member invited into a
+ * share that already had a transcript never sees it unless Rig asks. Left
+ * unasked, live entries pile up against Murmur's pending-entry bound and the
+ * replica stops replicating altogether.
+ */
+async function backfillReplica(
+    transport: MurmurSessionShareTransport,
+    shareId: string,
+): Promise<void> {
+    try {
+        await transport.retry(shareId);
+    } catch {
+        // Backfill is resumable: the next start, or the next entry that arrives, asks again.
+    }
+}
+
+/**
  * Bring both halves of sharing back up for a freshly started Murmur service:
  * owner shares recover, friends are re-offered a key package so they can invite
- * this account, and every invitation received while the service was down joins.
+ * this account, every invitation received while the service was down joins, and
+ * every active replica resumes the history it had not finished.
  */
-async function startForRuntime(
-    service: SessionShareService,
-    directory: MurmurShareDirectory,
-    joinReplica: (invitation: ReceivedShareInvitation) => Promise<void>,
-): Promise<void> {
-    await recoverShares(service);
+async function startForRuntime(context: {
+    daemonStore: PersistentSessionShareDaemonStore;
+    directory: MurmurShareDirectory;
+    joinReplica: (invitation: ReceivedShareInvitation) => Promise<void>;
+    service: SessionShareService;
+    transport: MurmurSessionShareTransport;
+}): Promise<void> {
+    await recoverShares(context.service);
     try {
-        await directory.publishKeyPackageOffers();
-        for (const invitation of await directory.pendingInvitations())
-            await joinReplica(invitation);
+        await context.directory.publishKeyPackageOffers();
+        for (const invitation of await context.directory.pendingInvitations()) {
+            await context.joinReplica(invitation);
+        }
     } catch {
         // Nothing here is load-bearing for daemon startup: a missed offer is re-requested
         // by the owner that needs it, and a missed invitation replays on the next start.
+    }
+    for (const replica of context.daemonStore.queryReplicas()) {
+        if (replica.state === "active") await backfillReplica(context.transport, replica.shareId);
     }
 }
 

@@ -13,6 +13,7 @@ import { sessionShareCreate } from "../sessionShareCreate.js";
 import { sessionShareEntryLogAppend } from "../sessionShareEntryLogAppend.js";
 import { sessionShareOutboxAcknowledge } from "../sessionShareOutboxAcknowledge.js";
 import { sessionShareOutboxEnqueue } from "../sessionShareOutboxEnqueue.js";
+import { sessionShareStop } from "../sessionShareStop.js";
 
 const directories: string[] = [];
 
@@ -83,6 +84,40 @@ describe("session share entry log persistence", () => {
                     },
                 ],
             });
+        } finally {
+            opened.client.close();
+        }
+    });
+
+    it("prunes the whole log when the share stops so no transcript duplicate lingers", async () => {
+        const opened = await fixture();
+        try {
+            createShare(opened.database);
+            sessionShareEntryLogAppend(opened.database, {
+                entries: [logEntry(1), logEntry(2), logEntry(3)],
+                shareId: "share-1",
+            });
+            expect(
+                querySessionShareEntryLog(opened.database, {
+                    afterSequence: 0,
+                    maxBytes: 1_000,
+                    maxItems: 10,
+                    shareId: "share-1",
+                }).entries,
+            ).toHaveLength(3);
+
+            expect(sessionShareStop(opened.database, "share-1", 5)).toBe(true);
+
+            // Stopping flips state only, so the CASCADE never fires; the stop must
+            // prune the log itself. A stopped share can never offer history again.
+            expect(
+                querySessionShareEntryLog(opened.database, {
+                    afterSequence: 0,
+                    maxBytes: 1_000,
+                    maxItems: 10,
+                    shareId: "share-1",
+                }).entries,
+            ).toEqual([]);
         } finally {
             opened.client.close();
         }

@@ -15,6 +15,7 @@ import type {
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import { querySessionShare, querySessionShareMembers } from "./querySessionShare.js";
+import { querySessionShareForOwnerSession } from "./querySessionShareForOwnerSession.js";
 import { querySessionShareEntryLog } from "./querySessionShareEntryLog.js";
 import { querySessionShareOutbox } from "./querySessionShareOutbox.js";
 import { querySessionShareEndedGrants } from "./querySessionShareEndedGrants.js";
@@ -85,13 +86,8 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
     }
 
     queryActiveShareForSession(ownerSessionId: string): CoreShare | undefined {
-        const share = [
-            ...queryRecoverableSessionShares(this.#tx()),
-            ...queryStoppedSessionShares(this.#tx()),
-        ].find((candidate) => candidate.ownerSessionId === ownerSessionId);
-        return share === undefined || share.state === "stopped"
-            ? undefined
-            : this.#shareWithMembers(share.shareId);
+        const share = querySessionShareForOwnerSession(this.#tx(), ownerSessionId);
+        return share === undefined ? undefined : this.#shareWithMembers(share.shareId);
     }
 
     queryRecoverableShares(): readonly CoreShare[] {

@@ -17,6 +17,7 @@ import {
     type SessionShareMurmurDirectory,
 } from "../MurmurSessionShareTransport.js";
 import { projectSessionShareEntry } from "../projectSessionShareEntry.js";
+import { SessionShareUnauthorizedPostError } from "../SessionShareService.js";
 import type {
     SessionShareOpaqueEntry,
     SessionShareTransportGrant,
@@ -114,6 +115,21 @@ async function pump(peer: Peer, transport: MurmurSessionShareTransport): Promise
     }
 }
 
+/** A directory whose absence is the point: these cases must not consult it. */
+function unusedDirectory(): SessionShareMurmurDirectory {
+    const fail = (): never => {
+        throw new Error("This case must not consult the Murmur directory.");
+    };
+    return {
+        acceptedInvitation: async () => fail(),
+        deliver: async () => fail(),
+        displayName: async () => fail(),
+        identity: async () => fail(),
+        keyPackage: async () => fail(),
+        requestKeyPackage: async () => fail(),
+    };
+}
+
 describe("the Murmur session-share transport", () => {
     it("replicates a shared session to a friend and carries their reply back", async () => {
         const relay = new InMemoryMurmurRelay();
@@ -170,7 +186,11 @@ describe("the Murmur session-share transport", () => {
             shareMemberId: "member-1",
         };
 
+        let rejectPosts = false;
         ownerTransport.handleOwnerEvents(shareId, (event) => {
+            if (rejectPosts && event.type === "member_posted") {
+                throw new SessionShareUnauthorizedPostError("The grant no longer accepts posts.");
+            }
             ownerEvents.push(event);
         });
         friendTransport.handleMemberEvents(grant, (event) => {
@@ -224,6 +244,20 @@ describe("the Murmur session-share transport", () => {
             senderPeerId: friend.peerId,
         });
 
+        // A post that races a revocation is rejected by the owner. That rejection runs
+        // inside Murmur's store transaction, so it must be dropped rather than escape and
+        // stall the cursor for every topic behind it.
+        rejectPosts = true;
+        await friendTransport.postMember({
+            clientMessageId: "post-2",
+            displayName: "Dana",
+            grant,
+            text: "One more thought.",
+        });
+        await expect(pump(owner, ownerTransport)).resolves.toBeUndefined();
+        expect(ownerEvents.filter((event) => event.type === "member_posted")).toHaveLength(1);
+        rejectPosts = false;
+
         await ownerTransport.revoke(grant);
         await pump(friend, friendTransport);
 
@@ -232,6 +266,75 @@ describe("the Murmur session-share transport", () => {
         ownerTransport.close();
         friendTransport.close();
     }, 60_000);
+
+    it("re-appends an entry Murmur already committed without degrading the share", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const owner = createPeer(relay);
+        const shareId = "share-replay";
+        const transport = new MurmurSessionShareTransport({
+            directory: unusedDirectory(),
+            entrySource: () => entrySourceOver([]),
+            runtime: runtimeOf(owner),
+        });
+        await transport.createOwner({ ownerPeerId: owner.peerId, shareId });
+
+        const entries = [entry(shareId, 1, "First."), entry(shareId, 2, "Second.")];
+        await transport.appendOwnerEntries(shareId, entries);
+
+        // A crash between Murmur's commit and Rig's acknowledgement leaves the entry in
+        // Rig's outbox, so the next publish resends it through a transport that has no
+        // memory of the send. It must be absorbed, not rejected.
+        transport.close();
+        const resumed = new MurmurSessionShareTransport({
+            directory: unusedDirectory(),
+            entrySource: () => entrySourceOver([]),
+            runtime: runtimeOf(owner),
+        });
+        await expect(resumed.appendOwnerEntries(shareId, entries)).resolves.toBeUndefined();
+        await expect(
+            resumed.appendOwnerEntries(shareId, [entry(shareId, 3, "Third.")]),
+        ).resolves.toBeUndefined();
+
+        resumed.close();
+    }, 30_000);
+
+    it("revokes a member who is no longer a Murmur friend", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const owner = createPeer(relay);
+        const friend = createPeer(relay);
+        const shareId = "share-revoke";
+        const friendBundle = createMlsKeyPackage(friend.identity);
+        const transport = new MurmurSessionShareTransport({
+            directory: {
+                ...unusedDirectory(),
+                deliver: async () => undefined,
+                // The member was unfriended after being invited, so the directory can no
+                // longer resolve them at all. Removal must never depend on friendship.
+                identity: async () => friend.identity,
+                keyPackage: async () => friendBundle.keyPackage,
+            },
+            entrySource: () => entrySourceOver([]),
+            runtime: runtimeOf(owner),
+        });
+        await transport.createOwner({ ownerPeerId: owner.peerId, shareId });
+        const grant: SessionShareTransportGrant = {
+            grantEpoch: 1,
+            murmurPeerId: friend.peerId,
+            shareId,
+            shareMemberId: "member-1",
+        };
+        await transport.invite(grant);
+
+        const unfriended = new MurmurSessionShareTransport({
+            directory: { ...unusedDirectory(), identity: async () => undefined },
+            entrySource: () => entrySourceOver([]),
+            runtime: runtimeOf(owner),
+        });
+        await expect(unfriended.revoke(grant)).resolves.toBeUndefined();
+
+        transport.close();
+        unfriended.close();
+    }, 30_000);
 
     it("refuses to add a friend who has not offered a key package", async () => {
         const relay = new InMemoryMurmurRelay();

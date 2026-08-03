@@ -256,8 +256,12 @@ describe("MurmurShareDirectory", () => {
         for (let index = 0; index < 40; index += 1) {
             await friendDirectory.publishKeyPackageOffer(owner.peerId);
         }
-        const ownBundleKeys = await friend.store.list("rig/murmur/share-directory/v1/own-bundle/");
-        expect(ownBundleKeys.size).toBeLessThanOrEqual(32);
+        // Own bundles are retained per peer, bounded by what that peer keeps of
+        // our offered public halves, so both stores settle at the same cap.
+        const ownBundleKeys = await friend.store.list(
+            `rig/murmur/share-directory/v1/own-bundle/${owner.peerId}/`,
+        );
+        expect(ownBundleKeys.size).toBeLessThanOrEqual(8);
 
         await pump(owner, ownerDirectory);
         const offeredKeys = await owner.store.list(
@@ -265,5 +269,113 @@ describe("MurmurShareDirectory", () => {
         );
         expect(offeredKeys.size).toBeLessThanOrEqual(8);
         expect(offeredKeys.size).toBeGreaterThan(0);
+    });
+
+    it("keeps the newest offer joinable after the per-peer cap is exercised", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const owner = await createPeer(relay);
+        const member = await createPeer(relay);
+        const ownerDirectory = directoryFor(owner, [friendshipRecord(member)]);
+        const memberDirectory = directoryFor(member, [friendshipRecord(owner)]);
+
+        // Offer far more than either side retains, so the member's own-bundle
+        // store and the owner's offered store both evict oldest-first down to the
+        // cap. The owner then consumes the newest offer it still holds.
+        for (let index = 0; index < 12; index += 1) {
+            await memberDirectory.publishKeyPackageOffer(owner.peerId);
+        }
+        await pump(owner, ownerDirectory);
+        const ownBundleKeys = await member.store.list(
+            `rig/murmur/share-directory/v1/own-bundle/${owner.peerId}/`,
+        );
+        expect(ownBundleKeys.size).toBe(8);
+
+        const keyPackage = await ownerDirectory.keyPackage(member.peerId);
+        expect(keyPackage).toBeDefined();
+
+        const ownerSession = await SharedSessionOwner.create("share-cap", {
+            callbacks: noopCallbacks(),
+            client: owner.client,
+            entrySource: emptyEntrySource(),
+            identity: owner.identity,
+            invitationDelivery: { deliver: (invitation) => ownerDirectory.deliver(invitation) },
+            store: owner.store,
+        });
+        await ownerSession.inviteMany([{ identity: member.identity, keyPackage: keyPackage! }]);
+        await pump(member, memberDirectory);
+
+        const accepted = await memberDirectory.acceptedInvitation("share-cap");
+        expect(accepted).toBeDefined();
+        const memberSession = await SharedSessionMember.join({
+            callbacks: noopCallbacks(),
+            client: member.client,
+            expectedOwner: accepted!.owner,
+            identity: member.identity,
+            invitation: accepted!.invitation,
+            keyPackageBundle: accepted!.bundle,
+            store: member.store,
+        });
+        expect(memberSession.shareId).toBe("share-cap");
+
+        // The one-use bundle is deleted as it is read, so a second attempt for the
+        // same share finds no private material and returns nothing.
+        expect(await memberDirectory.acceptedInvitation("share-cap")).toBeUndefined();
+
+        ownerSession.destroy();
+        memberSession.destroy();
+    });
+
+    it("keeps two friends' invitations for the same shareId from colliding", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const member = await createPeer(relay);
+        const ownerA = await createPeer(relay);
+        const ownerB = await createPeer(relay);
+        const memberDirectory = directoryFor(member, [
+            friendshipRecord(ownerA),
+            friendshipRecord(ownerB),
+        ]);
+        const ownerADirectory = directoryFor(ownerA, [friendshipRecord(member)]);
+        const ownerBDirectory = directoryFor(ownerB, [friendshipRecord(member)]);
+
+        await memberDirectory.publishKeyPackageOffer(ownerA.peerId);
+        await memberDirectory.publishKeyPackageOffer(ownerB.peerId);
+        await pump(ownerA, ownerADirectory);
+        await pump(ownerB, ownerBDirectory);
+
+        const inviteWithSharedId = async (
+            owner: Peer,
+            directory: MurmurShareDirectory,
+        ): Promise<SharedSessionOwner> => {
+            const keyPackage = await directory.keyPackage(member.peerId);
+            expect(keyPackage).toBeDefined();
+            const session = await SharedSessionOwner.create("shared-id", {
+                callbacks: noopCallbacks(),
+                client: owner.client,
+                entrySource: emptyEntrySource(),
+                identity: owner.identity,
+                invitationDelivery: { deliver: (invitation) => directory.deliver(invitation) },
+                store: owner.store,
+            });
+            await session.inviteMany([{ identity: member.identity, keyPackage: keyPackage! }]);
+            return session;
+        };
+
+        // Both friends deliberately invite the member to the same attacker-chosen
+        // shareId; neither invitation may overwrite the other.
+        const sessionA = await inviteWithSharedId(ownerA, ownerADirectory);
+        const sessionB = await inviteWithSharedId(ownerB, ownerBDirectory);
+        await pump(member, memberDirectory);
+
+        const pending = await memberDirectory.pendingInvitations();
+        expect(pending).toEqual(
+            expect.arrayContaining([
+                { ownerPeerId: ownerA.peerId, shareId: "shared-id" },
+                { ownerPeerId: ownerB.peerId, shareId: "shared-id" },
+            ]),
+        );
+        expect(pending).toHaveLength(2);
+
+        sessionA.destroy();
+        sessionB.destroy();
     });
 });

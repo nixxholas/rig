@@ -3,6 +3,7 @@ import { eq, sql } from "drizzle-orm";
 import { sessionShareGrants, sessionShareMembers, sessionShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import { sessionShareEntryLogPrune } from "./sessionShareEntryLogPrune.js";
 
 export function sessionShareStop(tx: TX, shareId: string, now: number): boolean {
     return inTx(tx, (tx) => {
@@ -28,6 +29,10 @@ export function sessionShareStop(tx: TX, shareId: string, now: number): boolean 
             .set({ state: "stopped", stoppedAtMs: now, updatedAtMs: now })
             .where(eq(sessionShares.shareId, shareId))
             .run();
+        // A stopped share admits no new member, so its entry log can never be
+        // offered as history again. Prune it in the same transaction so a stopped
+        // share leaves no permanent transcript duplicate behind.
+        sessionShareEntryLogPrune(tx, shareId);
         return true;
     });
 }

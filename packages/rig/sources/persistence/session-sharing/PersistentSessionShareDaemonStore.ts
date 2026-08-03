@@ -1,10 +1,11 @@
 import type { SessionShareDaemonStore } from "../../session-sharing/SessionShareDaemonService.js";
 import type { SessionShareRecord as ServiceShare } from "../../session-sharing/SessionShareService.js";
 import type { TX } from "../Transaction.js";
+import type { SessionShareRecord } from "./types.js";
 import { querySessionShare, querySessionShareMembers } from "./querySessionShare.js";
+import { querySessionShareForOwnerSession } from "./querySessionShareForOwnerSession.js";
 import { querySessionShareReplica, querySessionShareReplicas } from "./querySessionShareReplica.js";
 import { querySessionShareReplicaEntries } from "./querySessionShareReplica.js";
-import { queryRecoverableSessionShares, queryStoppedSessionShares } from "./querySessionShares.js";
 import type { SessionShareMemberRecord, SessionShareReplicaRecord } from "./types.js";
 
 const HISTORY_PAGE_LIMIT = 100;
@@ -23,17 +24,12 @@ export class PersistentSessionShareDaemonStore implements SessionShareDaemonStor
 
     queryShare(shareId: string): ServiceShare | undefined {
         const share = querySessionShare(this.#tx(), shareId);
-        return share === undefined ? undefined : this.#toServiceShare(shareId);
+        return share === undefined ? undefined : this.#toServiceShare(share);
     }
 
     queryActiveShareForSession(ownerSessionId: string): ServiceShare | undefined {
-        const share = [
-            ...queryRecoverableSessionShares(this.#tx()),
-            ...queryStoppedSessionShares(this.#tx()),
-        ].find((candidate) => candidate.ownerSessionId === ownerSessionId);
-        return share === undefined || share.state === "stopped"
-            ? undefined
-            : this.#toServiceShare(share.shareId);
+        const share = querySessionShareForOwnerSession(this.#tx(), ownerSessionId);
+        return share === undefined ? undefined : this.#toServiceShare(share);
     }
 
     queryPendingBytes(shareId: string): { pendingBytes: number; pendingEntries: number } {
@@ -80,10 +76,8 @@ export class PersistentSessionShareDaemonStore implements SessionShareDaemonStor
         return querySessionShareMembers(this.#tx(), shareId);
     }
 
-    #toServiceShare(shareId: string): ServiceShare {
-        const share = querySessionShare(this.#tx(), shareId);
-        if (share === undefined) throw new Error("The session share does not exist.");
-        const members = querySessionShareMembers(this.#tx(), shareId);
+    #toServiceShare(share: SessionShareRecord): ServiceShare {
+        const members = querySessionShareMembers(this.#tx(), share.shareId);
         return {
             includeFriendMessagesInModel: share.includeFriendMessages,
             members: members.map((member) => ({

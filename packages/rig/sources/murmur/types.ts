@@ -53,12 +53,18 @@ export interface MurmurRuntimeHandle {
 }
 
 /**
- * Consumes one received event before the friendship inbox sees it.
+ * What a router did with one event, and therefore who owns its relay cursor.
  *
- * A router returns `true` once it owns the event, in which case it has already
- * advanced the relay cursor inside its own durable transaction.
+ * `applied` means the router owned the event and already advanced the cursor
+ * inside its own durable transaction. `retained` means it owns the event but is
+ * not ready for it, so the cursor deliberately stays put and the event must be
+ * replayed later rather than immediately. `unowned` leaves the event to the
+ * next router, and finally to the friendship inbox.
  */
-export type MurmurEventRouter = (received: ReceivedEvent) => Promise<boolean>;
+export type MurmurEventOutcome = "applied" | "retained" | "unowned";
+
+/** Consumes one received event before the friendship inbox sees it. */
+export type MurmurEventRouter = (received: ReceivedEvent) => Promise<MurmurEventOutcome>;
 
 export interface MurmurServiceContract {
     getAccount(): Promise<GetMurmurAccountResponse>;

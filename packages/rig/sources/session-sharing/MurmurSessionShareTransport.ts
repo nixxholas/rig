@@ -1,8 +1,14 @@
-import { identityId, type IdentityPublicKeys, type ReceivedEvent } from "@slopus/murmur";
+import {
+    decodeBase64Url,
+    identityId,
+    type IdentityPublicKeys,
+    type ReceivedEvent,
+} from "@slopus/murmur";
 import type { MlsKeyPackage, MlsKeyPackageBundle } from "@slopus/murmur/mls";
 import {
     SharedSessionMember,
     SharedSessionOwner,
+    SharedSessionProtocolError,
     type SessionEntrySource,
     type SharedSessionCallbacks,
     type SharedSessionEntry,
@@ -14,6 +20,7 @@ import {
 
 import type { MurmurRuntimeHandle } from "../murmur/types.js";
 import { canonicalSessionShareJson, sessionShareContentHash } from "./canonicalSessionShareJson.js";
+import { SessionShareUnauthorizedPostError } from "./SessionShareService.js";
 import type {
     SessionShareOpaqueEntry,
     SessionShareTransport,
@@ -63,6 +70,9 @@ export interface MurmurSessionShareTransportOptions {
 
 /** What happened to one received event, and therefore who owns its relay cursor. */
 export type SessionShareEventOutcome = "applied" | "retained" | "unowned";
+
+/** Bounded history pages one retry pass will commit before yielding. */
+const MAX_HISTORY_RETRY_PAGES = 256;
 
 type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<void>;
 type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
@@ -161,12 +171,21 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         const owner = await this.#requireOwner(shareId);
         for (const entry of entries) {
             if (entry.shareSequence <= owner.lastAppendedSequence) continue;
-            await owner.session.append({
-                payload: JSON.parse(entry.canonicalJson) as never,
-                shareEventId: entry.shareEventId,
-                shareSequence: entry.shareSequence,
-                timestamp: entry.createdAt,
-            });
+            try {
+                await owner.session.append({
+                    payload: JSON.parse(entry.canonicalJson) as never,
+                    shareEventId: entry.shareEventId,
+                    shareSequence: entry.shareSequence,
+                    timestamp: entry.createdAt,
+                });
+            } catch (error: unknown) {
+                // Rig only records an entry after Murmur has durably committed it, so
+                // Murmur is never behind Rig's outbox. A gap here therefore means this
+                // sequence is already committed — a crash between Murmur's append and
+                // Rig's acknowledgement — and skipping it is the idempotent answer.
+                // Anything else is a real failure that must degrade the share.
+                if (!isSequenceGap(error)) throw error;
+            }
             owner.lastAppendedSequence = entry.shareSequence;
         }
     }
@@ -196,11 +215,12 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
     async revoke(grant: SessionShareTransportGrant): Promise<void> {
         const owner = await this.#requireOwner(grant.shareId);
         this.#forgetGrant(grant);
-        const identity = await this.#directory.identity(grant.murmurPeerId);
-        if (identity === undefined) {
-            throw new Error("The revoked friend's Murmur identity is unknown.");
-        }
-        owner.state = await owner.session.revoke(identity);
+        // A Murmur peer ID is the base64url signing key, which is all a revocation
+        // needs. Removal must never depend on the friendship still existing: an
+        // unfriended member has to be removable, or they keep decrypting the share.
+        owner.state = await owner.session.revoke({
+            signingKey: decodeBase64Url(grant.murmurPeerId),
+        });
     }
 
     async stop(shareId: string, _grants: readonly SessionShareTransportGrant[]): Promise<void> {
@@ -286,10 +306,21 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
 
     async retry(shareId: string): Promise<void> {
         const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
+        const sessions = [
+            ...(owner === undefined ? [] : [owner.session]),
+            ...[...this.#members.values()]
+                .filter((member) => member.grant.shareId === shareId)
+                .map((member) => member.session),
+        ];
         const reports = [];
-        if (owner !== undefined) reports.push(await owner.session.retry());
-        for (const member of this.#members.values()) {
-            if (member.grant.shareId === shareId) reports.push(await member.session.retry());
+        for (const session of sessions) {
+            // Murmur commits one history page per retry, so a member catching up on a
+            // share that already had a transcript needs as many passes as it has pages.
+            for (let page = 0; page < MAX_HISTORY_RETRY_PAGES; page += 1) {
+                const report = await session.retry();
+                reports.push(report);
+                if (report.historyPages === 0 || report.failures.length > 0) break;
+            }
         }
         const failures = reports.flatMap((report) => report.failures);
         if (failures.length > 0) {
@@ -424,6 +455,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 if (owner !== undefined) owner.state = state;
             },
             terminate: async (_transaction, termination) => {
+                this.#grants.delete(shareId);
                 await this.#emitOwner(shareId, {
                     error: terminationMessage(termination),
                     recoverable: false,
@@ -449,19 +481,19 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 const member = this.#members.get(grantKey(grant));
                 if (member !== undefined) member.state = state;
             },
-            terminate: async (_transaction, termination) => {
+            terminate: async (_transaction, _termination) => {
                 const member = this.#members.get(grantKey(grant));
                 const stopped =
                     member?.state?.status === "stopped" || member?.state?.status === "terminated";
+                // The destroyed session stays as a tombstone on purpose. Murmur retired
+                // this topic's cursors when it terminated, so a trailing event from the
+                // same batch must be absorbed here; letting it fall through to the
+                // default path would try to advance a cursor that no longer exists.
                 await this.#emitMember(grant, {
                     grant,
                     reason: stopped ? "stopped" : "revoked",
                     type: "ended",
                 });
-                if (termination.reason !== "protocol-error") {
-                    member?.session.destroy();
-                    this.#members.delete(grantKey(grant));
-                }
             },
         };
     }
@@ -472,7 +504,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
             // A post from a peer Rig no longer grants access to carries no authority.
             return;
         }
-        await this.#emitOwner(shareId, {
+        await this.#emitOwnerPostEvent(shareId, {
             post: {
                 clientMessageId: post.postId,
                 // Advisory only, and deliberately not a directory lookup: this runs inside
@@ -487,6 +519,25 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         });
     }
 
+    /**
+     * Deliver one owner event, dropping a post the current grant no longer accepts.
+     *
+     * This runs inside Murmur's store transaction, so an escaping rejection would
+     * leave the relay cursor where it is and make the shared sync loop replay the
+     * same event forever, stalling every other topic behind it. Losing an
+     * unauthorized post is the correct outcome; losing the account's sync is not.
+     */
+    async #emitOwnerPostEvent(
+        shareId: string,
+        event: SessionShareTransportOwnerEvent,
+    ): Promise<void> {
+        try {
+            await this.#emitOwner(shareId, event);
+        } catch (error: unknown) {
+            if (!(error instanceof SessionShareUnauthorizedPostError)) throw error;
+        }
+    }
+
     async #emitOwner(shareId: string, event: SessionShareTransportOwnerEvent): Promise<void> {
         for (const handler of this.#ownerHandlers.get(shareId) ?? []) await handler(event);
     }
@@ -499,11 +550,16 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
     }
 }
 
+function isSequenceGap(error: unknown): boolean {
+    return error instanceof SharedSessionProtocolError && error.code === "sequence-gap";
+}
+
 function outcomeOf(result: { readonly status: string }): SessionShareEventOutcome {
     if (result.status === "unhandled") return "unowned";
-    // A deferred or terminated delivery is deliberately left on the relay cursor so a later
-    // pass replays it in order; advancing here would create a gap the client rejects.
-    return result.status === "deferred" || result.status === "terminated" ? "retained" : "applied";
+    // A deferred delivery is deliberately left on the relay cursor so a later pass replays
+    // it in order; advancing here would create a gap the client rejects. Every other
+    // handled status, termination included, already advanced the cursor transactionally.
+    return result.status === "deferred" ? "retained" : "applied";
 }
 
 function terminationMessage(termination: SharedSessionTermination): string {

@@ -44,6 +44,21 @@ export interface SessionShareFriendInput {
     readonly murmurPeerId: string;
 }
 
+/**
+ * An authenticated friend post the current grant does not accept.
+ *
+ * This is an ordinary race, not a failure: the owner revokes or stops while a
+ * post is already in flight. It is raised as its own type so the service can
+ * drop the post and let Murmur's cursor advance, instead of letting a rejection
+ * escape into the shared sync loop and stall every topic behind it.
+ */
+export class SessionShareUnauthorizedPostError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "SessionShareUnauthorizedPostError";
+    }
+}
+
 export interface SessionShareReplicaRecord {
     readonly grant: SessionShareTransportGrant;
     readonly memberCount: number;
@@ -379,7 +394,9 @@ export class SessionShareService {
         if (event.type === "transport_recovered") return;
         const { post, senderPeerId } = event;
         if (senderPeerId !== post.grant.murmurPeerId) {
-            throw new Error("A friend message sender does not match its authenticated grant.");
+            throw new SessionShareUnauthorizedPostError(
+                "A friend message sender does not match its authenticated grant.",
+            );
         }
         // The label a friend's message is rendered under is the one the owner registered
         // when inviting them, never a name the network supplied.
@@ -387,7 +404,9 @@ export class SessionShareService {
             .queryShare(post.grant.shareId)
             ?.members.find((candidate) => candidate.shareMemberId === post.grant.shareMemberId);
         if (member === undefined) {
-            throw new Error("A friend message names a member this share does not have.");
+            throw new SessionShareUnauthorizedPostError(
+                "A friend message names a member this share does not have.",
+            );
         }
         const friendAuthor: FriendAuthor = {
             displayName: member.displayName,
