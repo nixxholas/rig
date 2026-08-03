@@ -42,6 +42,10 @@ export type SessionShareTransportOwner = Static<typeof sessionShareTransportOwne
 export const sessionShareTransportMemberPostSchema = Type.Object(
     {
         clientMessageId: identifierSchema,
+        /**
+         * Advisory label only. The owner renders a friend message under the name it
+         * registered for that member, so nothing here carries authority.
+         */
         displayName: Type.String({ maxLength: 512, minLength: 1 }),
         grant: sessionShareTransportGrantSchema,
         text: Type.String({ maxLength: 128 * 1024, minLength: 1 }),

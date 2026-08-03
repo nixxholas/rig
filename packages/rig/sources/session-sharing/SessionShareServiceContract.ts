@@ -15,7 +15,7 @@ import type {
 /**
  * Daemon API boundary for session sharing.
  *
- * The real runtime supplies this only after the Murmur session transport adapter is available.
+ * The daemon implements it over the real Murmur shared-session transport.
  */
 export interface SessionShareServiceContract {
     getOwner(sessionId: string): SessionShareOwnerResponse | undefined;

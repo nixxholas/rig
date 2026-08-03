@@ -1,0 +1,515 @@
+import { identityId, type IdentityPublicKeys, type ReceivedEvent } from "@slopus/murmur";
+import type { MlsKeyPackage, MlsKeyPackageBundle } from "@slopus/murmur/mls";
+import {
+    SharedSessionMember,
+    SharedSessionOwner,
+    type SessionEntrySource,
+    type SharedSessionCallbacks,
+    type SharedSessionEntry,
+    type SharedSessionInvitation,
+    type SharedSessionPost,
+    type SharedSessionState,
+    type SharedSessionTermination,
+} from "@slopus/murmur/sharedSession";
+
+import type { MurmurRuntimeHandle } from "../murmur/types.js";
+import { canonicalSessionShareJson, sessionShareContentHash } from "./canonicalSessionShareJson.js";
+import type {
+    SessionShareOpaqueEntry,
+    SessionShareTransport,
+    SessionShareTransportGrant,
+    SessionShareTransportMemberEvent,
+    SessionShareTransportMemberPost,
+    SessionShareTransportOwner,
+    SessionShareTransportOwnerEvent,
+} from "./SessionShareTransport.js";
+
+/**
+ * Everything the Murmur shared-session protocol needs about the people involved.
+ *
+ * Murmur deliberately ships no key-package directory and no invitation inbox:
+ * an application transports both itself over a channel it already trusts. This
+ * port is that channel, kept separate so the transport itself stays protocol
+ * code.
+ */
+export interface SessionShareMurmurDirectory {
+    /** Public identity of a friend Rig knows by Murmur peer ID. */
+    identity(murmurPeerId: string): Promise<IdentityPublicKeys | undefined>;
+    /** Human-readable name shown for a friend's messages. */
+    displayName(murmurPeerId: string): Promise<string | undefined>;
+    /** One fresh unused MLS key package authorizing this friend to be added. */
+    keyPackage(murmurPeerId: string): Promise<MlsKeyPackage | undefined>;
+    /** Ask a friend for a fresh key package after running out of the ones they offered. */
+    requestKeyPackage(murmurPeerId: string): Promise<void>;
+    /** Deliver one owner invitation to the friend it names. */
+    deliver(invitation: SharedSessionInvitation): Promise<void>;
+    /** The invitation and one-use bundle this daemon holds for a share it was invited to. */
+    acceptedInvitation(shareId: string): Promise<
+        | {
+              readonly bundle: MlsKeyPackageBundle;
+              readonly invitation: string;
+              readonly owner: IdentityPublicKeys;
+          }
+        | undefined
+    >;
+}
+
+export interface MurmurSessionShareTransportOptions {
+    readonly directory: SessionShareMurmurDirectory;
+    /** Authoritative transcript history the owner offers to a newly invited member. */
+    readonly entrySource: (shareId: string) => SessionEntrySource;
+    readonly runtime: () => MurmurRuntimeHandle | undefined;
+}
+
+/** What happened to one received event, and therefore who owns its relay cursor. */
+export type SessionShareEventOutcome = "applied" | "retained" | "unowned";
+
+type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<void>;
+type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
+
+interface OwnerSession {
+    lastAppendedSequence: number;
+    readonly session: SharedSessionOwner;
+    state: SharedSessionState | undefined;
+}
+
+interface MemberSession {
+    readonly grant: SessionShareTransportGrant;
+    readonly session: SharedSessionMember;
+    state: SharedSessionState | undefined;
+}
+
+function grantKey(grant: SessionShareTransportGrant): string {
+    return `${grant.shareId}\u0000${grant.shareMemberId}\u0000${String(grant.grantEpoch)}`;
+}
+
+function entryFromMurmur(shareId: string, entry: SharedSessionEntry): SessionShareOpaqueEntry {
+    const canonicalJson = canonicalSessionShareJson(entry.payload);
+    return {
+        canonicalJson,
+        contentHash: sessionShareContentHash(canonicalJson),
+        createdAt: entry.timestamp,
+        shareEventId: entry.shareEventId,
+        shareId,
+        shareSequence: entry.shareSequence,
+    };
+}
+
+/**
+ * Rig's session-share transport over the real Murmur shared-session protocol.
+ *
+ * The owner is the only accepted committer and the sole authority for state,
+ * entries, history offers, revocation, and the terminal stop. Friend posts are
+ * authenticated but carry no state authority, so they only ever become context
+ * messages on the owner's side.
+ *
+ * Murmur mints its own member identifiers and grant epochs. Rig keeps its own,
+ * so this adapter translates between the two by Murmur peer ID and never lets
+ * Murmur's numbering leak into Rig's records.
+ */
+export class MurmurSessionShareTransport implements SessionShareTransport {
+    readonly #directory: SessionShareMurmurDirectory;
+    readonly #entrySource: MurmurSessionShareTransportOptions["entrySource"];
+    readonly #grants = new Map<string, Map<string, SessionShareTransportGrant>>();
+    readonly #memberHandlers = new Map<string, Set<MemberHandler>>();
+    readonly #members = new Map<string, MemberSession>();
+    readonly #ownerHandlers = new Map<string, Set<OwnerHandler>>();
+    readonly #owners = new Map<string, OwnerSession>();
+    readonly #runtime: MurmurSessionShareTransportOptions["runtime"];
+
+    constructor(options: MurmurSessionShareTransportOptions) {
+        this.#directory = options.directory;
+        this.#entrySource = options.entrySource;
+        this.#runtime = options.runtime;
+    }
+
+    async createOwner(owner: SessionShareTransportOwner): Promise<void> {
+        const runtime = this.#requireRuntime();
+        const localPeerId = identityId(runtime.identity);
+        if (owner.ownerPeerId !== localPeerId) {
+            throw new Error("A session share can only be owned by this Murmur account.");
+        }
+        if (this.#owners.has(owner.shareId)) return;
+        const loaded = await this.#loadOwnerSession(owner.shareId);
+        if (loaded !== undefined) return;
+        const session = await SharedSessionOwner.create(owner.shareId, {
+            callbacks: this.#ownerCallbacks(owner.shareId),
+            client: runtime.client,
+            entrySource: this.#entrySource(owner.shareId),
+            identity: runtime.identity,
+            invitationDelivery: { deliver: (invitation) => this.#directory.deliver(invitation) },
+            store: runtime.store,
+        });
+        this.#owners.set(owner.shareId, {
+            lastAppendedSequence: 0,
+            session,
+            state: session.state,
+        });
+    }
+
+    async loadOwner(shareId: string): Promise<SessionShareTransportOwner | undefined> {
+        const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
+        return owner === undefined
+            ? undefined
+            : { ownerPeerId: owner.session.state.ownerId, shareId };
+    }
+
+    async appendOwnerEntries(
+        shareId: string,
+        entries: readonly SessionShareOpaqueEntry[],
+    ): Promise<void> {
+        const owner = await this.#requireOwner(shareId);
+        for (const entry of entries) {
+            if (entry.shareSequence <= owner.lastAppendedSequence) continue;
+            await owner.session.append({
+                payload: JSON.parse(entry.canonicalJson) as never,
+                shareEventId: entry.shareEventId,
+                shareSequence: entry.shareSequence,
+                timestamp: entry.createdAt,
+            });
+            owner.lastAppendedSequence = entry.shareSequence;
+        }
+    }
+
+    async inviteMany(grants: readonly SessionShareTransportGrant[]): Promise<void> {
+        if (grants.length === 0) throw new Error("An invite batch cannot be empty.");
+        const shareIds = new Set(grants.map((grant) => grant.shareId));
+        for (const shareId of shareIds) {
+            const shareGrants = grants.filter((grant) => grant.shareId === shareId);
+            const owner = await this.#requireOwner(shareId);
+            const invitees = [];
+            for (const grant of shareGrants) {
+                this.#rememberGrant(grant);
+                if (this.#isAlreadyActive(owner, grant)) continue;
+                invitees.push(await this.#invitee(grant.murmurPeerId));
+            }
+            if (invitees.length === 0) continue;
+            const result = await owner.session.inviteMany(invitees);
+            owner.state = result.state;
+        }
+    }
+
+    async invite(grant: SessionShareTransportGrant): Promise<void> {
+        await this.inviteMany([grant]);
+    }
+
+    async revoke(grant: SessionShareTransportGrant): Promise<void> {
+        const owner = await this.#requireOwner(grant.shareId);
+        this.#forgetGrant(grant);
+        const identity = await this.#directory.identity(grant.murmurPeerId);
+        if (identity === undefined) {
+            throw new Error("The revoked friend's Murmur identity is unknown.");
+        }
+        owner.state = await owner.session.revoke(identity);
+    }
+
+    async stop(shareId: string, _grants: readonly SessionShareTransportGrant[]): Promise<void> {
+        const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
+        if (owner === undefined) return;
+        owner.state = await owner.session.stop();
+        this.#grants.delete(shareId);
+        owner.session.destroy();
+        this.#owners.delete(shareId);
+    }
+
+    handleOwnerEvents(shareId: string, callback: OwnerHandler): () => void {
+        const handlers = this.#ownerHandlers.get(shareId) ?? new Set<OwnerHandler>();
+        handlers.add(callback);
+        this.#ownerHandlers.set(shareId, handlers);
+        return () => {
+            handlers.delete(callback);
+            if (handlers.size === 0) this.#ownerHandlers.delete(shareId);
+        };
+    }
+
+    async joinMember(grant: SessionShareTransportGrant): Promise<void> {
+        const key = grantKey(grant);
+        if (this.#members.has(key)) return;
+        const runtime = this.#requireRuntime();
+        const accepted = await this.#directory.acceptedInvitation(grant.shareId);
+        if (accepted === undefined) {
+            throw new Error("No accepted invitation is held for this shared session.");
+        }
+        const session = await SharedSessionMember.join({
+            callbacks: this.#memberCallbacks(grant),
+            client: runtime.client,
+            expectedOwner: accepted.owner,
+            identity: runtime.identity,
+            invitation: accepted.invitation,
+            keyPackageBundle: accepted.bundle,
+            store: runtime.store,
+        });
+        this.#members.set(key, { grant, session, state: session.state });
+    }
+
+    async loadMember(
+        grant: SessionShareTransportGrant,
+    ): Promise<SessionShareTransportGrant | undefined> {
+        const key = grantKey(grant);
+        const existing = this.#members.get(key);
+        if (existing !== undefined) return existing.grant;
+        const runtime = this.#runtime();
+        if (runtime === undefined) return undefined;
+        let session: SharedSessionMember;
+        try {
+            session = await SharedSessionMember.load(grant.shareId, {
+                callbacks: this.#memberCallbacks(grant),
+                client: runtime.client,
+                identity: runtime.identity,
+                store: runtime.store,
+            });
+        } catch {
+            return undefined;
+        }
+        this.#members.set(key, { grant, session, state: session.state });
+        return grant;
+    }
+
+    async postMember(post: SessionShareTransportMemberPost): Promise<void> {
+        const member = this.#members.get(grantKey(post.grant));
+        if (member === undefined) {
+            throw new Error("This shared session has no active membership to post into.");
+        }
+        await member.session.post(post.clientMessageId, post.text);
+    }
+
+    handleMemberEvents(grant: SessionShareTransportGrant, callback: MemberHandler): () => void {
+        const key = grantKey(grant);
+        const handlers = this.#memberHandlers.get(key) ?? new Set<MemberHandler>();
+        handlers.add(callback);
+        this.#memberHandlers.set(key, handlers);
+        return () => {
+            handlers.delete(callback);
+            if (handlers.size === 0) this.#memberHandlers.delete(key);
+        };
+    }
+
+    async retry(shareId: string): Promise<void> {
+        const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
+        const reports = [];
+        if (owner !== undefined) reports.push(await owner.session.retry());
+        for (const member of this.#members.values()) {
+            if (member.grant.shareId === shareId) reports.push(await member.session.retry());
+        }
+        const failures = reports.flatMap((report) => report.failures);
+        if (failures.length > 0) {
+            await this.#emitOwner(shareId, {
+                error: failures[0]!.message,
+                recoverable: true,
+                type: "transport_failed",
+            });
+            return;
+        }
+        await this.#emitOwner(shareId, { type: "transport_recovered" });
+    }
+
+    /**
+     * Apply one event the Murmur synchronization loop already read.
+     *
+     * `applied` means a live session owned the event and advanced its relay
+     * cursor inside the same durable transaction as its effect. `retained`
+     * means a session owns the event but is not ready for it yet, so the
+     * cursor must stay where it is until a later pass replays it. Only
+     * `unowned` leaves the caller responsible for advancing the cursor.
+     */
+    async handleReceivedEvent(received: ReceivedEvent): Promise<SessionShareEventOutcome> {
+        for (const owner of this.#owners.values()) {
+            const outcome = outcomeOf(await owner.session.handleEvent(received));
+            if (outcome !== "unowned") return outcome;
+        }
+        for (const member of this.#members.values()) {
+            const outcome = outcomeOf(await member.session.handleEvent(received));
+            if (outcome !== "unowned") return outcome;
+        }
+        return "unowned";
+    }
+
+    /** Release every in-memory epoch secret; durable state stays loadable. */
+    close(): void {
+        for (const owner of this.#owners.values()) owner.session.destroy();
+        for (const member of this.#members.values()) member.session.destroy();
+        this.#owners.clear();
+        this.#members.clear();
+        this.#ownerHandlers.clear();
+        this.#memberHandlers.clear();
+        this.#grants.clear();
+    }
+
+    #requireRuntime(): MurmurRuntimeHandle {
+        const runtime = this.#runtime();
+        if (runtime === undefined) {
+            throw new Error("Session sharing needs the Murmur service to be running.");
+        }
+        return runtime;
+    }
+
+    async #requireOwner(shareId: string): Promise<OwnerSession> {
+        const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
+        if (owner === undefined) throw new Error("This session share has no owner state.");
+        return owner;
+    }
+
+    async #loadOwnerSession(shareId: string): Promise<OwnerSession | undefined> {
+        const existing = this.#owners.get(shareId);
+        if (existing !== undefined) return existing;
+        const runtime = this.#runtime();
+        if (runtime === undefined) return undefined;
+        let session: SharedSessionOwner;
+        try {
+            session = await SharedSessionOwner.load(shareId, {
+                callbacks: this.#ownerCallbacks(shareId),
+                client: runtime.client,
+                entrySource: this.#entrySource(shareId),
+                identity: runtime.identity,
+                invitationDelivery: {
+                    deliver: (invitation) => this.#directory.deliver(invitation),
+                },
+                store: runtime.store,
+            });
+        } catch {
+            return undefined;
+        }
+        const owner: OwnerSession = { lastAppendedSequence: 0, session, state: session.state };
+        this.#owners.set(shareId, owner);
+        return owner;
+    }
+
+    async #invitee(
+        murmurPeerId: string,
+    ): Promise<{ identity: IdentityPublicKeys; keyPackage: MlsKeyPackage }> {
+        const identity = await this.#directory.identity(murmurPeerId);
+        if (identity === undefined) {
+            throw new Error("This friend's Murmur identity is unknown.");
+        }
+        const keyPackage = await this.#directory.keyPackage(murmurPeerId);
+        if (keyPackage === undefined) {
+            // Every offer is one-use, so running out is ordinary. Asking now means the
+            // friend's answer arrives on its own and the share completes on the retry.
+            await this.#directory.requestKeyPackage(murmurPeerId);
+            throw new Error(
+                "This friend has no key package left, so Rig asked for a fresh one. The shared session finishes inviting them as soon as it arrives.",
+            );
+        }
+        return { identity, keyPackage };
+    }
+
+    #isAlreadyActive(owner: OwnerSession, grant: SessionShareTransportGrant): boolean {
+        return (
+            owner.state?.members.some(
+                (member) => member.peerId === grant.murmurPeerId && member.status === "active",
+            ) === true
+        );
+    }
+
+    #rememberGrant(grant: SessionShareTransportGrant): void {
+        const shareGrants = this.#grants.get(grant.shareId) ?? new Map();
+        shareGrants.set(grant.murmurPeerId, grant);
+        this.#grants.set(grant.shareId, shareGrants);
+    }
+
+    #forgetGrant(grant: SessionShareTransportGrant): void {
+        this.#grants.get(grant.shareId)?.delete(grant.murmurPeerId);
+    }
+
+    #ownerCallbacks(shareId: string): SharedSessionCallbacks {
+        return {
+            persistEntry: async () => {
+                // The owner authored every entry; nothing is replicated back to it.
+            },
+            persistPost: async (_transaction, post) => {
+                await this.#emitOwnerPost(shareId, post);
+            },
+            persistState: async (_transaction, state) => {
+                const owner = this.#owners.get(shareId);
+                if (owner !== undefined) owner.state = state;
+            },
+            terminate: async (_transaction, termination) => {
+                await this.#emitOwner(shareId, {
+                    error: terminationMessage(termination),
+                    recoverable: false,
+                    type: "transport_failed",
+                });
+            },
+        };
+    }
+
+    #memberCallbacks(grant: SessionShareTransportGrant): SharedSessionCallbacks {
+        return {
+            persistEntry: async (_transaction, entry) => {
+                await this.#emitMember(grant, {
+                    entries: [entryFromMurmur(grant.shareId, entry)],
+                    grant,
+                    type: "entries_appended",
+                });
+            },
+            persistPost: async () => {
+                // A member sees only its own posts echoed back; the owner owns them.
+            },
+            persistState: async (_transaction, state) => {
+                const member = this.#members.get(grantKey(grant));
+                if (member !== undefined) member.state = state;
+            },
+            terminate: async (_transaction, termination) => {
+                const member = this.#members.get(grantKey(grant));
+                const stopped =
+                    member?.state?.status === "stopped" || member?.state?.status === "terminated";
+                await this.#emitMember(grant, {
+                    grant,
+                    reason: stopped ? "stopped" : "revoked",
+                    type: "ended",
+                });
+                if (termination.reason !== "protocol-error") {
+                    member?.session.destroy();
+                    this.#members.delete(grantKey(grant));
+                }
+            },
+        };
+    }
+
+    async #emitOwnerPost(shareId: string, post: SharedSessionPost): Promise<void> {
+        const grant = this.#grants.get(shareId)?.get(post.authenticatedPeerId);
+        if (grant === undefined) {
+            // A post from a peer Rig no longer grants access to carries no authority.
+            return;
+        }
+        await this.#emitOwner(shareId, {
+            post: {
+                clientMessageId: post.postId,
+                // Advisory only, and deliberately not a directory lookup: this runs inside
+                // the Murmur store transaction, and the owner labels the message with the
+                // name it registered for the member anyway.
+                displayName: post.authenticatedPeerId,
+                grant,
+                text: post.text,
+            },
+            senderPeerId: post.authenticatedPeerId,
+            type: "member_posted",
+        });
+    }
+
+    async #emitOwner(shareId: string, event: SessionShareTransportOwnerEvent): Promise<void> {
+        for (const handler of this.#ownerHandlers.get(shareId) ?? []) await handler(event);
+    }
+
+    async #emitMember(
+        grant: SessionShareTransportGrant,
+        event: SessionShareTransportMemberEvent,
+    ): Promise<void> {
+        for (const handler of this.#memberHandlers.get(grantKey(grant)) ?? []) await handler(event);
+    }
+}
+
+function outcomeOf(result: { readonly status: string }): SessionShareEventOutcome {
+    if (result.status === "unhandled") return "unowned";
+    // A deferred or terminated delivery is deliberately left on the relay cursor so a later
+    // pass replays it in order; advancing here would create a gap the client rejects.
+    return result.status === "deferred" || result.status === "terminated" ? "retained" : "applied";
+}
+
+function terminationMessage(termination: SharedSessionTermination): string {
+    if (termination.reason === "removed") return "This shared session removed the account.";
+    if (termination.reason === "protocol-error") {
+        return termination.error?.message ?? "The shared session failed its protocol checks.";
+    }
+    return "The shared session ended.";
+}

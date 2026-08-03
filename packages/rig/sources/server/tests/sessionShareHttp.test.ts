@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SessionShareServiceContract } from "../../session-sharing/index.js";
+import { FakeSessionShareTransport } from "../../session-sharing/FakeSessionShareTransport.js";
+import { SessionShareDaemonService } from "../../session-sharing/SessionShareDaemonService.js";
+import { SessionShareService } from "../../session-sharing/SessionShareService.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
+import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
+import type { SessionStore } from "../../session/SessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -45,14 +50,14 @@ const replica = {
 };
 
 describe("session share HTTP API", () => {
-    it("keeps the runtime gated when the real transport-backed service is absent", async () => {
+    it("reports plainly when a server was started without session sharing", async () => {
         const server = await startServer();
         try {
             const response = await request(server.socketPath, "GET", "/sessions/session-1/share");
             expect(response).toMatchObject({
                 status: 503,
                 body: {
-                    error: expect.stringContaining("Murmur transport"),
+                    error: expect.stringContaining("without session sharing"),
                 },
             });
         } finally {
@@ -217,6 +222,58 @@ describe("session share HTTP API", () => {
             await server.close();
         }
     });
+
+    it("creates a share and reads it back over HTTP through a real SessionShareDaemonService", async () => {
+        const store = new PersistentSessionStore({ databasePath: ":memory:" });
+        const transport = new FakeSessionShareTransport();
+        const sessionShares = new SessionShareDaemonService({
+            localPeerId: async () => "peer-owner",
+            service: new SessionShareService({
+                deliverFriendMessage: () => undefined,
+                store: store.sessionShares,
+                transport,
+            }),
+            store: store.sessionShareDaemonStore,
+        });
+        store.createWithId("session-real-1", { cwd: "/tmp/session-share-real" });
+        const server = await startServer(sessionShares, store);
+        try {
+            const created = await request(
+                server.socketPath,
+                "POST",
+                "/sessions/session-real-1/share",
+                {
+                    friends: [{ displayName: "Casey", peerId: "peer-casey" }],
+                    includeFriendMessagesInModel: true,
+                    mutationId: "mutation-1",
+                },
+            );
+            expect(created).toMatchObject({
+                body: {
+                    members: [
+                        expect.objectContaining({
+                            displayName: "Casey",
+                            murmurPeerId: "peer-casey",
+                            state: "active",
+                        }),
+                    ],
+                    share: {
+                        includeFriendMessagesInModel: true,
+                        memberCount: 1,
+                        state: "active",
+                    },
+                },
+                status: 201,
+            });
+
+            expect(
+                await request(server.socketPath, "GET", "/sessions/session-real-1/share"),
+            ).toEqual({ body: created.body, status: 200 });
+        } finally {
+            await server.close();
+            store.close();
+        }
+    });
 });
 
 function createStub(): SessionShareServiceContract & {
@@ -269,7 +326,7 @@ function createStub(): SessionShareServiceContract & {
 
 async function startServer(
     sessionShares?: SessionShareServiceContract,
-    providedStore?: InMemorySessionStore,
+    providedStore?: SessionStore,
 ): Promise<{
     close(): Promise<void>;
     socketPath: string;

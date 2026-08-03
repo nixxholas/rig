@@ -278,7 +278,7 @@ export interface ProtocolHttpServerOptions {
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
     murmur?: MurmurServiceContract;
-    /** Unavailable until the released Murmur shared-session adapter is installed. */
+    /** Session sharing over Murmur. The daemon always supplies it. */
     sessionShares?: SessionShareServiceContract;
     fileSearchService?: FileSearchServiceContract;
     globalEventQueue?: GlobalEventQueue;
@@ -629,7 +629,7 @@ async function handleRequest(
         const sessionShares = runtimeConfig.sessionShares;
         if (sessionShares === undefined) {
             sendJson(response, 503, {
-                error: "Session sharing is unavailable until the Murmur transport is installed.",
+                error: "This Rig server was started without session sharing.",
             });
             return;
         }

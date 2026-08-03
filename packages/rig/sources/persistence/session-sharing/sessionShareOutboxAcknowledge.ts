@@ -1,19 +1,17 @@
-import { and, eq, lte, sql } from "drizzle-orm";
+import { and, asc, eq, lte, sql } from "drizzle-orm";
 
 import { sessionShareOutbox, sessionShares } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
+import { sessionShareEntryLogAppend } from "./sessionShareEntryLogAppend.js";
 
 export function sessionShareOutboxAcknowledge(
     tx: TX,
     input: { now: number; throughSequence: number; shareId: string },
 ): void {
     inTx(tx, (tx) => {
-        const removed = tx
-            .select({
-                bytes: sql<number>`COALESCE(SUM(${sessionShareOutbox.byteLength}), 0)`,
-                count: sql<number>`COUNT(*)`,
-            })
+        const acknowledged = tx
+            .select()
             .from(sessionShareOutbox)
             .where(
                 and(
@@ -21,7 +19,23 @@ export function sessionShareOutboxAcknowledge(
                     lte(sessionShareOutbox.sequence, input.throughSequence),
                 ),
             )
-            .get();
+            .orderBy(asc(sessionShareOutbox.sequence))
+            .all();
+        sessionShareEntryLogAppend(tx, {
+            entries: acknowledged.map((row) => ({
+                canonicalJson: row.canonicalJson,
+                contentHash: row.contentHash,
+                createdAt: row.createdAtMs,
+                shareEventId: row.shareEventId,
+                shareId: row.shareId,
+                shareSequence: row.sequence,
+            })),
+            shareId: input.shareId,
+        });
+        const removed = {
+            bytes: acknowledged.reduce((total, row) => total + row.byteLength, 0),
+            count: acknowledged.length,
+        };
         tx.delete(sessionShareOutbox)
             .where(
                 and(
@@ -32,8 +46,8 @@ export function sessionShareOutboxAcknowledge(
             .run();
         tx.update(sessionShares)
             .set({
-                outboxBytes: sql`MAX(0, ${sessionShares.outboxBytes} - ${removed?.bytes ?? 0})`,
-                outboxCount: sql`MAX(0, ${sessionShares.outboxCount} - ${removed?.count ?? 0})`,
+                outboxBytes: sql`MAX(0, ${sessionShares.outboxBytes} - ${removed.bytes})`,
+                outboxCount: sql`MAX(0, ${sessionShares.outboxCount} - ${removed.count})`,
                 updatedAtMs: input.now,
             })
             .where(eq(sessionShares.shareId, input.shareId))

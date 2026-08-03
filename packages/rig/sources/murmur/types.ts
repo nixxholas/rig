@@ -1,4 +1,10 @@
-import type { IdentityKeyPair, IdentityProfile, MurmurStore } from "@slopus/murmur";
+import type {
+    IdentityKeyPair,
+    IdentityProfile,
+    MurmurClient,
+    MurmurStore,
+    ReceivedEvent,
+} from "@slopus/murmur";
 import type {
     AnswerMurmurFriendRequestRequest,
     AnswerMurmurFriendRequestResponse,
@@ -34,6 +40,26 @@ export interface StoredMurmurAccount {
     readonly profile: IdentityProfile;
 }
 
+/**
+ * Live Murmur primitives a higher-level protocol needs while the service runs.
+ *
+ * Shared sessions build their own MLS group state on top of the same account
+ * identity, client, and store, so they must never open a second account.
+ */
+export interface MurmurRuntimeHandle {
+    readonly client: MurmurClient;
+    readonly identity: IdentityKeyPair;
+    readonly store: MurmurStore;
+}
+
+/**
+ * Consumes one received event before the friendship inbox sees it.
+ *
+ * A router returns `true` once it owns the event, in which case it has already
+ * advanced the relay cursor inside its own durable transaction.
+ */
+export type MurmurEventRouter = (received: ReceivedEvent) => Promise<boolean>;
+
 export interface MurmurServiceContract {
     getAccount(): Promise<GetMurmurAccountResponse>;
     getFriends(): Promise<GetMurmurFriendsResponse>;
@@ -50,5 +76,11 @@ export interface MurmurServiceContract {
         request: AnswerMurmurFriendRequestRequest,
     ): Promise<AnswerMurmurFriendRequestResponse>;
     listContacts(): Promise<ListMurmurContactsResponse>;
+    /** The live runtime, or `undefined` while the Murmur service is stopped. */
+    runtime(): MurmurRuntimeHandle | undefined;
+    /** Observe the runtime appearing and disappearing as the service starts and stops. */
+    onRuntimeChanged(listener: (runtime: MurmurRuntimeHandle | undefined) => void): () => void;
+    /** Route events to a higher-level protocol before the friendship inbox. */
+    registerEventRouter(router: MurmurEventRouter): () => void;
     close(): Promise<void>;
 }

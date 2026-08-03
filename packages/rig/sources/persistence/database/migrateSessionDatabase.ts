@@ -19,6 +19,7 @@ import { sessionWorkspaceTransfer } from "./migrations/15-session-workspace-tran
 import { projectUserMutationVersion } from "./migrations/16-project-user-mutation-version.js";
 import { pendingContextMessages } from "./migrations/17-pending-context-messages.js";
 import { agentSessionSharing } from "./migrations/18-agent-session-sharing.js";
+import { sessionShareEntryLog } from "./migrations/19-session-share-entry-log.js";
 
 const migrations = [
     init,
@@ -39,6 +40,7 @@ const migrations = [
     projectUserMutationVersion,
     pendingContextMessages,
     agentSessionSharing,
+    sessionShareEntryLog,
 ] as const;
 const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
 

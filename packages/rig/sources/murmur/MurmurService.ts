@@ -53,7 +53,13 @@ import {
     MurmurFriendshipManager,
     type MurmurFriendshipChangedEvent,
 } from "./MurmurFriendshipManager.js";
-import type { MurmurLifecycleStore, MurmurServiceContract, StoredMurmurAccount } from "./types.js";
+import type {
+    MurmurEventRouter,
+    MurmurLifecycleStore,
+    MurmurRuntimeHandle,
+    MurmurServiceContract,
+    StoredMurmurAccount,
+} from "./types.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 
@@ -235,6 +241,8 @@ export class MurmurService implements MurmurServiceContract {
     #runtime: MurmurRuntime | undefined;
     #sequence: Promise<void> = Promise.resolve();
     #store: MurmurLifecycleStore | undefined;
+    readonly #eventRouters = new Set<MurmurEventRouter>();
+    readonly #runtimeListeners = new Set<(runtime: MurmurRuntimeHandle | undefined) => void>();
     #storeDeletion: PendingStoreDeletion | undefined;
     readonly #ready: Promise<void>;
 
@@ -377,6 +385,7 @@ export class MurmurService implements MurmurServiceContract {
                 runtime.loop = this.#syncLoop(runtime);
                 void runtime.loop.catch(rethrowDatabaseFailure);
                 void this.#flushRelayOutbox(runtime).catch(rethrowDatabaseFailure);
+                this.#announceRuntime();
                 return { service: this.#serviceState() };
             } catch (error: unknown) {
                 destroyStoredMurmurAccount(account);
@@ -589,6 +598,30 @@ export class MurmurService implements MurmurServiceContract {
         });
     }
 
+    runtime(): MurmurRuntimeHandle | undefined {
+        const runtime = this.#runtime;
+        if (runtime === undefined) return undefined;
+        return {
+            client: runtime.client,
+            identity: runtime.account.identity,
+            store: runtime.observedStore,
+        };
+    }
+
+    onRuntimeChanged(listener: (runtime: MurmurRuntimeHandle | undefined) => void): () => void {
+        this.#runtimeListeners.add(listener);
+        return () => {
+            this.#runtimeListeners.delete(listener);
+        };
+    }
+
+    registerEventRouter(router: MurmurEventRouter): () => void {
+        this.#eventRouters.add(router);
+        return () => {
+            this.#eventRouters.delete(router);
+        };
+    }
+
     async close(): Promise<void> {
         return this.#serialize(async () => {
             if (this.#closed) return;
@@ -691,6 +724,7 @@ export class MurmurService implements MurmurServiceContract {
         } finally {
             if (this.#runtime === runtime) this.#runtime = undefined;
             this.#relayUrls = [];
+            this.#announceRuntime();
             destroyStoredMurmurAccount(runtime.account);
         }
     }
@@ -742,7 +776,20 @@ export class MurmurService implements MurmurServiceContract {
         }
     }
 
+    #announceRuntime(): void {
+        const handle = this.runtime();
+        for (const listener of this.#runtimeListeners) listener(handle);
+    }
+
+    async #routeReceivedEvent(received: ReceivedEvent): Promise<boolean> {
+        for (const router of this.#eventRouters) {
+            if (await router(received)) return true;
+        }
+        return false;
+    }
+
     async #persistReceivedEvent(runtime: MurmurRuntime, received: ReceivedEvent): Promise<void> {
+        if (await this.#routeReceivedEvent(received)) return;
         const inbox = identityInboxTopic(runtime.account.identity);
         if (received.event.topic !== inbox) {
             await this.#requireStore().transaction(async (transaction) => {

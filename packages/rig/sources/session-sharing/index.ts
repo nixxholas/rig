@@ -1,4 +1,12 @@
+export { canonicalSessionShareJson, sessionShareContentHash } from "./canonicalSessionShareJson.js";
 export { FakeSessionShareTransport } from "./FakeSessionShareTransport.js";
+export {
+    MurmurSessionShareTransport,
+    type MurmurSessionShareTransportOptions,
+    type SessionShareEventOutcome,
+    type SessionShareMurmurDirectory,
+} from "./MurmurSessionShareTransport.js";
+export { MurmurShareDirectory, type MurmurShareDirectoryOptions } from "./MurmurShareDirectory.js";
 export {
     friendAuthorSchema,
     userMessageAuthorshipSchema,

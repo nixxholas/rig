@@ -178,6 +178,9 @@ function createMurmurStub(): MurmurServiceContract & {
             stats,
         })),
         close: vi.fn(async () => undefined),
+        onRuntimeChanged: vi.fn(() => () => undefined),
+        registerEventRouter: vi.fn(() => () => undefined),
+        runtime: vi.fn(() => undefined),
         deleteAccount: vi.fn(async () => ({ deleted: true })),
         getAccount: vi.fn(async () => ({ account, service: stopped })),
         getFriends: vi.fn(async () => ({

@@ -54,6 +54,10 @@ import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { MurmurService } from "../murmur/index.js";
+import {
+    createSessionShareRuntime,
+    type SessionShareRuntime,
+} from "../session-sharing/createSessionShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
 
 export interface RunLocalProtocolServerOptions {
@@ -121,6 +125,7 @@ async function runOwnedLocalProtocolServer(
     let startupState: DaemonStartupState = { status: "starting" };
     let mcpToolProvider: McpToolProvider | undefined;
     let murmurService: MurmurService | undefined;
+    let sessionShareRuntime: SessionShareRuntime | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -492,6 +497,7 @@ async function runOwnedLocalProtocolServer(
                 : { onSessionAccess: (session) => happySyncService?.attach(session) }),
             onSessionEvent: (event, session) => {
                 if (happyModule !== undefined) happySyncService?.observe(event, session);
+                sessionShareRuntime?.wake(event.sessionId);
                 if (store !== undefined && gitStateTracker !== undefined) {
                     const identity = session?.projectIdentity();
                     markGitStateFromSessionEvent(
@@ -527,6 +533,18 @@ async function runOwnedLocalProtocolServer(
                 new SqliteMurmurStore(join(dirname(paths.databasePath), "murmur.sqlite")),
         });
         await murmurService.getAccount();
+        const activeMurmur = murmurService;
+        sessionShareRuntime = createSessionShareRuntime({
+            daemonStore: activeStore.sessionShareDaemonStore,
+            deliverFriendMessage: (ownerSessionId, message, persisted) => {
+                activeStore.get(ownerSessionId)?.applyPersistedFriendMessage(message, persisted);
+            },
+            murmur: activeMurmur,
+            shareStore: activeStore.sessionShares,
+        });
+        shutdown.register("session-sharing", async () => {
+            await sessionShareRuntime?.close();
+        });
         shutdown.register("murmur", async () => {
             await murmurService?.close();
         });
@@ -622,6 +640,9 @@ async function runOwnedLocalProtocolServer(
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
                 murmur: murmurService,
+                ...(sessionShareRuntime === undefined
+                    ? {}
+                    : { sessionShares: sessionShareRuntime.contract }),
                 plugins,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 listProviderUsage: () => providerUsageTracker?.all() ?? [],

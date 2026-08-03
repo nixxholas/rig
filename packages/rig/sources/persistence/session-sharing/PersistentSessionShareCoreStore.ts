@@ -15,6 +15,7 @@ import type {
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import { querySessionShare, querySessionShareMembers } from "./querySessionShare.js";
+import { querySessionShareEntryLog } from "./querySessionShareEntryLog.js";
 import { querySessionShareOutbox } from "./querySessionShareOutbox.js";
 import { querySessionShareEndedGrants } from "./querySessionShareEndedGrants.js";
 import { querySessionShareReplica, querySessionShareReplicas } from "./querySessionShareReplica.js";
@@ -180,6 +181,18 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
             shareId: entry.shareId,
             shareSequence: entry.sequence,
         }));
+    }
+
+    queryEntryPage(
+        shareId: string,
+        limits: { afterSequence: number; maxBytes: number; maxItems: number },
+    ): { complete: boolean; entries: readonly SessionShareOpaqueEntry[] } {
+        return querySessionShareEntryLog(this.#tx(), {
+            afterSequence: limits.afterSequence,
+            maxBytes: limits.maxBytes,
+            maxItems: limits.maxItems,
+            shareId,
+        });
     }
 
     acknowledgeOutbox(shareId: string, throughShareSequence: number): void {

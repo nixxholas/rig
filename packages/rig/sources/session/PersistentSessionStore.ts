@@ -148,6 +148,8 @@ import { PresenceStore, resolvePresences } from "../presence/index.js";
 import { SlotEntryStore } from "../slots/index.js";
 import { WebappStore } from "../webapps/index.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
+import { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
+import { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import type { TX } from "../persistence/Transaction.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
@@ -218,6 +220,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly liveEvents = new LiveGlobalEventQueue();
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
+    readonly sessionShareDaemonStore: PersistentSessionShareDaemonStore;
+    readonly sessionShares: PersistentSessionShareCoreStore;
     readonly slots: SlotEntryStore;
     readonly webapps: WebappStore;
 
@@ -259,6 +263,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             options.durableGlobalEventQueue === true
                 ? new PersistentGlobalEventQueue(this.#database)
                 : new InMemoryGlobalEventQueue();
+        this.sessionShares = new PersistentSessionShareCoreStore({
+            now: this.#now,
+            tx: () => this.#tx(),
+        });
+        this.sessionShareDaemonStore = new PersistentSessionShareDaemonStore({
+            tx: () => this.#tx(),
+        });
         this.webapps = new WebappStore({
             now: this.#now,
             publish: (event) => this.#publishGlobalEvent(event),

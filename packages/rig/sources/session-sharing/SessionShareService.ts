@@ -381,8 +381,16 @@ export class SessionShareService {
         if (senderPeerId !== post.grant.murmurPeerId) {
             throw new Error("A friend message sender does not match its authenticated grant.");
         }
+        // The label a friend's message is rendered under is the one the owner registered
+        // when inviting them, never a name the network supplied.
+        const member = this.#store
+            .queryShare(post.grant.shareId)
+            ?.members.find((candidate) => candidate.shareMemberId === post.grant.shareMemberId);
+        if (member === undefined) {
+            throw new Error("A friend message names a member this share does not have.");
+        }
         const friendAuthor: FriendAuthor = {
-            displayName: post.displayName,
+            displayName: member.displayName,
             grantEpoch: post.grant.grantEpoch,
             kind: "friend",
             murmurPeerId: senderPeerId,

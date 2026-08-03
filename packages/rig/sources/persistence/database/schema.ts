@@ -562,6 +562,26 @@ export const sessionShareReplicaEntries = sqliteTable(
     ],
 );
 
+export const sessionShareEntries = sqliteTable(
+    "session_share_entries",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        sequence: integer("sequence").notNull(),
+        shareEventId: text("share_event_id").notNull(),
+        contentHash: text("content_hash").notNull(),
+        canonicalJson: text("canonical_json").notNull(),
+        byteLength: integer("byte_length").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.sequence] }),
+        check("session_share_entries_sequence_check", sql`${table.sequence} >= 1`),
+        check("session_share_entries_byte_length_check", sql`${table.byteLength} >= 0`),
+    ],
+);
+
 export const externalToolCalls = sqliteTable(
     "external_tool_calls",
     {

@@ -1,9 +1,8 @@
-import { createHash } from "node:crypto";
-
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { Message } from "../agent/types.js";
 import type { SessionEvent } from "../protocol/index.js";
+import { canonicalSessionShareJson, sessionShareContentHash } from "./canonicalSessionShareJson.js";
 import type { SessionShareOpaqueEntry } from "./SessionShareTransport.js";
 
 const exact = { additionalProperties: false } as const;
@@ -66,10 +65,10 @@ export function projectSessionShareEntry(options: {
 }): SessionShareOpaqueEntry | undefined {
     const projection = project(options.source);
     if (projection === undefined) return undefined;
-    const canonicalJson = canonicalStringify(projection);
+    const canonicalJson = canonicalSessionShareJson(projection);
     return {
         canonicalJson,
-        contentHash: createHash("sha256").update(canonicalJson).digest("base64url"),
+        contentHash: sessionShareContentHash(canonicalJson),
         createdAt: options.createdAt,
         shareEventId: options.shareEventId,
         shareId: options.shareId,
@@ -106,19 +105,5 @@ function sanitize(value: unknown): unknown {
                 ? []
                 : [[key, sanitize(child)]],
         ),
-    );
-}
-
-function canonicalStringify(value: unknown): string {
-    return JSON.stringify(canonicalize(value));
-}
-
-function canonicalize(value: unknown): unknown {
-    if (Array.isArray(value)) return value.map(canonicalize);
-    if (value === null || typeof value !== "object") return value;
-    return Object.fromEntries(
-        Object.entries(value as Record<string, unknown>)
-            .sort(([left], [right]) => left.localeCompare(right))
-            .map(([key, child]) => [key, canonicalize(child)]),
     );
 }
