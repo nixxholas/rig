@@ -2,6 +2,8 @@ export type { EventId } from "./EventId.js";
 export type {
     BaseProjectEvent,
     BaseProjectWorkspaceEvent,
+    ComputePreparationEvent,
+    ComputePreparationPhase,
     CreateProjectWorkspaceRequest,
     GitChangeSnapshot,
     GitChangeState,

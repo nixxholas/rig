@@ -11,7 +11,7 @@ export function happyComputeErrorStatus(
             return 400;
         case "capacity_exhausted":
             return 429;
-        case "not_ready":
+        case "preparing_compute":
             return 409;
         case "invalid_response":
             return 502;
@@ -41,7 +41,7 @@ export function normalizeHappyComputeError(error: HappyComputeError): HappyCompu
                 retryable: true,
                 ...(error.state === undefined ? {} : { state: error.state }),
             };
-        case "not_ready":
+        case "preparing_compute":
             return error;
         case "instance_failed":
         case "instance_not_found":

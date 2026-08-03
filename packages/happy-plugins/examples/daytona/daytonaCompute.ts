@@ -9,6 +9,7 @@ import {
     HAPPY_COMPUTE_MAX_FILE_BYTES,
     HappyComputeProviderError,
     type HappyComputeProviderHandlers,
+    type HappyComputeStartHandlerContext,
 } from "happy-plugins";
 
 const DAYTONA_API_URL = "https://app.daytona.io/api";
@@ -100,7 +101,7 @@ export function createDaytonaComputeProvider(
 
     return {
         handlers: {
-            async start({ workspaceSource }, context) {
+            async start({ workspaceSource }, context: HappyComputeStartHandlerContext) {
                 if (closed) {
                     throw new HappyComputeProviderError(
                         "provider_unhealthy",
@@ -113,6 +114,10 @@ export function createDaytonaComputeProvider(
                         "DAYTONA_API_KEY is missing. Set it before starting a Daytona sandbox.",
                     );
                 }
+                await context.reportProgress({
+                    message: "Checking the source code for Daytona.",
+                    phase: "checking_out_code",
+                });
                 let source: string;
                 try {
                     source = await realpath(workspaceSource.path);
@@ -148,6 +153,10 @@ export function createDaytonaComputeProvider(
                 });
                 instances.set(instance.id, instance);
                 try {
+                    await context.reportProgress({
+                        message: "Copying files to the Daytona compute.",
+                        phase: "copying_files_to_compute",
+                    });
                     await uploadSource(instance, source, request, context.signal, log);
                 } catch (error) {
                     instances.delete(instance.id);

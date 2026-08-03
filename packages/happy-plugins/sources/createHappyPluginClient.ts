@@ -4,6 +4,8 @@ import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import {
+    createHappyComputeInputSchema,
+    createHappyComputeResponseSchema,
     emptyHappyComputeResponseSchema,
     execHappyComputeInputSchema,
     execHappyComputeResponseSchema,
@@ -15,12 +17,11 @@ import {
     listHappyComputeProvidersResponseSchema,
     readHappyComputeInputSchema,
     readHappyComputeResponseSchema,
-    startHappyComputeInputSchema,
-    startHappyComputeResponseSchema,
     stopHappyComputeInputSchema,
     writeHappyComputeInputSchema,
 } from "./computeTypes.js";
 import { startHappyComputeProvider } from "./startHappyComputeProvider.js";
+import { subscribeHappyComputePreparation } from "./subscribeHappyComputePreparation.js";
 import { startHappyMcpServer } from "./startHappyMcpServer.js";
 import {
     startHappyNetworkRequestHandler,
@@ -157,6 +158,18 @@ export function createHappyPluginClient(
             },
         },
         compute: {
+            create: (input) => {
+                Value.Assert(createHappyComputeInputSchema, input);
+                return request(
+                    "POST",
+                    "/compute/instances",
+                    createHappyComputeResponseSchema,
+                    input,
+                );
+            },
+            events: {
+                subscribe: (handler) => subscribeHappyComputePreparation(handler, streamTransport),
+            },
             exec: async (input) => {
                 Value.Assert(execHappyComputeInputSchema, input);
                 const response = await request(
@@ -220,15 +233,6 @@ export function createHappyPluginClient(
                     )
                 ).providers,
             register: (handlers) => startHappyComputeProvider(handlers, streamTransport),
-            start: (input) => {
-                Value.Assert(startHappyComputeInputSchema, input);
-                return request(
-                    "POST",
-                    "/compute/instances",
-                    startHappyComputeResponseSchema,
-                    input,
-                );
-            },
             stop: async (input) => {
                 Value.Assert(stopHappyComputeInputSchema, input);
                 await request(

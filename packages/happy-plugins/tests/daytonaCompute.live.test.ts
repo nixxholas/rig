@@ -12,7 +12,10 @@ describe.skipIf(apiKey === undefined)("Daytona compute live (on demand)", () => 
         const source = await mkdtemp(join(process.cwd(), "daytona-live-"));
         await writeFile(join(source, "message.txt"), "hello");
         const provider = createDaytonaComputeProvider({ apiKey: apiKey! });
-        const context = { signal: AbortSignal.timeout(150_000) };
+        const context = {
+            reportProgress: async () => undefined,
+            signal: AbortSignal.timeout(150_000),
+        };
         let instanceId: string | undefined;
         try {
             instanceId = await provider.handlers.start(

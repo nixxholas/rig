@@ -240,26 +240,47 @@ preserves provider error codes but derives retryability from the code and post-t
 it never trusts the provider's retryable field.
 
 Stream loss fails a generation immediately and rejects all pending calls with `provider_lost`
-instead of waiting for their deadlines. Failure makes every backed instance terminally failed and
-rejects new starts with `provider_unhealthy`; only a new plugin process generation can recover.
-Provider appearance, health changes, and disappearance invalidate the plugin catalog and publish
-the same whole-catalog `plugins_changed` event used for plugin lifecycle changes. Both
-`GET /compute/providers` and the `/plugins` compute contribution include `healthy`, `degraded`, or
-`failed` health.
+instead of waiting for their deadlines. Failure terminally fails every materialized instance owned
+by that generation; only a new plugin process generation can recover. Unprovisioned metadata
+handles remain listable while their provider is offline. Provider appearance, health changes, and
+disappearance invalidate the plugin catalog and publish the same whole-catalog `plugins_changed`
+event used for plugin lifecycle changes. Both `GET /compute/providers` and the `/plugins` compute
+contribution include `healthy`, `degraded`, or `failed` health.
 
-Instances are leased to the consumer plugin process generation that started them and follow one
-stored `provisioning -> ready -> unavailable -> failed | stopped` lifecycle. `start` creates the
-public provisioning record before provider materialization, then includes a cheap `exec("true")`
-probe inside its 30-second budget and returns only after `ready`. Exec and file operations that
-arrive during provisioning or transient unavailability wait up to ten seconds, then return
-`not_ready` with the current state. A provider success restores unavailable instances when the
-generation recovers; provider failure terminally fails every backed instance.
+Instances are leased to the consumer plugin process generation that created them and follow one
+stored `unprovisioned -> provisioning -> ready -> unavailable -> failed | stopped` lifecycle.
+Creating a handle is metadata-only: it does not resolve the source path, contact a provider, or
+wait for an environment. The first exec or file operation atomically moves `unprovisioned` to
+`provisioning`, starts one background provider attempt, and immediately returns
+`preparing_compute` with `retryable: true`. Concurrent callers observe the same provisioning state
+and cannot create parallel sandboxes. Calls during transient recovery fail fast through the same
+code instead of holding an inference request open.
+
+Provisioning ends with the cheap `exec("true")` probe. Background materialization, provider phases,
+and the probe share a capped five-minute provisioning budget. Provider handlers report
+`checking_out_code` and `copying_files_to_compute` progress while the attempt is running; both
+phases are required, in that order, before a successful completion.
+Rig publishes durable `compute_preparation` events for preparing, provider phases, verification,
+success, retryable failure, terminal failure, and cancellation. Every attempt ends with `ready`,
+`failed`, or `stopped`; terminalization emits from the single lifecycle transition, so concurrent
+cleanup cannot double-publish. Messages are deliberately suitable for a future session integration
+to forward unchanged into chat timelines; session wiring remains out of scope. A failed attempt
+emits a typed `preparing_compute` error in its failure event, resets the handle to `unprovisioned`,
+and lets the next use start a fresh single-flight attempt. It becomes terminally failed only after
+materialization if its provider generation dies.
+
+Expiry of the aggregate provisioning budget fails the attempt loudly and resets it, but never
+counts against provider health. Ordinary read, write, exec, and stop deadline misses remain
+provider-attributable.
 
 Explicit stop transitions immediately to terminal `stopped`; provider cleanup is best-effort and
 deadline-bound. Explicit stop, consumer cleanup, reaping, and daemon shutdown join one cleanup task
-and cannot double-notify. One registry reaper enforces a two-hour maximum lifetime and 30-minute
-idle timeout, logs the attributed death reason, and avoids per-instance timers. Daemon shutdown
-drains best-effort stops while provider streams are still available.
+and cannot double-notify. One registry reaper enforces a two-hour maximum materialized lifetime
+and 30-minute idle timeout, logs the attributed death reason, and avoids per-instance timers.
+Never-materialized handles have a separate two-hour lifetime from handle creation so abandoned
+metadata cannot exhaust the daemon-wide capacity. Provisioning is not reaped while its bounded
+attempt is running; materialized lifetime and idle clocks begin when readiness is verified. Daemon
+shutdown drains best-effort stops while provider streams are still available.
 
 The registry retains at most 256 terminal tombstones with final state, reason, and created/died
 timestamps, evicting oldest first. A call using a retained dead ID returns `instance_failed` and
@@ -269,14 +290,15 @@ the tombstone reason; `instance_not_found` means the ID never existed or its tom
 Every compute failure that crosses the socket uses the TypeBox-validated
 `{ code, message, retryable, state? }` shape. The public codes are `provider_not_found`,
 `provider_unhealthy`, `provider_lost`, `instance_not_found`, `instance_failed`,
-`not_ready`, `deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and `invalid_request`.
-`not_ready`, capacity exhaustion, and deadlines are retryable; dead generations and terminal
-instance tombstones are not.
+`preparing_compute`, `deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and
+`invalid_request`. `preparing_compute`, capacity exhaustion, and deadlines are retryable; dead
+generations and terminal instance tombstones are not.
 
-The first `workspaceSource` form is a canonical absolute local directory path. The daemon verifies
-and canonicalizes it, and the provider owns materialization by copy or checkout. This deliberately
-avoids buffering arbitrarily large workspaces through the socket. The SDK and registry are
-foundation only: custom computes are not yet wired into agent session execution.
+The first `workspaceSource` form is a local directory path retained as handle metadata. The
+provider verifies it only when first use starts materialization, then owns copying, checkout, or
+upload. This deliberately avoids both eager filesystem work and buffering arbitrarily large
+workspaces through the socket. The SDK and registry are foundation only: custom computes are not
+yet wired into agent session execution.
 
 The provider write contract is atomic: the destination is fully replaced or left untouched.
 Providers normally write a same-directory temporary file and rename it as the commit step.

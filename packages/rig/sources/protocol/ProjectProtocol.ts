@@ -1,4 +1,9 @@
-import type { HappyComputeProviderContribution, HappyPluginAppContribution } from "happy-plugins";
+import type {
+    HappyComputePreparationEvent,
+    HappyComputePreparationPhase,
+    HappyComputeProviderContribution,
+    HappyPluginAppContribution,
+} from "happy-plugins";
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { EventId } from "./EventId.js";
@@ -504,6 +509,20 @@ export interface PluginsChangedEvent {
     type: "plugins_changed";
 }
 
+export type ComputePreparationPhase = HappyComputePreparationPhase;
+
+/**
+ * Durable compute materialization progress. A future session integration can forward these same
+ * human-readable events into a chat timeline without inventing another lifecycle channel.
+ */
+export interface ComputePreparationEvent {
+    computeInstanceId: string;
+    createdAt: number;
+    data: Pick<HappyComputePreparationEvent, "error" | "message" | "phase" | "provider" | "state">;
+    id: EventId;
+    type: "compute_preparation";
+}
+
 export type GlobalLiveEvent =
     | PluginsChangedEvent
     | PresenceChangedEvent
@@ -515,7 +534,12 @@ export type GlobalLiveEvent =
     | SessionCurrentEvent
     | Extract<SessionEvent, { type: "session_context_changed" | "session_draft_changed" }>;
 
-export type GlobalEvent = SessionEvent | ProjectEvent | ProjectWorkspaceEvent | GlobalLiveEvent;
+export type GlobalEvent =
+    | ComputePreparationEvent
+    | SessionEvent
+    | ProjectEvent
+    | ProjectWorkspaceEvent
+    | GlobalLiveEvent;
 
 export interface GlobalEventQueueEntry {
     cursor: string;

@@ -49,8 +49,10 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     append(event: GlobalEvent, tx: TX = this.#database): GlobalEventQueueEntry | undefined {
         if (isLiveGlobalEvent(event)) return undefined;
         if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
-        let aggregate: { id: string; kind: "project" | "session" | "workspace" };
-        if ("workspaceId" in event && typeof event.workspaceId === "string") {
+        let aggregate: { id: string; kind: "compute" | "project" | "session" | "workspace" };
+        if ("computeInstanceId" in event) {
+            aggregate = { id: event.computeInstanceId, kind: "compute" };
+        } else if ("workspaceId" in event && typeof event.workspaceId === "string") {
             aggregate = { id: event.workspaceId, kind: "workspace" };
         } else if ("sessionId" in event && typeof event.sessionId === "string") {
             aggregate = { id: event.sessionId, kind: "session" };

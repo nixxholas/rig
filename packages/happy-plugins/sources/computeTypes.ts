@@ -10,6 +10,7 @@ export const HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 export const HAPPY_COMPUTE_MAX_FILE_BYTES = 1024 * 1024;
 
 export const happyComputeInstanceStateSchema = Type.Union([
+    Type.Literal("unprovisioned"),
     Type.Literal("provisioning"),
     Type.Literal("ready"),
     Type.Literal("unavailable"),
@@ -77,17 +78,18 @@ export const happyComputeRelativePathSchema = Type.String({
     pattern: "^(?!/)(?!.*(?:^|/)\\.\\.?(?:/|$))(?!.*\\\\).+$",
 });
 
-export const startHappyComputeInputSchema = Type.Object(
+export const createHappyComputeInputSchema = Type.Object(
     {
         provider: happyComputeProviderNameSchema,
         workspaceSource: happyComputeWorkspaceSourceSchema,
     },
     exact,
 );
-export type StartHappyComputeInput = Static<typeof startHappyComputeInputSchema>;
-export const startHappyComputeHandlerInputSchema = Type.Pick(startHappyComputeInputSchema, [
-    "workspaceSource",
-]);
+export type CreateHappyComputeInput = Static<typeof createHappyComputeInputSchema>;
+export const startHappyComputeHandlerInputSchema = Type.Object(
+    { workspaceSource: happyComputeWorkspaceSourceSchema },
+    exact,
+);
 export type StartHappyComputeHandlerInput = Static<typeof startHappyComputeHandlerInputSchema>;
 
 const happyComputeInstanceBaseSchema = Type.Object(
@@ -99,6 +101,19 @@ const happyComputeInstanceBaseSchema = Type.Object(
     exact,
 );
 export const happyComputeInstanceSchema = Type.Union([
+    Type.Composite(
+        [
+            happyComputeInstanceBaseSchema,
+            Type.Object(
+                {
+                    reason: Type.Optional(nonEmptyText),
+                    state: Type.Literal("unprovisioned"),
+                },
+                exact,
+            ),
+        ],
+        exact,
+    ),
     Type.Composite(
         [
             happyComputeInstanceBaseSchema,
@@ -211,8 +226,8 @@ export const listHappyComputeInstancesResponseSchema = Type.Object(
     { instances: Type.Array(happyComputeInstanceSchema, { maxItems: 512 }) },
     exact,
 );
-export const startHappyComputeBodySchema = startHappyComputeInputSchema;
-export const startHappyComputeResponseSchema = happyComputeInstanceSchema;
+export const createHappyComputeBodySchema = createHappyComputeInputSchema;
+export const createHappyComputeResponseSchema = happyComputeInstanceSchema;
 export const readHappyComputeBodySchema = Type.Pick(readHappyComputeInputSchema, ["path"]);
 export const readHappyComputeResponseSchema = Type.Object(
     {
@@ -312,7 +327,7 @@ export const happyComputeErrorCodeSchema = Type.Union([
     Type.Literal("invalid_response"),
     Type.Literal("instance_failed"),
     Type.Literal("instance_not_found"),
-    Type.Literal("not_ready"),
+    Type.Literal("preparing_compute"),
     Type.Literal("provider_lost"),
     Type.Literal("provider_not_found"),
     Type.Literal("provider_unhealthy"),
@@ -352,10 +367,14 @@ export const happyComputeErrorSchema = Type.Union([
     ),
     Type.Object(
         {
-            code: Type.Literal("not_ready"),
+            code: Type.Literal("preparing_compute"),
             message: nonEmptyText,
             retryable: Type.Literal(true),
-            state: Type.Union([Type.Literal("provisioning"), Type.Literal("unavailable")]),
+            state: Type.Union([
+                Type.Literal("unprovisioned"),
+                Type.Literal("provisioning"),
+                Type.Literal("unavailable"),
+            ]),
         },
         exact,
     ),
@@ -408,6 +427,55 @@ export const happyComputeCallCompletionSchema = Type.Union([
 ]);
 export type HappyComputeCallCompletion = Static<typeof happyComputeCallCompletionSchema>;
 
+export const happyComputeProvisioningPhaseSchema = Type.Union([
+    Type.Literal("checking_out_code"),
+    Type.Literal("copying_files_to_compute"),
+]);
+export type HappyComputeProvisioningPhase = Static<typeof happyComputeProvisioningPhaseSchema>;
+
+export const happyComputeProvisioningProgressSchema = Type.Object(
+    {
+        message: nonEmptyText,
+        phase: happyComputeProvisioningPhaseSchema,
+    },
+    exact,
+);
+export type HappyComputeProvisioningProgress = Static<
+    typeof happyComputeProvisioningProgressSchema
+>;
+
+export const happyComputePreparationPhaseSchema = Type.Union([
+    Type.Literal("preparing_compute"),
+    Type.Literal("checking_out_code"),
+    Type.Literal("copying_files_to_compute"),
+    Type.Literal("verifying_compute"),
+    Type.Literal("ready"),
+    Type.Literal("failed"),
+    Type.Literal("stopped"),
+]);
+export type HappyComputePreparationPhase = Static<typeof happyComputePreparationPhaseSchema>;
+
+export const happyComputePreparationEventSchema = Type.Object(
+    {
+        createdAt: Type.Integer({ minimum: 0 }),
+        error: Type.Optional(happyComputeErrorSchema),
+        instanceId: instanceIdSchema,
+        message: nonEmptyText,
+        phase: happyComputePreparationPhaseSchema,
+        provider: happyComputeProviderNameSchema,
+        state: Type.Union([
+            Type.Literal("provisioning"),
+            Type.Literal("ready"),
+            Type.Literal("unprovisioned"),
+            Type.Literal("failed"),
+            Type.Literal("stopped"),
+        ]),
+        type: Type.Literal("compute_preparation"),
+    },
+    exact,
+);
+export type HappyComputePreparationEvent = Static<typeof happyComputePreparationEventSchema>;
+
 export const registerHappyComputeProviderResponseSchema = Type.Object(
     { registrationId: nonEmptyText },
     exact,
@@ -416,6 +484,11 @@ export const registerHappyComputeProviderResponseSchema = Type.Object(
 export interface HappyComputeHandlerContext {
     /** Aborted when the caller deadline expires or the provider generation is retired. */
     readonly signal: AbortSignal;
+}
+
+export interface HappyComputeStartHandlerContext extends HappyComputeHandlerContext {
+    /** Publishes human-readable materialization progress through Rig's compute event stream. */
+    reportProgress(progress: HappyComputeProvisioningProgress): Promise<void>;
 }
 
 export interface HappyComputeProviderHandlers {
@@ -429,7 +502,7 @@ export interface HappyComputeProviderHandlers {
     ): Uint8Array | Promise<Uint8Array>;
     start(
         input: StartHappyComputeHandlerInput,
-        context: HappyComputeHandlerContext,
+        context: HappyComputeStartHandlerContext,
     ): string | Promise<string>;
     stop(input: StopHappyComputeInput, context: HappyComputeHandlerContext): void | Promise<void>;
     write(input: WriteHappyComputeInput, context: HappyComputeHandlerContext): void | Promise<void>;
@@ -438,6 +511,12 @@ export interface HappyComputeProviderHandlers {
 export interface HappyComputeRegistration {
     readonly failure: string | undefined;
     readonly registrationId: string;
+    readonly status: "closed" | "connected";
+    close(): Promise<void>;
+}
+
+export interface HappyComputeEventSubscription {
+    readonly failure: string | undefined;
     readonly status: "closed" | "connected";
     close(): Promise<void>;
 }

@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
 import type { FileSystemContext } from "../../agent/context/FileSystemContext.js";
 import type { LiveGlobalEventEntry } from "../../global-event/LiveGlobalEventQueue.js";
-import type { PluginsChangedEvent } from "../../protocol/index.js";
+import type { ComputePreparationEvent, PluginsChangedEvent } from "../../protocol/index.js";
 import { DaemonLog } from "../../server/DaemonLog.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { PluginManager } from "../PluginManager.js";
@@ -188,19 +188,28 @@ describe("plugin registration", () => {
             }),
         );
 
+        const instance = computeRegistry.create(
+            {
+                provider: "cloud",
+                workspaceSource: {
+                    path: "/source",
+                    type: "local_directory",
+                },
+            },
+            consumer.generation,
+        );
         for (let failure = 0; failure < 2; failure += 1) {
             await expect(
-                computeRegistry.start(
-                    {
-                        provider: "cloud",
-                        workspaceSource: {
-                            path: "/source",
-                            type: "local_directory",
-                        },
-                    },
+                computeRegistry.read(
+                    { instanceId: instance.instanceId, path: "message.txt" },
                     consumer.generation,
                 ),
-            ).rejects.toMatchObject({ code: "invalid_response" });
+            ).rejects.toMatchObject({ code: "preparing_compute" });
+            await vi.waitFor(() =>
+                expect(computeRegistry.listInstances(consumer.generation)[0]?.state).toBe(
+                    "unprovisioned",
+                ),
+            );
         }
         await vi.waitFor(() =>
             expect(harness.events.at(-1)?.data.plugins[0]?.compute).toEqual({
@@ -208,6 +217,18 @@ describe("plugin registration", () => {
                 name: "cloud",
             }),
         );
+        expect(harness.computeEvents.map((event) => event.data.phase)).toEqual([
+            "preparing_compute",
+            "failed",
+            "preparing_compute",
+            "failed",
+        ]);
+        expect(
+            harness.store.globalEventQueue
+                .list()
+                ?.filter((entry) => entry.event.type === "compute_preparation")
+                .map((entry) => entry.event.id),
+        ).toEqual(harness.computeEvents.map((event) => event.id));
 
         detach();
         await vi.waitFor(() =>
@@ -221,6 +242,58 @@ describe("plugin registration", () => {
             expect(harness.events.at(-1)?.data.plugins[0]?.compute).toBeUndefined(),
         );
         consumer.close();
+    });
+
+    it("durably closes an in-flight preparation before daemon shutdown", async () => {
+        const computeRegistry = new PluginComputeRegistry();
+        const harness = await createHarness({ computeRegistry });
+        await harness.manager.start();
+        const provider = computeRegistry.createConnection({
+            compute: { name: "cloud" },
+            folder: "cloud",
+            name: "Cloud",
+        });
+        const consumer = computeRegistry.createConnection({
+            folder: "consumer",
+            name: "Consumer",
+        });
+        const registrationId = provider.register();
+        provider.attach(registrationId, () => true);
+        const instance = computeRegistry.create(
+            {
+                provider: "cloud",
+                workspaceSource: { path: "/source", type: "local_directory" },
+            },
+            consumer.generation,
+        );
+
+        await expect(
+            computeRegistry.read(
+                { instanceId: instance.instanceId, path: "message.txt" },
+                consumer.generation,
+            ),
+        ).rejects.toMatchObject({ code: "preparing_compute" });
+        await vi.waitFor(() =>
+            expect(harness.computeEvents.map((event) => event.data.phase)).toEqual([
+                "preparing_compute",
+            ]),
+        );
+
+        await harness.manager.close();
+
+        expect(harness.computeEvents.map((event) => event.data.phase)).toEqual([
+            "preparing_compute",
+            "stopped",
+        ]);
+        expect(harness.computeEvents.at(-1)?.data).toMatchObject({
+            state: "stopped",
+        });
+        expect(
+            harness.store.globalEventQueue
+                .list()
+                ?.filter((entry) => entry.event.type === "compute_preparation")
+                .map((entry) => entry.event.id),
+        ).toEqual(harness.computeEvents.map((event) => event.id));
     });
 
     it("completes install and uninstall when Docker housekeeping fails", async () => {
@@ -581,6 +654,7 @@ async function createHarness(
         startupTimeoutMs?: number;
     } = {},
 ): Promise<{
+    computeEvents: ComputePreparationEvent[];
     dataRoot: string;
     events: PluginsChangedEvent[];
     exitRuntime(name: string): void;
@@ -606,8 +680,10 @@ async function createHarness(
     });
     cleanup.push(() => store.close());
 
+    const computeEvents: ComputePreparationEvent[] = [];
     const events: PluginsChangedEvent[] = [];
     store.liveEvents.subscribe((entry: LiveGlobalEventEntry) => {
+        if (entry.event.type === "compute_preparation") computeEvents.push(entry.event);
         if (entry.event.type === "plugins_changed") events.push(entry.event);
     });
 
@@ -691,6 +767,7 @@ async function createHarness(
     cleanup.push(() => manager.close());
 
     return {
+        computeEvents,
         dataRoot,
         events,
         exitRuntime(name) {

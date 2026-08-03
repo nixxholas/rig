@@ -32,6 +32,10 @@ describe("Happy compute lifecycle", () => {
         const registration = await host.client.compute.register(localBash.handlers);
         await host.compute.waitForProvider();
         await host.client.ready("Ready.");
+        const preparationEvents: string[] = [];
+        const subscription = await host.client.compute.events.subscribe((event) => {
+            preparationEvents.push(event.phase);
+        });
 
         await expect(host.client.compute.list()).resolves.toEqual([
             {
@@ -41,10 +45,33 @@ describe("Happy compute lifecycle", () => {
                 pluginName: "Test Plugin",
             },
         ]);
-        const instance = await host.client.compute.start({
+        const instance = await host.client.compute.create({
             provider: "local-bash",
             workspaceSource: { path: source, type: "local_directory" },
         });
+        expect(instance.state).toBe("unprovisioned");
+        await expect(access(instanceParent)).rejects.toThrow();
+        await expect(
+            host.client.compute.files.write({
+                bytes: Buffer.from(" from compute"),
+                instanceId: instance.instanceId,
+                path: "suffix.txt",
+            }),
+        ).rejects.toMatchObject({
+            code: "preparing_compute",
+            retryable: true,
+            state: "provisioning",
+        });
+        await waitForReady(host, instance.instanceId);
+        await expect
+            .poll(() => preparationEvents)
+            .toEqual([
+                "preparing_compute",
+                "checking_out_code",
+                "copying_files_to_compute",
+                "verifying_compute",
+                "ready",
+            ]);
         await host.client.compute.files.write({
             bytes: Buffer.from(" from compute"),
             instanceId: instance.instanceId,
@@ -90,6 +117,7 @@ describe("Happy compute lifecycle", () => {
             }),
         ]);
 
+        await subscription.close();
         await registration.close();
         await localBash.close();
     });
@@ -102,11 +130,18 @@ describe("Happy compute lifecycle", () => {
         await mkdir(source);
         await writeFile(join(source, "message.txt"), "hello");
         const localBash = createLocalBashComputeProvider(instanceParent);
-        const context = { signal: new AbortController().signal };
+        const phases: string[] = [];
+        const context = {
+            reportProgress: async (progress: { phase: string }) => {
+                phases.push(progress.phase);
+            },
+            signal: new AbortController().signal,
+        };
         const instanceId = await localBash.handlers.start(
             { workspaceSource: { path: source, type: "local_directory" } },
             context,
         );
+        expect(phases).toEqual(["checking_out_code", "copying_files_to_compute"]);
 
         await expect(
             Promise.resolve(localBash.handlers.read({ instanceId, path: "missing.txt" }, context)),
@@ -145,6 +180,85 @@ describe("Happy compute lifecycle", () => {
             message: "The local Bash compute instance was not found.",
         });
         await localBash.close();
+    });
+
+    it("publishes a terminal event when provisioning is stopped", async () => {
+        const host = await createHappyPluginTestHost(
+            { computeProvider: { name: "test-compute" } },
+            { temporaryDirectory: process.cwd() },
+        );
+        hosts.push(host);
+        let releaseStart: () => void = () => undefined;
+        const startReleased = new Promise<void>((resolve) => {
+            releaseStart = resolve;
+        });
+        let markStartEntered: () => void = () => undefined;
+        const startEntered = new Promise<void>((resolve) => {
+            markStartEntered = resolve;
+        });
+        const registration = await host.client.compute.register({
+            exec: () => ({
+                exitCode: 0,
+                stderr: "",
+                stderrTruncated: false,
+                stdout: "",
+                stdoutTruncated: false,
+                timedOut: false,
+            }),
+            read: () => Buffer.alloc(0),
+            start: async (_input, context) => {
+                await context.reportProgress({
+                    message: "Checking out code.",
+                    phase: "checking_out_code",
+                });
+                markStartEntered();
+                await startReleased;
+                await context.reportProgress({
+                    message: "Copying files to compute.",
+                    phase: "copying_files_to_compute",
+                });
+                return "provider-instance";
+            },
+            stop: () => undefined,
+            write: () => undefined,
+        });
+        await host.compute.waitForProvider();
+        const phases: string[] = [];
+        const subscription = await host.client.compute.events.subscribe((event) => {
+            phases.push(event.phase);
+        });
+        const instance = await host.client.compute.create({
+            provider: "test-compute",
+            workspaceSource: { path: host.rootDirectory, type: "local_directory" },
+        });
+
+        await expect(
+            host.client.compute.files.read({
+                instanceId: instance.instanceId,
+                path: "message.txt",
+            }),
+        ).rejects.toMatchObject({ code: "preparing_compute" });
+        await startEntered;
+        await host.client.compute.stop({ instanceId: instance.instanceId });
+        await expect
+            .poll(() => phases)
+            .toEqual(["preparing_compute", "checking_out_code", "stopped"]);
+
+        releaseStart();
+        await expect
+            .poll(() =>
+                host.requests.some(
+                    (request) =>
+                        request.method === "POST" &&
+                        request.path.startsWith(
+                            `/compute/providers/${registration.registrationId}/calls/`,
+                        ) &&
+                        !request.path.endsWith("/progress"),
+                ),
+            )
+            .toBe(true);
+        await subscription.close();
+        await registration.close();
     });
 
     it("matches daemon status and retryability for typed provider errors", async () => {
@@ -187,18 +301,34 @@ describe("Happy compute lifecycle", () => {
                         return Buffer.alloc(0);
                 }
             },
-            start: () => "provider-instance",
+            start: async (_input, context) => {
+                await context.reportProgress({
+                    message: "Checking out code.",
+                    phase: "checking_out_code",
+                });
+                await context.reportProgress({
+                    message: "Copying files to compute.",
+                    phase: "copying_files_to_compute",
+                });
+                return "provider-instance";
+            },
             stop: () => undefined,
             write: () => undefined,
         });
         await host.compute.waitForProvider();
-        const instance = await host.client.compute.start({
+        const instance = await host.client.compute.create({
             provider: "test-compute",
             workspaceSource: { path: host.rootDirectory, type: "local_directory" },
         });
         const read = (path: string) =>
             host.client.compute.files.read({ instanceId: instance.instanceId, path });
 
+        await expect(read("invalid")).rejects.toMatchObject({
+            code: "preparing_compute",
+            retryable: true,
+            status: 409,
+        });
+        await waitForReady(host, instance.instanceId);
         await expect(read("invalid")).rejects.toMatchObject({
             code: "invalid_request",
             retryable: false,
@@ -245,15 +375,38 @@ describe("Happy compute lifecycle", () => {
                 timedOut: false,
             }),
             read: () => Buffer.alloc(0),
-            start: () => "provider-instance",
+            start: async (_input, context) => {
+                await context.reportProgress({
+                    message: "Checking out code.",
+                    phase: "checking_out_code",
+                });
+                await context.reportProgress({
+                    message: "Copying files to compute.",
+                    phase: "copying_files_to_compute",
+                });
+                return "provider-instance";
+            },
             stop: () => undefined,
             write: () => undefined,
         });
         await host.compute.waitForProvider();
-        const instance = await host.client.compute.start({
+        const instance = await host.client.compute.create({
             provider: "test-compute",
             workspaceSource: { path: host.rootDirectory, type: "local_directory" },
         });
+        await expect(
+            host.client.compute.files.read({
+                instanceId: instance.instanceId,
+                path: "message.txt",
+            }),
+        ).rejects.toMatchObject({ code: "preparing_compute" });
+        await waitForReady(host, instance.instanceId);
+        await expect(
+            host.client.compute.files.read({
+                instanceId: instance.instanceId,
+                path: "message.txt",
+            }),
+        ).resolves.toEqual(Buffer.alloc(0));
 
         host.compute.disconnectProvider();
         await expect.poll(() => registration.status).toBe("closed");
@@ -273,3 +426,14 @@ describe("Happy compute lifecycle", () => {
         await registration.close();
     });
 });
+
+async function waitForReady(host: HappyPluginTestHost, instanceId: string): Promise<void> {
+    await expect
+        .poll(async () => {
+            const instance = (await host.client.compute.instances.list()).find(
+                (candidate) => candidate.instanceId === instanceId,
+            );
+            return instance?.state;
+        })
+        .toBe("ready");
+}

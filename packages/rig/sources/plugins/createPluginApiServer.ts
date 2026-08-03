@@ -1,12 +1,10 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { lstat, realpath } from "node:fs/promises";
-import { basename, extname, isAbsolute } from "node:path";
+import { basename, extname } from "node:path";
 
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 import type {
     AgentMessageDelivery,
-    HappyComputeWorkspaceSource,
     HappyPlugin,
     HappyPluginStatus,
     HappyProviderUsageEntry,
@@ -44,14 +42,15 @@ import {
 } from "happy-plugins";
 import {
     classifyPluginApiRequestError,
+    createHappyComputeBodySchema,
     createPluginWorkspaceCommandExecutor,
     execHappyComputeBodySchema,
     happyComputeErrorStatus,
+    happyComputeProvisioningProgressSchema,
     PluginApiRequestError,
     PluginApiRequestTooLargeError,
     readHappyComputeBodySchema,
     readPluginWorkspaceFile,
-    startHappyComputeBodySchema,
     writeHappyComputeBodySchema,
     writePluginWorkspaceFile,
 } from "happy-plugins/internal";
@@ -231,6 +230,38 @@ async function handleRequest(
         sendJson(response, 200, { providers: requireComputeRegistry(options).list() });
         return;
     }
+    if (request.method === "GET" && url.pathname === "/compute/events") {
+        const compute = requireCompute(options);
+        response.writeHead(200, {
+            "cache-control": "no-store",
+            "content-type": "application/x-ndjson",
+        });
+        response.flushHeaders();
+        const unsubscribe = requireComputeRegistry(options).subscribe((event) => {
+            if (
+                event.type !== "preparation" ||
+                event.consumerGeneration !== compute.generation ||
+                response.destroyed ||
+                response.writableEnded
+            ) {
+                return;
+            }
+            response.write(
+                `${JSON.stringify({
+                    createdAt: event.createdAt,
+                    ...(event.error === undefined ? {} : { error: event.error }),
+                    instanceId: event.instanceId,
+                    message: event.message,
+                    phase: event.phase,
+                    provider: event.provider,
+                    state: event.state,
+                    type: "compute_preparation",
+                })}\n`,
+            );
+        });
+        response.once("close", unsubscribe);
+        return;
+    }
     if (request.method === "GET" && url.pathname === "/compute/instances") {
         sendJson(response, 200, {
             instances: requireComputeRegistry(options).listInstances(
@@ -346,17 +377,15 @@ async function handleRequest(
         return;
     }
     if (request.method === "POST" && url.pathname === "/compute/instances") {
-        const body = await readJson(request, startHappyComputeBodySchema, "Compute start settings");
+        const body = await readJson(
+            request,
+            createHappyComputeBodySchema,
+            "Compute instance settings",
+        );
         sendJson(
             response,
             201,
-            await requireComputeRegistry(options).start(
-                {
-                    ...body,
-                    workspaceSource: await canonicalizeComputeSource(body.workspaceSource),
-                },
-                requireCompute(options).generation,
-            ),
+            requireComputeRegistry(options).create(body, requireCompute(options).generation),
         );
         return;
     }
@@ -383,6 +412,25 @@ async function handleRequest(
         });
         response.flushHeaders();
         response.once("close", detach);
+        return;
+    }
+    if (
+        parts.length === 6 &&
+        parts[0] === "compute" &&
+        parts[1] === "providers" &&
+        parts[2] !== undefined &&
+        parts[3] === "calls" &&
+        parts[4] !== undefined &&
+        parts[5] === "progress" &&
+        request.method === "POST"
+    ) {
+        const progress = await readJson(
+            request,
+            happyComputeProvisioningProgressSchema,
+            "Compute provisioning progress",
+        );
+        requireCompute(options).progress(parts[2], parts[4], progress);
+        sendJson(response, 200, {});
         return;
     }
     if (
@@ -979,27 +1027,6 @@ function requireCompute(options: CreatePluginApiServerOptions): PluginComputeCon
 function requireComputeRegistry(options: CreatePluginApiServerOptions): PluginComputeRegistry {
     if (options.computeRegistry !== undefined) return options.computeRegistry;
     throw new PluginApiRequestError("Compute providers are unavailable to this plugin.");
-}
-
-async function canonicalizeComputeSource(
-    source: HappyComputeWorkspaceSource,
-): Promise<HappyComputeWorkspaceSource> {
-    if (!isAbsolute(source.path)) {
-        throw new PluginApiRequestError(
-            "A local compute source must be an absolute directory path.",
-        );
-    }
-    let path: string;
-    try {
-        path = await realpath(source.path);
-        if (!(await lstat(path)).isDirectory()) {
-            throw new PluginApiRequestError("A local compute source must be a directory.");
-        }
-    } catch (error) {
-        if (error instanceof PluginApiRequestError) throw error;
-        throw new PluginApiRequestError("The local compute source directory is unavailable.");
-    }
-    return { path, type: "local_directory" };
 }
 
 function requirePluginDataDirectory(options: CreatePluginApiServerOptions): string {

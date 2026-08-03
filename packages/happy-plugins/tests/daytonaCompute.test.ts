@@ -9,7 +9,10 @@ import { HAPPY_COMPUTE_MAX_COMMAND_OUTPUT_BYTES } from "../sources/index.js";
 import { createDaytonaComputeProvider } from "../examples/daytona/daytonaCompute.ts";
 
 const directories: string[] = [];
-const context = { signal: new AbortController().signal };
+const context = {
+    reportProgress: async () => undefined,
+    signal: new AbortController().signal,
+};
 const observedCommandBodySchema = Type.Object(
     { command: Type.String() },
     { additionalProperties: true },
@@ -24,6 +27,7 @@ afterEach(async () => {
 describe("Daytona compute example", () => {
     it("maps sandbox creation, source upload, exec, files, and deletion", async () => {
         const source = await createSource();
+        const phases: string[] = [];
         const requests: {
             authorization: string | null;
             body: unknown;
@@ -73,7 +77,12 @@ describe("Daytona compute example", () => {
 
         const instanceId = await provider.handlers.start(
             { workspaceSource: { path: source, type: "local_directory" } },
-            context,
+            {
+                reportProgress: async (progress) => {
+                    phases.push(progress.phase);
+                },
+                signal: context.signal,
+            },
         );
         await expect(
             provider.handlers.exec(
@@ -97,6 +106,7 @@ describe("Daytona compute example", () => {
         ).resolves.toEqual(Buffer.from("saved"));
         await provider.handlers.stop({ instanceId }, context);
 
+        expect(phases).toEqual(["checking_out_code", "copying_files_to_compute"]);
         expect(requests[0]).toMatchObject({
             body: {
                 autoDeleteInterval: 0,

@@ -6,8 +6,10 @@ import {
     HAPPY_COMPUTE_MAX_FILE_BYTES,
     happyComputeCallCompletionSchema,
     happyComputeEventSchema,
+    happyComputeProvisioningProgressSchema,
     type HappyComputeCallCompletion,
     type HappyComputeCallEvent,
+    type HappyComputeProvisioningProgress,
     type HappyComputeProviderHandlers,
     type HappyComputeRegistration,
 } from "./computeTypes.js";
@@ -48,7 +50,15 @@ export async function startHappyComputeProvider(
             const controller = new AbortController();
             calls.get(event.callId)?.abort();
             calls.set(event.callId, controller);
-            void executeComputeCall(event, handlers, controller.signal)
+            void executeComputeCall(event, handlers, controller.signal, async (progress) => {
+                Value.Assert(happyComputeProvisioningProgressSchema, progress);
+                await transport.request(
+                    "POST",
+                    `/compute/providers/${encodeURIComponent(registrationId)}/calls/${encodeURIComponent(event.callId)}/progress`,
+                    emptyResponseSchema,
+                    progress,
+                );
+            })
                 .then((completion) =>
                     transport.request(
                         "POST",
@@ -96,6 +106,7 @@ async function executeComputeCall(
     event: HappyComputeCallEvent,
     handlers: HappyComputeProviderHandlers,
     signal: AbortSignal,
+    reportProgress: (progress: HappyComputeProvisioningProgress) => Promise<void>,
 ): Promise<HappyComputeCallCompletion> {
     try {
         const context = { signal };
@@ -107,7 +118,7 @@ async function executeComputeCall(
                     result: {
                         instanceId: await handlers.start(
                             { workspaceSource: event.workspaceSource },
-                            context,
+                            { reportProgress, signal },
                         ),
                     },
                 };

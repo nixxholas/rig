@@ -1,14 +1,16 @@
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 
 import type {
+    CreateHappyComputeInput,
     ExecHappyComputeInput,
+    HappyComputeEventSubscription,
     HappyComputeExecResult,
     HappyComputeInstance,
+    HappyComputePreparationEvent,
     HappyComputeProvider,
     HappyComputeProviderHandlers,
     HappyComputeRegistration,
     ReadHappyComputeInput,
-    StartHappyComputeInput,
     StopHappyComputeInput,
     WriteHappyComputeInput,
 } from "./computeTypes.js";
@@ -1295,6 +1297,12 @@ export interface HappyPluginClient {
     };
     /** Register or consume generation-scoped filesystem-and-command compute providers. */
     readonly compute: {
+        create(input: CreateHappyComputeInput): Promise<HappyComputeInstance>;
+        readonly events: {
+            subscribe(
+                handler: (event: HappyComputePreparationEvent) => void | Promise<void>,
+            ): Promise<HappyComputeEventSubscription>;
+        };
         exec(input: ExecHappyComputeInput): Promise<HappyComputeExecResult>;
         readonly files: {
             read(input: ReadHappyComputeInput): Promise<Uint8Array>;
@@ -1305,7 +1313,6 @@ export interface HappyPluginClient {
         };
         list(): Promise<readonly HappyComputeProvider[]>;
         register(handlers: HappyComputeProviderHandlers): Promise<HappyComputeRegistration>;
-        start(input: StartHappyComputeInput): Promise<HappyComputeInstance>;
         stop(input: StopHappyComputeInput): Promise<void>;
     };
     /** Register middleware that may replace the composed system prompt before an agent turn. */

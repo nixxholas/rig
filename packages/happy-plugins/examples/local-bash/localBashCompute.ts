@@ -20,6 +20,7 @@ import {
     HAPPY_COMPUTE_MAX_FILE_BYTES,
     HappyComputeProviderError,
     type HappyComputeProviderHandlers,
+    type HappyComputeStartHandlerContext,
 } from "happy-plugins";
 
 const missingFileSystemPathSchema = Type.Object({
@@ -54,7 +55,7 @@ export function createLocalBashComputeProvider(
 
     return {
         handlers: {
-            async start({ workspaceSource: source }) {
+            async start({ workspaceSource: source }, context: HappyComputeStartHandlerContext) {
                 if (closed) {
                     throw new HappyComputeProviderError(
                         "provider_unhealthy",
@@ -67,6 +68,10 @@ export function createLocalBashComputeProvider(
                         "Local Bash compute requires a local directory source.",
                     );
                 }
+                await context.reportProgress({
+                    message: "Checking the local source code.",
+                    phase: "checking_out_code",
+                });
                 let sourcePath: string;
                 try {
                     sourcePath = await realpath(source.path);
@@ -82,6 +87,10 @@ export function createLocalBashComputeProvider(
                         "The local Bash compute source must be a directory.",
                     );
                 }
+                await context.reportProgress({
+                    message: "Copying files to the local compute.",
+                    phase: "copying_files_to_compute",
+                });
                 await mkdir(instanceParent, { recursive: true });
                 const root = await mkdtemp(join(instanceParent, "local-bash-"));
                 const workspace = join(root, "workspace");

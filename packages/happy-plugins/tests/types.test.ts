@@ -1,7 +1,11 @@
 import { Value } from "@sinclair/typebox/value";
 import { describe, expect, it } from "vitest";
 
-import { happyComputeErrorSchema, happyComputeInstanceSchema } from "../sources/computeTypes.js";
+import {
+    happyComputeErrorSchema,
+    happyComputeInstanceSchema,
+    happyComputePreparationEventSchema,
+} from "../sources/computeTypes.js";
 import { happyPluginManifestSchema } from "../sources/types.js";
 import { HAPPY_PLUGIN_MAX_INTERCEPT_DOMAINS } from "../sources/types.js";
 
@@ -9,7 +13,7 @@ describe("happy plugin manifest", () => {
     it("validates compute readiness errors and terminal instance tombstones", () => {
         expect(
             Value.Check(happyComputeErrorSchema, {
-                code: "not_ready",
+                code: "preparing_compute",
                 message: "The instance is still provisioning.",
                 retryable: true,
                 state: "provisioning",
@@ -17,7 +21,7 @@ describe("happy plugin manifest", () => {
         ).toBe(true);
         expect(
             Value.Check(happyComputeErrorSchema, {
-                code: "not_ready",
+                code: "preparing_compute",
                 message: "The instance failed.",
                 retryable: true,
                 state: "failed",
@@ -31,6 +35,54 @@ describe("happy plugin manifest", () => {
                 provider: "test-compute",
                 reason: "The provider crashed.",
                 state: "failed",
+            }),
+        ).toBe(true);
+    });
+
+    it("validates typed compute preparation events", () => {
+        expect(
+            Value.Check(happyComputePreparationEventSchema, {
+                createdAt: 10,
+                error: {
+                    code: "preparing_compute",
+                    message: "The sandbox API rejected provisioning.",
+                    retryable: true,
+                    state: "unprovisioned",
+                },
+                instanceId: "instance-1",
+                message: "The sandbox API rejected provisioning.",
+                phase: "failed",
+                provider: "test-compute",
+                state: "unprovisioned",
+                type: "compute_preparation",
+            }),
+        ).toBe(true);
+        expect(
+            Value.Check(happyComputePreparationEventSchema, {
+                createdAt: 20,
+                error: {
+                    code: "instance_failed",
+                    message: "The compute provider disconnected.",
+                    retryable: false,
+                    state: "failed",
+                },
+                instanceId: "instance-1",
+                message: "The compute provider disconnected.",
+                phase: "failed",
+                provider: "test-compute",
+                state: "failed",
+                type: "compute_preparation",
+            }),
+        ).toBe(true);
+        expect(
+            Value.Check(happyComputePreparationEventSchema, {
+                createdAt: 30,
+                instanceId: "instance-1",
+                message: "Compute preparation stopped.",
+                phase: "stopped",
+                provider: "test-compute",
+                state: "stopped",
+                type: "compute_preparation",
             }),
         ).toBe(true);
     });

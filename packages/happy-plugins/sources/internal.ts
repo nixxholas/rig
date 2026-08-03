@@ -1,6 +1,9 @@
 export { createPluginWorkspaceCommandExecutor } from "./createPluginWorkspaceCommandExecutor.js";
 export { happyComputeErrorStatus, normalizeHappyComputeError } from "./computeErrorSemantics.js";
 export {
+    createHappyComputeBodySchema,
+    createHappyComputeInputSchema,
+    createHappyComputeResponseSchema,
     emptyHappyComputeResponseSchema,
     execHappyComputeBodySchema,
     execHappyComputeHandlerInputSchema,
@@ -11,6 +14,9 @@ export {
     happyComputeErrorCodeSchema,
     happyComputeEventSchema,
     happyComputeInstanceSchema,
+    happyComputePreparationEventSchema,
+    happyComputePreparationPhaseSchema,
+    happyComputeProvisioningProgressSchema,
     happyComputeExecResultSchema,
     listHappyComputeInstancesResponseSchema,
     listHappyComputeProvidersResponseSchema,
@@ -18,15 +24,16 @@ export {
     readHappyComputeInputSchema,
     readHappyComputeResponseSchema,
     registerHappyComputeProviderResponseSchema,
-    startHappyComputeBodySchema,
     startHappyComputeHandlerInputSchema,
-    startHappyComputeInputSchema,
-    startHappyComputeResponseSchema,
     stopHappyComputeInputSchema,
     writeHappyComputeBodySchema,
     writeHappyComputeInputSchema,
 } from "./computeTypes.js";
-export type { HappyComputeCallCompletion, HappyComputeEvent } from "./computeTypes.js";
+export type {
+    HappyComputeCallCompletion,
+    HappyComputeEvent,
+    HappyComputeProvisioningProgress,
+} from "./computeTypes.js";
 export { executePluginWorkspaceCommand } from "./executePluginWorkspaceCommand.js";
 export {
     classifyPluginApiRequestError,

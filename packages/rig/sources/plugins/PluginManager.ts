@@ -10,7 +10,12 @@ import { errorToMessage } from "../errorToMessage.js";
 import type { DockerExecutionConfig } from "../execution/index.js";
 import type { GeneratedMediaStore } from "../generated-media/index.js";
 import { createEventIdFactory } from "../protocol/createEventIdFactory.js";
-import type { EventId, PluginLogSnapshot, PluginSummary } from "../protocol/index.js";
+import type {
+    ComputePreparationEvent,
+    EventId,
+    PluginLogSnapshot,
+    PluginSummary,
+} from "../protocol/index.js";
 import type { SessionStore } from "../session/SessionStore.js";
 import type { DaemonLog } from "../server/DaemonLog.js";
 import type { FileSystemContext } from "../agent/context/FileSystemContext.js";
@@ -39,7 +44,7 @@ import { readPluginManifest } from "./readPluginManifest.js";
 import { removePluginDockerImages } from "./preparePluginDockerImage.js";
 import { resolvePluginDockerImage } from "./resolvePluginDockerRuntime.js";
 import type { PluginDiscovery, RegisteredPlugin } from "./types.js";
-import { PluginComputeRegistry } from "./PluginComputeRegistry.js";
+import { PluginComputeRegistry, type PluginComputeRegistryEvent } from "./PluginComputeRegistry.js";
 import { PluginHookRegistry } from "./PluginHookRegistry.js";
 import type { PluginMcpRegistry } from "./PluginMcpRegistry.js";
 import { PluginNetworkRegistry } from "./PluginNetworkRegistry.js";
@@ -156,8 +161,13 @@ export class PluginManager implements ManagedNetworkInterceptor {
                 log: (level, event, message, details) =>
                     this.#daemonLog.record(level, event, message, details),
             });
-        this.#unsubscribeCompute = this.#computeRegistry.subscribe(() => {
-            if (this.#started) void this.#publishChanged();
+        this.#unsubscribeCompute = this.#computeRegistry.subscribe((event) => {
+            if (!this.#started) return;
+            if (event.type === "catalog_changed") {
+                void this.#publishChanged();
+            } else {
+                this.#publishComputePreparation(event);
+            }
         });
         this.#defaultDocker = options.defaultDocker;
         this.#docker = options.docker ?? createPluginDockerClient(options.defaultDocker);
@@ -657,8 +667,11 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
         this.#statusPublication = { status: "idle" };
         this.#startupGenerations.clear();
-        this.#unsubscribeCompute();
-        await this.#computeRegistry.close();
+        try {
+            await this.#computeRegistry.close();
+        } finally {
+            this.#unsubscribeCompute();
+        }
         await Promise.all(
             [...this.#running.values()].map((plugin) =>
                 plugin.close().catch((error: unknown) => {
@@ -1046,6 +1059,41 @@ export class PluginManager implements ManagedNetworkInterceptor {
         const next = this.#publication.then(publish, publish);
         this.#publication = next.catch(() => undefined);
         await next;
+    }
+
+    #publishComputePreparation(
+        progress: Extract<PluginComputeRegistryEvent, { type: "preparation" }>,
+    ): void {
+        const event: ComputePreparationEvent = {
+            computeInstanceId: progress.instanceId,
+            createdAt: progress.createdAt,
+            data: {
+                ...(progress.error === undefined ? {} : { error: progress.error }),
+                message: progress.message,
+                phase: progress.phase,
+                provider: progress.provider,
+                state: progress.state,
+            },
+            id: this.#createEventId(),
+            type: "compute_preparation",
+        };
+        try {
+            const entry = this.#store.globalEventQueue.append(event);
+            if (entry !== undefined) this.#store.globalEventQueue.publish(entry);
+        } catch (error) {
+            this.#daemonLog.record(
+                "warning",
+                "compute_preparation_event_unstored",
+                "Rig could not retain a compute preparation event.",
+                {
+                    error: errorToMessage(error),
+                    instanceId: progress.instanceId,
+                    phase: progress.phase,
+                    provider: progress.provider,
+                },
+            );
+        }
+        this.#store.liveEvents.publish(event);
     }
 }
 

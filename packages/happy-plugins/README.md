@@ -404,7 +404,7 @@ its manifest and registers these exact handlers:
 type HappyComputeProviderHandlers = {
     start(
         input: { workspaceSource: HappyComputeWorkspaceSource },
-        context: HappyComputeHandlerContext,
+        context: HappyComputeStartHandlerContext,
     ): string | Promise<string>;
     read(
         input: { instanceId: string; path: string },
@@ -435,11 +435,25 @@ throw new HappyComputeProviderError("invalid_request", "The requested file does 
 ```
 
 All provider-side compute error codes remain valid provider completions. The daemon-owned
-`not_ready` code is not available through `HappyComputeProviderError` because only Rig knows an
-instance's authoritative lifecycle. Rig preserves provider codes and derives `retryable` itself.
-`invalid_request`, `instance_not_found`, `provider_not_found`, and
+`preparing_compute` code is not available through `HappyComputeProviderError` because only Rig
+knows an instance's authoritative lifecycle. Rig preserves provider codes and derives `retryable`
+itself. `invalid_request`, `instance_not_found`, `provider_not_found`, and
 `capacity_exhausted` are consumer-attributable and do not affect provider health. Untyped handler
 exceptions become provider-attributable `invalid_response` failures.
+
+The `start` handler must report both materialization phases, in order. Rig treats a successful
+completion that omits them as an invalid provider response:
+
+```ts
+await context.reportProgress({
+    phase: "checking_out_code",
+    message: "Checking out code.",
+});
+await context.reportProgress({
+    phase: "copying_files_to_compute",
+    message: "Copying files to compute.",
+});
+```
 
 Consumers use the same namespace. Provider catalog entries include
 `health: "healthy" | "degraded" | "failed"`:
@@ -447,60 +461,101 @@ Consumers use the same namespace. Provider catalog entries include
 ```ts
 await happy.compute.list();
 await happy.compute.instances.list();
-const instance = await happy.compute.start({
+let instanceId: string | undefined;
+let resolveReady!: () => void;
+let rejectReady!: (error: Error) => void;
+const ready = new Promise<void>((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+});
+const preparation = await happy.compute.events.subscribe((event) => {
+    if (event.instanceId !== instanceId) return;
+    if (event.phase === "ready") resolveReady();
+    if (event.phase === "failed") rejectReady(new Error(event.error?.message ?? event.message));
+    if (event.phase === "stopped") rejectReady(new Error(event.message));
+});
+const instance = await happy.compute.create({
     provider: "local-bash",
     workspaceSource: { type: "local_directory", path: "/absolute/source/folder" },
 });
-await happy.compute.files.read({ instanceId: instance.instanceId, path: "README.md" });
+instanceId = instance.instanceId;
+try {
+    await happy.compute.files.read({ instanceId, path: "README.md" });
+} catch (error) {
+    if (!(error instanceof HappyPluginApiError) || error.code !== "preparing_compute") throw error;
+}
+await ready;
+const readme = await happy.compute.files.read({ instanceId, path: "README.md" });
 await happy.compute.files.write({
-    instanceId: instance.instanceId,
+    instanceId,
     path: "notes.txt",
     bytes: Buffer.from("ready\n"),
 });
 await happy.compute.exec({
-    instanceId: instance.instanceId,
+    instanceId,
     command: "pnpm test",
     timeoutMs: 30_000,
 });
-await happy.compute.stop({ instanceId: instance.instanceId });
+await happy.compute.stop({ instanceId });
+await preparation.close();
 ```
 
-`start()` allocates a daemon-side instance in `provisioning`, asks the provider to materialize it,
-and runs a bounded `exec("true")` readiness probe inside the 30-second start budget. It resolves
-only with a validated `ready` instance record. Files are grouped under `compute.files`, instance
-records under `compute.instances`, while exec and stop remain flat.
+`create()` allocates only the daemon-side `unprovisioned` metadata handle. It does not inspect the
+source, contact the provider, or wait, so creation and listing work while a compute is offline.
+Files are grouped under `compute.files`, instance records under `compute.instances`, while exec and
+stop remain flat.
 
-An operation that reaches an instance while it is `provisioning` or transiently `unavailable`
-waits up to ten seconds for `ready`, then returns `not_ready` with the current state and
-`retryable: true`. Every instance follows one daemon-owned
-`provisioning -> ready -> unavailable -> failed | stopped` lifecycle. Provider recovery can move
-`unavailable` back to `ready`; `failed` and `stopped` are terminal.
+The first exec, read, or write atomically starts one background provisioning attempt and fails fast
+with `preparing_compute`, `state: "provisioning"`, and `retryable: true`. Concurrent first users
+share that attempt and receive the same answer; no consumer call waits for sandbox creation. The
+provider's background `start` call shares one five-minute provisioning budget with checkout,
+copy/upload, and Rig's bounded `exec("true")` probe. Every handle follows one daemon-owned
+`unprovisioned -> provisioning -> ready -> unavailable -> failed | stopped` lifecycle.
 
-For this first contract, `workspaceSource` has one form: `local_directory`. Happy canonicalizes the
-absolute source path and hands it to the provider; the provider materializes it by copying,
-checking out, or otherwise importing it. This avoids buffering a potentially large folder through
-the plugin socket. A future remote provider can add a streamed/archive source variant without
-changing instance operations.
+Rig publishes durable `compute_preparation` events for preparing, checkout, file copy,
+verification, readiness, retryable failure, terminal failure, and provisioning cancellation. Every
+attempt ends with `ready`, `failed`, or `stopped`, so a subscriber never has to infer that
+preparation ended from a missing event. Each carries a human-readable message; failures also carry
+their typed compute error and attributed reason. These event names and messages are intended for
+future forwarding into session chat timelines. Agent-session wiring remains out of scope.
 
-Every operation is a blocking, TypeBox-validated socket round trip with a deadline. Reads and
-writes are capped at 1 MiB, command timeout is at most five minutes, and stdout and stderr are each
-capped at 1 MiB. Exec results report `timedOut`, `stdoutTruncated`, and `stderrTruncated`
-independently.
+A provisioning failure always resets the handle to `unprovisioned`, and the next use starts a new
+single-flight attempt. Only a materialized instance whose provider generation dies becomes
+terminally `failed`. Provider recovery can move `unavailable` back to `ready`; `failed` and
+`stopped` are terminal. A never-materialized handle is reaped two hours after creation so abandoned
+metadata cannot hold the global capacity budget forever. Provisioning itself is protected by its
+five-minute budget and is not reaped mid-attempt. Materialized lifetime and 30-minute idle clocks
+begin only after the readiness probe succeeds.
+
+For this first contract, `workspaceSource` has one form: `local_directory`. Happy retains the path
+as metadata and the provider validates it during provisioning, then materializes it by copying,
+checking out, or otherwise importing it. This avoids eager filesystem work and buffering a
+potentially large folder through the plugin socket. A future remote provider can add a
+streamed/archive source variant without changing instance operations.
+
+Provider operations are TypeBox-validated socket round trips with deadlines. Reads and writes are
+capped at 1 MiB, command timeout is at most five minutes, and stdout and stderr are each capped at
+1 MiB. Exec results report `timedOut`, `stdoutTruncated`, and `stderrTruncated` independently.
 
 Each provider generation moves through `registered -> healthy -> degraded -> failed`. Deadline,
 transport, malformed response, and typed provider-side failures count consecutively: two degrade
 the provider and three fail it terminally. A success resets the count and recovers a degraded
 provider. Consumer-attributable errors reported either before dispatch or by a provider do not
 count. Stream loss fails the generation immediately, rejects pending calls with `provider_lost`,
-and terminally fails all its instances. New starts then return `provider_unhealthy` until the
-plugin restarts with a new generation.
+and terminally fails its materialized instances. Unprovisioned handles remain metadata-only and can
+provision after the plugin restarts with a new generation.
 
-Each instance is leased to the consumer plugin process generation that started it. When that
+Each instance is leased to the consumer plugin process generation that created it. When that
 consumer generation ends, Rig terminally stops its instances and asks the provider to clean them
 up. Provider notification is always best-effort and does not control the daemon-side transition.
 Concurrent consumer stop, reaping, and shutdown share one cleanup task and do not double-notify.
-Rig also reaps instances after two hours of total lifetime or 30 minutes without a call touching
-them, and best-effort-stops live instances during daemon shutdown.
+Rig also reaps materialized instances after two hours of lifetime or 30 minutes without a call
+touching them, and best-effort-stops live instances during daemon shutdown. Unprovisioned handles
+have the separate two-hour creation lifetime above; the idle clock remains materialized-only.
+
+Provisioning-budget expiry loudly fails the attempt and resets its handle to `unprovisioned`, but
+does not degrade provider health. This intentionally treats the aggregate background budget
+differently from ordinary read, write, exec, and stop deadline misses.
 
 Rig retains at most 256 oldest-first terminal tombstones per daemon: final state, human-readable
 reason, creation time, and death time. Calls on a retained dead ID return `instance_failed` with
@@ -519,8 +574,9 @@ provider stop.
 `ubuntu:24.04` sandbox, uploads at most 32 MiB of source files while skipping individual files over
 1 MiB, bounds command and file output, uploads writes to a sibling temporary path before an atomic
 sandbox-side `mv`, and treats delete 404 as success. It reads
-`DAYTONA_API_KEY` at startup. A missing key does not prevent plugin readiness; `start()` reports a
-clear configuration error until the key is set.
+`DAYTONA_API_KEY` at startup. A missing key does not prevent plugin readiness; the first
+provisioning attempt reports a clear failure event, resets the handle to `unprovisioned`, and lets
+a later use retry after the Daytona plugin restarts with the key set.
 
 Compute is not yet connected to agent session execution. Plugins can provide and consume computes
 today; choosing a compute for an agent session is a later product step.
@@ -980,9 +1036,10 @@ try {
 Compute errors always set `code` and `retryable`, may carry the authoritative instance `state`, and
 use one shape across provider completions and daemon HTTP responses. Codes are
 `provider_not_found`, `provider_unhealthy`, `provider_lost`, `instance_not_found`,
-`instance_failed`, `not_ready`, `deadline_exceeded`, `capacity_exhausted`, `invalid_response`, and
-`invalid_request`. `not_ready`, `capacity_exhausted`, and `deadline_exceeded` are retryable.
-Terminal generation loss and retained failed/stopped instances are not.
+`instance_failed`, `preparing_compute`, `deadline_exceeded`, `capacity_exhausted`,
+`invalid_response`, and `invalid_request`. `preparing_compute`, `capacity_exhausted`, and
+`deadline_exceeded` are retryable. Terminal generation loss and retained failed/stopped instances
+are not.
 
 ## Testing outside Happy
 

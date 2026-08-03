@@ -5,7 +5,7 @@ import type { TX } from "../Transaction.js";
 
 export interface GlobalEventAppendOptions {
     aggregateId: string;
-    aggregateKind: "project" | "session" | "workspace";
+    aggregateKind: "compute" | "project" | "session" | "workspace";
     cursor: string;
     event: GlobalEvent;
 }

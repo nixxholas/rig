@@ -64,6 +64,7 @@ describe("plugin compute API", () => {
         });
         const files = new Map<string, Buffer>();
         const commands: string[] = [];
+        let starts = 0;
         const handlers = {
             exec({ command }) {
                 commands.push(command);
@@ -84,7 +85,16 @@ describe("plugin compute API", () => {
                 }
                 return bytes;
             },
-            start() {
+            async start(_input, context) {
+                starts += 1;
+                await context.reportProgress({
+                    message: "Checking out code.",
+                    phase: "checking_out_code",
+                });
+                await context.reportProgress({
+                    message: "Copying files to compute.",
+                    phase: "copying_files_to_compute",
+                });
                 return "provider-instance";
             },
             stop() {
@@ -101,6 +111,10 @@ describe("plugin compute API", () => {
             status: 400,
         });
         await client.ready("Ready.");
+        const preparationEvents: string[] = [];
+        const subscription = await client.compute.events.subscribe((event) => {
+            preparationEvents.push(event.phase);
+        });
 
         await expect(client.compute.list()).resolves.toEqual([
             {
@@ -110,18 +124,50 @@ describe("plugin compute API", () => {
                 pluginName: "Memory Compute",
             },
         ]);
-        const instance = await client.compute.start({
+        const instance = await client.compute.create({
             provider: "memory-compute",
             workspaceSource: { path: source, type: "local_directory" },
         });
-        expect(instance).toMatchObject({ state: "ready" });
-        expect(commands).toEqual(["true"]);
+        expect(instance).toMatchObject({ state: "unprovisioned" });
+        expect(starts).toBe(0);
+        expect(commands).toEqual([]);
         await expect(client.compute.instances.list()).resolves.toEqual([
             expect.objectContaining({
                 instanceId: instance.instanceId,
-                state: "ready",
+                state: "unprovisioned",
             }),
         ]);
+        await expect(
+            client.compute.files.write({
+                bytes: Buffer.from("written"),
+                instanceId: instance.instanceId,
+                path: "written.txt",
+            }),
+        ).rejects.toMatchObject({
+            code: "preparing_compute",
+            retryable: true,
+            state: "provisioning",
+            status: 409,
+        });
+        await expect
+            .poll(async () => {
+                const current = (await client.compute.instances.list()).find(
+                    (candidate) => candidate.instanceId === instance.instanceId,
+                );
+                return current?.state;
+            })
+            .toBe("ready");
+        expect(starts).toBe(1);
+        expect(commands).toEqual(["true"]);
+        await expect
+            .poll(() => preparationEvents)
+            .toEqual([
+                "preparing_compute",
+                "checking_out_code",
+                "copying_files_to_compute",
+                "verifying_compute",
+                "ready",
+            ]);
         await client.compute.files.write({
             bytes: Buffer.from("written"),
             instanceId: instance.instanceId,
@@ -190,6 +236,7 @@ describe("plugin compute API", () => {
             }),
         ]);
 
+        await subscription.close();
         await registration.close();
     });
 });

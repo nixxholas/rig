@@ -1,8 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 
 import type { Static, TSchema } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
@@ -11,15 +11,20 @@ import { createHappyPluginClient } from "./createHappyPluginClient.js";
 import { happyComputeErrorStatus, normalizeHappyComputeError } from "./computeErrorSemantics.js";
 import {
     HAPPY_COMPUTE_DEFAULT_COMMAND_TIMEOUT_MS,
+    createHappyComputeBodySchema,
     execHappyComputeBodySchema,
     happyComputeCallCompletionSchema,
+    happyComputeProvisioningProgressSchema,
     readHappyComputeBodySchema,
-    startHappyComputeBodySchema,
     writeHappyComputeBodySchema,
     type HappyComputeCallCompletion,
     type HappyComputeError,
     type HappyComputeEvent,
     type HappyComputeInstanceState,
+    type HappyComputePreparationEvent,
+    type HappyComputePreparationPhase,
+    type HappyComputeProvisioningProgress,
+    type HappyComputeWorkspaceSource,
 } from "./computeTypes.js";
 import { normalizeHappyMcpName } from "./createHappyMcpToolName.js";
 import { createPluginWorkspaceCommandExecutor } from "./createPluginWorkspaceCommandExecutor.js";
@@ -77,6 +82,7 @@ import {
 import { writePluginWorkspaceFile } from "./writePluginWorkspaceFile.js";
 
 const CALL_TIMEOUT_MS = 10_000;
+const PROVISION_TIMEOUT_MS = 5 * 60_000;
 const MAXIMUM_COMPUTE_COMPLETION_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_BODY_BYTES = 1024 * 1024;
 
@@ -185,21 +191,38 @@ interface TestComputeRegistration {
 
 interface TestComputeCall extends TestCall<HappyComputeCallCompletion> {
     operation: Extract<HappyComputeEvent, { type: "call" }>["operation"];
+    progress?: (progress: HappyComputeProvisioningProgress) => void;
 }
 
 type TestComputeInstanceBase = {
     createdAt: number;
     id: string;
-    providerInstanceId: string;
-    registrationId: string;
+    provider: string;
+    workspaceSource: HappyComputeWorkspaceSource;
 };
 
 type TestComputeInstance =
-    | (TestComputeInstanceBase & { state: "ready" })
+    | (TestComputeInstanceBase & { reason?: string; state: "unprovisioned" })
+    | (TestComputeInstanceBase & {
+          phase: "checking_out_code" | "copying_files_to_compute" | "preparing_compute";
+          providerInstanceId?: string;
+          registrationId?: string;
+          state: "provisioning";
+      })
+    | (TestComputeInstanceBase & {
+          providerInstanceId: string;
+          registrationId: string;
+          state: "ready";
+      })
     | (TestComputeInstanceBase & {
           diedAt: number;
           reason: string;
-          state: "failed" | "stopped";
+          state: "failed";
+      })
+    | (TestComputeInstanceBase & {
+          diedAt: number;
+          reason: string;
+          state: "stopped";
       });
 
 /** Starts an in-memory, Unix-socket Happy host for plugin tests and local authoring. */
@@ -231,6 +254,7 @@ export async function createHappyPluginTestHost(
     const systemPromptCalls = new Map<string, TestCall<HappySystemPromptHookResult>>();
     const calls = new Map<string, TestCall<HappyMcpToolResult>>();
     const computeCalls = new Map<string, TestComputeCall>();
+    const computeEventResponses = new Set<ServerResponse>();
     const computeInstances = new Map<string, TestComputeInstance>();
     let computeRegistration: TestComputeRegistration | undefined;
     const computeWaiters = new Set<() => void>();
@@ -246,6 +270,163 @@ export async function createHappyPluginTestHost(
         [...registrations.values()]
             .filter((registration) => registration.response !== undefined)
             .reduce((count, registration) => count + registration.server.tools.length, 0);
+
+    const publishComputeEvent = (
+        instance: TestComputeInstance,
+        phase: HappyComputePreparationPhase,
+        message: string,
+        state: HappyComputePreparationEvent["state"],
+        error?: HappyComputeError,
+    ): void => {
+        const event: HappyComputePreparationEvent = {
+            createdAt: Date.now(),
+            ...(error === undefined ? {} : { error }),
+            instanceId: instance.id,
+            message,
+            phase,
+            provider: instance.provider,
+            state,
+            type: "compute_preparation",
+        };
+        for (const response of computeEventResponses) {
+            if (!response.destroyed && !response.writableEnded) {
+                response.write(`${JSON.stringify(event)}\n`);
+            }
+        }
+    };
+
+    const provisionTestCompute = async (instanceId: string): Promise<void> => {
+        let instance = computeInstances.get(instanceId);
+        if (instance?.state !== "provisioning") return;
+        const registration = computeRegistration;
+        if (registration?.response === undefined || declaredCompute?.name !== instance.provider) {
+            const failed: TestComputeInstance = {
+                createdAt: instance.createdAt,
+                id: instance.id,
+                provider: instance.provider,
+                reason: `No running compute provider is named "${instance.provider}".`,
+                state: "unprovisioned",
+                workspaceSource: instance.workspaceSource,
+            };
+            computeInstances.set(instance.id, failed);
+            publishComputeEvent(failed, "failed", failed.reason!, "unprovisioned", {
+                code: "preparing_compute",
+                message: failed.reason!,
+                retryable: true,
+                state: "unprovisioned",
+            });
+            return;
+        }
+        instance = { ...instance, registrationId: registration.id };
+        computeInstances.set(instance.id, instance);
+        const deadlineAt = Date.now() + PROVISION_TIMEOUT_MS;
+        try {
+            const completion = await invokeTestCompute(
+                registration,
+                computeCalls,
+                nextComputeCallId,
+                {
+                    operation: "start",
+                    workspaceSource: instance.workspaceSource,
+                },
+                remainingTestComputeDeadline(deadlineAt),
+                (progress) => {
+                    const current = computeInstances.get(instanceId);
+                    if (current?.state !== "provisioning") return;
+                    const valid =
+                        (current.phase === "preparing_compute" &&
+                            progress.phase === "checking_out_code") ||
+                        (current.phase === "checking_out_code" &&
+                            progress.phase === "copying_files_to_compute");
+                    if (!valid) {
+                        throw new Error(
+                            `Provisioning progress cannot move from ${current.phase} to ${progress.phase}.`,
+                        );
+                    }
+                    computeInstances.set(current.id, {
+                        ...current,
+                        phase: progress.phase,
+                    });
+                    publishComputeEvent(current, progress.phase, progress.message, "provisioning");
+                },
+            );
+            if ("error" in completion) throw new Error(completion.error.message);
+            if (completion.operation !== "start") {
+                throw new Error("The test compute provider returned the wrong operation result.");
+            }
+            const current = computeInstances.get(instance.id);
+            if (current?.state !== "provisioning") return;
+            if (current.phase !== "copying_files_to_compute") {
+                throw new Error(
+                    "The test compute provider completed provisioning without reporting its checkout and file-copy phases.",
+                );
+            }
+            instance = {
+                ...current,
+                providerInstanceId: completion.result.instanceId,
+                registrationId: registration.id,
+            };
+            computeInstances.set(instance.id, instance);
+            publishComputeEvent(
+                instance,
+                "verifying_compute",
+                "Verifying that the compute is ready.",
+                "provisioning",
+            );
+            const probe = await invokeTestCompute(
+                registration,
+                computeCalls,
+                nextComputeCallId,
+                {
+                    command: "true",
+                    instanceId: completion.result.instanceId,
+                    operation: "exec",
+                    timeoutMs: Math.min(5_000, remainingTestComputeDeadline(deadlineAt)),
+                },
+                remainingTestComputeDeadline(deadlineAt),
+            );
+            if ("error" in probe) throw new Error(probe.error.message);
+            if (probe.operation !== "exec") {
+                throw new Error(
+                    "The test compute provider returned the wrong readiness probe result.",
+                );
+            }
+            if (probe.result.exitCode !== 0 || probe.result.timedOut) {
+                throw new Error("The test compute instance readiness probe did not succeed.");
+            }
+            const verified = computeInstances.get(instance.id);
+            if (verified?.state !== "provisioning") return;
+            const readyInstance: TestComputeInstance = {
+                createdAt: verified.createdAt,
+                id: verified.id,
+                provider: verified.provider,
+                providerInstanceId: completion.result.instanceId,
+                registrationId: registration.id,
+                state: "ready",
+                workspaceSource: verified.workspaceSource,
+            };
+            computeInstances.set(instance.id, readyInstance);
+            publishComputeEvent(readyInstance, "ready", "Compute is ready.", "ready");
+        } catch (error) {
+            const current = computeInstances.get(instance.id);
+            if (current?.state !== "provisioning") return;
+            const failed: TestComputeInstance = {
+                createdAt: current.createdAt,
+                id: current.id,
+                provider: current.provider,
+                reason: `Compute provisioning failed. ${error instanceof Error ? error.message : String(error)}`,
+                state: "unprovisioned",
+                workspaceSource: current.workspaceSource,
+            };
+            computeInstances.set(current.id, failed);
+            publishComputeEvent(failed, "failed", failed.reason!, "unprovisioned", {
+                code: "preparing_compute",
+                message: failed.reason!,
+                retryable: true,
+                state: "unprovisioned",
+            });
+        }
+    };
 
     const server = createServer((request, response) => {
         void (async () => {
@@ -365,25 +546,46 @@ export async function createHappyPluginTestHost(
                 });
                 return;
             }
+            if (request.method === "GET" && url.pathname === "/compute/events") {
+                response.writeHead(200, {
+                    "cache-control": "no-store",
+                    "content-type": "application/x-ndjson",
+                });
+                response.flushHeaders();
+                computeEventResponses.add(response);
+                response.once("close", () => computeEventResponses.delete(response));
+                return;
+            }
             if (request.method === "GET" && url.pathname === "/compute/instances") {
                 send(response, 200, {
-                    instances: [...computeInstances.values()].map((instance) =>
-                        instance.state === "ready"
-                            ? {
-                                  createdAt: instance.createdAt,
-                                  instanceId: instance.id,
-                                  provider: declaredCompute?.name ?? "test-compute",
-                                  state: instance.state,
-                              }
-                            : {
-                                  createdAt: instance.createdAt,
-                                  diedAt: instance.diedAt,
-                                  instanceId: instance.id,
-                                  provider: declaredCompute?.name ?? "test-compute",
-                                  reason: instance.reason,
-                                  state: instance.state,
-                              },
-                    ),
+                    instances: [...computeInstances.values()].map((instance) => {
+                        const base = {
+                            createdAt: instance.createdAt,
+                            instanceId: instance.id,
+                            provider: instance.provider,
+                        };
+                        switch (instance.state) {
+                            case "unprovisioned":
+                                return {
+                                    ...base,
+                                    ...(instance.reason === undefined
+                                        ? {}
+                                        : { reason: instance.reason }),
+                                    state: instance.state,
+                                };
+                            case "provisioning":
+                            case "ready":
+                                return { ...base, state: instance.state };
+                            case "failed":
+                            case "stopped":
+                                return {
+                                    ...base,
+                                    diedAt: instance.diedAt,
+                                    reason: instance.reason,
+                                    state: instance.state,
+                                };
+                        }
+                    }),
                 });
                 return;
             }
@@ -442,10 +644,40 @@ export async function createHappyPluginTestHost(
                         "The test compute provider generation ended.",
                         computeInstances,
                         computeCalls,
+                        publishComputeEvent,
                     );
                 });
                 for (const notify of computeWaiters) notify();
                 computeWaiters.clear();
+                return;
+            }
+            if (
+                request.method === "POST" &&
+                parts.length === 6 &&
+                parts[0] === "compute" &&
+                parts[1] === "providers" &&
+                parts[2] === computeRegistration?.id &&
+                parts[3] === "calls" &&
+                parts[4] !== undefined &&
+                parts[5] === "progress"
+            ) {
+                const call = computeCalls.get(parts[4]);
+                if (call?.operation !== "start" || call.progress === undefined) {
+                    send(response, 400, {
+                        code: "invalid_request",
+                        message: "That compute provisioning call is no longer active.",
+                        retryable: false,
+                    });
+                    return;
+                }
+                call.progress(
+                    decodeRequest(
+                        happyComputeProvisioningProgressSchema,
+                        body,
+                        "Compute provisioning progress",
+                    ),
+                );
+                send(response, 200, {});
                 return;
             }
             if (
@@ -500,109 +732,30 @@ export async function createHappyPluginTestHost(
                     "The test compute provider generation ended.",
                     computeInstances,
                     computeCalls,
+                    publishComputeEvent,
                 );
                 send(response, 200, {});
                 return;
             }
             if (request.method === "POST" && url.pathname === "/compute/instances") {
                 const input = decodeRequest(
-                    startHappyComputeBodySchema,
+                    createHappyComputeBodySchema,
                     body,
-                    "Compute start settings",
+                    "Compute instance settings",
                 );
-                if (
-                    declaredCompute?.name !== input.provider ||
-                    computeRegistration?.response === undefined
-                ) {
-                    send(response, 404, {
-                        code: "provider_not_found",
-                        message: `No running compute provider is named "${input.provider}".`,
-                        retryable: false,
-                    });
-                    return;
-                }
-                if (!isAbsolute(input.workspaceSource.path)) {
-                    send(response, 400, {
-                        code: "invalid_request",
-                        message: "A local compute source must be an absolute directory path.",
-                        retryable: false,
-                    });
-                    return;
-                }
-                const sourcePath = await realpath(input.workspaceSource.path);
-                if (!(await lstat(sourcePath)).isDirectory()) {
-                    send(response, 400, {
-                        code: "invalid_request",
-                        message: "A local compute source must be a directory.",
-                        retryable: false,
-                    });
-                    return;
-                }
-                const completion = await invokeTestCompute(
-                    computeRegistration,
-                    computeCalls,
-                    nextComputeCallId,
-                    {
-                        operation: "start",
-                        workspaceSource: { path: sourcePath, type: "local_directory" },
-                    },
-                );
-                if ("error" in completion) {
-                    sendTestComputeError(response, completion.error);
-                    return;
-                }
-                if (completion.operation !== "start") {
-                    throw new PluginApiRequestError(
-                        "The test compute provider returned the wrong operation result.",
-                    );
-                }
-                const probe = await invokeTestCompute(
-                    computeRegistration,
-                    computeCalls,
-                    nextComputeCallId,
-                    {
-                        command: "true",
-                        instanceId: completion.result.instanceId,
-                        operation: "exec",
-                        timeoutMs: 5_000,
-                    },
-                );
-                if ("error" in probe) {
-                    send(response, 409, {
-                        code: "not_ready",
-                        message: `The test compute instance readiness probe failed. ${probe.error.message}`,
-                        retryable: true,
-                        state: "unavailable",
-                    });
-                    return;
-                }
-                if (probe.operation !== "exec") {
-                    throw new PluginApiRequestError(
-                        "The test compute provider returned the wrong readiness probe result.",
-                    );
-                }
-                if (probe.result.exitCode !== 0 || probe.result.timedOut) {
-                    send(response, 409, {
-                        code: "not_ready",
-                        message: "The test compute instance readiness probe did not succeed.",
-                        retryable: true,
-                        state: "unavailable",
-                    });
-                    return;
-                }
                 const instanceId = `test-compute-instance-${String(nextId++)}`;
                 computeInstances.set(instanceId, {
                     createdAt: Date.now(),
                     id: instanceId,
-                    providerInstanceId: completion.result.instanceId,
-                    registrationId: computeRegistration.id,
-                    state: "ready",
+                    provider: input.provider,
+                    state: "unprovisioned",
+                    workspaceSource: input.workspaceSource,
                 });
                 send(response, 201, {
                     createdAt: computeInstances.get(instanceId)!.createdAt,
                     instanceId,
                     provider: input.provider,
-                    state: "ready",
+                    state: "unprovisioned",
                 });
                 return;
             }
@@ -624,7 +777,7 @@ export async function createHappyPluginTestHost(
                 }
                 const registration = computeRegistration;
                 if (parts.length === 4 && parts[3] === "stop") {
-                    if (instance.state !== "ready") {
+                    if (instance.state === "failed" || instance.state === "stopped") {
                         send(response, 409, {
                             code: "instance_failed",
                             message: instance.reason,
@@ -633,30 +786,78 @@ export async function createHappyPluginTestHost(
                         });
                         return;
                     }
-                    try {
-                        if (
-                            registration?.response !== undefined &&
-                            registration.id === instance.registrationId
-                        ) {
-                            await invokeTestCompute(registration, computeCalls, nextComputeCallId, {
-                                instanceId: instance.providerInstanceId,
-                                operation: "stop",
-                            }).catch(() => undefined);
-                            // Provider notification is best-effort. The registry release below is
-                            // unconditional even when the handler reports an error.
-                        }
-                    } finally {
-                        computeInstances.set(instance.id, {
-                            ...instance,
-                            diedAt: Date.now(),
-                            reason: "The test compute instance was stopped by its consumer.",
-                            state: "stopped",
-                        });
+                    const reason = "The test compute instance was stopped by its consumer.";
+                    const stopped: TestComputeInstance = {
+                        ...instance,
+                        diedAt: Date.now(),
+                        reason,
+                        state: "stopped",
+                    };
+                    computeInstances.set(instance.id, stopped);
+                    if (instance.state === "unprovisioned" || instance.state === "provisioning") {
+                        publishComputeEvent(
+                            stopped,
+                            "stopped",
+                            `Compute preparation stopped. ${reason}`,
+                            "stopped",
+                        );
+                    }
+                    if (
+                        instance.state !== "unprovisioned" &&
+                        instance.providerInstanceId !== undefined &&
+                        registration?.response !== undefined &&
+                        registration.id === instance.registrationId
+                    ) {
+                        await invokeTestCompute(registration, computeCalls, nextComputeCallId, {
+                            instanceId: instance.providerInstanceId,
+                            operation: "stop",
+                        }).catch(() => undefined);
+                        // Provider notification is best-effort. Registry release is unconditional.
                     }
                     send(response, 200, {});
                     return;
                 }
-                if (instance.state !== "ready") {
+                if (instance.state === "unprovisioned") {
+                    const preparationMessage =
+                        instance.reason === undefined
+                            ? "Preparing compute for its first use."
+                            : `Preparing compute again. The previous attempt failed: ${instance.reason}`;
+                    const provisioning: TestComputeInstance = {
+                        createdAt: instance.createdAt,
+                        id: instance.id,
+                        phase: "preparing_compute",
+                        provider: instance.provider,
+                        state: "provisioning",
+                        workspaceSource: instance.workspaceSource,
+                    };
+                    computeInstances.set(instance.id, provisioning);
+                    publishComputeEvent(
+                        provisioning,
+                        "preparing_compute",
+                        preparationMessage,
+                        "provisioning",
+                    );
+                    queueMicrotask(() => {
+                        void provisionTestCompute(instance.id);
+                    });
+                    send(response, 409, {
+                        code: "preparing_compute",
+                        message: preparationMessage,
+                        retryable: true,
+                        state: "provisioning",
+                    });
+                    return;
+                }
+                if (instance.state === "provisioning") {
+                    send(response, 409, {
+                        code: "preparing_compute",
+                        message: "Preparing compute.",
+                        retryable: true,
+                        state: "provisioning",
+                    });
+                    return;
+                }
+                if (instance.state === "failed" || instance.state === "stopped") {
                     send(response, 409, {
                         code: "instance_failed",
                         message: instance.reason,
@@ -1590,6 +1791,7 @@ function invokeTestCompute(
     createCallId: () => string,
     event: TestComputeCallEvent,
     timeoutMs = CALL_TIMEOUT_MS,
+    progress?: (progress: HappyComputeProvisioningProgress) => void,
 ): Promise<HappyComputeCallCompletion> {
     if (registration.response === undefined) {
         return Promise.reject(new Error("No compute provider is attached to the fake Happy host."));
@@ -1621,6 +1823,7 @@ function invokeTestCompute(
         calls.set(callId, {
             cleanup,
             operation: event.operation,
+            ...(progress === undefined ? {} : { progress }),
             reject: finishReject,
             resolve: finishResolve,
         });
@@ -1639,21 +1842,67 @@ function failTestComputeGeneration(
     reason: string,
     instances: Map<string, TestComputeInstance>,
     calls: Map<string, TestComputeCall>,
+    publishPreparation: (
+        instance: TestComputeInstance,
+        phase: HappyComputePreparationPhase,
+        message: string,
+        state: HappyComputePreparationEvent["state"],
+        error?: HappyComputeError,
+    ) => void,
 ): void {
     for (const instance of instances.values()) {
-        if (instance.registrationId !== registrationId || instance.state !== "ready") continue;
-        instances.set(instance.id, {
+        if (
+            instance.state === "unprovisioned" ||
+            instance.state === "failed" ||
+            instance.state === "stopped" ||
+            instance.registrationId !== registrationId
+        ) {
+            continue;
+        }
+        if (instance.state === "provisioning" && instance.providerInstanceId === undefined) {
+            const unprovisioned: TestComputeInstance = {
+                createdAt: instance.createdAt,
+                id: instance.id,
+                provider: instance.provider,
+                reason,
+                state: "unprovisioned",
+                workspaceSource: instance.workspaceSource,
+            };
+            instances.set(instance.id, unprovisioned);
+            publishPreparation(unprovisioned, "failed", reason, "unprovisioned", {
+                code: "preparing_compute",
+                message: reason,
+                retryable: true,
+                state: "unprovisioned",
+            });
+            continue;
+        }
+        const failed: TestComputeInstance = {
             ...instance,
             diedAt: Date.now(),
             reason,
             state: "failed",
-        });
+        };
+        instances.set(instance.id, failed);
+        if (instance.state === "provisioning") {
+            const message = `Compute preparation failed. ${reason}`;
+            publishPreparation(failed, "failed", message, "failed", {
+                code: "instance_failed",
+                message,
+                retryable: false,
+                state: "failed",
+            });
+        }
     }
     for (const call of calls.values()) {
         call.cleanup();
         call.reject(new Error(reason));
     }
     calls.clear();
+}
+
+function remainingTestComputeDeadline(deadlineAt: number): number {
+    return Math.max(1, deadlineAt - Date.now());
 }
 
 function decodeNetworkCompletion(
@@ -1718,7 +1967,7 @@ function sendTestComputeError(
     state?: HappyComputeInstanceState,
 ): void {
     const normalized = normalizeHappyComputeError(
-        error.code === "not_ready" || state === undefined ? error : { ...error, state },
+        error.code === "preparing_compute" || state === undefined ? error : { ...error, state },
     );
     send(response, happyComputeErrorStatus(normalized.code), normalized);
 }

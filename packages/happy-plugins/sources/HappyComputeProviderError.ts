@@ -5,7 +5,7 @@ import { happyComputeErrorCodeSchema } from "./computeTypes.js";
 
 const happyComputeProviderErrorCodeSchema = Type.Exclude(
     happyComputeErrorCodeSchema,
-    Type.Literal("not_ready"),
+    Type.Literal("preparing_compute"),
 );
 
 const happyComputeProviderErrorInputSchema = Type.Object(

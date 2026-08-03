@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
+    ComputePreparationEvent,
     GitChangeSnapshot,
     GlobalEventDelivery,
     GlobalLiveEvent,
@@ -124,6 +125,34 @@ describe("live global events", () => {
 
         expect(queue.cursor()).toBe(before);
         expect(queue.list()).toEqual([]);
+    });
+
+    it("retains compute preparation events in the durable stream", () => {
+        const opened = openSessionDatabase(":memory:");
+        clients.push(opened.client);
+        migrateSessionDatabase(opened.database);
+        const queue = new PersistentGlobalEventQueue(opened.database);
+        const event: ComputePreparationEvent = {
+            computeInstanceId: "compute-1",
+            createdAt: 1,
+            data: {
+                message: "Copying files to compute.",
+                phase: "copying_files_to_compute",
+                provider: "test-compute",
+                state: "provisioning",
+            },
+            id: "compute-event-1" as never,
+            type: "compute_preparation",
+        };
+
+        const appended = queue.append(event);
+
+        expect(appended?.event).toBe(event);
+        expect(new PersistentGlobalEventQueue(opened.database).list()).toEqual([
+            expect.objectContaining({
+                event,
+            }),
+        ]);
     });
 });
 
