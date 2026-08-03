@@ -4249,6 +4249,7 @@ export class InMemorySession {
         persisted: {
             createdAt: number;
             event: Extract<SessionEvent, { type: "message_submitted" }>;
+            overflowedMessageIds: readonly string[];
             position: number;
         },
     ): void {
@@ -4262,6 +4263,9 @@ export class InMemorySession {
             message: stored,
             position: persisted.position,
         };
+        for (const messageId of persisted.overflowedMessageIds) {
+            this.#pendingContextMessages.delete(messageId);
+        }
         this.#storeMessage(persisted.position, stored, false, anchorRunId, false);
         this.#pendingContextMessages.set(stored.id, pending);
         this.#appendDurableEvent(persisted.event);

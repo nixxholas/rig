@@ -52,6 +52,7 @@ export function sessionShareFriendMessageSave(
                 memberPeerId: sessionShareMembers.murmurPeerId,
                 memberState: sessionShareMembers.state,
                 memberShareId: sessionShareMembers.shareId,
+                ownerSessionId: sessionShares.ownerSessionId,
                 shareState: sessionShares.state,
             })
             .from(sessionShareMembers)
@@ -71,6 +72,7 @@ export function sessionShareFriendMessageSave(
             authority.memberEpoch !== input.grantEpoch ||
             authority.memberDisplayName !== input.displayName ||
             authority.memberPeerId !== input.murmurPeerId ||
+            authority.ownerSessionId !== input.ownerSessionId ||
             authority.shareState !== "active" ||
             authority.memberState !== "active" ||
             authority.grantState !== "active"

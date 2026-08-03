@@ -1,4 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
+import { Value } from "@sinclair/typebox/value";
 
 import type { UserMessage } from "../agent/types.js";
 import { asyncQueue, type AsyncQueue } from "../concurrency/index.js";
@@ -7,9 +8,11 @@ import type {
     SessionShareOpaqueEntry,
     SessionShareTransport,
     SessionShareTransportGrant,
-    SessionShareTransportMemberEvent,
     SessionShareTransportMemberPost,
-    SessionShareTransportOwnerEvent,
+} from "./SessionShareTransport.js";
+import {
+    sessionShareTransportMemberEventSchema,
+    sessionShareTransportOwnerEventSchema,
 } from "./SessionShareTransport.js";
 
 const MAX_PAGE_COUNT = 100;
@@ -59,6 +62,7 @@ export interface SessionShareAcceptedFriendMessage {
         }
     >;
     readonly ownerSessionId: string;
+    readonly overflowedMessageIds: readonly string[];
     readonly position: number;
     readonly status: "accepted";
 }
@@ -122,6 +126,7 @@ export interface SessionShareServiceOptions {
                     type: "message_submitted";
                 }
             >;
+            overflowedMessageIds: readonly string[];
             position: number;
         },
     ) => void | Promise<void>;
@@ -212,8 +217,10 @@ export class SessionShareService {
     async stop(shareId: string): Promise<SessionShareRecord> {
         this.#assertOpen();
         const share = this.#store.stopShare(shareId);
+        const queue = this.#publishQueues.get(shareId) ?? asyncQueue();
+        this.#publishQueues.set(shareId, queue);
         try {
-            await this.#transport.stop(shareId, this.#allKnownGrants(share));
+            await queue.runInLock(() => this.#transport.stop(shareId, this.#allKnownGrants(share)));
         } finally {
             this.#ownerSubscriptions.get(shareId)?.();
             this.#ownerSubscriptions.delete(shareId);
@@ -245,7 +252,10 @@ export class SessionShareService {
     wake(shareId: string): void {
         if (this.#closed) return;
         this.#publishRequested.add(shareId);
-        void this.publish(shareId);
+        void this.publish(shareId).catch(() => {
+            // publish() already recorded degraded health. Live wakeups are optional hints; the
+            // durable cursor/outbox drives the later retry.
+        });
     }
 
     async publish(shareId: string): Promise<void> {
@@ -355,7 +365,10 @@ export class SessionShareService {
         ];
     }
 
-    async #handleOwnerEvent(event: SessionShareTransportOwnerEvent): Promise<void> {
+    async #handleOwnerEvent(event: unknown): Promise<void> {
+        if (!Value.Check(sessionShareTransportOwnerEventSchema, event)) {
+            throw new Error("The session-share owner transport event is invalid.");
+        }
         if (event.type === "transport_failed") {
             for (const share of this.#store.queryRecoverableShares()) {
                 if (share.state !== "stopped")
@@ -388,12 +401,16 @@ export class SessionShareService {
             await this.#deliverFriendMessage(accepted.ownerSessionId, accepted.message, {
                 createdAt: accepted.createdAt,
                 event: accepted.event,
+                overflowedMessageIds: accepted.overflowedMessageIds,
                 position: accepted.position,
             });
         }
     }
 
-    #handleMemberEvent(event: SessionShareTransportMemberEvent): void {
+    #handleMemberEvent(event: unknown): void {
+        if (!Value.Check(sessionShareTransportMemberEventSchema, event)) {
+            throw new Error("The session-share member transport event is invalid.");
+        }
         if (event.type === "transport_failed" || event.type === "transport_recovered") return;
         if (event.type === "entries_appended") {
             assertPageBounds(event.entries);

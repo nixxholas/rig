@@ -5,7 +5,9 @@ import { connectRig, ProjectRegistrationError, ProjectRegistrationProtocolError 
 import type { SessionFinished } from "@/connectRig.js";
 import type {
     GlobalStreamHello,
+    SessionSharedMetadata,
     SessionStateResponse,
+    SessionSummary,
     SessionTranscriptWindow,
 } from "@/protocol.js";
 
@@ -160,6 +162,24 @@ function groupsCatalog(): Omit<GlobalStreamHello, "cursor"> {
     };
 }
 
+function catalogSession(shared?: SessionSharedMetadata): SessionSummary {
+    return {
+        archived: false,
+        createdAt: 1,
+        cwd: "/work",
+        id: "session-1",
+        modelId: "old-model",
+        orderKey: "a",
+        permissionMode: "auto",
+        projectId: "project-1",
+        providerId: "codex",
+        status: "idle",
+        titleStatus: "idle",
+        updatedAt: 1,
+        ...(shared === undefined ? {} : { shared }),
+    };
+}
+
 /** What the daemon reports back for a workspace the client named itself. */
 function daemonWorkspace(id: string) {
     return {
@@ -228,6 +248,143 @@ const randomValues = (bytes: Uint8Array): Uint8Array => {
 };
 
 describe("connectRig mutations", () => {
+    it("converges sharing responses into open chat and catalog state", async () => {
+        const streams: ReturnType<typeof streamResponse>[] = [];
+        const bodies: unknown[] = [];
+        let createAttempts = 0;
+        let authoritative: SessionSharedMetadata | undefined;
+        const ownerResponse = (share: SessionSharedMetadata) => ({
+            members: [],
+            share,
+        });
+        const rig = connectRig({
+            endpoint: "http://daemon.test",
+            fetch: (input, init) => {
+                const url = new URL(String(input));
+                if (url.pathname === "/events/live") {
+                    const stream = streamResponse();
+                    streams.push(stream);
+                    return Promise.resolve(stream.response);
+                }
+                if (url.pathname === "/catalog") {
+                    const catalog = groupsCatalog();
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...catalog,
+                                sessions: [catalogSession(authoritative)],
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname.endsWith("/state")) {
+                    const state = sessionState();
+                    return Promise.resolve(
+                        new Response(
+                            JSON.stringify({
+                                ...state,
+                                session: {
+                                    ...state.session!,
+                                    ...(authoritative === undefined
+                                        ? {}
+                                        : { shared: authoritative }),
+                                },
+                            }),
+                            { status: 200 },
+                        ),
+                    );
+                }
+                if (url.pathname === "/git/watch") {
+                    return Promise.resolve(
+                        new Response(JSON.stringify({ snapshots: [] }), { status: 200 }),
+                    );
+                }
+                bodies.push(JSON.parse(String(init?.body)));
+                if (url.pathname === "/sessions/session-1/share") {
+                    createAttempts += 1;
+                    if (createAttempts === 1) return Promise.reject(new TypeError("disconnected"));
+                    authoritative = {
+                        includeFriendMessagesInModel: false,
+                        memberCount: 1,
+                        shareId: "share-1",
+                        state: "active",
+                    };
+                } else if (url.pathname.endsWith("/members")) {
+                    authoritative = { ...authoritative!, memberCount: 3 };
+                } else if (url.pathname.endsWith("/revoke")) {
+                    authoritative = { ...authoritative!, memberCount: 1 };
+                } else if (url.pathname.endsWith("/friend-messages")) {
+                    authoritative = {
+                        ...authoritative!,
+                        includeFriendMessagesInModel: true,
+                    };
+                } else if (url.pathname.endsWith("/stop")) {
+                    authoritative = { ...authoritative!, state: "stopped" };
+                }
+                return Promise.resolve(
+                    new Response(JSON.stringify(ownerResponse(authoritative!)), { status: 200 }),
+                );
+            },
+            mutationRetryDelayMs: 1,
+            randomValues,
+            token: "secret",
+            wait: () => Promise.resolve(),
+        });
+        const session = rig.connectSession({ onChange: () => undefined, sessionId: "session-1" });
+        const groups = rig.connectGroups({ onChange: () => undefined });
+        try {
+            await settle();
+            streams[0]?.write(liveHello());
+            await settle();
+            const transcript = session.elements();
+
+            rig.createSessionShare("session-1", {
+                friends: [{ displayName: "Taylor", peerId: "peer-1" }],
+                includeFriendMessagesInModel: false,
+            });
+            await settle();
+
+            expect(createAttempts).toBe(2);
+            expect(bodies[0]).toEqual(bodies[1]);
+            expect(session.session().shared).toEqual(authoritative);
+            expect(groups.projects()[0]?.sessions[0]?.shared).toEqual(authoritative);
+            expect(session.elements()).toBe(transcript);
+
+            rig.addSessionShareMember("session-1", {
+                displayName: "Morgan",
+                peerId: "peer-2",
+            });
+            expect(session.session().shared?.memberCount).toBe(2);
+            await settle();
+            expect(session.session().shared?.memberCount).toBe(3);
+            expect(groups.projects()[0]?.sessions[0]?.shared?.memberCount).toBe(3);
+
+            rig.revokeSessionShareMember("session-1", "member-1");
+            rig.setSessionShareFriendMessages("session-1", true);
+            rig.stopSessionShare("session-1");
+            await settle();
+            expect(session.session().shared).toEqual(authoritative);
+            expect(groups.projects()[0]?.sessions[0]?.shared).toEqual(authoritative);
+
+            streams[0]?.close();
+            await settle();
+            streams[1]?.write(
+                liveHello("01900000-0000-7000-8000-000000000099", {
+                    gap: true,
+                    resumed: true,
+                }),
+            );
+            await settle();
+            expect(session.session().shared).toEqual(authoritative);
+            expect(groups.projects()[0]?.sessions[0]?.shared).toEqual(authoritative);
+        } finally {
+            session.close();
+            groups.close();
+            rig.close();
+        }
+    });
+
     it("retries project registration with one identity and returns the authoritative entity", async () => {
         const bodies: { path: string; projectId: string }[] = [];
         const project = {

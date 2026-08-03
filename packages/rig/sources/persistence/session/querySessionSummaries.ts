@@ -53,7 +53,10 @@ export function querySessionSummaries(
             SELECT latest_share.share_id
             FROM session_shares AS latest_share
             WHERE latest_share.owner_session_id = listed_sessions.id
-            ORDER BY latest_share.created_at_ms DESC, latest_share.share_id DESC
+            ORDER BY
+                latest_share.state <> 'stopped' DESC,
+                latest_share.created_at_ms DESC,
+                latest_share.share_id DESC
             LIMIT 1
         )
         ORDER BY

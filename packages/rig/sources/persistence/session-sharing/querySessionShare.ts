@@ -1,4 +1,4 @@
-import { asc, desc, eq } from "drizzle-orm";
+import { asc, desc, eq, sql } from "drizzle-orm";
 
 import { sessionShareMembers, sessionShares } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
@@ -39,7 +39,11 @@ export function querySessionShareByOwnerSession(
         .select({ shareId: sessionShares.shareId })
         .from(sessionShares)
         .where(eq(sessionShares.ownerSessionId, ownerSessionId))
-        .orderBy(desc(sessionShares.createdAtMs), desc(sessionShares.shareId))
+        .orderBy(
+            desc(sql`${sessionShares.state} <> 'stopped'`),
+            desc(sessionShares.createdAtMs),
+            desc(sessionShares.shareId),
+        )
         .get()?.shareId;
     return shareId === undefined ? undefined : querySessionShare(tx, shareId);
 }

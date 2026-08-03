@@ -33,6 +33,7 @@ export interface SessionShareServiceContract {
         request: RevokeSessionShareMemberRequest,
     ): Promise<SessionShareOwnerResponse>;
     stop(sessionId: string, request: StopSessionShareRequest): Promise<SessionShareOwnerResponse>;
+    stopForArchivedSession(sessionId: string): Promise<void>;
     setFriendMessages(
         sessionId: string,
         request: SetSessionShareFriendMessagesRequest,

@@ -7,6 +7,7 @@ interface TranscriptEntry {
     ordinal: number;
     text: string;
     trustedUserEvidence: boolean;
+    trustedUserEvidenceTruncated: boolean;
 }
 
 export interface AutoPermissionTranscript {
@@ -56,7 +57,9 @@ export function createAutoPermissionTranscript(
         .map((entry) => `[${String(entry.ordinal + 1)}] ${entry.text}`);
     const omitted = entries.length - retained.length;
     const omittedUserEvidence = entries.some(
-        (entry) => entry.trustedUserEvidence && !selected.has(entry.ordinal),
+        (entry) =>
+            entry.trustedUserEvidence &&
+            (!selected.has(entry.ordinal) || entry.trustedUserEvidenceTruncated),
     );
     if (omitted > 0) {
         retained.push(
@@ -76,25 +79,27 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
         if (isInternalMessage(message)) continue;
         if (message.role === "system") continue;
         if (message.role === "user") {
+            // Friend-authored content is not part of the permission-review conversation at all.
+            // Rendering it as merely untrusted would still let its bytes spoof transcript framing.
+            if (message.friendAuthor !== undefined) continue;
             if (isGeneratedConversationSummary(message.blocks)) continue;
             const text = renderContent(message.blocks, "[Image shared by user]");
             if (text.length > 0) {
                 const isShellContext = isUserShellCommandContext(message.blocks);
                 const isAgentMessage = message.provenance === "agent";
-                const isFriendMessage = message.friendAuthor !== undefined;
+                const rendered = isShellContext
+                    ? `Tool result (direct user shell command):\n${text}`
+                    : isAgentMessage
+                      ? `Agent message:\n${text}`
+                      : `User:\n${text}`;
+                const trustedUserEvidence = !isShellContext && !isAgentMessage;
                 entries.push({
                     category: isShellContext ? "tool" : "message",
                     ordinal: entries.length,
-                    text: truncateEntry(
-                        isShellContext
-                            ? `Tool result (direct user shell command):\n${text}`
-                            : isAgentMessage
-                              ? `Agent message:\n${text}`
-                              : isFriendMessage
-                                ? `Friend message from ${message.friendAuthor!.displayName} (${message.friendAuthor!.murmurPeerId}):\n${text}`
-                                : `User:\n${text}`,
-                    ),
-                    trustedUserEvidence: !isShellContext && !isAgentMessage && !isFriendMessage,
+                    text: truncateEntry(rendered),
+                    trustedUserEvidence,
+                    trustedUserEvidenceTruncated:
+                        trustedUserEvidence && rendered.length > MAX_ENTRY_CHARACTERS,
                 });
             }
             continue;
@@ -110,6 +115,7 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
                         `${message.outcome === "retried" ? "Retried inference error" : "Run error"}:\n${text}`,
                     ),
                     trustedUserEvidence: false,
+                    trustedUserEvidenceTruncated: false,
                 });
             }
             continue;
@@ -123,6 +129,7 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
                     ordinal: entries.length,
                     text: truncateEntry(`Assistant:\n${block.text}`),
                     trustedUserEvidence: false,
+                    trustedUserEvidenceTruncated: false,
                 });
                 continue;
             }
@@ -132,6 +139,7 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
                     ordinal: entries.length,
                     text: "Assistant:\n[Image shared by assistant]",
                     trustedUserEvidence: false,
+                    trustedUserEvidenceTruncated: false,
                 });
                 continue;
             }
@@ -143,6 +151,7 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
                         `Assistant tool call (${block.name}):\n${safeJson(block.arguments)}`,
                     ),
                     trustedUserEvidence: false,
+                    trustedUserEvidenceTruncated: false,
                 });
                 continue;
             }
@@ -152,15 +161,16 @@ function collectEntries(messages: readonly Message[]): TranscriptEntry[] {
                 block.trustedUserEvidence ?? block.rendered,
                 trustedUserEvidence ? "[Image selected by user]" : "[Image returned by tool]",
             );
+            const entryText = trustedUserEvidence
+                ? `User response through ${block.toolName}:\n${rendered}`
+                : `Tool result (${block.toolName}${block.isError === true ? ", error" : ""}):\n${rendered}`;
             entries.push({
                 category: trustedUserEvidence ? "message" : "tool",
                 ordinal: entries.length,
-                text: truncateEntry(
-                    trustedUserEvidence
-                        ? `User response through ${block.toolName}:\n${rendered}`
-                        : `Tool result (${block.toolName}${block.isError === true ? ", error" : ""}):\n${rendered}`,
-                ),
+                text: truncateEntry(entryText),
                 trustedUserEvidence,
+                trustedUserEvidenceTruncated:
+                    trustedUserEvidence && entryText.length > MAX_ENTRY_CHARACTERS,
             });
         }
     }

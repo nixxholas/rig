@@ -633,6 +633,25 @@ async function handleRequest(
             });
             return;
         }
+        if (
+            route.name === "session-share" ||
+            route.name === "session-share-members" ||
+            route.name === "session-share-member-revoke" ||
+            route.name === "session-share-stop" ||
+            route.name === "session-share-friend-messages"
+        ) {
+            const ownerSession = store.get(route.sessionId);
+            if (ownerSession === undefined) {
+                sendJson(response, 404, { error: "Session not found." });
+                return;
+            }
+            if (ownerSession.agentMetadata().type !== "primary") {
+                sendJson(response, 409, {
+                    error: "Only primary sessions can be shared.",
+                });
+                return;
+            }
+        }
         if (request.method === "GET" && route.name === "session-share") {
             const share = sessionShares.getOwner(route.sessionId);
             if (share === undefined) sendJson(response, 404, { error: "Session share not found." });
@@ -2724,6 +2743,9 @@ async function handleRequest(
         }
         if (!sessionMutationCanApply(request, response, session)) return;
         const archived = session.setArchived(route.name === "archive", mutationId);
+        if (route.name === "archive") {
+            await runtimeConfig.sessionShares?.stopForArchivedSession(sessionId);
+        }
         if (route.name === "unarchive") {
             // A visible chat must never sit under a project the user archived.
             store.unarchiveProject(archived.projectId);
@@ -2776,7 +2798,12 @@ async function handleRequest(
         // position arrives on the global stream and is replayed on top of this.
         const cursor = store.liveEvents.cursor();
         const turnLimit = parseTurnLimit(url.searchParams.get("turns"));
-        const hello = sessionStateHello(session, turnLimit, store.listSubagents(sessionId));
+        const baseHello = sessionStateHello(session, turnLimit, store.listSubagents(sessionId));
+        const ownerShare = runtimeConfig.sessionShares?.getOwner(sessionId)?.share;
+        const hello =
+            ownerShare === undefined || baseHello.session === undefined
+                ? baseHello
+                : { ...baseHello, session: { ...baseHello.session, shared: ownerShare } };
         // A client catching up says which message it already holds, and receives
         // only the turns from there on. It still gets the whole current session,
         // because a gap leaves the rest of that state uncertain too — but the

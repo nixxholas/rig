@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt, lte } from "drizzle-orm";
 
 import { sessionShareReplicaEntries, sessionShareReplicas } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
@@ -19,6 +19,7 @@ export function querySessionShareReplica(
               createdAt: row.createdAtMs,
               ...(row.endedAtMs === null ? {} : { endedAt: row.endedAtMs }),
               ...(row.endedReason === null ? {} : { endedReason: row.endedReason }),
+              appliedThroughSequence: row.appliedThroughSequence,
               grantEpoch: row.grantEpoch,
               memberCount: row.memberCount,
               murmurPeerId: row.murmurPeerId,
@@ -31,12 +32,31 @@ export function querySessionShareReplica(
           };
 }
 
-export function querySessionShareReplicaEntries(tx: TX, shareId: string) {
+export function querySessionShareReplicaEntries(
+    tx: TX,
+    shareId: string,
+    options: { afterSequence?: number; limit?: number } = {},
+) {
+    const replica = tx
+        .select({ appliedThroughSequence: sessionShareReplicas.appliedThroughSequence })
+        .from(sessionShareReplicas)
+        .where(eq(sessionShareReplicas.shareId, shareId))
+        .get();
+    if (replica === undefined) return [];
+    const afterSequence = Math.max(0, options.afterSequence ?? 0);
+    const limit = Math.max(1, Math.min(100, options.limit ?? 100));
     return tx
         .select()
         .from(sessionShareReplicaEntries)
-        .where(eq(sessionShareReplicaEntries.shareId, shareId))
+        .where(
+            and(
+                eq(sessionShareReplicaEntries.shareId, shareId),
+                gt(sessionShareReplicaEntries.sequence, afterSequence),
+                lte(sessionShareReplicaEntries.sequence, replica.appliedThroughSequence),
+            ),
+        )
         .orderBy(asc(sessionShareReplicaEntries.sequence))
+        .limit(limit)
         .all()
         .map((row) => ({
             canonicalJson: row.canonicalJson,
@@ -55,6 +75,7 @@ export function querySessionShareReplicas(tx: TX): readonly SessionShareReplicaR
         .select({ shareId: sessionShareReplicas.shareId })
         .from(sessionShareReplicas)
         .orderBy(asc(sessionShareReplicas.updatedAtMs), asc(sessionShareReplicas.shareId))
+        .limit(1_000)
         .all()
         .map((row) => querySessionShareReplica(tx, row.shareId))
         .filter((replica): replica is SessionShareReplicaRecord => replica !== undefined);

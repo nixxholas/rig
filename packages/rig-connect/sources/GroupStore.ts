@@ -189,6 +189,19 @@ export class GroupStore {
         };
     }
 
+    /** Applies the owner share returned by a completed sharing mutation. */
+    applySessionShare(sessionId: string, shared: SessionSummary["shared"]): readonly GroupDelta[] {
+        const known = this.#sessions.get(sessionId);
+        if (known === undefined || sameProtocolValue(known.shared, shared)) return [];
+        const previousTree = this.projects();
+        const { shared: _shared, ...withoutShared } = known;
+        const updated = shared === undefined ? withoutShared : { ...known, shared };
+        this.#sessions.set(sessionId, updated);
+        this.#markDirty(known.projectId);
+        const projects = this.projects();
+        return projects === previousTree ? [] : [{ projects, type: "projects_changed" }];
+    }
+
     /** Applies a project or workspace name prediction without advancing its version. */
     applyOptimisticGroupName(
         target:

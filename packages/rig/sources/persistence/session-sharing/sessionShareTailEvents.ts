@@ -17,7 +17,7 @@ export function sessionShareTailEvents(
         pageSize: number;
         shareId: string;
     },
-): { appended: number; degraded: boolean; publishedEventSeq: number } {
+): { appended: number; degraded: boolean; progressed: number; publishedEventSeq: number } {
     return inTx(tx, (tx) => {
         const share = tx
             .select()
@@ -26,7 +26,12 @@ export function sessionShareTailEvents(
             .get();
         if (share === undefined) throw new Error("The session share does not exist.");
         if (share.state === "stopped") {
-            return { appended: 0, degraded: false, publishedEventSeq: share.publishedEventSeq };
+            return {
+                appended: 0,
+                degraded: false,
+                progressed: 0,
+                publishedEventSeq: share.publishedEventSeq,
+            };
         }
         const createShareEventId = createEventIdFactory({ now: () => input.now });
         let nextSequence = share.nextShareSequence;
@@ -35,6 +40,7 @@ export function sessionShareTailEvents(
         let publishedMessagePosition = share.publishedMessagePosition;
         let publishedEventSeq = share.publishedEventSeq;
         let appended = 0;
+        let progressed = 0;
         let degraded = false;
         const snapshotBoundary = share.snapshotThroughPosition ?? -1;
         if (publishedMessagePosition < snapshotBoundary) {
@@ -45,9 +51,8 @@ export function sessionShareTailEvents(
                 updated_at_ms: number;
             }>(sql`
                 SELECT message_json, position, run_id, updated_at_ms
-                FROM session_messages
-                WHERE session_id = ${share.ownerSessionId}
-                    AND is_partial = 0
+                FROM session_share_snapshot_messages
+                WHERE share_id = ${input.shareId}
                     AND position > ${publishedMessagePosition}
                     AND position <= ${snapshotBoundary}
                 ORDER BY position ASC
@@ -68,6 +73,7 @@ export function sessionShareTailEvents(
                 });
                 if (projected === undefined) {
                     publishedMessagePosition = row.position;
+                    progressed += 1;
                     continue;
                 }
                 const byteLength = Buffer.byteLength(projected.canonicalJson, "utf8");
@@ -90,12 +96,14 @@ export function sessionShareTailEvents(
                     })
                     .run();
                 appended += 1;
+                progressed += 1;
                 nextSequence += 1;
                 outboxBytes += byteLength;
                 outboxCount += 1;
                 publishedMessagePosition = row.position;
             }
             if (!degraded && messages.length < input.pageSize) {
+                if (publishedMessagePosition < snapshotBoundary) progressed += 1;
                 publishedMessagePosition = snapshotBoundary;
             }
         }
@@ -117,7 +125,9 @@ export function sessionShareTailEvents(
             for (const row of events) {
                 const eventData = JSON.parse(row.data_json) as Record<string, unknown>;
                 if (
-                    row.type === "message_submitted" &&
+                    (row.type === "message_submitted" ||
+                        row.type === "agent_message" ||
+                        row.type === "system_notice") &&
                     messageWasIncludedInSnapshot(
                         tx,
                         share.ownerSessionId,
@@ -126,6 +136,7 @@ export function sessionShareTailEvents(
                     )
                 ) {
                     publishedEventSeq = row.seq;
+                    progressed += 1;
                     continue;
                 }
                 const projected = projectSessionShareEntry({
@@ -146,6 +157,7 @@ export function sessionShareTailEvents(
                 });
                 if (projected === undefined) {
                     publishedEventSeq = row.seq;
+                    progressed += 1;
                     continue;
                 }
                 const byteLength = Buffer.byteLength(projected.canonicalJson, "utf8");
@@ -169,6 +181,7 @@ export function sessionShareTailEvents(
                     })
                     .run();
                 appended += 1;
+                progressed += 1;
                 nextSequence += 1;
                 outboxBytes += byteLength;
                 outboxCount += 1;
@@ -187,7 +200,7 @@ export function sessionShareTailEvents(
             })
             .where(eq(sessionShares.shareId, input.shareId))
             .run();
-        return { appended, degraded, publishedEventSeq };
+        return { appended, degraded, progressed, publishedEventSeq };
     });
 }
 
@@ -203,8 +216,16 @@ function messageWasIncludedInSnapshot(
     if (typeof messageId !== "string") return false;
     const row = tx.get<{ position: number }>(sql`
         SELECT position
-        FROM session_messages
-        WHERE session_id = ${sessionId} AND message_id = ${messageId}
+        FROM session_share_snapshot_messages
+        WHERE share_id = (
+            SELECT share_id
+            FROM session_shares
+            WHERE owner_session_id = ${sessionId}
+              AND state <> 'stopped'
+            ORDER BY created_at_ms DESC, share_id DESC
+            LIMIT 1
+        )
+          AND message_id = ${messageId}
         LIMIT 1
     `);
     return row !== undefined && row.position <= snapshotBoundary;

@@ -94,6 +94,7 @@ import type {
     PostSessionShareFriendMessageResponse,
     SessionSharedMetadata,
     SessionShareFriendInput,
+    SessionShareOwnerResponse,
 } from "./protocol.js";
 import {
     getSessionShareHealthResponseSchema,
@@ -111,6 +112,7 @@ import {
     projectRegistrationErrorResponseSchema,
     projectResponseSchema,
     projectWorkspaceSchema,
+    sessionShareOwnerResponseSchema,
     sendMurmurFriendRequestResponseSchema,
     signupMurmurAccountResponseSchema,
     startMurmurServiceResponseSchema,
@@ -1097,6 +1099,46 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     const applyAcceptedResponse = (mutation: PendingMutation, data: unknown): boolean => {
+        if (mutation.sessionId !== undefined && isSessionShareMutationAction(mutation.action)) {
+            let response: SessionShareOwnerResponse;
+            try {
+                response = Value.Decode(sessionShareOwnerResponseSchema, data);
+            } catch {
+                rejectMutation(mutation, "Rig returned an invalid session-sharing response.");
+                return true;
+            }
+            const sessionId = mutation.sessionId;
+            reconcile(
+                [mutation.entityKey],
+                mutation.id,
+                [sessionId],
+                groupsEntry !== undefined,
+                () => ({
+                    ...(groupsEntry === undefined
+                        ? {}
+                        : {
+                              groupDeltas: groupsEntry.store.applySessionShare(
+                                  sessionId,
+                                  response.share,
+                              ),
+                          }),
+                    ...(sessionEntries.has(sessionId)
+                        ? {
+                              sessionDeltas: new Map([
+                                  [
+                                      sessionId,
+                                      sessionEntries
+                                          .get(sessionId)!
+                                          .store.applySessionShare(response.share),
+                                  ],
+                              ]),
+                          }
+                        : {}),
+                }),
+            );
+            return true;
+        }
+
         const project = responseEntity(data, "project");
         if (
             groupsEntry !== undefined &&
@@ -4626,6 +4668,25 @@ function isRetryableMutationError(error: unknown): boolean {
     }
     return (
         error.status === 408 || error.status === 425 || error.status === 429 || error.status >= 500
+    );
+}
+
+function isSessionShareMutationAction(
+    action: MutationAction,
+): action is Extract<
+    MutationAction,
+    | "add_session_share_member"
+    | "create_session_share"
+    | "revoke_session_share_member"
+    | "set_session_share_friend_messages"
+    | "stop_session_share"
+> {
+    return (
+        action === "add_session_share_member" ||
+        action === "create_session_share" ||
+        action === "revoke_session_share_member" ||
+        action === "set_session_share_friend_messages" ||
+        action === "stop_session_share"
     );
 }
 

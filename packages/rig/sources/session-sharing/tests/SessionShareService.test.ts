@@ -338,6 +338,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
             },
             message,
             ownerSessionId: share.ownerSessionId,
+            overflowedMessageIds: [],
             position,
             status: "accepted" as const,
         };

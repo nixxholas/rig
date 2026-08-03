@@ -483,6 +483,17 @@ export class ChatStore {
         };
     }
 
+    /** Applies the owner share returned by a completed sharing mutation. */
+    applySessionShare(shared: SessionState["shared"]): readonly ChatDelta[] {
+        if (sameSessionShare(this.#session.shared, shared)) return [];
+        const sessionBefore = this.#session;
+        this.#session =
+            shared === undefined
+                ? withoutKeys(this.#session, ["shared"])
+                : { ...this.#session, shared };
+        return this.#finish([], this.#revision, sessionBefore);
+    }
+
     /** Adds one immediately visible user bubble for a queued send mutation. */
     applyOptimisticMessage(
         mutationId: string,
@@ -3511,6 +3522,18 @@ function withoutKeys(session: SessionState, keys: readonly (keyof SessionState)[
     const next = { ...session };
     for (const key of keys) delete next[key];
     return next;
+}
+
+function sameSessionShare(left: SessionState["shared"], right: SessionState["shared"]): boolean {
+    return (
+        left === right ||
+        (left !== undefined &&
+            right !== undefined &&
+            left.includeFriendMessagesInModel === right.includeFriendMessagesInModel &&
+            left.memberCount === right.memberCount &&
+            left.shareId === right.shareId &&
+            left.state === right.state)
+    );
 }
 
 /**

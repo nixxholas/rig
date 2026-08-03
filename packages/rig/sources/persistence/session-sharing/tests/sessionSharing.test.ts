@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createSessionDatabaseFixture } from "../../database/tests/createSessionDatabaseFixture.js";
@@ -12,6 +13,7 @@ import {
     sessionEvents,
     sessionShareGrants,
     sessionShareMessageContext,
+    sessionShareReplicaEntries,
     sessions,
 } from "../../database/schema.js";
 import { querySessionShare, querySessionShareMembers } from "../querySessionShare.js";
@@ -44,6 +46,63 @@ afterEach(async () => {
 });
 
 describe("session sharing persistence", () => {
+    it("bounds disabled friend backlog by overflowing the oldest durable rows", async () => {
+        const opened = await fixture();
+        try {
+            createShare(opened.database);
+            const accepted: string[][] = [];
+            for (let index = 1; index <= 2; index += 1) {
+                const messageId = `bounded-friend-${String(index)}`;
+                const text = `message-${String(index)}`;
+                const result = sessionShareAcceptFriendMessage(opened.database, {
+                    backlogLimits: { maxBytes: 100, maxMessages: 1 },
+                    message: {
+                        blocks: [{ text, type: "text" }],
+                        contextOnly: true,
+                        friendAuthor: {
+                            displayName: "Initial friend",
+                            grantEpoch: 1,
+                            kind: "friend",
+                            murmurPeerId: "peer-initial",
+                            shareId: "share-1",
+                            shareMemberId: "member-initial",
+                        },
+                        id: messageId,
+                        role: "user",
+                    },
+                    now: index + 1,
+                    post: {
+                        clientMessageId: `bounded-client-${String(index)}`,
+                        displayName: "Initial friend",
+                        grant: {
+                            grantEpoch: 1,
+                            murmurPeerId: "peer-initial",
+                            shareId: "share-1",
+                            shareMemberId: "member-initial",
+                        },
+                        text,
+                    },
+                    senderPeerId: "peer-initial",
+                });
+                if (result.status === "accepted") {
+                    accepted.push([...result.overflowedMessageIds]);
+                }
+            }
+
+            expect(accepted).toEqual([[], ["bounded-friend-1"]]);
+            expect(
+                querySessionShareFriendMessages(opened.database, { shareId: "share-1" }).map(
+                    (entry) => [entry.messageId, entry.disposition],
+                ),
+            ).toEqual([
+                ["bounded-friend-1", "overflow"],
+                ["bounded-friend-2", "pending"],
+            ]);
+        } finally {
+            opened.client.close();
+        }
+    });
+
     it("keeps friend backlog pending while off, then drains newest with explicit overflow", async () => {
         const opened = await fixture();
         try {
@@ -414,10 +473,11 @@ describe("session sharing persistence", () => {
                 .insert(sessionEvents)
                 .values({
                     createdAtMs: 2,
-                    dataJson: '{"status":"running"}',
+                    dataJson:
+                        '{"message":{"blocks":[{"text":"Visible notice","type":"text"}],"id":"notice-1","role":"system"}}',
                     eventId: "source-event-2",
                     sessionId: "session-1",
-                    type: "session_status_changed",
+                    type: "system_notice",
                 })
                 .returning({ seq: sessionEvents.seq })
                 .get();
@@ -432,6 +492,7 @@ describe("session sharing persistence", () => {
             ).toEqual({
                 appended: 0,
                 degraded: true,
+                progressed: 0,
                 publishedEventSeq: 0,
             });
             sessionShareOutboxAcknowledge(opened.database, {
@@ -450,6 +511,7 @@ describe("session sharing persistence", () => {
             ).toEqual({
                 appended: 1,
                 degraded: true,
+                progressed: 1,
                 publishedEventSeq: firstEvent.seq,
             });
             expect(
@@ -475,6 +537,7 @@ describe("session sharing persistence", () => {
             ).toEqual({
                 appended: 1,
                 degraded: false,
+                progressed: 1,
                 publishedEventSeq: secondEvent.seq,
             });
         } finally {
@@ -523,6 +586,14 @@ describe("session sharing persistence", () => {
             snapshotThroughPosition: 1,
             state: "degraded",
         });
+        opened.database
+            .update(sessionMessages)
+            .set({
+                messageJson:
+                    '{"blocks":[{"text":"Replacement after share creation","type":"text"}],"id":"snapshot-1","role":"user"}',
+            })
+            .where(and(eq(sessionMessages.sessionId, "session-1"), eq(sessionMessages.position, 1)))
+            .run();
         opened.client.close();
 
         const restored = openSessionDatabase(databasePath);
@@ -548,54 +619,121 @@ describe("session sharing persistence", () => {
             expect(
                 querySessionShareOutbox(restored.database, { limit: 10, shareId: "share-1" }),
             ).toMatchObject([{ sequence: 2 }]);
+            const canonicalJson = querySessionShareOutbox(restored.database, {
+                limit: 10,
+                shareId: "share-1",
+            })[0]?.canonicalJson;
+            expect(canonicalJson).toContain("Second");
+            expect(canonicalJson).not.toContain("Replacement after share creation");
         } finally {
             restored.client.close();
         }
     });
 
-    it("appends replica entries only for the current grant and deletes them when it ends", async () => {
+    it("stores reordered replica entries while exposing only the contiguous prefix", async () => {
         const opened = await fixture();
         try {
-            sessionShareReplicaSave(opened.database, {
-                createdAt: 1,
-                grantEpoch: 2,
-                memberCount: 3,
-                murmurPeerId: "member-peer",
-                ownerPeerId: "owner-peer",
-                shareId: "remote-share",
-                shareMemberId: "remote-member",
-                state: "active",
-                title: "Shared work",
-                updatedAt: 1,
+            saveReplica(opened.database, 2);
+            expect(sessionShareReplicaAppend(opened.database, replicaEntry(3))).toBe(true);
+            expect(querySessionShareReplicaEntries(opened.database, "remote-share")).toEqual([]);
+            expect(opened.database.select().from(sessionShareReplicaEntries).all()).toHaveLength(1);
+            expect(querySessionShareReplica(opened.database, "remote-share")).toMatchObject({
+                appliedThroughSequence: 0,
             });
-            const append = {
-                canonicalJson: '{"event":1}',
-                contentHash: "hash",
-                createdAt: 2,
-                grantEpoch: 2,
-                grantMemberId: "remote-member",
-                sequence: 1,
-                shareEventId: "remote-event",
-                shareId: "remote-share",
-            };
-            expect(sessionShareReplicaAppend(opened.database, append)).toBe(true);
-            expect(sessionShareReplicaAppend(opened.database, append)).toBe(false);
+
+            expect(sessionShareReplicaAppend(opened.database, replicaEntry(1))).toBe(true);
+            expect(
+                querySessionShareReplicaEntries(opened.database, "remote-share").map(
+                    (entry) => entry.sequence,
+                ),
+            ).toEqual([1]);
+            expect(querySessionShareReplica(opened.database, "remote-share")).toMatchObject({
+                appliedThroughSequence: 1,
+            });
+
+            expect(sessionShareReplicaAppend(opened.database, replicaEntry(2))).toBe(true);
+            expect(
+                querySessionShareReplicaEntries(opened.database, "remote-share").map(
+                    (entry) => entry.sequence,
+                ),
+            ).toEqual([1, 2, 3]);
+            expect(querySessionShareReplica(opened.database, "remote-share")).toMatchObject({
+                appliedThroughSequence: 3,
+            });
+            expect(
+                querySessionShareReplicaEntries(opened.database, "remote-share", {
+                    afterSequence: 1,
+                    limit: 1,
+                }).map((entry) => entry.sequence),
+            ).toEqual([2]);
+        } finally {
+            opened.client.close();
+        }
+    });
+
+    it("accepts exact duplicate replica entries and rejects identity conflicts", async () => {
+        const opened = await fixture();
+        try {
+            saveReplica(opened.database, 2);
+            const entry = replicaEntry(1);
+            expect(sessionShareReplicaAppend(opened.database, entry)).toBe(true);
+            expect(sessionShareReplicaAppend(opened.database, entry)).toBe(false);
+
+            expect(() =>
+                sessionShareReplicaAppend(
+                    opened.database,
+                    replicaEntry(1, {
+                        canonicalJson: '{"event":"different"}',
+                    }),
+                ),
+            ).toThrow("conflicts with an existing event or sequence");
+            expect(() =>
+                sessionShareReplicaAppend(
+                    opened.database,
+                    replicaEntry(1, { shareEventId: "different-event" }),
+                ),
+            ).toThrow("conflicts with an existing event or sequence");
             expect(querySessionShareReplicaEntries(opened.database, "remote-share")).toHaveLength(
                 1,
             );
-            sessionShareReplicaSave(opened.database, {
-                createdAt: 1,
-                grantEpoch: 3,
-                memberCount: 3,
-                murmurPeerId: "member-peer",
-                ownerPeerId: "owner-peer",
-                shareId: "remote-share",
-                shareMemberId: "remote-member",
-                state: "active",
-                title: "Shared work",
-                updatedAt: 3,
-            });
+        } finally {
+            opened.client.close();
+        }
+    });
+
+    it("rejects replica entries with the wrong share or content hash", async () => {
+        const opened = await fixture();
+        try {
+            saveReplica(opened.database, 2);
+            expect(() =>
+                sessionShareReplicaAppend(
+                    opened.database,
+                    replicaEntry(1, { shareId: "another-share" }),
+                ),
+            ).toThrow("share does not match its grant");
+            expect(() =>
+                sessionShareReplicaAppend(opened.database, {
+                    ...replicaEntry(1),
+                    contentHash: "not-the-content-hash",
+                }),
+            ).toThrow("content hash is invalid");
+            expect(opened.database.select().from(sessionShareReplicaEntries).all()).toEqual([]);
+        } finally {
+            opened.client.close();
+        }
+    });
+
+    it("resets replica contents for a newer grant and ignores delayed old endings", async () => {
+        const opened = await fixture();
+        try {
+            saveReplica(opened.database, 2);
+            sessionShareReplicaAppend(opened.database, replicaEntry(1));
+            saveReplica(opened.database, 3);
             expect(querySessionShareReplicaEntries(opened.database, "remote-share")).toEqual([]);
+            expect(querySessionShareReplica(opened.database, "remote-share")).toMatchObject({
+                appliedThroughSequence: 0,
+                grantEpoch: 3,
+            });
             expect(
                 sessionShareReplicaEndCurrentGrant(opened.database, {
                     grantEpoch: 2,
@@ -609,12 +747,62 @@ describe("session sharing persistence", () => {
                 murmurPeerId: "member-peer",
                 state: "active",
             });
+            const epochThree = replicaEntry(1, { grantEpoch: 3 });
+            expect(sessionShareReplicaAppend(opened.database, epochThree)).toBe(true);
+            expect(
+                sessionShareReplicaEndCurrentGrant(opened.database, {
+                    grantEpoch: 3,
+                    now: 4,
+                    reason: "revoked",
+                    shareId: "remote-share",
+                    shareMemberId: "remote-member",
+                }),
+            ).toBe(true);
+            expect(querySessionShareReplica(opened.database, "remote-share")).toMatchObject({
+                appliedThroughSequence: 1,
+                state: "ended",
+            });
             expect(querySessionShareReplicaEntries(opened.database, "remote-share")).toEqual([]);
+            expect(opened.database.select().from(sessionShareReplicaEntries).all()).toEqual([]);
         } finally {
             opened.client.close();
         }
     });
 });
+
+function saveReplica(tx: Parameters<typeof sessionShareReplicaSave>[0], grantEpoch: number): void {
+    sessionShareReplicaSave(tx, {
+        createdAt: 1,
+        grantEpoch,
+        memberCount: 3,
+        murmurPeerId: "member-peer",
+        ownerPeerId: "owner-peer",
+        shareId: "remote-share",
+        shareMemberId: "remote-member",
+        state: "active",
+        title: "Shared work",
+        updatedAt: grantEpoch,
+    });
+}
+
+function replicaEntry(
+    sequence: number,
+    overrides: Partial<Parameters<typeof sessionShareReplicaAppend>[1]> = {},
+): Parameters<typeof sessionShareReplicaAppend>[1] {
+    const canonicalJson = overrides.canonicalJson ?? `{"event":${String(sequence)}}`;
+    return {
+        canonicalJson,
+        contentHash: createHash("sha256").update(canonicalJson).digest("base64url"),
+        createdAt: sequence + 1,
+        grantEpoch: 2,
+        grantMemberId: "remote-member",
+        grantShareId: "remote-share",
+        sequence,
+        shareEventId: `remote-event-${String(sequence)}`,
+        shareId: "remote-share",
+        ...overrides,
+    };
+}
 
 function createShare(tx: Parameters<typeof sessionShareCreate>[0]): void {
     sessionShareCreate(tx, {

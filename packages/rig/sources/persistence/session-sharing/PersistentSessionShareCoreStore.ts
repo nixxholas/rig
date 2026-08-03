@@ -161,7 +161,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
             now: this.#now(),
             pageSize: TAIL_PAGE_SIZE,
             shareId,
-        }).appended;
+        }).progressed;
     }
 
     queryOutboxPage(
@@ -218,9 +218,10 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
                     createdAt: entry.createdAt,
                     grantEpoch: grant.grantEpoch,
                     grantMemberId: grant.shareMemberId,
+                    grantShareId: grant.shareId,
                     sequence: entry.shareSequence,
                     shareEventId: entry.shareEventId,
-                    shareId: grant.shareId,
+                    shareId: entry.shareId,
                 });
             }
         });

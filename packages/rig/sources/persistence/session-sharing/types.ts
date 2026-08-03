@@ -50,6 +50,7 @@ export interface SessionShareReplicaRecord {
     murmurPeerId: string;
     shareMemberId: string;
     grantEpoch: number;
+    appliedThroughSequence: number;
     title: string;
     memberCount: number;
     state: SessionShareReplicaState;

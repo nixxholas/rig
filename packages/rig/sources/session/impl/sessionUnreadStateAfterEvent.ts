@@ -13,7 +13,7 @@ export function sessionUnreadStateAfterEvent(
         event.data.message.friendAuthor !== undefined
     ) {
         if (current?.reason === "attention_needed") return current;
-        return { reason: "friend_message", since: event.createdAt };
+        return { reason: "friend_message", since: current?.since ?? event.createdAt };
     }
     if (event.type !== "run_finished" && event.type !== "run_error") return current;
     if (current?.reason === "attention_needed" || current?.reason === "friend_message") {

@@ -5,7 +5,10 @@ import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import type { SessionShareReplicaRecord } from "./types.js";
 
-export function sessionShareReplicaSave(tx: TX, replica: SessionShareReplicaRecord): void {
+export function sessionShareReplicaSave(
+    tx: TX,
+    replica: Omit<SessionShareReplicaRecord, "appliedThroughSequence">,
+): void {
     inTx(tx, (tx) => {
         const existing = tx
             .select({ grantEpoch: sessionShareReplicas.grantEpoch })
@@ -18,6 +21,7 @@ export function sessionShareReplicaSave(tx: TX, replica: SessionShareReplicaReco
                 endedAtMs: replica.endedAt ?? null,
                 endedReason: replica.endedReason ?? null,
                 grantEpoch: replica.grantEpoch,
+                appliedThroughSequence: 0,
                 memberCount: replica.memberCount,
                 murmurPeerId: replica.murmurPeerId,
                 ownerPeerId: replica.ownerPeerId,
@@ -32,6 +36,12 @@ export function sessionShareReplicaSave(tx: TX, replica: SessionShareReplicaReco
                     endedAtMs: sql`excluded.ended_at_ms`,
                     endedReason: sql`excluded.ended_reason`,
                     grantEpoch: sql`excluded.grant_epoch`,
+                    appliedThroughSequence: sql`
+                        CASE
+                            WHEN excluded.grant_epoch > ${sessionShareReplicas.grantEpoch} THEN 0
+                            ELSE ${sessionShareReplicas.appliedThroughSequence}
+                        END
+                    `,
                     memberCount: sql`excluded.member_count`,
                     murmurPeerId: sql`excluded.murmur_peer_id`,
                     ownerPeerId: sql`excluded.owner_peer_id`,

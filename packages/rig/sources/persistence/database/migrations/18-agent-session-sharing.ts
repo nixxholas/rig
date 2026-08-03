@@ -33,6 +33,16 @@ const statements = [
         UNIQUE (share_id, murmur_peer_id),
         UNIQUE (share_member_id, current_grant_epoch)
     )`,
+    `CREATE TABLE session_share_snapshot_messages (
+        share_id TEXT NOT NULL REFERENCES session_shares(share_id) ON DELETE CASCADE,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        message_id TEXT NOT NULL,
+        message_json TEXT NOT NULL,
+        run_id TEXT,
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (share_id, position),
+        UNIQUE (share_id, message_id)
+    )`,
     `CREATE TABLE session_share_grants (
         share_member_id TEXT NOT NULL REFERENCES session_share_members(share_member_id) ON DELETE CASCADE,
         grant_epoch INTEGER NOT NULL CHECK (grant_epoch >= 1),
@@ -89,6 +99,8 @@ const statements = [
         murmur_peer_id TEXT NOT NULL,
         share_member_id TEXT NOT NULL,
         grant_epoch INTEGER NOT NULL CHECK (grant_epoch >= 1),
+        applied_through_sequence INTEGER NOT NULL DEFAULT 0
+            CHECK (applied_through_sequence >= 0),
         title TEXT NOT NULL,
         member_count INTEGER NOT NULL CHECK (member_count >= 0),
         state TEXT NOT NULL CHECK (state IN ('active', 'ended')),

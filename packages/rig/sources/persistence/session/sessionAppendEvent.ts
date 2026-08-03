@@ -38,7 +38,10 @@ export function sessionAppendEvent(
                 .select({
                     createdAtMs: sessionEvents.createdAtMs,
                     dataJson: sessionEvents.dataJson,
+                    messageId: sessionEvents.messageId,
+                    runId: sessionEvents.runId,
                     sessionId: sessionEvents.sessionId,
+                    toolCallId: sessionEvents.toolCallId,
                     type: sessionEvents.type,
                 })
                 .from(sessionEvents)
@@ -48,6 +51,9 @@ export function sessionAppendEvent(
                 existing?.sessionId !== event.sessionId ||
                 existing.createdAtMs !== event.createdAt ||
                 existing.type !== event.type ||
+                existing.messageId !== (facts.messageId ?? null) ||
+                existing.runId !== (facts.runId ?? null) ||
+                existing.toolCallId !== (facts.toolCallId ?? null) ||
                 existing.dataJson !== JSON.stringify(event.data)
             ) {
                 throw new Error("A session event identity cannot be reused for different content.");

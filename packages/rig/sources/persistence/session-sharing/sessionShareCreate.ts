@@ -119,6 +119,18 @@ export function sessionShareCreate(
                 updatedAtMs: input.now,
             })
             .run();
+        tx.run(sql`
+            INSERT INTO session_share_snapshot_messages (
+                share_id, position, message_id, message_json, run_id, updated_at_ms
+            )
+            SELECT
+                ${input.shareId}, position, message_id, message_json, run_id, updated_at_ms
+            FROM session_messages
+            WHERE session_id = ${input.ownerSessionId}
+                AND is_partial = 0
+                AND position <= ${snapshotThroughPosition ?? -1}
+            ORDER BY position ASC
+        `);
         for (const { byteLength, projected } of entries) {
             tx.insert(sessionShareOutbox)
                 .values({

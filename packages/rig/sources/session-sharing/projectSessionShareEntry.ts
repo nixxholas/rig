@@ -7,6 +7,31 @@ import type { SessionEvent } from "../protocol/index.js";
 import type { SessionShareOpaqueEntry } from "./SessionShareTransport.js";
 
 const exact = { additionalProperties: false } as const;
+const VISIBLE_TRANSCRIPT_EVENT_TYPES = new Set<SessionEvent["type"]>([
+    "abort_requested",
+    "agent_event",
+    "agent_message",
+    "external_tool_call_requested",
+    "external_tool_call_resolved",
+    "goal_changed",
+    "message_submitted",
+    "run_error",
+    "run_finished",
+    "run_started",
+    "session_archived",
+    "session_reset",
+    "session_rewound",
+    "session_workspace_archived",
+    "shell_command_finished",
+    "shell_command_started",
+    "steering_applied",
+    "subagents_suspended",
+    "system_notice",
+    "user_input_detached",
+    "user_input_requested",
+    "user_input_resolved",
+    "workflow_changed",
+]);
 
 export const sessionShareProjectionSchema = Type.Object(
     {
@@ -54,6 +79,7 @@ export function projectSessionShareEntry(options: {
 
 function project(source: SessionShareProjectionSource): SessionShareProjection | undefined {
     if (source.kind === "event") {
+        if (!VISIBLE_TRANSCRIPT_EVENT_TYPES.has(source.event.type)) return undefined;
         return { kind: "event", payload: sanitize(source.event), version: 1 };
     }
     if (source.message.internal === true) return undefined;

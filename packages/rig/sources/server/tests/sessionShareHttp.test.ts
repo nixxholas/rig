@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SessionShareServiceContract } from "../../session-sharing/index.js";
+import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
 
@@ -146,6 +147,76 @@ describe("session share HTTP API", () => {
             await server.close();
         }
     });
+
+    it("rejects missing and subagent owner sessions without calling the sharing service", async () => {
+        const service = createStub();
+        const store = new InMemorySessionStore();
+        store.createWithId("session-1", { cwd: "/tmp/session-share-primary" });
+        const subagent = store.createWithId("subagent-1", {
+            cwd: "/tmp/session-share-subagent",
+        });
+        vi.spyOn(subagent, "agentMetadata").mockReturnValue({
+            depth: 1,
+            parentSessionId: "session-1",
+            rootSessionId: "session-1",
+            type: "subagent",
+        });
+        const server = await startServer(service, store);
+        try {
+            expect(
+                await request(server.socketPath, "GET", "/sessions/missing/share"),
+            ).toMatchObject({
+                body: { error: "Session not found." },
+                status: 404,
+            });
+            const rejectedOwnerRequests = [
+                request(server.socketPath, "GET", "/sessions/subagent-1/share"),
+                request(server.socketPath, "POST", "/sessions/subagent-1/share", {
+                    friends: [{ displayName: "Friend", peerId: "peer-friend" }],
+                    includeFriendMessagesInModel: true,
+                    mutationId: "mutation-create",
+                }),
+                request(server.socketPath, "POST", "/sessions/subagent-1/share/members", {
+                    friend: { displayName: "Friend", peerId: "peer-friend" },
+                    mutationId: "mutation-add",
+                }),
+                request(
+                    server.socketPath,
+                    "POST",
+                    "/sessions/subagent-1/share/members/member-1/revoke",
+                    { mutationId: "mutation-revoke" },
+                ),
+                request(server.socketPath, "POST", "/sessions/subagent-1/share/stop", {
+                    mutationId: "mutation-stop",
+                }),
+                request(server.socketPath, "POST", "/sessions/subagent-1/share/friend-messages", {
+                    includeFriendMessagesInModel: false,
+                    mutationId: "mutation-toggle",
+                }),
+            ];
+            for (const response of await Promise.all(rejectedOwnerRequests)) {
+                expect(response).toMatchObject({
+                    body: { error: "Only primary sessions can be shared." },
+                    status: 409,
+                });
+            }
+            expect(service.getOwner).not.toHaveBeenCalled();
+            expect(service.create).not.toHaveBeenCalled();
+            expect(service.add).not.toHaveBeenCalled();
+            expect(service.revoke).not.toHaveBeenCalled();
+            expect(service.stop).not.toHaveBeenCalled();
+            expect(service.setFriendMessages).not.toHaveBeenCalled();
+
+            expect(
+                await request(server.socketPath, "GET", "/session-share-replicas"),
+            ).toMatchObject({ body: { replicas: [replica] }, status: 200 });
+            expect(
+                await request(server.socketPath, "GET", "/session-shares/share-1/health"),
+            ).toMatchObject({ status: 200 });
+        } finally {
+            await server.close();
+        }
+    });
 });
 
 function createStub(): SessionShareServiceContract & {
@@ -190,17 +261,28 @@ function createStub(): SessionShareServiceContract & {
             ...owner,
             share: { ...owner.share, state: "stopped" as const },
         })),
+        stopForArchivedSession: vi.fn<SessionShareServiceContract["stopForArchivedSession"]>(
+            async () => undefined,
+        ),
     };
 }
 
-async function startServer(sessionShares?: SessionShareServiceContract): Promise<{
+async function startServer(
+    sessionShares?: SessionShareServiceContract,
+    providedStore?: InMemorySessionStore,
+): Promise<{
     close(): Promise<void>;
     socketPath: string;
 }> {
     const directory = await createTestSocketDirectory();
     const socketPath = join(directory, "server.sock");
+    const store = providedStore ?? new InMemorySessionStore();
+    if (store.get("session-1") === undefined) {
+        store.createWithId("session-1", { cwd: "/tmp/session-share-owner" });
+    }
     const server = createProtocolHttpServer({
         ...(sessionShares === undefined ? {} : { sessionShares }),
+        store,
         token: "secret",
     });
     await new Promise<void>((resolve, reject) => {

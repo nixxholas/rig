@@ -114,4 +114,30 @@ describe("projectSessionShareEntry", () => {
             '{"kind":"message","payload":{"blocks":[{"text":"Everything stays visible.","type":"text"}],"id":"visible-1","role":"system"},"position":1,"version":1}',
         );
     });
+
+    it("excludes session metadata that Rig Connect does not render as transcript history", () => {
+        expect(
+            projectSessionShareEntry({
+                createdAt: 3,
+                shareEventId: "event-metadata",
+                shareId: "share-1",
+                shareSequence: 3,
+                source: {
+                    event: {
+                        createdAt: 3,
+                        data: {
+                            session: {
+                                projectSecretIds: ["secret-attachment"],
+                                sessionSecretIds: ["session-secret"],
+                            },
+                        },
+                        id: "source-metadata",
+                        sessionId: "session-1",
+                        type: "session_updated",
+                    } as never,
+                    kind: "event",
+                },
+            }),
+        ).toBeUndefined();
+    });
 });

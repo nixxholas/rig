@@ -376,6 +376,25 @@ export const sessionShareMembers = sqliteTable(
     ],
 );
 
+export const sessionShareSnapshotMessages = sqliteTable(
+    "session_share_snapshot_messages",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => sessionShares.shareId, { onDelete: "cascade" }),
+        position: integer("position").notNull(),
+        messageId: text("message_id").notNull(),
+        messageJson: text("message_json").notNull(),
+        runId: text("run_id"),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.position] }),
+        unique().on(table.shareId, table.messageId),
+        check("session_share_snapshot_messages_position_check", sql`${table.position} >= 0`),
+    ],
+);
+
 export const sessionShareGrants = sqliteTable(
     "session_share_grants",
     {
@@ -500,6 +519,7 @@ export const sessionShareReplicas = sqliteTable(
         murmurPeerId: text("murmur_peer_id").notNull(),
         shareMemberId: text("share_member_id").notNull(),
         grantEpoch: integer("grant_epoch").notNull(),
+        appliedThroughSequence: integer("applied_through_sequence").notNull().default(0),
         title: text("title").notNull(),
         memberCount: integer("member_count").notNull(),
         state: text("state").notNull(),
@@ -511,6 +531,10 @@ export const sessionShareReplicas = sqliteTable(
     (table) => [
         index("session_share_replicas_member").on(table.shareMemberId, table.grantEpoch),
         check("session_share_replicas_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check(
+            "session_share_replicas_applied_sequence_check",
+            sql`${table.appliedThroughSequence} >= 0`,
+        ),
         check("session_share_replicas_member_count_check", sql`${table.memberCount} >= 0`),
         check("session_share_replicas_state_check", sql`${table.state} IN ('active', 'ended')`),
     ],
