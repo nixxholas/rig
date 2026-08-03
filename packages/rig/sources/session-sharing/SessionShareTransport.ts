@@ -127,5 +127,6 @@ export interface SessionShareTransport {
         grant: SessionShareTransportGrant,
         callback: (event: SessionShareTransportMemberEvent) => void | Promise<void>,
     ): () => void;
-    retry(shareId: string): Promise<void>;
+    /** Retry a share's transport work, reporting whether it moved any history. */
+    retry(shareId: string): Promise<boolean>;
 }

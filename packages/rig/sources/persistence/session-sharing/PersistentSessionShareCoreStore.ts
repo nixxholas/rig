@@ -124,8 +124,8 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
         return toCoreMember(member);
     }
 
-    stopShare(shareId: string, options?: { readonly pruneEntryLog: boolean }): CoreShare {
-        sessionShareStop(this.#tx(), shareId, this.#now(), options);
+    stopShare(shareId: string): CoreShare {
+        sessionShareStop(this.#tx(), shareId, this.#now());
         return this.#shareWithMembers(shareId);
     }
 
@@ -238,7 +238,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
 
     endReplica(
         grant: SessionShareTransportGrant,
-        reason: "revoked" | "stopped",
+        reason: "revoked" | "stopped" | "unreadable",
     ): "ended" | "stale" {
         return sessionShareReplicaEndCurrentGrant(this.#tx(), {
             grantEpoch: grant.grantEpoch,

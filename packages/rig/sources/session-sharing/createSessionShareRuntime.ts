@@ -3,6 +3,7 @@ import type { MurmurServiceContract } from "../murmur/types.js";
 import type { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
 import type { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
 import type { SessionShareReplicaRecord } from "../persistence/session-sharing/types.js";
+import { delay } from "../concurrency/index.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { SessionEvent } from "../protocol/index.js";
 import { MurmurShareDirectory, type ReceivedShareInvitation } from "./MurmurShareDirectory.js";
@@ -13,12 +14,8 @@ import type { SessionShareServiceContract } from "./SessionShareServiceContract.
 
 const HISTORY_PAGE_ENTRIES = 100;
 const HISTORY_PAGE_BYTES = 256 * 1024;
-const MAX_BACKFILL_ATTEMPTS = 12;
+const BACKFILL_DELAY_STEP_MS = 100;
 const MAX_BACKFILL_DELAY_MS = 30_000;
-
-function delay(milliseconds: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 
 export interface SessionShareRuntimeOptions {
     /** Applies a friend message to the live session after it is durably stored. */
@@ -149,29 +146,46 @@ export function createSessionShareRuntime(
         await backfillReplica(transport, replica.shareId);
     };
 
-    // Draining deferred backfills is coalesced: a member that is waiting on history defers
-    // every event that arrives, and one retry pass serves all of them. Murmur re-reads a
-    // deferred event every 50ms, so a gap a backfill cannot close would otherwise turn into
-    // a permanent 20Hz round of relay traffic. Each unproductive drain therefore waits
-    // longer than the last, and a share that never recovers stops asking.
-    let draining: Promise<void> | undefined;
-    const backoff = new Map<string, number>();
-    const drainDeferred = (): void => {
-        if (draining !== undefined) return;
-        draining = (async () => {
-            for (const shareId of transport.takeDeferredShares()) {
-                const attempt = backoff.get(shareId) ?? 0;
-                if (attempt >= MAX_BACKFILL_ATTEMPTS) continue;
-                backoff.set(shareId, attempt + 1);
-                if (attempt > 0) await delay(Math.min(2 ** attempt * 100, MAX_BACKFILL_DELAY_MS));
-                await backfillReplica(transport, shareId);
+    // A member that is waiting on history defers every event that arrives, and Murmur
+    // re-reads a deferred event every 50ms. Backfilling on each of those would be a
+    // permanent 20Hz round of relay traffic, so each share gets its own timer that spaces
+    // unproductive attempts further apart, up to a ceiling it then holds. It never stops
+    // asking: the gap usually closes when the owner comes back, and a replica that gave up
+    // would sit silently broken until the daemon restarted.
+    // Closing the runtime aborts every pending wait, so a 30-second timer cannot hold the
+    // process open or fire a retry into a transport that is already shut down.
+    const backfillAbort = new AbortController();
+    const backfillSignal = backfillAbort.signal;
+    const backfills = new Map<string, { attempt: number; pending: boolean }>();
+    const scheduleBackfill = (shareId: string): void => {
+        const state = backfills.get(shareId) ?? { attempt: 0, pending: false };
+        backfills.set(shareId, state);
+        if (state.pending) return;
+        state.pending = true;
+        void (async () => {
+            try {
+                if (state.attempt > 0) {
+                    await delay(
+                        Math.min(
+                            2 ** state.attempt * BACKFILL_DELAY_STEP_MS,
+                            MAX_BACKFILL_DELAY_MS,
+                        ),
+                        backfillSignal,
+                    );
+                }
+                state.attempt += 1;
+                // A pass that moves history is progress, so the next stall starts over.
+                if (await backfillReplica(transport, shareId)) state.attempt = 0;
+            } catch {
+                // The runtime is closing; the next start resumes this replica from its rows.
+            } finally {
+                state.pending = false;
             }
-        })().finally(() => {
-            draining = undefined;
-        });
+        })();
     };
-    // A replica that applies an entry has caught up, so its next stall starts over.
-    const unobserveProgress = service.onReplicaProgress((shareId) => backoff.delete(shareId));
+    const drainDeferred = (): void => {
+        for (const shareId of transport.takeDeferredShares()) scheduleBackfill(shareId);
+    };
     const unregisterRouter = options.murmur.registerEventRouter(async (received) => {
         // The router must be total. Murmur's synchronization loop absorbs a thrown
         // non-database error and simply retries the same event, so anything escaping here
@@ -220,10 +234,10 @@ export function createSessionShareRuntime(
 
     return {
         close: async () => {
+            backfillAbort.abort();
             unregisterRouter();
             unobserveOffers();
             unobserveInvitations();
-            unobserveProgress();
             unobserveRuntime();
             service.close();
             transport.close();
@@ -247,11 +261,12 @@ export function createSessionShareRuntime(
 async function backfillReplica(
     transport: MurmurSessionShareTransport,
     shareId: string,
-): Promise<void> {
+): Promise<boolean> {
     try {
-        await transport.retry(shareId);
+        return await transport.retry(shareId);
     } catch {
         // Backfill is resumable: the next start, or the next entry that arrives, asks again.
+        return false;
     }
 }
 

@@ -10,7 +10,10 @@ outbox, so an owner can always page durable history back to a newly invited memb
 `querySessionShareEntryLog`.
 
 Retention: the entry log exists only to offer past history to a member that joins later, so it is
-bounded by the share's lifetime rather than kept forever. Stopping a share flips its state without
-deleting the share row, so the `ON DELETE CASCADE` never fires; `sessionShareStop` therefore prunes
-the log (`sessionShareEntryLogPrune`) in the same transaction as the stop. A stopped share can never
-admit a new member, so it keeps no transcript duplicate.
+bounded by the share's lifetime rather than kept forever. It is deliberately not truncated by
+length — Murmur chains history offers rather than stopping at one, so every sequence stays
+offerable and a cap would hand a late member a transcript with a hole in it. Stopping a share flips
+its state without deleting the share row, so the `ON DELETE CASCADE` never fires; `sessionShareStop`
+therefore prunes the log (`sessionShareEntryLogPrune`) in the same transaction as the stop, however
+the share came to stop. A stopped share can never admit a new member, so it keeps no transcript
+duplicate.

@@ -3,6 +3,7 @@ import { Value } from "@sinclair/typebox/value";
 
 import type { UserMessage } from "../agent/types.js";
 import { asyncQueue, type AsyncQueue } from "../concurrency/index.js";
+import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { FriendAuthor } from "./FriendAuthor.js";
 import type {
     SessionShareOpaqueEntry,
@@ -107,7 +108,7 @@ export interface SessionShareCoreStore {
         shareMemberId: string;
     }): SessionShareMemberRecord;
     revokeMember(shareId: string, shareMemberId: string): SessionShareMemberRecord;
-    stopShare(shareId: string, options?: { readonly pruneEntryLog: boolean }): SessionShareRecord;
+    stopShare(shareId: string): SessionShareRecord;
     setIncludeFriendMessages(shareId: string, include: boolean): SessionShareRecord;
     setShareHealth(shareId: string, state: "active" | "degraded"): void;
     acceptFriendMessage(
@@ -126,7 +127,10 @@ export interface SessionShareCoreStore {
         grant: SessionShareTransportGrant,
         entries: readonly SessionShareOpaqueEntry[],
     ): void;
-    endReplica(grant: SessionShareTransportGrant, reason: "revoked" | "stopped"): "ended" | "stale";
+    endReplica(
+        grant: SessionShareTransportGrant,
+        reason: "revoked" | "stopped" | "unreadable",
+    ): "ended" | "stale";
 }
 
 export interface SessionShareServiceOptions {
@@ -156,7 +160,6 @@ export class SessionShareService {
     readonly #ownerSubscriptions = new Map<string, () => void>();
     readonly #memberSubscriptions = new Map<string, () => void>();
     readonly #publishQueues = new Map<string, AsyncQueue>();
-    readonly #replicaProgressListeners = new Set<(shareId: string) => void>();
     readonly #publishRequested = new Set<string>();
     readonly #store: SessionShareCoreStore;
     readonly #transport: SessionShareTransport;
@@ -282,6 +285,11 @@ export class SessionShareService {
         await queue.runInLock(async () => {
             while (this.#publishRequested.delete(shareId)) {
                 try {
+                    // A revocation Rig recorded but the transport never accepted leaves the
+                    // member decrypting. Repairing it here rather than only on restart makes
+                    // the window one entry: nothing is published past a removal that has not
+                    // actually happened.
+                    await this.#repairRevocations(shareId);
                     for (;;) {
                         const tailed = this.#store.tailOutbox(shareId);
                         const page = this.#store.queryOutboxPage(shareId, {
@@ -356,7 +364,24 @@ export class SessionShareService {
         this.#ownerSubscriptions.clear();
         this.#memberSubscriptions.clear();
         this.#publishRequested.clear();
-        this.#replicaProgressListeners.clear();
+    }
+
+    /**
+     * Replay a revocation the transport never accepted.
+     *
+     * Only a peer Rig no longer grants access to is replayed, so a friend who was
+     * invited back is never removed by their own stale epoch, and the transport skips
+     * anyone Murmur has already removed — so a share with nothing to repair pays for
+     * one indexed read.
+     */
+    async #repairRevocations(shareId: string): Promise<void> {
+        const ended = this.#store.queryEndedGrants(shareId);
+        if (ended.length === 0) return;
+        const share = this.#store.queryShare(shareId);
+        const active = new Set(share === undefined ? [] : activeGrants(share).map(peerOf));
+        for (const grant of ended) {
+            if (!active.has(grant.murmurPeerId)) await this.#transport.revoke(grant);
+        }
     }
 
     #subscribeOwner(shareId: string): void {
@@ -377,16 +402,8 @@ export class SessionShareService {
                     shareId: share.shareId,
                 });
             }
-            // A revocation that failed at the transport left Rig saying revoked while the
-            // member is still in the group and still decrypting, so recovery has to repair
-            // it. Only a peer Rig no longer grants access to is replayed — otherwise a
-            // stale epoch would remove the membership that same friend holds today — and
-            // the transport skips anyone Murmur has already removed.
+            await this.#repairRevocations(share.shareId);
             const grants = activeGrants(share);
-            const active = new Set(grants.map((grant) => grant.murmurPeerId));
-            for (const ended of this.#store.queryEndedGrants(share.shareId)) {
-                if (!active.has(ended.murmurPeerId)) await this.#transport.revoke(ended);
-            }
             if (grants.length > 0) await this.#transport.inviteMany(grants);
             await this.#transport.retry(share.shareId);
             await this.publish(share.shareId);
@@ -428,7 +445,7 @@ export class SessionShareService {
             // Murmur already deleted this group's rows, so no retry can revive the share.
             // Recording it as stopped is the honest end state; left degraded, recovery
             // would retry forever against owner state that no longer exists.
-            this.#store.stopShare(event.shareId, { pruneEntryLog: false });
+            this.#store.stopShare(event.shareId);
             this.#ownerSubscriptions.get(event.shareId)?.();
             this.#ownerSubscriptions.delete(event.shareId);
             return;
@@ -476,14 +493,6 @@ export class SessionShareService {
         }
     }
 
-    /** Observe a replica applying entries, which is the signal that it caught up. */
-    onReplicaProgress(listener: (shareId: string) => void): () => void {
-        this.#replicaProgressListeners.add(listener);
-        return () => {
-            this.#replicaProgressListeners.delete(listener);
-        };
-    }
-
     #handleMemberEvent(event: unknown): void {
         if (!Value.Check(sessionShareTransportMemberEventSchema, event)) {
             throw new Error("The session-share member transport event is invalid.");
@@ -491,18 +500,31 @@ export class SessionShareService {
         if (event.type === "transport_failed" || event.type === "transport_recovered") return;
         if (event.type === "entries_appended") {
             assertPageBounds(event.entries);
-            this.#store.appendReplicaEntries(event.grant, event.entries);
-            for (const listener of this.#replicaProgressListeners) {
-                listener(event.grant.shareId);
+            try {
+                this.#store.appendReplicaEntries(event.grant, event.entries);
+            } catch (error: unknown) {
+                rethrowDatabaseFailure(error);
+                // The owner sent an entry this replica cannot apply — a sequence already
+                // held with different content, or a grant that is not the live one. The
+                // replica's visible transcript stops at its first gap, so continuing would
+                // silently freeze it while still reporting active. Ending it says so.
+                this.#endReplica(event.grant, "unreadable");
             }
             return;
         }
+        this.#endReplica(event.grant, event.reason);
+    }
+
+    #endReplica(
+        grant: SessionShareTransportGrant,
+        reason: "revoked" | "stopped" | "unreadable",
+    ): void {
         // The subscription goes either way: an end for a grant this replica has already
         // moved past is stale for the store but still retires that epoch's handler, and
         // keeping it would leak one handler per epoch for the daemon's lifetime.
-        this.#store.endReplica(event.grant, event.reason);
-        this.#memberSubscriptions.get(grantKey(event.grant))?.();
-        this.#memberSubscriptions.delete(grantKey(event.grant));
+        this.#store.endReplica(grant, reason);
+        this.#memberSubscriptions.get(grantKey(grant))?.();
+        this.#memberSubscriptions.delete(grantKey(grant));
     }
 
     #assertOpen(): void {
@@ -512,6 +534,10 @@ export class SessionShareService {
 
 function activeGrants(share: SessionShareRecord): SessionShareTransportGrant[] {
     return share.members.filter((member) => member.state === "active").map(memberGrant);
+}
+
+function peerOf(grant: SessionShareTransportGrant): string {
+    return grant.murmurPeerId;
 }
 
 function memberGrant(member: SessionShareMemberRecord): SessionShareTransportGrant {

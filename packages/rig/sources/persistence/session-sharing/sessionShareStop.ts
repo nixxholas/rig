@@ -5,12 +5,7 @@ import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
 import { sessionShareEntryLogPrune } from "./sessionShareEntryLogPrune.js";
 
-export function sessionShareStop(
-    tx: TX,
-    shareId: string,
-    now: number,
-    options: { readonly pruneEntryLog: boolean } = { pruneEntryLog: true },
-): boolean {
+export function sessionShareStop(tx: TX, shareId: string, now: number): boolean {
     return inTx(tx, (tx) => {
         const share = tx
             .select({ state: sessionShares.state })
@@ -36,10 +31,8 @@ export function sessionShareStop(
             .run();
         // A stopped share admits no new member, so its entry log can never be
         // offered as history again. Prune it in the same transaction so a stopped
-        // share leaves no permanent transcript duplicate behind. A share stopped by
-        // the transport rather than by the owner keeps its log: deleting the owner's
-        // history because a peer sent a bad frame is destructive and unasked for.
-        if (options.pruneEntryLog) sessionShareEntryLogPrune(tx, shareId);
+        // share leaves no permanent transcript duplicate behind.
+        sessionShareEntryLogPrune(tx, shareId);
         return true;
     });
 }

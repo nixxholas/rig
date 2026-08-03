@@ -73,17 +73,13 @@ export type SessionShareEventOutcome = "applied" | "retained" | "unowned";
 
 /** Bounded retry passes one catch-up will make before yielding to the next wake. */
 const MAX_HISTORY_RETRY_PASSES = 512;
-/** One published outbox page, the largest prefix a restart can resend as a duplicate. */
-const MAX_DUPLICATE_PAGE = 100;
 
 type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<void>;
 type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
 
 interface OwnerSession {
-    /** Whether this process has committed an append, which bounds duplicate skipping. */
+    /** Whether an append page has run yet, which bounds duplicate skipping to the first. */
     appendedThisSession: boolean;
-    /** Where this process started appending, which bounds it to the unacknowledged page. */
-    firstAttemptedSequence: number | undefined;
     lastAppendedSequence: number;
     readonly session: SharedSessionOwner;
     state: SharedSessionState | undefined;
@@ -175,7 +171,6 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         });
         this.#owners.set(owner.shareId, {
             appendedThisSession: false,
-            firstAttemptedSequence: undefined,
             lastAppendedSequence: 0,
             session,
             state: session.state,
@@ -196,7 +191,6 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         const owner = await this.#requireOwner(shareId);
         for (const entry of entries) {
             if (entry.shareSequence <= owner.lastAppendedSequence) continue;
-            owner.firstAttemptedSequence ??= entry.shareSequence;
             try {
                 await owner.session.append({
                     payload: JSON.parse(entry.canonicalJson) as never,
@@ -209,17 +203,17 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 // Murmur raises one code whichever side is ahead, and it exposes no way to
                 // read its committed maximum, so the two are told apart by how a duplicate
                 // can arise at all. Rig acknowledges an outbox page only after Murmur has
-                // durably committed it, so the sole prefix Murmur can already hold is the
-                // one page a restart left unacknowledged. Beyond that page — or after this
-                // session has itself appended — Murmur is genuinely behind, and skipping
+                // durably committed it, so the only prefix Murmur can already hold is this
+                // one unacknowledged page, resent by a restart before this session has
+                // appended anything. Anywhere else Murmur is genuinely behind, and skipping
                 // would drop an entry every member is then missing with no error at all.
-                const duplicable =
-                    !owner.appendedThisSession &&
-                    entry.shareSequence < (owner.firstAttemptedSequence ?? 0) + MAX_DUPLICATE_PAGE;
-                if (!isSequenceGap(error) || !duplicable) throw error;
+                if (!isSequenceGap(error) || owner.appendedThisSession) throw error;
             }
             owner.lastAppendedSequence = entry.shareSequence;
         }
+        // Only the first page of a resumed session can be a duplicate of what Murmur
+        // already holds. Closing the window here keeps a later page from being skipped.
+        owner.appendedThisSession = true;
     }
 
     async inviteMany(grants: readonly SessionShareTransportGrant[]): Promise<void> {
@@ -341,7 +335,8 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         };
     }
 
-    async retry(shareId: string): Promise<void> {
+    /** Retry a share's transport work, reporting whether it moved any history. */
+    async retry(shareId: string): Promise<boolean> {
         const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
         const sessions = [
             ...(owner === undefined ? [] : [owner.session]),
@@ -374,9 +369,10 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 shareId,
                 type: "transport_failed",
             });
-            return;
+            return false;
         }
         await this.#emitOwner(shareId, { shareId, type: "transport_recovered" });
+        return reports.some((report) => report.historyPages > 0 || report.published > 0);
     }
 
     /**
@@ -477,7 +473,6 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         }
         const owner: OwnerSession = {
             appendedThisSession: false,
-            firstAttemptedSequence: undefined,
             lastAppendedSequence: 0,
             session,
             state: session.state,

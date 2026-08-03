@@ -256,6 +256,51 @@ describe("SessionShareService", () => {
         expect(store.queryShare(share.shareId)?.state).toBe("active");
     });
 
+    it("ends a replica the owner sent an entry it cannot apply", async () => {
+        const transport = new FakeSessionShareTransport();
+        transport.setAutoDeliver(false);
+        const store = new MemorySessionShareStore(1);
+        const service = new SessionShareService({
+            deliverFriendMessage: () => undefined,
+            idFactory: sequenceIds("share-1", "member-1"),
+            store,
+            transport,
+        });
+        const share = await service.create({
+            friends: [{ displayName: "Casey", murmurPeerId: "peer-casey" }],
+            includeFriendMessagesInModel: true,
+            ownerPeerId: "peer-owner",
+            ownerSessionId: "session-1",
+        });
+        const grant = toGrant(share.members[0]!);
+        await service.joinReplica({
+            grant,
+            memberCount: 1,
+            ownerPeerId: "peer-owner",
+            state: "active",
+            title: "Shared session",
+        });
+        await transport.flushAll();
+
+        // A replica's visible transcript stops at its first gap, so an entry it can never
+        // apply would silently freeze it while it still reported active.
+        store.failAppend = new Error("The replica entry conflicts with an existing event.");
+        await transport.appendOwnerEntries(share.shareId, [
+            {
+                canonicalJson: '{"kind":"conflict"}',
+                contentHash: "hash-conflict",
+                createdAt: 5,
+                shareEventId: "event-conflict",
+                shareId: share.shareId,
+                shareSequence: 99,
+            },
+        ]);
+        await transport.flushAll();
+
+        expect(store.replica?.state).toBe("ended");
+        expect(store.endedReplicaReasons).toContain("unreadable");
+    });
+
     it("stops a share terminally when its owner session is archived", async () => {
         const transport = new FakeSessionShareTransport();
         const store = new MemorySessionShareStore();
@@ -495,10 +540,14 @@ class MemorySessionShareStore implements SessionShareCoreStore {
         }
     }
 
+    failAppend: Error | undefined;
+    readonly endedReplicaReasons: string[] = [];
+
     appendReplicaEntries(
         grant: SessionShareTransportGrant,
         entries: readonly SessionShareOpaqueEntry[],
     ): void {
+        if (this.failAppend !== undefined) throw this.failAppend;
         if (this.replica?.grant.grantEpoch !== grant.grantEpoch) return;
         const existing = new Set(this.replicaEntries.map((candidate) => candidate.shareEventId));
         for (const candidate of entries) {
@@ -508,7 +557,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
 
     endReplica(
         grant: SessionShareTransportGrant,
-        _reason: "revoked" | "stopped",
+        reason: "revoked" | "stopped" | "unreadable",
     ): "ended" | "stale" {
         if (
             this.replica?.grant.grantEpoch !== grant.grantEpoch ||
@@ -516,6 +565,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
         ) {
             return "stale";
         }
+        this.endedReplicaReasons.push(reason);
         this.replica = { ...this.replica, state: "ended" };
         this.replicaEntries.length = 0;
         return "ended";

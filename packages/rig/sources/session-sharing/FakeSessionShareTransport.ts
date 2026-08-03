@@ -268,10 +268,11 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         };
     }
 
-    async retry(shareId: string): Promise<void> {
+    async retry(shareId: string): Promise<boolean> {
         this.#throwFailure("retry");
         this.#requireShare(shareId);
         await this.#enqueueOwner(shareId, { shareId, type: "transport_recovered" });
+        return false;
     }
 
     async #replay(grant: SessionShareTransportGrant): Promise<void> {
