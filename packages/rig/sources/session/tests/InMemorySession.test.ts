@@ -2,8 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createEventIdFactory, type ModelCatalog } from "../../protocol/index.js";
 import { defineModel } from "@slopus/rig-execution";
-import { InMemorySession } from "../InMemorySession.js";
+import { InMemorySession, type InMemorySessionPersistence } from "../InMemorySession.js";
 import { InMemorySessionStore } from "../InMemorySessionStore.js";
+import type { TaskDrain } from "../../utils/TrackedTaskDrain.js";
 
 describe("InMemorySession", () => {
     it("stores idempotent context without starting or queuing a run", () => {
@@ -114,6 +115,72 @@ describe("InMemorySession", () => {
         );
         expect(session.state().messages).toEqual([]);
         expect(session.state().queuedRuns).toEqual([]);
+    });
+
+    it("does not retry a queue drain that failed before consuming its run", async () => {
+        const model = defineModel({
+            defaultThinkingLevel: "off",
+            id: "test/queue-drain-failure",
+            name: "Queue drain failure model",
+            thinkingLevels: ["off"],
+        });
+        const modelCatalog: ModelCatalog = {
+            defaultModelId: model.id,
+            defaultProviderId: "test",
+            models: [model],
+            providers: [{ providerId: "test", models: [model] }],
+        };
+        const deleteQueuedRun = vi.fn(() => {
+            throw new Error("queue persistence failed");
+        });
+        const persistence: InMemorySessionPersistence = {
+            clearMessages: vi.fn(),
+            deleteMessagesFrom: vi.fn(),
+            deleteQueuedRun,
+            insertQueuedRun: vi.fn(),
+            saveSession: vi.fn(),
+            upsertMessage: vi.fn(),
+        };
+        let drainRuns = 0;
+        let firstDrain: Promise<unknown> | undefined;
+        const taskDrain: TaskDrain = {
+            beginClose() {},
+            closing: false,
+            async drain() {},
+            run<T>(task: () => Promise<T>): Promise<T> {
+                drainRuns += 1;
+                if (drainRuns > 1) return new Promise<T>(() => undefined);
+                const running = Promise.resolve().then(task);
+                firstDrain = running;
+                return running;
+            },
+        };
+        const session = new InMemorySession({
+            createEventId: createEventIdFactory(),
+            metadata: {
+                depth: 1,
+                description: "Exercise queue failure handling",
+                parentSessionId: "parent-session",
+                rootSessionId: "parent-session",
+                type: "subagent",
+            },
+            modelCatalog,
+            persistence,
+            request: {
+                cwd: "/tmp/rig-queue-drain-failure",
+                modelId: model.id,
+                providerId: "test",
+            },
+            taskDrain,
+        });
+
+        session.submit({ text: "Keep this queued." });
+        await firstDrain?.catch(() => undefined);
+        await Promise.resolve();
+
+        expect(deleteQueuedRun).toHaveBeenCalledTimes(1);
+        expect(drainRuns).toBe(1);
+        expect(session.state().queuedRuns).toHaveLength(1);
     });
 
     it("keeps a subagent out of the ordered list whatever position it is handed", () => {

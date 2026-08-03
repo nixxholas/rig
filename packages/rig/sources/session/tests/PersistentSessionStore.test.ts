@@ -2996,7 +2996,9 @@ describe("PersistentSessionStore", () => {
             const store = new PersistentSessionStore({ databasePath });
             try {
                 const session = store.create({ cwd: "/tmp/rig-persisted-forward" });
-                for (const text of ["One.", "Two.", "Three."]) session.submit({ text });
+                for (const text of ["One.", "Two.", "Three."]) {
+                    session.submitContext({ text });
+                }
                 const anchors = (session.events.since(undefined) ?? [])
                     .filter((event) => event.type === "message_submitted")
                     .map((event) => event.id);

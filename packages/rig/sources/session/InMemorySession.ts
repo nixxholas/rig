@@ -7191,9 +7191,10 @@ export class InMemorySession {
         const draining = this.#taskDrain?.run(drain) ?? drain();
         this.#draining = draining.finally(() => {
             this.#draining = undefined;
-            if (this.#queue.length > 0) this.#startDrainQueue();
         });
-        void this.#draining.catch(rethrowDatabaseFailure);
+        void this.#draining.then(() => {
+            if (this.#queue.length > 0) this.#startDrainQueue();
+        }, rethrowDatabaseFailure);
     }
 
     #assertAcceptingWork(): void {
