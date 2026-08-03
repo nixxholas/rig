@@ -2157,6 +2157,67 @@ describe("AgentSessionManager", () => {
         ).rejects.toThrow("was not found in that project");
     });
 
+    it("tells the delegator when delegated work fails", async () => {
+        const delegated = {
+            agentIdentity: () => ({
+                agentId: "delegate-agent",
+                folder: "changelog",
+                title: "Update the changelog",
+            }),
+            agentMetadata: () => ({
+                delegatedBySessionId: "root-1",
+                depth: 0,
+                rootSessionId: "delegate-1",
+                type: "primary" as const,
+            }),
+            id: "delegate-1",
+            isSubagent: () => false,
+            submit: vi.fn(() => ({ runId: "delegate-run" })),
+            waitForRun: vi.fn(async () => ({
+                errorMessage: "API Error: 500 Internal server error.",
+                status: "error" as const,
+            })),
+        } as unknown as InMemorySession;
+        const deliverNotification = vi.fn();
+        const delegator = delegatorSession({
+            deliverNotification,
+            effortLevelsForModel: () => ["medium"],
+            hasModel: () => true,
+        });
+        const manager = new AgentSessionManager({
+            repository: {
+                createDelegatedSession: () => delegated,
+                createSubagent: vi.fn(),
+                get: (id) => (id === delegator.id ? delegator : undefined),
+                listByRoot: () => [],
+                workspace: () =>
+                    ({
+                        id: "workspace-2",
+                        name: "Changelog",
+                        path: "/workspaces/changelog",
+                        projectId: "project-1",
+                        status: "ready",
+                    }) as ProjectWorkspace,
+            },
+        });
+
+        await manager.delegate(delegator.id, {
+            effort: "medium",
+            modelId: "openai/gpt-5.6-sol",
+            prompt: "Update the changelog.",
+            title: "Update the changelog",
+            workspaceId: "workspace-2",
+        });
+
+        await vi.waitFor(() => expect(deliverNotification).toHaveBeenCalledOnce());
+        expect(deliverNotification).toHaveBeenCalledWith({
+            displayText: 'Delegated work in "Update the changelog" failed.',
+            text: expect.stringMatching(
+                /Status: error\nResult: API Error: 500 Internal server error\./u,
+            ),
+        });
+    });
+
     it("tells the delegator what the user said when they take a delegated session over", () => {
         const deliverNotification = vi.fn();
         const delegator = delegatorSession({ deliverNotification });

@@ -2118,7 +2118,8 @@ describe("PersistentSessionStore", () => {
             });
             const submitted = session.submit({ text: "Recover this response." });
             await expect(session.waitForRun(submitted.runId)).resolves.toEqual({
-                status: "completed",
+                errorMessage: "WebSocket error",
+                status: "error",
             });
 
             expect(requests).toHaveLength(1);
@@ -2146,6 +2147,11 @@ describe("PersistentSessionStore", () => {
             });
             try {
                 const restored = restoredStore.get(session.id);
+                expect(restored).toBeDefined();
+                await expect(restored?.waitForRun(submitted.runId)).resolves.toEqual({
+                    errorMessage: "WebSocket error",
+                    status: "error",
+                });
                 expect(restored?.state().contextMessages?.at(-1)).toMatchObject({
                     blocks: [{ type: "text", text: "WebSocket error" }],
                     outcome: "failed",

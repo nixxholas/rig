@@ -22,7 +22,14 @@ describe("InMemorySession provider failures", () => {
         const session = createSession();
 
         const run = session.submit({ text: "Fail this turn." });
-        await session.waitForRun(run.runId);
+        await expect(session.waitForRun(run.runId)).resolves.toEqual({
+            errorMessage: PROVIDER_FAILURE,
+            status: "error",
+        });
+        await expect(session.waitForRun(run.runId)).resolves.toEqual({
+            errorMessage: PROVIDER_FAILURE,
+            status: "error",
+        });
 
         const boundary = runBoundary(session, run.runId);
         expect(boundary.data).toMatchObject({ errorMessage: PROVIDER_FAILURE });

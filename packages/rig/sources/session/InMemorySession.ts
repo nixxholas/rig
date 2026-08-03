@@ -484,6 +484,20 @@ export interface SessionRunCompletion {
     status: "aborted" | "completed" | "error";
 }
 
+function completionFromRunFinished(
+    event: Extract<SessionEvent, { type: "run_finished" }>,
+): SessionRunCompletion {
+    if (event.data.stopReason === "error") {
+        return {
+            errorMessage: event.data.errorMessage ?? "The model response failed.",
+            status: "error",
+        };
+    }
+    return {
+        status: event.data.stopReason === "aborted" ? "aborted" : "completed",
+    };
+}
+
 const SUBAGENT_TOKEN_EXHAUSTED_ERROR =
     "The subagent ran out of tokens before returning a response.";
 
@@ -4478,9 +4492,7 @@ export class InMemorySession {
                 resolve(
                     event.type === "run_error"
                         ? { errorMessage: event.data.errorMessage, status: "error" }
-                        : {
-                              status: event.data.stopReason === "aborted" ? "aborted" : "completed",
-                          },
+                        : completionFromRunFinished(event),
                 );
             });
         });
@@ -6085,7 +6097,11 @@ export class InMemorySession {
         this.#restartMetadataSettlement();
         if (this.isSubagent()) this.#agentManager?.recordChanged(this);
         this.#trimRetainedMessages();
-        return stopReason === "aborted" ? "aborted" : "completed";
+        return stopReason === "aborted"
+            ? "aborted"
+            : stopReason === "error"
+              ? "error"
+              : "completed";
     }
 
     #appendDurableError(
@@ -6567,9 +6583,7 @@ export class InMemorySession {
             if (event.type === "run_error") {
                 return { errorMessage: event.data.errorMessage, status: "error" };
             }
-            return {
-                status: event.data.stopReason === "aborted" ? "aborted" : "completed",
-            };
+            return completionFromRunFinished(event);
         }
         return undefined;
     }
