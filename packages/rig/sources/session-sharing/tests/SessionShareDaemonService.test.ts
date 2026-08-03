@@ -1,17 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
-import {
-    canonicalSessionShareJson,
-    sessionShareContentHash,
-} from "../canonicalSessionShareJson.js";
-import { FakeSessionShareTransport } from "../FakeSessionShareTransport.js";
+import { canonicalShareJson, shareContentHash } from "../../sharing/canonicalShareJson.js";
+import { FakeShareTransport } from "../../sharing/FakeShareTransport.js";
 import { SessionShareDaemonService } from "../SessionShareDaemonService.js";
 import { SessionShareService } from "../SessionShareService.js";
 
 /**
  * Wires the real durable stores (via a real, in-memory-database `PersistentSessionStore`) to the
- * deterministic transport, exactly the way `createSessionShareRuntime` wires the real Murmur
+ * deterministic transport, exactly the way `createShareRuntime` wires the real Murmur
  * transport in production.
  */
 function makeContext(options: { localPeerId?: () => Promise<string | undefined> } = {}): {
@@ -19,10 +16,10 @@ function makeContext(options: { localPeerId?: () => Promise<string | undefined> 
     deliverFriendMessage: ReturnType<typeof vi.fn>;
     service: SessionShareService;
     store: PersistentSessionStore;
-    transport: FakeSessionShareTransport;
+    transport: FakeShareTransport;
 } {
     const store = new PersistentSessionStore({ databasePath: ":memory:" });
-    const transport = new FakeSessionShareTransport();
+    const transport = new FakeShareTransport();
     const deliverFriendMessage = vi.fn();
     const service = new SessionShareService({
         deliverFriendMessage,
@@ -245,10 +242,10 @@ describe("SessionShareDaemonService with a real database and the deterministic t
             });
             const entries = Array.from({ length: 150 }, (_unused, index) => {
                 const sequence = index + 1;
-                const canonicalJson = canonicalSessionShareJson({ sequence });
+                const canonicalJson = canonicalShareJson({ sequence });
                 return {
                     canonicalJson,
-                    contentHash: sessionShareContentHash(canonicalJson),
+                    contentHash: shareContentHash(canonicalJson),
                     createdAt: sequence,
                     shareEventId: `remote-event-${String(sequence)}`,
                     shareId: grant.shareId,

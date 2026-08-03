@@ -8,10 +8,10 @@ import type {
     SessionShareReplicaRecord as CoreReplica,
 } from "../../session-sharing/SessionShareService.js";
 import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransportGrant,
-    SessionShareTransportMemberPost,
-} from "../../session-sharing/SessionShareTransport.js";
+    ShareOpaqueEntry,
+    ShareTransportGrant,
+    ShareTransportMemberPost,
+} from "../../sharing/ShareTransport.js";
 import { inTx } from "../inTx.js";
 import type { SessionShareReplicaEndedReason } from "./types.js";
 import type { TX } from "../Transaction.js";
@@ -98,7 +98,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
         ].map((share) => this.#shareWithMembers(share.shareId));
     }
 
-    queryEndedGrants(shareId: string): readonly SessionShareTransportGrant[] {
+    queryEndedGrants(shareId: string): readonly ShareTransportGrant[] {
         return querySessionShareEndedGrants(this.#tx(), shareId);
     }
 
@@ -140,7 +140,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
     }
 
     acceptFriendMessage(
-        post: SessionShareTransportMemberPost,
+        post: ShareTransportMemberPost,
         senderPeerId: string,
         message: Parameters<SessionShareCoreStore["acceptFriendMessage"]>[2],
     ) {
@@ -165,7 +165,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
     queryOutboxPage(
         shareId: string,
         limits: { maxBytes: number; maxItems: number },
-    ): readonly SessionShareOpaqueEntry[] {
+    ): readonly ShareOpaqueEntry[] {
         return querySessionShareOutbox(this.#tx(), {
             limit: limits.maxItems,
             maxBytes: limits.maxBytes,
@@ -183,7 +183,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
     queryEntryPage(
         shareId: string,
         limits: { afterSequence: number; maxBytes: number; maxItems: number },
-    ): { complete: boolean; entries: readonly SessionShareOpaqueEntry[] } {
+    ): { complete: boolean; entries: readonly ShareOpaqueEntry[] } {
         return querySessionShareEntryLog(this.#tx(), {
             afterSequence: limits.afterSequence,
             maxBytes: limits.maxBytes,
@@ -216,10 +216,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
         });
     }
 
-    appendReplicaEntries(
-        grant: SessionShareTransportGrant,
-        entries: readonly SessionShareOpaqueEntry[],
-    ): void {
+    appendReplicaEntries(grant: ShareTransportGrant, entries: readonly ShareOpaqueEntry[]): void {
         inTx(this.#tx(), (tx) => {
             for (const entry of entries) {
                 sessionShareReplicaAppend(tx, {
@@ -238,7 +235,7 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
     }
 
     endReplica(
-        grant: SessionShareTransportGrant,
+        grant: ShareTransportGrant,
         reason: SessionShareReplicaEndedReason,
     ): "ended" | "stale" {
         return sessionShareReplicaEndCurrentGrant(this.#tx(), {

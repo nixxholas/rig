@@ -1,12 +1,12 @@
 import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransport,
-    SessionShareTransportGrant,
-    SessionShareTransportMemberEvent,
-    SessionShareTransportMemberPost,
-    SessionShareTransportOwner,
-    SessionShareTransportOwnerEvent,
-} from "./SessionShareTransport.js";
+    ShareOpaqueEntry,
+    ShareTransport,
+    ShareTransportGrant,
+    ShareTransportMemberEvent,
+    ShareTransportMemberPost,
+    ShareTransportOwner,
+    ShareTransportOwnerEvent,
+} from "./ShareTransport.js";
 
 type FailureOperation =
     | "append"
@@ -20,9 +20,9 @@ type FailureOperation =
     | "stop";
 
 interface FakeShare {
-    readonly entries: SessionShareOpaqueEntry[];
-    readonly grants: Map<string, SessionShareTransportGrant>;
-    readonly owner: SessionShareTransportOwner;
+    readonly entries: ShareOpaqueEntry[];
+    readonly grants: Map<string, ShareTransportGrant>;
+    readonly owner: ShareTransportOwner;
     stopped: boolean;
 }
 
@@ -32,19 +32,19 @@ interface QueuedDelivery {
     readonly shareId: string;
 }
 
-function grantKey(grant: SessionShareTransportGrant): string {
+function grantKey(grant: ShareTransportGrant): string {
     return `${grant.shareId}\u0000${grant.shareMemberId}\u0000${String(grant.grantEpoch)}`;
 }
 
-export class FakeSessionShareTransport implements SessionShareTransport {
+export class FakeShareTransport implements ShareTransport {
     readonly #failures = new Map<FailureOperation, Error[]>();
     readonly #memberHandlers = new Map<
         string,
-        Set<(event: SessionShareTransportMemberEvent) => void | Promise<void>>
+        Set<(event: ShareTransportMemberEvent) => void | Promise<void>>
     >();
     readonly #ownerHandlers = new Map<
         string,
-        Set<(event: SessionShareTransportOwnerEvent) => void | Promise<void>>
+        Set<(event: ShareTransportOwnerEvent) => void | Promise<void>>
     >();
     readonly #queue: QueuedDelivery[] = [];
     readonly #shares = new Map<string, FakeShare>();
@@ -95,7 +95,7 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         this.#memberHandlers.clear();
     }
 
-    async createOwner(owner: SessionShareTransportOwner): Promise<void> {
+    async createOwner(owner: ShareTransportOwner): Promise<void> {
         this.#throwFailure("create");
         const existing = this.#shares.get(owner.shareId);
         if (existing !== undefined) {
@@ -112,15 +112,12 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         });
     }
 
-    async loadOwner(shareId: string): Promise<SessionShareTransportOwner | undefined> {
+    async loadOwner(shareId: string): Promise<ShareTransportOwner | undefined> {
         this.#throwFailure("load");
         return this.#shares.get(shareId)?.owner;
     }
 
-    async appendOwnerEntries(
-        shareId: string,
-        entries: readonly SessionShareOpaqueEntry[],
-    ): Promise<void> {
+    async appendOwnerEntries(shareId: string, entries: readonly ShareOpaqueEntry[]): Promise<void> {
         this.#throwFailure("append");
         if (entries.length === 0 || entries.length > 100) {
             throw new Error("Fake transport pages must contain 1 to 100 entries.");
@@ -173,20 +170,20 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         }
     }
 
-    async inviteMany(grants: readonly SessionShareTransportGrant[]): Promise<void> {
+    async inviteMany(grants: readonly ShareTransportGrant[]): Promise<void> {
         this.#throwFailure("invite");
         if (grants.length === 0) throw new Error("An invite batch cannot be empty.");
         for (const grant of grants) this.#saveGrant(grant);
         for (const grant of grants) await this.#replay(grant);
     }
 
-    async invite(grant: SessionShareTransportGrant): Promise<void> {
+    async invite(grant: ShareTransportGrant): Promise<void> {
         this.#throwFailure("invite");
         this.#saveGrant(grant);
         await this.#replay(grant);
     }
 
-    async revoke(grant: SessionShareTransportGrant): Promise<void> {
+    async revoke(grant: ShareTransportGrant): Promise<void> {
         this.#throwFailure("revoke");
         const share = this.#requireShare(grant.shareId);
         // The real transport removes a Murmur peer, not one epoch of it, so a revocation
@@ -201,11 +198,11 @@ export class FakeSessionShareTransport implements SessionShareTransport {
     }
 
     /** Grants this share currently holds, for asserting who can still decrypt it. */
-    grantsFor(shareId: string): readonly SessionShareTransportGrant[] {
+    grantsFor(shareId: string): readonly ShareTransportGrant[] {
         return [...(this.#shares.get(shareId)?.grants.values() ?? [])];
     }
 
-    async stop(shareId: string, grants: readonly SessionShareTransportGrant[]): Promise<void> {
+    async stop(shareId: string, grants: readonly ShareTransportGrant[]): Promise<void> {
         this.#throwFailure("stop");
         const share = this.#requireShare(shareId);
         share.stopped = true;
@@ -217,7 +214,7 @@ export class FakeSessionShareTransport implements SessionShareTransport {
 
     handleOwnerEvents(
         shareId: string,
-        callback: (event: SessionShareTransportOwnerEvent) => void | Promise<void>,
+        callback: (event: ShareTransportOwnerEvent) => void | Promise<void>,
     ): () => void {
         const handlers = this.#ownerHandlers.get(shareId) ?? new Set();
         handlers.add(callback);
@@ -228,20 +225,18 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         };
     }
 
-    async joinMember(grant: SessionShareTransportGrant): Promise<void> {
+    async joinMember(grant: ShareTransportGrant): Promise<void> {
         this.#throwFailure("join");
         const saved = this.#requireShare(grant.shareId).grants.get(grantKey(grant));
         if (saved === undefined) throw new Error("The fake grant is not active.");
     }
 
-    async loadMember(
-        grant: SessionShareTransportGrant,
-    ): Promise<SessionShareTransportGrant | undefined> {
+    async loadMember(grant: ShareTransportGrant): Promise<ShareTransportGrant | undefined> {
         this.#throwFailure("load");
         return this.#shares.get(grant.shareId)?.grants.get(grantKey(grant));
     }
 
-    async postMember(post: SessionShareTransportMemberPost): Promise<void> {
+    async postMember(post: ShareTransportMemberPost): Promise<void> {
         this.#throwFailure("post");
         const grant = this.#requireShare(post.grant.shareId).grants.get(grantKey(post.grant));
         if (grant === undefined || grant.murmurPeerId !== post.grant.murmurPeerId) {
@@ -255,8 +250,8 @@ export class FakeSessionShareTransport implements SessionShareTransport {
     }
 
     handleMemberEvents(
-        grant: SessionShareTransportGrant,
-        callback: (event: SessionShareTransportMemberEvent) => void | Promise<void>,
+        grant: ShareTransportGrant,
+        callback: (event: ShareTransportMemberEvent) => void | Promise<void>,
     ): () => void {
         const key = grantKey(grant);
         const handlers = this.#memberHandlers.get(key) ?? new Set();
@@ -275,7 +270,7 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         return false;
     }
 
-    async #replay(grant: SessionShareTransportGrant): Promise<void> {
+    async #replay(grant: ShareTransportGrant): Promise<void> {
         const entries = this.#requireShare(grant.shareId).entries;
         for (let index = 0; index < entries.length; index += 100) {
             await this.#enqueueMember(grant, {
@@ -286,13 +281,13 @@ export class FakeSessionShareTransport implements SessionShareTransport {
         }
     }
 
-    #saveGrant(grant: SessionShareTransportGrant): void {
+    #saveGrant(grant: ShareTransportGrant): void {
         const share = this.#requireShare(grant.shareId);
         if (share.stopped) throw new Error("A stopped fake share cannot invite members.");
         share.grants.set(grantKey(grant), structuredClone(grant));
     }
 
-    async #enqueueOwner(shareId: string, event: SessionShareTransportOwnerEvent): Promise<void> {
+    async #enqueueOwner(shareId: string, event: ShareTransportOwnerEvent): Promise<void> {
         await this.#enqueue({
             deliver: async () => {
                 for (const handler of this.#ownerHandlers.get(shareId) ?? []) {
@@ -305,8 +300,8 @@ export class FakeSessionShareTransport implements SessionShareTransport {
     }
 
     async #enqueueMember(
-        grant: SessionShareTransportGrant,
-        event: SessionShareTransportMemberEvent,
+        grant: ShareTransportGrant,
+        event: ShareTransportMemberEvent,
     ): Promise<void> {
         await this.#enqueue({
             deliver: async () => {

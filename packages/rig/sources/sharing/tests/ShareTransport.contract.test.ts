@@ -11,27 +11,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import { InMemoryMurmurRelay } from "../../murmur/InMemoryMurmurRelay.js";
 import type { MurmurRuntimeHandle } from "../../murmur/types.js";
-import { FakeSessionShareTransport } from "../FakeSessionShareTransport.js";
-import {
-    MurmurSessionShareTransport,
-    type SessionShareMurmurDirectory,
-} from "../MurmurSessionShareTransport.js";
-import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransport,
-    SessionShareTransportGrant,
-} from "../SessionShareTransport.js";
+import { FakeShareTransport } from "../FakeShareTransport.js";
+import { MurmurShareTransport, type ShareMurmurDirectory } from "../MurmurShareTransport.js";
+import type { ShareOpaqueEntry, ShareTransport, ShareTransportGrant } from "../ShareTransport.js";
 
-type TransportFactory = () => SessionShareTransport;
+type TransportFactory = () => ShareTransport;
 
 interface NeutralFixture {
     readonly ownerPeerId: string;
     readonly shareId: string;
-    readonly transport: SessionShareTransport;
+    readonly transport: ShareTransport;
 }
 
 /**
- * Behaviours that hold for every `SessionShareTransport`, run against both the fake and
+ * Behaviours that hold for every `ShareTransport`, run against both the fake and
  * the real Murmur adapter.
  *
  * This set is deliberately small. The two transports are not behaviourally identical:
@@ -39,7 +32,7 @@ interface NeutralFixture {
  * package and invitation per invitee before a member can join, `loadMember` on the real
  * transport reflects durable per-member session state rather than an owner-side grant
  * registry, and real replication only reaches a member after `retry()` plus relay `sync()`
- * pumping (see MurmurSessionShareTransport.test.ts). Anything that depends on those
+ * pumping (see MurmurShareTransport.test.ts). Anything that depends on those
  * differences stays in the fake-only block below instead of being forced to match here.
  */
 export function sessionShareTransportNeutralContract(
@@ -108,16 +101,13 @@ export function sessionShareTransportNeutralContract(
     });
 }
 
-sessionShareTransportNeutralContract("FakeSessionShareTransport neutral contract", () => ({
+sessionShareTransportNeutralContract("FakeShareTransport neutral contract", () => ({
     ownerPeerId: "owner",
     shareId: "share-neutral-1",
-    transport: new FakeSessionShareTransport(),
+    transport: new FakeShareTransport(),
 }));
 
-sessionShareTransportNeutralContract(
-    "MurmurSessionShareTransport neutral contract",
-    murmurNeutralFixture,
-);
+sessionShareTransportNeutralContract("MurmurShareTransport neutral contract", murmurNeutralFixture);
 
 /**
  * Whole-lifecycle assertions kept fake-only.
@@ -127,9 +117,9 @@ sessionShareTransportNeutralContract(
  * grant registry that authorizes `loadMember`/`postMember` without a real member
  * session, and exact event-payload equality. The real transport cannot satisfy these
  * without a real MLS key package and invitation exchanged through
- * `SessionShareMurmurDirectory`, an explicit `joinMember`, and asynchronous
+ * `ShareMurmurDirectory`, an explicit `joinMember`, and asynchronous
  * `retry()`/relay `sync()` pumping, all demonstrated end to end in
- * MurmurSessionShareTransport.test.ts. Bending these assertions to fit the real
+ * MurmurShareTransport.test.ts. Bending these assertions to fit the real
  * transport would only weaken what they prove about the fake, so they stay here
  * unchanged.
  */
@@ -199,14 +189,11 @@ export function sessionShareTransportContract(name: string, factory: TransportFa
     });
 }
 
-sessionShareTransportContract(
-    "FakeSessionShareTransport contract",
-    () => new FakeSessionShareTransport(),
-);
+sessionShareTransportContract("FakeShareTransport contract", () => new FakeShareTransport());
 
-describe("FakeSessionShareTransport delivery controls", () => {
+describe("FakeShareTransport delivery controls", () => {
     it("fragments and reassembles a complete oversized opaque entry within wire bounds", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const grant = fixtureGrant(1);
         await transport.createOwner({ ownerPeerId: "owner", shareId: grant.shareId });
         const oversized = {
@@ -225,7 +212,7 @@ describe("FakeSessionShareTransport delivery controls", () => {
     });
 
     it("deterministically duplicates, reorders, drops, resets, delays ended, and fails", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const grant = fixtureGrant(1);
         await transport.createOwner({ ownerPeerId: "owner", shareId: grant.shareId });
         await transport.invite(grant);
@@ -259,7 +246,7 @@ describe("FakeSessionShareTransport delivery controls", () => {
     });
 });
 
-function fixtureGrant(grantEpoch: number): SessionShareTransportGrant {
+function fixtureGrant(grantEpoch: number): ShareTransportGrant {
     return {
         grantEpoch,
         murmurPeerId: "peer-1",
@@ -268,7 +255,7 @@ function fixtureGrant(grantEpoch: number): SessionShareTransportGrant {
     };
 }
 
-function fixtureEntry(shareSequence: number): SessionShareOpaqueEntry {
+function fixtureEntry(shareSequence: number): ShareOpaqueEntry {
     return {
         canonicalJson: JSON.stringify({ shareSequence }),
         contentHash: `hash-${String(shareSequence)}`,
@@ -279,7 +266,7 @@ function fixtureEntry(shareSequence: number): SessionShareOpaqueEntry {
     };
 }
 
-function neutralEntry(shareId: string, shareSequence: number): SessionShareOpaqueEntry {
+function neutralEntry(shareId: string, shareSequence: number): ShareOpaqueEntry {
     return {
         canonicalJson: JSON.stringify({ note: `entry-${String(shareSequence)}` }),
         contentHash: `hash-${String(shareSequence)}`,
@@ -313,7 +300,7 @@ function emptyEntrySource(): SessionEntrySource {
 }
 
 /** A directory whose methods fail loudly if the neutral contract ever needs them. */
-function unusedMurmurDirectory(): SessionShareMurmurDirectory {
+function unusedMurmurDirectory(): ShareMurmurDirectory {
     const fail = (): never => {
         throw new Error("The neutral contract must not need the Murmur directory.");
     };
@@ -335,7 +322,7 @@ function murmurNeutralFixture(): NeutralFixture {
         identity: owner.identity,
         store: owner.store,
     };
-    const transport = new MurmurSessionShareTransport({
+    const transport = new MurmurShareTransport({
         directory: unusedMurmurDirectory(),
         entrySource: () => emptyEntrySource(),
         runtime: () => runtime,

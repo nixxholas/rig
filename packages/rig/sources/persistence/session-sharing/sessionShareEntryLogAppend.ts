@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 
-import type { SessionShareOpaqueEntry } from "../../session-sharing/SessionShareTransport.js";
+import type { ShareOpaqueEntry } from "../../sharing/ShareTransport.js";
 import { sessionShareEntries } from "../database/schema.js";
 import { inTx } from "../inTx.js";
 import type { TX } from "../Transaction.js";
@@ -16,7 +16,7 @@ import type { TX } from "../Transaction.js";
  */
 export function sessionShareEntryLogAppend(
     tx: TX,
-    input: { entries: readonly SessionShareOpaqueEntry[]; shareId: string },
+    input: { entries: readonly ShareOpaqueEntry[]; shareId: string },
 ): void {
     if (input.entries.length === 0) return;
     inTx(tx, (tx) => {

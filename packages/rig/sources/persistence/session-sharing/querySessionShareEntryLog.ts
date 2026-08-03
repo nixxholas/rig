@@ -1,13 +1,13 @@
 import { and, asc, eq, gt } from "drizzle-orm";
 
-import type { SessionShareOpaqueEntry } from "../../session-sharing/SessionShareTransport.js";
+import type { ShareOpaqueEntry } from "../../sharing/ShareTransport.js";
 import { sessionShareEntries } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 
 export function querySessionShareEntryLog(
     tx: TX,
     input: { afterSequence: number; maxBytes: number; maxItems: number; shareId: string },
-): { complete: boolean; entries: readonly SessionShareOpaqueEntry[] } {
+): { complete: boolean; entries: readonly ShareOpaqueEntry[] } {
     const rows = tx
         .select()
         .from(sessionShareEntries)

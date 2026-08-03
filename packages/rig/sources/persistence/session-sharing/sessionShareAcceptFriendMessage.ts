@@ -8,7 +8,7 @@ import type {
     SessionShareAcceptedFriendMessage,
     SessionShareDuplicateFriendMessage,
 } from "../../session-sharing/SessionShareService.js";
-import type { SessionShareTransportMemberPost } from "../../session-sharing/SessionShareTransport.js";
+import type { ShareTransportMemberPost } from "../../sharing/ShareTransport.js";
 import { friendAuthorSchema } from "../../session-sharing/FriendAuthor.js";
 import {
     pendingContextMessages,
@@ -33,7 +33,7 @@ export function sessionShareAcceptFriendMessage(
         backlogLimits?: { maxBytes: number; maxMessages: number };
         message: UserMessage;
         now: number;
-        post: SessionShareTransportMemberPost;
+        post: ShareTransportMemberPost;
         senderPeerId: string;
     },
 ): SessionShareAcceptedFriendMessage | SessionShareDuplicateFriendMessage {

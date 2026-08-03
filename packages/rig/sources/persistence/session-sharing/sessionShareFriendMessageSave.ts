@@ -8,7 +8,7 @@ import {
     sessionShares,
 } from "../database/schema.js";
 import { inTx } from "../inTx.js";
-import { SessionShareUnauthorizedPostError } from "../../session-sharing/SessionShareService.js";
+import { ShareUnauthorizedPostError } from "../../sharing/ShareUnauthorizedPostError.js";
 import type { TX } from "../Transaction.js";
 
 export interface SessionShareFriendMessageRecord {
@@ -78,7 +78,7 @@ export function sessionShareFriendMessageSave(
             authority.memberState !== "active" ||
             authority.grantState !== "active"
         ) {
-            throw new SessionShareUnauthorizedPostError(
+            throw new ShareUnauthorizedPostError(
                 "The current share grant does not accept friend messages.",
             );
         }

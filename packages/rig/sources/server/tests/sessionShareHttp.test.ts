@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SessionShareServiceContract } from "../../session-sharing/index.js";
-import { FakeSessionShareTransport } from "../../session-sharing/FakeSessionShareTransport.js";
+import { FakeShareTransport } from "../../sharing/FakeShareTransport.js";
 import { SessionShareDaemonService } from "../../session-sharing/SessionShareDaemonService.js";
 import { SessionShareService } from "../../session-sharing/SessionShareService.js";
 import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
@@ -225,7 +225,7 @@ describe("session share HTTP API", () => {
 
     it("creates a share and reads it back over HTTP through a real SessionShareDaemonService", async () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const sessionShares = new SessionShareDaemonService({
             localPeerId: async () => "peer-owner",
             service: new SessionShareService({

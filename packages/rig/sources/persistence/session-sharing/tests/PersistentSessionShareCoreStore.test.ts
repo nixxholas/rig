@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { FakeSessionShareTransport } from "../../../session-sharing/FakeSessionShareTransport.js";
+import { FakeShareTransport } from "../../../sharing/FakeShareTransport.js";
 import { SessionShareService } from "../../../session-sharing/SessionShareService.js";
 import { sessions } from "../../database/schema.js";
 import { createSessionDatabaseFixture } from "../../database/tests/createSessionDatabaseFixture.js";
@@ -16,7 +16,7 @@ describe("PersistentSessionShareCoreStore with the deterministic transport", () 
         createSessionDatabaseFixture(path);
         const opened = openSessionDatabase(path);
         const database = opened.database;
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const delivered = vi.fn();
         const ids = ["share-1", "member-1", "message-1", "unused-message-id"];
         const store = new PersistentSessionShareCoreStore({

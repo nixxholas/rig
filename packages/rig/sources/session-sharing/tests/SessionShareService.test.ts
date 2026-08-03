@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { UserMessage } from "../../agent/types.js";
 import type { SessionShareReplicaEndedReason } from "../../persistence/session-sharing/types.js";
-import { FakeSessionShareTransport } from "../FakeSessionShareTransport.js";
+import { FakeShareTransport } from "../../sharing/FakeShareTransport.js";
 import {
     SessionShareService,
     type SessionShareCoreStore,
@@ -12,14 +12,14 @@ import {
     type SessionShareReplicaRecord,
 } from "../SessionShareService.js";
 import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransportGrant,
-    SessionShareTransportMemberPost,
-} from "../SessionShareTransport.js";
+    ShareOpaqueEntry,
+    ShareTransportGrant,
+    ShareTransportMemberPost,
+} from "../../sharing/ShareTransport.js";
 
 describe("SessionShareService", () => {
     it("persists first, invites the initial friends as one batch, and deduplicates friend posts", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const store = new MemorySessionShareStore();
         const delivered = vi.fn();
         const ids = ["share-1", "member-1", "member-2", "message-1", "message-duplicate"];
@@ -43,7 +43,7 @@ describe("SessionShareService", () => {
         expect(share.members).toHaveLength(2);
         expect(store.operations.slice(0, 2)).toEqual(["create:share-1", "health:share-1:active"]);
         const grant = toGrant(share.members[0]!);
-        const post: SessionShareTransportMemberPost = {
+        const post: ShareTransportMemberPost = {
             clientMessageId: "client-1",
             displayName: "Casey",
             grant,
@@ -69,7 +69,7 @@ describe("SessionShareService", () => {
     });
 
     it("publishes huge history in bounded pages, degrades on failure, and resumes from the ack", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const store = new MemorySessionShareStore(205);
         const service = new SessionShareService({
             deliverFriendMessage: () => undefined,
@@ -102,7 +102,7 @@ describe("SessionShareService", () => {
     });
 
     it("keeps stable member identity across grant epochs and ignores delayed old ended events", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         transport.setAutoDeliver(false);
         const store = new MemorySessionShareStore(1);
         const service = new SessionShareService({
@@ -151,7 +151,7 @@ describe("SessionShareService", () => {
     });
 
     it("keeps a replica's transcript when re-joining its next epoch fails", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         transport.setAutoDeliver(false);
         const store = new MemorySessionShareStore(1);
         const service = new SessionShareService({
@@ -196,7 +196,7 @@ describe("SessionShareService", () => {
     });
 
     it("repairs a revocation that never reached the transport", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const store = new MemorySessionShareStore();
         const service = new SessionShareService({
             deliverFriendMessage: () => undefined,
@@ -227,7 +227,7 @@ describe("SessionShareService", () => {
     });
 
     it("never re-revokes a friend who was invited back", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const store = new MemorySessionShareStore();
         const service = new SessionShareService({
             deliverFriendMessage: () => undefined,
@@ -258,7 +258,7 @@ describe("SessionShareService", () => {
     });
 
     it("ends a replica the owner sent an entry it cannot apply", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         transport.setAutoDeliver(false);
         const store = new MemorySessionShareStore(1);
         const service = new SessionShareService({
@@ -309,7 +309,7 @@ describe("SessionShareService", () => {
     });
 
     it("stops a share terminally when its owner session is archived", async () => {
-        const transport = new FakeSessionShareTransport();
+        const transport = new FakeShareTransport();
         const store = new MemorySessionShareStore();
         const service = new SessionShareService({
             deliverFriendMessage: () => undefined,
@@ -335,11 +335,11 @@ describe("SessionShareService", () => {
 class MemorySessionShareStore implements SessionShareCoreStore {
     readonly acknowledgements: number[] = [];
     readonly friendMessages: UserMessage[] = [];
-    readonly endedGrants: SessionShareTransportGrant[] = [];
+    readonly endedGrants: ShareTransportGrant[] = [];
     readonly operations: string[] = [];
-    readonly outbox: SessionShareOpaqueEntry[] = [];
+    readonly outbox: ShareOpaqueEntry[] = [];
     replica: SessionShareReplicaRecord | undefined;
-    readonly replicaEntries: SessionShareOpaqueEntry[] = [];
+    readonly replicaEntries: ShareOpaqueEntry[] = [];
     #share: MutableShare | undefined;
     readonly #dedupe = new Map<string, string>();
     readonly #seedCount: number;
@@ -391,7 +391,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
         return this.#share === undefined ? [] : [this.#cloneShare()];
     }
 
-    queryEndedGrants(shareId: string): readonly SessionShareTransportGrant[] {
+    queryEndedGrants(shareId: string): readonly ShareTransportGrant[] {
         this.#requireShare(shareId);
         return structuredClone(this.endedGrants);
     }
@@ -451,7 +451,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
     }
 
     acceptFriendMessage(
-        post: SessionShareTransportMemberPost,
+        post: ShareTransportMemberPost,
         senderPeerId: string,
         message: UserMessage,
     ) {
@@ -506,9 +506,9 @@ class MemorySessionShareStore implements SessionShareCoreStore {
     queryOutboxPage(
         shareId: string,
         limits: { maxBytes: number; maxItems: number },
-    ): readonly SessionShareOpaqueEntry[] {
+    ): readonly ShareOpaqueEntry[] {
         this.#requireShare(shareId);
-        const selected: SessionShareOpaqueEntry[] = [];
+        const selected: ShareOpaqueEntry[] = [];
         let bytes = 0;
         for (const candidate of this.outbox) {
             const next = Buffer.byteLength(candidate.canonicalJson);
@@ -550,10 +550,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
     failAppend: Error | undefined;
     readonly endedReplicaReasons: string[] = [];
 
-    appendReplicaEntries(
-        grant: SessionShareTransportGrant,
-        entries: readonly SessionShareOpaqueEntry[],
-    ): void {
+    appendReplicaEntries(grant: ShareTransportGrant, entries: readonly ShareOpaqueEntry[]): void {
         if (this.failAppend !== undefined) throw this.failAppend;
         if (this.replica?.grant.grantEpoch !== grant.grantEpoch) return;
         const existing = new Set(this.replicaEntries.map((candidate) => candidate.shareEventId));
@@ -563,7 +560,7 @@ class MemorySessionShareStore implements SessionShareCoreStore {
     }
 
     endReplica(
-        grant: SessionShareTransportGrant,
+        grant: ShareTransportGrant,
         reason: SessionShareReplicaEndedReason,
     ): "ended" | "stale" {
         if (
@@ -610,7 +607,7 @@ function sequenceIds(...ids: string[]): () => string {
     return () => ids.shift()!;
 }
 
-function toGrant(member: SessionShareMemberRecord): SessionShareTransportGrant {
+function toGrant(member: SessionShareMemberRecord): ShareTransportGrant {
     return {
         grantEpoch: member.grantEpoch,
         murmurPeerId: member.murmurPeerId,
@@ -619,7 +616,7 @@ function toGrant(member: SessionShareMemberRecord): SessionShareTransportGrant {
     };
 }
 
-function entry(shareId: string, shareSequence: number): SessionShareOpaqueEntry {
+function entry(shareId: string, shareSequence: number): ShareOpaqueEntry {
     return {
         canonicalJson: JSON.stringify({ value: "x".repeat(16), shareSequence }),
         contentHash: `hash-${String(shareSequence)}`,

@@ -2,8 +2,8 @@ import { Type, type Static } from "@sinclair/typebox";
 
 import type { Message } from "../agent/types.js";
 import type { SessionEvent } from "../protocol/index.js";
-import { canonicalSessionShareJson, sessionShareContentHash } from "./canonicalSessionShareJson.js";
-import type { SessionShareOpaqueEntry } from "./SessionShareTransport.js";
+import { canonicalShareJson, shareContentHash } from "../sharing/canonicalShareJson.js";
+import type { ShareOpaqueEntry } from "../sharing/ShareTransport.js";
 
 const exact = { additionalProperties: false } as const;
 const VISIBLE_TRANSCRIPT_EVENT_TYPES = new Set<SessionEvent["type"]>([
@@ -62,13 +62,13 @@ export function projectSessionShareEntry(options: {
     shareId: string;
     shareSequence: number;
     source: SessionShareProjectionSource;
-}): SessionShareOpaqueEntry | undefined {
+}): ShareOpaqueEntry | undefined {
     const projection = project(options.source);
     if (projection === undefined) return undefined;
-    const canonicalJson = canonicalSessionShareJson(projection);
+    const canonicalJson = canonicalShareJson(projection);
     return {
         canonicalJson,
-        contentHash: sessionShareContentHash(canonicalJson),
+        contentHash: shareContentHash(canonicalJson),
         createdAt: options.createdAt,
         shareEventId: options.shareEventId,
         shareId: options.shareId,

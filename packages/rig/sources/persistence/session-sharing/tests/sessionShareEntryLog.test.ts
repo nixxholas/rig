@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { SessionShareOpaqueEntry } from "../../../session-sharing/SessionShareTransport.js";
+import type { ShareOpaqueEntry } from "../../../sharing/ShareTransport.js";
 import { createSessionDatabaseFixture } from "../../database/tests/createSessionDatabaseFixture.js";
 import { openSessionDatabase } from "../../database/openSessionDatabase.js";
 import { querySessionShareEntryLog } from "../querySessionShareEntryLog.js";
@@ -254,10 +254,7 @@ describe("session share entry log persistence", () => {
     });
 });
 
-function logEntry(
-    sequence: number,
-    overrides: Partial<SessionShareOpaqueEntry> = {},
-): SessionShareOpaqueEntry {
+function logEntry(sequence: number, overrides: Partial<ShareOpaqueEntry> = {}): ShareOpaqueEntry {
     return {
         canonicalJson: `{"sequence":${String(sequence)}}`,
         contentHash: `hash-${String(sequence)}`,

@@ -7,11 +7,11 @@ import { createHash } from "node:crypto";
  * payload it authenticated, so both sides derive the identical bytes and the
  * identical content hash for the same entry.
  */
-export function canonicalSessionShareJson(value: unknown): string {
+export function canonicalShareJson(value: unknown): string {
     return JSON.stringify(canonicalize(value));
 }
 
-export function sessionShareContentHash(canonicalJson: string): string {
+export function shareContentHash(canonicalJson: string): string {
     return createHash("sha256").update(canonicalJson).digest("base64url");
 }
 

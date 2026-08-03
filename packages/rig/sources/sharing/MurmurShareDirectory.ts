@@ -49,7 +49,7 @@ import {
     encodeStoredShareOwnBundle,
     serializeSharePublicIdentity,
 } from "./impl/shareCodec.js";
-import type { SessionShareMurmurDirectory } from "./MurmurSessionShareTransport.js";
+import type { ShareMurmurDirectory } from "./MurmurShareTransport.js";
 
 const STORE_PREFIX = "rig/murmur/share-directory/v1/";
 const OWN_BUNDLE_PREFIX = `${STORE_PREFIX}own-bundle/`;
@@ -151,7 +151,7 @@ async function evictOldest(
 }
 
 /**
- * Real `SessionShareMurmurDirectory`: transports one-use MLS KeyPackage offers
+ * Real `ShareMurmurDirectory`: transports one-use MLS KeyPackage offers
  * and owner invitations over Rig's existing encrypted Murmur friend channel.
  *
  * Murmur ships no key-package directory and no invitation inbox of its own, so
@@ -161,7 +161,7 @@ async function evictOldest(
  * invitations — lives in the Murmur store under its own bounded key prefix,
  * never in Rig's session database.
  */
-export class MurmurShareDirectory implements SessionShareMurmurDirectory {
+export class MurmurShareDirectory implements ShareMurmurDirectory {
     readonly #invitationListeners = new Set<(invitation: ReceivedShareInvitation) => void>();
     readonly #keyPackageListeners = new Set<(murmurPeerId: string) => void>();
     readonly #murmur: Pick<MurmurServiceContract, "getFriends">;
@@ -673,7 +673,7 @@ export class MurmurShareDirectory implements SessionShareMurmurDirectory {
         // One-use private material: delete it as it is read so a bundle is never
         // reused. If the join that follows fails, `acceptedInvitation` finds
         // nothing here on the next attempt and the caller
-        // (MurmurSessionShareTransport.joinMember) throws rather than looping.
+        // (MurmurShareTransport.joinMember) throws rather than looping.
         await transaction.delete(key);
         const record = decodeStoredShareOwnBundle(bytes);
         zeroBytes(bytes);

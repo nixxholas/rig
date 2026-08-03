@@ -5,17 +5,18 @@ import type { UserMessage } from "../agent/types.js";
 import { asyncQueue, type AsyncQueue } from "../concurrency/index.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 import type { SessionShareReplicaEndedReason } from "../persistence/session-sharing/types.js";
+import { ShareUnauthorizedPostError } from "../sharing/ShareUnauthorizedPostError.js";
 import type { FriendAuthor } from "./FriendAuthor.js";
 import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransport,
-    SessionShareTransportGrant,
-    SessionShareTransportMemberPost,
-} from "./SessionShareTransport.js";
+    ShareOpaqueEntry,
+    ShareTransport,
+    ShareTransportGrant,
+    ShareTransportMemberPost,
+} from "../sharing/ShareTransport.js";
 import {
-    sessionShareTransportMemberEventSchema,
-    sessionShareTransportOwnerEventSchema,
-} from "./SessionShareTransport.js";
+    shareTransportMemberEventSchema,
+    shareTransportOwnerEventSchema,
+} from "../sharing/ShareTransport.js";
 
 const MAX_PAGE_COUNT = 100;
 const MAX_PAGE_BYTES = 256 * 1024;
@@ -46,23 +47,8 @@ export interface SessionShareFriendInput {
     readonly murmurPeerId: string;
 }
 
-/**
- * An authenticated friend post the current grant does not accept.
- *
- * This is an ordinary race, not a failure: the owner revokes or stops while a
- * post is already in flight. It is raised as its own type so the service can
- * drop the post and let Murmur's cursor advance, instead of letting a rejection
- * escape into the shared sync loop and stall every topic behind it.
- */
-export class SessionShareUnauthorizedPostError extends Error {
-    constructor(message: string) {
-        super(message);
-        this.name = "SessionShareUnauthorizedPostError";
-    }
-}
-
 export interface SessionShareReplicaRecord {
-    readonly grant: SessionShareTransportGrant;
+    readonly grant: ShareTransportGrant;
     readonly memberCount: number;
     readonly ownerPeerId: string;
     readonly state: "active" | "ended";
@@ -101,7 +87,7 @@ export interface SessionShareCoreStore {
     queryShare(shareId: string): SessionShareRecord | undefined;
     queryActiveShareForSession(ownerSessionId: string): SessionShareRecord | undefined;
     queryRecoverableShares(): readonly SessionShareRecord[];
-    queryEndedGrants(shareId: string): readonly SessionShareTransportGrant[];
+    queryEndedGrants(shareId: string): readonly ShareTransportGrant[];
     addMember(input: {
         displayName: string;
         murmurPeerId: string;
@@ -113,7 +99,7 @@ export interface SessionShareCoreStore {
     setIncludeFriendMessages(shareId: string, include: boolean): SessionShareRecord;
     setShareHealth(shareId: string, state: "active" | "degraded"): void;
     acceptFriendMessage(
-        post: SessionShareTransportMemberPost,
+        post: ShareTransportMemberPost,
         senderPeerId: string,
         message: UserMessage,
     ): SessionShareAcceptedFriendMessage | SessionShareDuplicateFriendMessage;
@@ -121,15 +107,12 @@ export interface SessionShareCoreStore {
     queryOutboxPage(
         shareId: string,
         limits: { maxBytes: number; maxItems: number },
-    ): readonly SessionShareOpaqueEntry[];
+    ): readonly ShareOpaqueEntry[];
     acknowledgeOutbox(shareId: string, throughShareSequence: number): void;
     saveReplica(replica: SessionShareReplicaRecord): void;
-    appendReplicaEntries(
-        grant: SessionShareTransportGrant,
-        entries: readonly SessionShareOpaqueEntry[],
-    ): void;
+    appendReplicaEntries(grant: ShareTransportGrant, entries: readonly ShareOpaqueEntry[]): void;
     endReplica(
-        grant: SessionShareTransportGrant,
+        grant: ShareTransportGrant,
         reason: SessionShareReplicaEndedReason,
     ): "ended" | "stale";
 }
@@ -152,7 +135,7 @@ export interface SessionShareServiceOptions {
     ) => void | Promise<void>;
     readonly idFactory?: () => string;
     readonly store: SessionShareCoreStore;
-    readonly transport: SessionShareTransport;
+    readonly transport: ShareTransport;
 }
 
 export class SessionShareService {
@@ -160,11 +143,11 @@ export class SessionShareService {
     readonly #idFactory: () => string;
     readonly #ownerSubscriptions = new Map<string, () => void>();
     readonly #memberSubscriptions = new Map<string, () => void>();
-    readonly #pendingEnds: SessionShareTransportGrant[] = [];
+    readonly #pendingEnds: ShareTransportGrant[] = [];
     readonly #publishQueues = new Map<string, AsyncQueue>();
     readonly #publishRequested = new Set<string>();
     readonly #store: SessionShareCoreStore;
-    readonly #transport: SessionShareTransport;
+    readonly #transport: ShareTransport;
     #closed = false;
 
     constructor(options: SessionShareServiceOptions) {
@@ -344,7 +327,7 @@ export class SessionShareService {
 
     // A replica restored on daemon start is already durable and its Murmur session is
     // reloaded by the transport, so resuming only needs the event subscription back.
-    observeReplica(grant: SessionShareTransportGrant): void {
+    observeReplica(grant: ShareTransportGrant): void {
         this.#assertOpen();
         const key = grantKey(grant);
         this.#memberSubscriptions.get(key)?.();
@@ -354,7 +337,7 @@ export class SessionShareService {
         );
     }
 
-    async post(post: SessionShareTransportMemberPost): Promise<void> {
+    async post(post: ShareTransportMemberPost): Promise<void> {
         this.#assertOpen();
         await this.#transport.postMember(post);
     }
@@ -419,7 +402,7 @@ export class SessionShareService {
         }
     }
 
-    #allKnownGrants(share: SessionShareRecord): SessionShareTransportGrant[] {
+    #allKnownGrants(share: SessionShareRecord): ShareTransportGrant[] {
         const grants = [
             ...share.members.map(memberGrant),
             ...this.#store.queryEndedGrants(share.shareId),
@@ -435,7 +418,7 @@ export class SessionShareService {
     }
 
     async #handleOwnerEvent(event: unknown): Promise<void> {
-        if (!Value.Check(sessionShareTransportOwnerEventSchema, event)) {
+        if (!Value.Check(shareTransportOwnerEventSchema, event)) {
             throw new Error("The session-share owner transport event is invalid.");
         }
         if (event.type === "transport_failed") {
@@ -458,7 +441,7 @@ export class SessionShareService {
         if (event.type === "transport_recovered") return;
         const { post, senderPeerId } = event;
         if (senderPeerId !== post.grant.murmurPeerId) {
-            throw new SessionShareUnauthorizedPostError(
+            throw new ShareUnauthorizedPostError(
                 "A friend message sender does not match its authenticated grant.",
             );
         }
@@ -468,7 +451,7 @@ export class SessionShareService {
             .queryShare(post.grant.shareId)
             ?.members.find((candidate) => candidate.shareMemberId === post.grant.shareMemberId);
         if (member === undefined) {
-            throw new SessionShareUnauthorizedPostError(
+            throw new ShareUnauthorizedPostError(
                 "A friend message names a member this share does not have.",
             );
         }
@@ -499,7 +482,7 @@ export class SessionShareService {
     }
 
     #handleMemberEvent(event: unknown): void {
-        if (!Value.Check(sessionShareTransportMemberEventSchema, event)) {
+        if (!Value.Check(shareTransportMemberEventSchema, event)) {
             throw new Error("The session-share member transport event is invalid.");
         }
         if (event.type === "transport_failed" || event.type === "transport_recovered") return;
@@ -535,7 +518,7 @@ export class SessionShareService {
         }
     }
 
-    #endReplica(grant: SessionShareTransportGrant, reason: SessionShareReplicaEndedReason): void {
+    #endReplica(grant: ShareTransportGrant, reason: SessionShareReplicaEndedReason): void {
         // The subscription goes either way: an end for a grant this replica has already
         // moved past is stale for the store but still retires that epoch's handler, and
         // keeping it would leak one handler per epoch for the daemon's lifetime.
@@ -549,11 +532,11 @@ export class SessionShareService {
     }
 }
 
-function activeGrants(share: SessionShareRecord): SessionShareTransportGrant[] {
+function activeGrants(share: SessionShareRecord): ShareTransportGrant[] {
     return share.members.filter((member) => member.state === "active").map(memberGrant);
 }
 
-function memberGrant(member: SessionShareMemberRecord): SessionShareTransportGrant {
+function memberGrant(member: SessionShareMemberRecord): ShareTransportGrant {
     return {
         grantEpoch: member.grantEpoch,
         murmurPeerId: member.murmurPeerId,
@@ -562,11 +545,11 @@ function memberGrant(member: SessionShareMemberRecord): SessionShareTransportGra
     };
 }
 
-function grantKey(grant: SessionShareTransportGrant): string {
+function grantKey(grant: ShareTransportGrant): string {
     return `${grant.shareId}\u0000${grant.shareMemberId}\u0000${String(grant.grantEpoch)}`;
 }
 
-function assertPageBounds(entries: readonly SessionShareOpaqueEntry[]): void {
+function assertPageBounds(entries: readonly ShareOpaqueEntry[]): void {
     if (entries.length === 0 || entries.length > MAX_PAGE_COUNT) {
         throw new Error("A session share page must contain 1 to 100 entries.");
     }
@@ -574,7 +557,7 @@ function assertPageBounds(entries: readonly SessionShareOpaqueEntry[]): void {
         (total, entry) => total + Buffer.byteLength(entry.canonicalJson, "utf8"),
         0,
     );
-    // A single complete entry may exceed the wire page. SessionShareTransport owns deterministic
+    // A single complete entry may exceed the wire page. ShareTransport owns deterministic
     // fragmentation/reassembly for that entry; multi-entry batches remain wire-page bounded.
     if (entries.length > 1 && bytes > MAX_PAGE_BYTES) {
         throw new Error("A session share page exceeds 256 KiB.");

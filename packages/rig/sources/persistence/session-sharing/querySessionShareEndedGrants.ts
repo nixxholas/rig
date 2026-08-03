@@ -1,6 +1,6 @@
 import { and, eq, ne } from "drizzle-orm";
 
-import type { SessionShareTransportGrant } from "../../session-sharing/SessionShareTransport.js";
+import type { ShareTransportGrant } from "../../sharing/ShareTransport.js";
 import { sessionShareGrants, sessionShareMembers } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 
@@ -8,7 +8,7 @@ import type { TX } from "../Transaction.js";
 export function querySessionShareEndedGrants(
     tx: TX,
     shareId: string,
-): readonly SessionShareTransportGrant[] {
+): readonly ShareTransportGrant[] {
     return tx
         .select({
             grantEpoch: sessionShareGrants.grantEpoch,

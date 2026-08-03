@@ -19,17 +19,17 @@ import {
 } from "@slopus/murmur/sharedSession";
 
 import type { MurmurRuntimeHandle } from "../murmur/types.js";
-import { canonicalSessionShareJson, sessionShareContentHash } from "./canonicalSessionShareJson.js";
-import { SessionShareUnauthorizedPostError } from "./SessionShareService.js";
+import { canonicalShareJson, shareContentHash } from "./canonicalShareJson.js";
+import { ShareUnauthorizedPostError } from "./ShareUnauthorizedPostError.js";
 import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransport,
-    SessionShareTransportGrant,
-    SessionShareTransportMemberEvent,
-    SessionShareTransportMemberPost,
-    SessionShareTransportOwner,
-    SessionShareTransportOwnerEvent,
-} from "./SessionShareTransport.js";
+    ShareOpaqueEntry,
+    ShareTransport,
+    ShareTransportGrant,
+    ShareTransportMemberEvent,
+    ShareTransportMemberPost,
+    ShareTransportOwner,
+    ShareTransportOwnerEvent,
+} from "./ShareTransport.js";
 
 /**
  * Everything the Murmur shared-session protocol needs about the people involved.
@@ -39,7 +39,7 @@ import type {
  * port is that channel, kept separate so the transport itself stays protocol
  * code.
  */
-export interface SessionShareMurmurDirectory {
+export interface ShareMurmurDirectory {
     /** Public identity of a friend Rig knows by Murmur peer ID. */
     identity(murmurPeerId: string): Promise<IdentityPublicKeys | undefined>;
     /** Human-readable name shown for a friend's messages. */
@@ -61,21 +61,21 @@ export interface SessionShareMurmurDirectory {
     >;
 }
 
-export interface MurmurSessionShareTransportOptions {
-    readonly directory: SessionShareMurmurDirectory;
+export interface MurmurShareTransportOptions {
+    readonly directory: ShareMurmurDirectory;
     /** Authoritative transcript history the owner offers to a newly invited member. */
     readonly entrySource: (shareId: string) => SessionEntrySource;
     readonly runtime: () => MurmurRuntimeHandle | undefined;
 }
 
 /** What happened to one received event, and therefore who owns its relay cursor. */
-export type SessionShareEventOutcome = "applied" | "retained" | "unowned";
+export type ShareEventOutcome = "applied" | "retained" | "unowned";
 
 /** Bounded retry passes one catch-up will make before yielding to the next wake. */
 const MAX_HISTORY_RETRY_PASSES = 512;
 
-type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<void>;
-type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
+type OwnerHandler = (event: ShareTransportOwnerEvent) => void | Promise<void>;
+type MemberHandler = (event: ShareTransportMemberEvent) => void | Promise<void>;
 
 interface OwnerSession {
     /** Whether an append page has run yet, which bounds duplicate skipping to the first. */
@@ -86,22 +86,22 @@ interface OwnerSession {
 }
 
 interface MemberSession {
-    readonly grant: SessionShareTransportGrant;
+    readonly grant: ShareTransportGrant;
     readonly session: SharedSessionMember;
     state: SharedSessionState | undefined;
     /** Murmur ended this replica and retired its cursors; it only absorbs events now. */
     terminated: boolean;
 }
 
-function grantKey(grant: SessionShareTransportGrant): string {
+function grantKey(grant: ShareTransportGrant): string {
     return `${grant.shareId}\u0000${grant.shareMemberId}\u0000${String(grant.grantEpoch)}`;
 }
 
-function entryFromMurmur(shareId: string, entry: SharedSessionEntry): SessionShareOpaqueEntry {
-    const canonicalJson = canonicalSessionShareJson(entry.payload);
+function entryFromMurmur(shareId: string, entry: SharedSessionEntry): ShareOpaqueEntry {
+    const canonicalJson = canonicalShareJson(entry.payload);
     return {
         canonicalJson,
-        contentHash: sessionShareContentHash(canonicalJson),
+        contentHash: shareContentHash(canonicalJson),
         createdAt: entry.timestamp,
         shareEventId: entry.shareEventId,
         shareId,
@@ -121,24 +121,24 @@ function entryFromMurmur(shareId: string, entry: SharedSessionEntry): SessionSha
  * so this adapter translates between the two by Murmur peer ID and never lets
  * Murmur's numbering leak into Rig's records.
  */
-export class MurmurSessionShareTransport implements SessionShareTransport {
+export class MurmurShareTransport implements ShareTransport {
     readonly #deferred = new Set<string>();
-    readonly #directory: SessionShareMurmurDirectory;
-    readonly #entrySource: MurmurSessionShareTransportOptions["entrySource"];
-    readonly #grants = new Map<string, Map<string, SessionShareTransportGrant>>();
+    readonly #directory: ShareMurmurDirectory;
+    readonly #entrySource: MurmurShareTransportOptions["entrySource"];
+    readonly #grants = new Map<string, Map<string, ShareTransportGrant>>();
     readonly #memberHandlers = new Map<string, Set<MemberHandler>>();
     readonly #members = new Map<string, MemberSession>();
     readonly #ownerHandlers = new Map<string, Set<OwnerHandler>>();
     readonly #owners = new Map<string, OwnerSession>();
-    readonly #runtime: MurmurSessionShareTransportOptions["runtime"];
+    readonly #runtime: MurmurShareTransportOptions["runtime"];
 
-    constructor(options: MurmurSessionShareTransportOptions) {
+    constructor(options: MurmurShareTransportOptions) {
         this.#directory = options.directory;
         this.#entrySource = options.entrySource;
         this.#runtime = options.runtime;
     }
 
-    async createOwner(owner: SessionShareTransportOwner): Promise<void> {
+    async createOwner(owner: ShareTransportOwner): Promise<void> {
         const runtime = this.#requireRuntime();
         const localPeerId = identityId(runtime.identity);
         if (owner.ownerPeerId !== localPeerId) {
@@ -177,17 +177,14 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         });
     }
 
-    async loadOwner(shareId: string): Promise<SessionShareTransportOwner | undefined> {
+    async loadOwner(shareId: string): Promise<ShareTransportOwner | undefined> {
         const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
         return owner === undefined
             ? undefined
             : { ownerPeerId: owner.session.state.ownerId, shareId };
     }
 
-    async appendOwnerEntries(
-        shareId: string,
-        entries: readonly SessionShareOpaqueEntry[],
-    ): Promise<void> {
+    async appendOwnerEntries(shareId: string, entries: readonly ShareOpaqueEntry[]): Promise<void> {
         const owner = await this.#requireOwner(shareId);
         for (const entry of entries) {
             if (entry.shareSequence <= owner.lastAppendedSequence) continue;
@@ -216,7 +213,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         owner.appendedThisSession = true;
     }
 
-    async inviteMany(grants: readonly SessionShareTransportGrant[]): Promise<void> {
+    async inviteMany(grants: readonly ShareTransportGrant[]): Promise<void> {
         if (grants.length === 0) throw new Error("An invite batch cannot be empty.");
         const shareIds = new Set(grants.map((grant) => grant.shareId));
         for (const shareId of shareIds) {
@@ -234,11 +231,11 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         }
     }
 
-    async invite(grant: SessionShareTransportGrant): Promise<void> {
+    async invite(grant: ShareTransportGrant): Promise<void> {
         await this.inviteMany([grant]);
     }
 
-    async revoke(grant: SessionShareTransportGrant): Promise<void> {
+    async revoke(grant: ShareTransportGrant): Promise<void> {
         const owner = await this.#requireOwner(grant.shareId);
         this.#forgetGrant(grant);
         // Murmur rejects revoking a grant it has already ended, and recovery has to be able
@@ -253,7 +250,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         });
     }
 
-    async stop(shareId: string, _grants: readonly SessionShareTransportGrant[]): Promise<void> {
+    async stop(shareId: string, _grants: readonly ShareTransportGrant[]): Promise<void> {
         const owner = this.#owners.get(shareId) ?? (await this.#loadOwnerSession(shareId));
         if (owner === undefined) return;
         owner.state = await owner.session.stop();
@@ -272,7 +269,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         };
     }
 
-    async joinMember(grant: SessionShareTransportGrant): Promise<void> {
+    async joinMember(grant: ShareTransportGrant): Promise<void> {
         const key = grantKey(grant);
         if (this.#members.get(key)?.terminated === false) return;
         const runtime = this.#requireRuntime();
@@ -293,9 +290,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         this.#members.set(key, { grant, session, state: session.state, terminated: false });
     }
 
-    async loadMember(
-        grant: SessionShareTransportGrant,
-    ): Promise<SessionShareTransportGrant | undefined> {
+    async loadMember(grant: ShareTransportGrant): Promise<ShareTransportGrant | undefined> {
         const key = grantKey(grant);
         const existing = this.#members.get(key);
         if (existing !== undefined && !existing.terminated) return existing.grant;
@@ -316,7 +311,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         return grant;
     }
 
-    async postMember(post: SessionShareTransportMemberPost): Promise<void> {
+    async postMember(post: ShareTransportMemberPost): Promise<void> {
         const member = this.#members.get(grantKey(post.grant));
         if (member === undefined || member.terminated) {
             throw new Error("This shared session has no active membership to post into.");
@@ -324,7 +319,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         await member.session.post(post.clientMessageId, post.text);
     }
 
-    handleMemberEvents(grant: SessionShareTransportGrant, callback: MemberHandler): () => void {
+    handleMemberEvents(grant: ShareTransportGrant, callback: MemberHandler): () => void {
         const key = grantKey(grant);
         const handlers = this.#memberHandlers.get(key) ?? new Set<MemberHandler>();
         handlers.add(callback);
@@ -387,7 +382,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
      * cursor must stay where it is until a later pass replays it. Only
      * `unowned` leaves the caller responsible for advancing the cursor.
      */
-    async handleReceivedEvent(received: ReceivedEvent): Promise<SessionShareEventOutcome> {
+    async handleReceivedEvent(received: ReceivedEvent): Promise<ShareEventOutcome> {
         for (const owner of this.#owners.values()) {
             const outcome = outcomeOf(await owner.session.handleEvent(received));
             if (outcome !== "unowned") return outcome;
@@ -503,7 +498,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         return { identity, keyPackage };
     }
 
-    #isAlreadyActive(owner: OwnerSession, grant: SessionShareTransportGrant): boolean {
+    #isAlreadyActive(owner: OwnerSession, grant: ShareTransportGrant): boolean {
         return this.#isPeerActive(owner, grant.murmurPeerId);
     }
 
@@ -522,13 +517,13 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         );
     }
 
-    #rememberGrant(grant: SessionShareTransportGrant): void {
+    #rememberGrant(grant: ShareTransportGrant): void {
         const shareGrants = this.#grants.get(grant.shareId) ?? new Map();
         shareGrants.set(grant.murmurPeerId, grant);
         this.#grants.set(grant.shareId, shareGrants);
     }
 
-    #forgetGrant(grant: SessionShareTransportGrant): void {
+    #forgetGrant(grant: ShareTransportGrant): void {
         this.#grants.get(grant.shareId)?.delete(grant.murmurPeerId);
     }
 
@@ -576,7 +571,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         };
     }
 
-    #memberCallbacks(grant: SessionShareTransportGrant): SharedSessionCallbacks {
+    #memberCallbacks(grant: ShareTransportGrant): SharedSessionCallbacks {
         return {
             persistEntry: async (_transaction, entry) => {
                 await this.#emitMember(grant, {
@@ -639,25 +634,19 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
      * same event forever, stalling every other topic behind it. Losing an
      * unauthorized post is the correct outcome; losing the account's sync is not.
      */
-    async #emitOwnerPostEvent(
-        shareId: string,
-        event: SessionShareTransportOwnerEvent,
-    ): Promise<void> {
+    async #emitOwnerPostEvent(shareId: string, event: ShareTransportOwnerEvent): Promise<void> {
         try {
             await this.#emitOwner(shareId, event);
         } catch (error: unknown) {
-            if (!(error instanceof SessionShareUnauthorizedPostError)) throw error;
+            if (!(error instanceof ShareUnauthorizedPostError)) throw error;
         }
     }
 
-    async #emitOwner(shareId: string, event: SessionShareTransportOwnerEvent): Promise<void> {
+    async #emitOwner(shareId: string, event: ShareTransportOwnerEvent): Promise<void> {
         for (const handler of this.#ownerHandlers.get(shareId) ?? []) await handler(event);
     }
 
-    async #emitMember(
-        grant: SessionShareTransportGrant,
-        event: SessionShareTransportMemberEvent,
-    ): Promise<void> {
+    async #emitMember(grant: ShareTransportGrant, event: ShareTransportMemberEvent): Promise<void> {
         for (const handler of this.#memberHandlers.get(grantKey(grant)) ?? []) await handler(event);
     }
 }
@@ -666,7 +655,7 @@ function isSequenceGap(error: unknown): boolean {
     return error instanceof SharedSessionProtocolError && error.code === "sequence-gap";
 }
 
-function outcomeOf(result: { readonly status: string }): SessionShareEventOutcome {
+function outcomeOf(result: { readonly status: string }): ShareEventOutcome {
     if (result.status === "unhandled") return "unowned";
     // A deferred delivery is deliberately left on the relay cursor so a later pass replays
     // it in order; advancing here would create a gap the client rejects. Every other

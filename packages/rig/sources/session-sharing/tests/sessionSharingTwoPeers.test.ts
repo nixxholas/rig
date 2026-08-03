@@ -13,7 +13,7 @@ import {
 import { afterEach, describe, expect, it } from "vitest";
 
 import { encodeMurmurIdentityToken } from "../../murmur/impl/identityToken.js";
-import { encodeSharePrivateEnvelope } from "../impl/shareCodec.js";
+import { encodeSharePrivateEnvelope } from "../../sharing/impl/shareCodec.js";
 import { InMemoryMurmurRelay } from "../../murmur/InMemoryMurmurRelay.js";
 import type {
     MurmurEventRouter,
@@ -22,7 +22,9 @@ import type {
 } from "../../murmur/types.js";
 import type { MurmurFriendship, MurmurProfile } from "../../protocol/MurmurProtocol.js";
 import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
-import { createSessionShareRuntime } from "../createSessionShareRuntime.js";
+import { createShareRuntime } from "../../sharing/createShareRuntime.js";
+import { createSessionShareKind, type SessionShareKindOptions } from "../createSessionShareKind.js";
+import type { SessionShareServiceContract } from "../SessionShareServiceContract.js";
 
 interface Peer {
     readonly client: MurmurClient;
@@ -236,7 +238,7 @@ describe("session sharing between two peers over the real Murmur transport", () 
         cleanups.push(() => storeFriend.close());
 
         const delivered: { displayName: string | undefined; text: string }[] = [];
-        const ownerRuntime = createSessionShareRuntime({
+        const ownerRuntime = createSessionSharingRuntime({
             daemonStore: storeOwner.sessionShareDaemonStore,
             deliverFriendMessage: (_ownerSessionId, message) => {
                 delivered.push({
@@ -249,7 +251,7 @@ describe("session sharing between two peers over the real Murmur transport", () 
             murmur: ownerMurmur,
             shareStore: storeOwner.sessionShares,
         });
-        const friendRuntime = createSessionShareRuntime({
+        const friendRuntime = createSessionSharingRuntime({
             daemonStore: storeFriend.sessionShareDaemonStore,
             deliverFriendMessage: () => {},
             murmur: friendMurmur,
@@ -454,7 +456,7 @@ describe("the session-sharing event router", () => {
         const store = new PersistentSessionStore({ databasePath: ":memory:" });
         cleanups.push(() => store.close());
         const reported: unknown[] = [];
-        const runtime = createSessionShareRuntime({
+        const runtime = createSessionSharingRuntime({
             daemonStore: store.sessionShareDaemonStore,
             deliverFriendMessage: () => {},
             murmur,
@@ -478,13 +480,40 @@ describe("the session-sharing event router", () => {
     }, 30_000);
 });
 
+/**
+ * Session sharing over the one shared runtime, which is what the daemon builds.
+ *
+ * Every kind of share rides a single transport, directory, and event router, so a
+ * test that wants only the session kind still goes through the same assembly.
+ */
+function createSessionSharingRuntime(options: {
+    daemonStore: PersistentSessionStore["sessionShareDaemonStore"];
+    deliverFriendMessage: SessionShareKindOptions["deliverFriendMessage"];
+    murmur: FakeMurmurService;
+    reportFailure?: (error: unknown) => void;
+    shareStore: PersistentSessionStore["sessionShares"];
+}): { close: () => Promise<void>; contract: SessionShareServiceContract } {
+    const runtime = createShareRuntime({
+        kinds: {
+            session: createSessionShareKind({
+                daemonStore: options.daemonStore,
+                deliverFriendMessage: options.deliverFriendMessage,
+                shareStore: options.shareStore,
+            }),
+        },
+        murmur: options.murmur,
+        ...(options.reportFailure === undefined ? {} : { reportFailure: options.reportFailure }),
+    });
+    return { close: runtime.close, contract: runtime.kinds.session.contract };
+}
+
 /** One Rig daemon's worth of session-sharing state for a peer. */
 function createHost(murmur: FakeMurmurService): {
-    runtime: ReturnType<typeof createSessionShareRuntime>;
+    runtime: ReturnType<typeof createSessionSharingRuntime>;
     store: PersistentSessionStore;
 } {
     const store = new PersistentSessionStore({ databasePath: ":memory:" });
-    const runtime = createSessionShareRuntime({
+    const runtime = createSessionSharingRuntime({
         daemonStore: store.sessionShareDaemonStore,
         deliverFriendMessage: () => {},
         murmur,

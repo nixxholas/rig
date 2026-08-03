@@ -12,18 +12,15 @@ import { describe, expect, it } from "vitest";
 
 import { InMemoryMurmurRelay } from "../../murmur/InMemoryMurmurRelay.js";
 import type { MurmurRuntimeHandle } from "../../murmur/types.js";
-import {
-    MurmurSessionShareTransport,
-    type SessionShareMurmurDirectory,
-} from "../MurmurSessionShareTransport.js";
-import { projectSessionShareEntry } from "../projectSessionShareEntry.js";
-import { SessionShareUnauthorizedPostError } from "../SessionShareService.js";
+import { MurmurShareTransport, type ShareMurmurDirectory } from "../MurmurShareTransport.js";
+import { canonicalShareJson, shareContentHash } from "../canonicalShareJson.js";
+import { ShareUnauthorizedPostError } from "../ShareUnauthorizedPostError.js";
 import type {
-    SessionShareOpaqueEntry,
-    SessionShareTransportGrant,
-    SessionShareTransportMemberEvent,
-    SessionShareTransportOwnerEvent,
-} from "../SessionShareTransport.js";
+    ShareOpaqueEntry,
+    ShareTransportGrant,
+    ShareTransportMemberEvent,
+    ShareTransportOwnerEvent,
+} from "../ShareTransport.js";
 
 interface Peer {
     readonly client: MurmurClient;
@@ -47,32 +44,21 @@ function runtimeOf(peer: Peer): () => MurmurRuntimeHandle {
     return () => ({ client: peer.client, identity: peer.identity, store: peer.store });
 }
 
-function entry(shareId: string, sequence: number, text: string): SessionShareOpaqueEntry {
-    return projectSessionShareEntry({
+// The transport carries opaque entries, so these tests build one directly rather
+// than through any one kind of share's projection.
+function entry(shareId: string, sequence: number, text: string): ShareOpaqueEntry {
+    const canonicalJson = canonicalShareJson({ text, version: 1 });
+    return {
+        canonicalJson,
+        contentHash: shareContentHash(canonicalJson),
         createdAt: 1_700_000_000_000 + sequence,
         shareEventId: `0199f000-0000-7000-8000-00000000000${String(sequence)}`,
         shareId,
         shareSequence: sequence,
-        source: {
-            event: {
-                createdAt: 1_700_000_000_000 + sequence,
-                data: {
-                    message: {
-                        blocks: [{ text, type: "text" as const }],
-                        id: `notice-${String(sequence)}`,
-                        role: "system" as const,
-                    },
-                },
-                id: `event-${String(sequence)}`,
-                sessionId: "session-1",
-                type: "system_notice",
-            },
-            kind: "event",
-        },
-    })!;
+    };
 }
 
-function entrySourceOver(entries: readonly SessionShareOpaqueEntry[]): SessionEntrySource {
+function entrySourceOver(entries: readonly ShareOpaqueEntry[]): SessionEntrySource {
     return {
         readPage: async ({ afterSequence, maximumBytes, maximumEntries }) => {
             const remaining = entries.filter((item) => item.shareSequence > afterSequence);
@@ -99,7 +85,7 @@ function entrySourceOver(entries: readonly SessionShareOpaqueEntry[]): SessionEn
     };
 }
 
-async function pump(peer: Peer, transport: MurmurSessionShareTransport): Promise<void> {
+async function pump(peer: Peer, transport: MurmurShareTransport): Promise<void> {
     for (let round = 0; round < 20; round += 1) {
         const result = await peer.client.sync(0);
         if (result.status === "reset") continue;
@@ -116,7 +102,7 @@ async function pump(peer: Peer, transport: MurmurSessionShareTransport): Promise
 }
 
 /** A directory whose absence is the point: these cases must not consult it. */
-function unusedDirectory(): SessionShareMurmurDirectory {
+function unusedDirectory(): ShareMurmurDirectory {
     const fail = (): never => {
         throw new Error("This case must not consult the Murmur directory.");
     };
@@ -138,11 +124,11 @@ describe("the Murmur session-share transport", () => {
         const shareId = "share-alpha";
         // Filled after the owner exists, the way the real service does it: a share is
         // created first and its transcript only reaches the log once published.
-        const appended: SessionShareOpaqueEntry[] = [];
+        const appended: ShareOpaqueEntry[] = [];
         const invitations: SharedSessionInvitation[] = [];
         const friendBundle: MlsKeyPackageBundle = createMlsKeyPackage(friend.identity);
 
-        const ownerDirectory: SessionShareMurmurDirectory = {
+        const ownerDirectory: ShareMurmurDirectory = {
             acceptedInvitation: async () => undefined,
             deliver: async (invitation) => {
                 invitations.push(invitation);
@@ -152,7 +138,7 @@ describe("the Murmur session-share transport", () => {
             keyPackage: async () => friendBundle.keyPackage,
             requestKeyPackage: async () => undefined,
         };
-        const friendDirectory: SessionShareMurmurDirectory = {
+        const friendDirectory: ShareMurmurDirectory = {
             acceptedInvitation: async () => ({
                 bundle: friendBundle,
                 invitation: invitations[0]!.text,
@@ -165,20 +151,20 @@ describe("the Murmur session-share transport", () => {
             requestKeyPackage: async () => undefined,
         };
 
-        const ownerTransport = new MurmurSessionShareTransport({
+        const ownerTransport = new MurmurShareTransport({
             directory: ownerDirectory,
             entrySource: () => entrySourceOver(appended),
             runtime: runtimeOf(owner),
         });
-        const friendTransport = new MurmurSessionShareTransport({
+        const friendTransport = new MurmurShareTransport({
             directory: friendDirectory,
             entrySource: () => entrySourceOver([]),
             runtime: runtimeOf(friend),
         });
 
-        const ownerEvents: SessionShareTransportOwnerEvent[] = [];
-        const memberEvents: SessionShareTransportMemberEvent[] = [];
-        const grant: SessionShareTransportGrant = {
+        const ownerEvents: ShareTransportOwnerEvent[] = [];
+        const memberEvents: ShareTransportMemberEvent[] = [];
+        const grant: ShareTransportGrant = {
             grantEpoch: 1,
             murmurPeerId: friend.peerId,
             shareId,
@@ -188,7 +174,7 @@ describe("the Murmur session-share transport", () => {
         let rejectPosts = false;
         ownerTransport.handleOwnerEvents(shareId, (event) => {
             if (rejectPosts && event.type === "member_posted") {
-                throw new SessionShareUnauthorizedPostError("The grant no longer accepts posts.");
+                throw new ShareUnauthorizedPostError("The grant no longer accepts posts.");
             }
             ownerEvents.push(event);
         });
@@ -274,7 +260,7 @@ describe("the Murmur session-share transport", () => {
         const relay = new InMemoryMurmurRelay();
         const owner = createPeer(relay);
         const shareId = "share-replay";
-        const transport = new MurmurSessionShareTransport({
+        const transport = new MurmurShareTransport({
             directory: unusedDirectory(),
             entrySource: () => entrySourceOver([]),
             runtime: runtimeOf(owner),
@@ -288,7 +274,7 @@ describe("the Murmur session-share transport", () => {
         // Rig's outbox, so the next publish resends it through a transport that has no
         // memory of the send. It must be absorbed, not rejected.
         transport.close();
-        const resumed = new MurmurSessionShareTransport({
+        const resumed = new MurmurShareTransport({
             directory: unusedDirectory(),
             entrySource: () => entrySourceOver([]),
             runtime: runtimeOf(owner),
@@ -307,7 +293,7 @@ describe("the Murmur session-share transport", () => {
         const friend = createPeer(relay);
         const shareId = "share-revoke";
         const friendBundle = createMlsKeyPackage(friend.identity);
-        const transport = new MurmurSessionShareTransport({
+        const transport = new MurmurShareTransport({
             directory: {
                 ...unusedDirectory(),
                 deliver: async () => undefined,
@@ -320,7 +306,7 @@ describe("the Murmur session-share transport", () => {
             runtime: runtimeOf(owner),
         });
         await transport.createOwner({ ownerPeerId: owner.peerId, shareId });
-        const grant: SessionShareTransportGrant = {
+        const grant: ShareTransportGrant = {
             grantEpoch: 1,
             murmurPeerId: friend.peerId,
             shareId,
@@ -328,7 +314,7 @@ describe("the Murmur session-share transport", () => {
         };
         await transport.invite(grant);
 
-        const unfriended = new MurmurSessionShareTransport({
+        const unfriended = new MurmurShareTransport({
             directory: { ...unusedDirectory(), identity: async () => undefined },
             entrySource: () => entrySourceOver([]),
             runtime: runtimeOf(owner),
@@ -345,7 +331,7 @@ describe("the Murmur session-share transport", () => {
         const friend = createPeer(relay);
         const shareId = "share-revoke-replay";
         const friendBundle = createMlsKeyPackage(friend.identity);
-        const transport = new MurmurSessionShareTransport({
+        const transport = new MurmurShareTransport({
             directory: {
                 ...unusedDirectory(),
                 deliver: async () => undefined,
@@ -356,7 +342,7 @@ describe("the Murmur session-share transport", () => {
             runtime: runtimeOf(owner),
         });
         await transport.createOwner({ ownerPeerId: owner.peerId, shareId });
-        const grant: SessionShareTransportGrant = {
+        const grant: ShareTransportGrant = {
             grantEpoch: 1,
             murmurPeerId: friend.peerId,
             shareId,
@@ -381,7 +367,7 @@ describe("the Murmur session-share transport", () => {
         const friend = createPeer(relay);
         const shareId = "share-beta";
         const requested: string[] = [];
-        const transport = new MurmurSessionShareTransport({
+        const transport = new MurmurShareTransport({
             directory: {
                 acceptedInvitation: async () => undefined,
                 deliver: async () => undefined,
@@ -415,7 +401,7 @@ describe("the Murmur session-share transport", () => {
         const relay = new InMemoryMurmurRelay();
         const owner = createPeer(relay);
         const other = createPeer(relay);
-        const transport = new MurmurSessionShareTransport({
+        const transport = new MurmurShareTransport({
             directory: {
                 acceptedInvitation: async () => undefined,
                 deliver: async () => undefined,
@@ -436,9 +422,7 @@ describe("the Murmur session-share transport", () => {
     }, 30_000);
 });
 
-function replicated(
-    events: readonly SessionShareTransportMemberEvent[],
-): readonly SessionShareOpaqueEntry[] {
+function replicated(events: readonly ShareTransportMemberEvent[]): readonly ShareOpaqueEntry[] {
     const entries = events.flatMap((event) =>
         event.type === "entries_appended" ? [...event.entries] : [],
     );
