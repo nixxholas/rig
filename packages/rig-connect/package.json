@@ -1,6 +1,6 @@
 {
     "name": "@slopus/rig-connect",
-    "version": "0.0.25",
+    "version": "0.0.27",
     "description": "Live Rig session state for any user interface, from one subscription.",
     "license": "MIT",
     "repository": {
