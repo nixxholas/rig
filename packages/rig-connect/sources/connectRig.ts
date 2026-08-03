@@ -97,6 +97,7 @@ import {
     pluginInstallClassificationSchema,
     projectRegistrationErrorResponseSchema,
     projectResponseSchema,
+    projectWorkspaceSchema,
     sendMurmurFriendRequestResponseSchema,
     signupMurmurAccountResponseSchema,
     startMurmurServiceResponseSchema,
@@ -1072,16 +1073,15 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const workspace = responseEntity(data, "workspace");
         if (
             groupsEntry !== undefined &&
-            typeof workspace?.id === "string" &&
-            typeof workspace.projectId === "string" &&
-            typeof workspace.version === "number"
+            workspace !== undefined &&
+            Value.Check(projectWorkspaceSchema, workspace)
         ) {
             const entry = groupsEntry;
             const event = {
                 createdAt: now(),
                 data: {
                     mutationId: mutation.id,
-                    workspace: workspace as unknown as ProjectWorkspace,
+                    workspace,
                 },
                 id: mutation.id,
                 projectId: workspace.projectId,
@@ -1157,13 +1157,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const workspace = responseEntity(data, "workspace");
         if (
             groupsEntry !== undefined &&
-            typeof workspace?.id === "string" &&
-            typeof workspace.projectId === "string" &&
-            typeof workspace.version === "number"
+            workspace !== undefined &&
+            Value.Check(projectWorkspaceSchema, workspace)
         ) {
             const event = {
                 createdAt: now(),
-                data: { workspace: workspace as unknown as ProjectWorkspace },
+                data: { workspace },
                 id: mutation.id,
                 projectId: workspace.projectId,
                 type: "workspace_updated",
@@ -3012,6 +3011,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const optimistic: ProjectWorkspace = {
             ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
             createdAt,
+            gitCommonDir: "",
             id,
             kind: "git_worktree",
             name: input.name,
@@ -3020,6 +3020,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             presence: "missing",
             projectId: input.projectId,
             status: "initializing",
+            storageKey: "",
             updatedAt: createdAt,
             version: 0,
         };

@@ -16,6 +16,7 @@ import type {
     Project,
     ProjectWorkspace,
     RemoteTerminalGroupState,
+    RemoteTerminalSummary,
     SessionActivity,
     SessionStatus,
     SessionEvent,
@@ -825,7 +826,7 @@ export class GroupStore {
     ): WorkspaceGroup {
         const cached = this.#workspaceGroups.get(workspace.id);
         const sessions = (sessionsByWorkspace.get(workspace.id) ?? []).sort(byOrderKey);
-        const terminals = this.#workspaceTerminals.get(workspace.id) ?? [];
+        const terminals = this.#workspaceTerminals.get(workspace.id) ?? EMPTY_TERMINALS;
         const branch = this.#workspaceGit.get(workspace.id)?.branch ?? workspace.git?.branch;
         if (
             cached !== undefined &&
@@ -839,6 +840,7 @@ export class GroupStore {
             id: workspace.id,
             name: workspace.name,
             ...(branch === undefined ? {} : { branch }),
+            ...(workspace.error === undefined ? {} : { error: workspace.error }),
             orderKey: workspace.orderKey,
             path: workspace.path,
             presence: workspace.presence,
@@ -962,6 +964,7 @@ function unreadOf(sessions: readonly GroupSession[]): GroupUnread {
 
 /** Shared so a group with nothing waiting keeps the same object across rebuilds. */
 const EMPTY_UNREAD: GroupUnread = { attentionCount: 0, count: 0 };
+const EMPTY_TERMINALS: readonly RemoteTerminalSummary[] = [];
 
 function usageOf(sessions: readonly GroupSession[]): { totalTokens: number } {
     return {

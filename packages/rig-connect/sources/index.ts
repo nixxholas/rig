@@ -151,6 +151,8 @@ export type {
 export { sessionUnreadAfterEvent } from "./sessionUnread.js";
 export {
     computePreparationNoticeSchema,
+    PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
+    projectWorkspaceSchema,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     SERVICE_NOTICE_TEXT_MAX_LENGTH,
     serviceNoticeSchema,

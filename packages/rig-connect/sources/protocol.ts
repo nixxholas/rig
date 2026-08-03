@@ -1222,26 +1222,6 @@ export interface GitRepositoryFacts {
     branch?: string;
 }
 
-/** A worktree inside a project. */
-export interface ProjectWorkspace {
-    archivedAt?: number;
-    baseRef?: string;
-    createdAt: number;
-    error?: string;
-    git?: GitRepositoryFacts;
-    id: string;
-    kind: "git_worktree";
-    name: string;
-    orderKey: string;
-    path: string;
-    presence: "present" | "missing";
-    projectId: string;
-    status: "initializing" | "ready" | "failed" | "archiving" | "archived";
-    title?: string;
-    updatedAt: number;
-    version: number;
-}
-
 export interface SessionSummary {
     id: string;
     archived: boolean;
@@ -1345,6 +1325,7 @@ export interface PluginAppContribution {
 }
 
 const exact = { additionalProperties: false } as const;
+export const PROJECT_WORKSPACE_ERROR_MAX_LENGTH = 500;
 
 const projectGitFactsSchema = Type.Object(
     {
@@ -1375,6 +1356,41 @@ const projectWorkspaceComputeSchema = Type.Union([
         exact,
     ),
 ]);
+
+/** The exact worktree entity Rig sends over its protocol. */
+export const projectWorkspaceSchema = Type.Object(
+    {
+        archivedAt: Type.Optional(Type.Number()),
+        baseCommit: Type.Optional(Type.String()),
+        baseRef: Type.Optional(Type.String()),
+        createdAt: Type.Number(),
+        error: Type.Optional(Type.String({ maxLength: PROJECT_WORKSPACE_ERROR_MAX_LENGTH })),
+        git: Type.Optional(projectGitFactsSchema),
+        gitCommonDir: Type.String(),
+        id: Type.String({ minLength: 1 }),
+        kind: Type.Literal("git_worktree"),
+        name: Type.String(),
+        orderKey: Type.String(),
+        path: Type.String(),
+        presence: Type.Union([Type.Literal("present"), Type.Literal("missing")]),
+        projectId: Type.String({ minLength: 1 }),
+        status: Type.Union([
+            Type.Literal("initializing"),
+            Type.Literal("ready"),
+            Type.Literal("failed"),
+            Type.Literal("archiving"),
+            Type.Literal("archived"),
+        ]),
+        storageKey: Type.String(),
+        title: Type.Optional(Type.String()),
+        updatedAt: Type.Number(),
+        version: Type.Number(),
+    },
+    exact,
+);
+
+/** A worktree inside a project. */
+export type ProjectWorkspace = Static<typeof projectWorkspaceSchema>;
 
 export const projectSchema = Type.Object(
     {

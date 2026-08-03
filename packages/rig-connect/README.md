@@ -350,6 +350,7 @@ for (const group of groups.projects()) {
     group.unread.count; // chats in the project itself waiting for the person
     group.sessions; // sessions in the project root
     group.workspaces; // worktrees, each with its own sessions and Git state
+    group.workspaces[0]?.error; // bounded failure reason when setup failed
 }
 ```
 

@@ -37,8 +37,9 @@ function workspace(
     projectId: string,
     overrides: Partial<ProjectWorkspace> = {},
 ): ProjectWorkspace {
-    return {
+    const base: ProjectWorkspace = {
         createdAt: 1,
+        gitCommonDir: `/work/${projectId}/.git`,
         id,
         kind: "git_worktree",
         name: id,
@@ -47,10 +48,11 @@ function workspace(
         presence: "present",
         projectId,
         status: "ready",
+        storageKey: id,
         updatedAt: 1,
         version: 1,
-        ...overrides,
     };
+    return { ...base, ...overrides };
 }
 
 function session(id: string, projectId: string, workspaceId?: string): SessionSummary {
@@ -453,6 +455,58 @@ describe("GroupStore", () => {
         expect(store.projects()[0]?.workspaces[0]).toBe(beforeWorkspace);
         expect(store.projects()[0]?.workspaces[0]?.sessions[0]).toBe(beforeSession);
         expect(deltas).toEqual([]);
+    });
+
+    it("keeps workspace failures current without replacing unchanged workspace groups", () => {
+        const store = new GroupStore();
+        store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [],
+                workspaces: [
+                    workspace("w1", "p1", { error: "Setup failed.", status: "failed" }),
+                    workspace("w2", "p1"),
+                ],
+            }),
+        );
+        const initial = store.projects();
+        const initialFailed = initial[0]?.workspaces[0];
+        const initialReady = initial[0]?.workspaces[1];
+
+        expect(initialFailed?.error).toBe("Setup failed.");
+
+        store.apply(
+            event(
+                "workspace_updated",
+                {
+                    workspace: workspace("w1", "p1", {
+                        error: "Setup failed differently.",
+                        status: "failed",
+                        version: 2,
+                    }),
+                },
+                { projectId: "p1", workspaceId: "w1" },
+            ),
+        );
+        const changed = store.projects();
+        expect(changed[0]?.workspaces[0]?.error).toBe("Setup failed differently.");
+        expect(changed[0]?.workspaces[0]).not.toBe(initialFailed);
+        expect(changed[0]?.workspaces[1]).toBe(initialReady);
+
+        store.applyHello(
+            hello({
+                projects: [project("p1")],
+                sessions: [],
+                workspaces: [
+                    workspace("w1", "p1", { status: "ready", version: 3 }),
+                    workspace("w2", "p1"),
+                ],
+            }),
+        );
+        const rebuilt = store.projects();
+        expect(rebuilt[0]?.workspaces[0]?.error).toBeUndefined();
+        expect(rebuilt[0]?.workspaces[0]).not.toBe(changed[0]?.workspaces[0]);
+        expect(rebuilt[0]?.workspaces[1]).toBe(initialReady);
     });
 
     it("adds a project the daemon reports after the opening frame", () => {

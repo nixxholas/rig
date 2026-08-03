@@ -100,6 +100,8 @@ export interface WorkspaceGroup {
     readonly id: string;
     readonly name: string;
     readonly branch?: string;
+    /** Human-readable failure reason while workspace initialization has failed. */
+    readonly error?: string;
     readonly orderKey: string;
     readonly path: string;
     readonly presence: "present" | "missing";

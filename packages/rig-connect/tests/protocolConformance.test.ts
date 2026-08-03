@@ -10,7 +10,11 @@ import { systemNoticePayloadSchema as daemonSystemNoticePayloadSchema } from "..
 // it travels on the wire all the same, so it is checked the same way.
 import type * as daemonAgent from "../../rig/sources/agent/index.js";
 import type * as local from "@/protocol.js";
-import { systemNoticePayloadSchema } from "@/protocol.js";
+import {
+    PROJECT_WORKSPACE_ERROR_MAX_LENGTH,
+    projectWorkspaceSchema,
+    systemNoticePayloadSchema,
+} from "@/protocol.js";
 
 /**
  * The protocol types are declared locally so a browser bundle carries no daemon
@@ -95,6 +99,11 @@ type _ProjectRegistrationErrorCode = Assignable<
     daemon.ProjectRegistrationErrorCode
 >;
 type _Workspace = Assignable<local.ProjectWorkspace, daemon.ProjectWorkspace>;
+type _WorkspaceExact = Assignable<daemon.ProjectWorkspace, local.ProjectWorkspace>;
+type _WorkspaceError = Assignable<
+    daemon.ProjectWorkspace["error"],
+    local.ProjectWorkspace["error"]
+>;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
 type _Attachment = Assignable<local.Attachment, daemon.Attachment>;
@@ -203,5 +212,35 @@ describe("protocol conformance", () => {
         expect(decoded).toEqual(payload);
         expect(Value.Decode(daemonSystemNoticePayloadSchema, serialized)).toEqual(payload);
         expect(decoded.text).toBe("Preparing compute: Waiting for the sandbox to start. (45s)");
+    });
+
+    it("validates the exact bounded workspace contract", () => {
+        const workspace: local.ProjectWorkspace = {
+            createdAt: 1,
+            error: "x".repeat(PROJECT_WORKSPACE_ERROR_MAX_LENGTH),
+            gitCommonDir: "/work/project/.git",
+            id: "workspace-1",
+            kind: "git_worktree",
+            name: "Workspace",
+            orderKey: "a",
+            path: "/work/project/workspace-1",
+            presence: "present",
+            projectId: "project-1",
+            status: "failed",
+            storageKey: "workspace-1",
+            updatedAt: 2,
+            version: 3,
+        };
+
+        expect(Value.Decode(projectWorkspaceSchema, workspace)).toEqual(workspace);
+        expect(() =>
+            Value.Decode(projectWorkspaceSchema, {
+                ...workspace,
+                error: `${workspace.error}x`,
+            }),
+        ).toThrow();
+        expect(() =>
+            Value.Decode(projectWorkspaceSchema, { ...workspace, unexpected: true }),
+        ).toThrow();
     });
 });
