@@ -23,11 +23,14 @@ describe("Claude provider tool goldens", () => {
             // present in the native capture. Every captured tool must still exist and preserve
             // the provider's callable shape.
             expect(productionGoldenTools.map((tool) => tool.name).sort()).toEqual(goldenNames);
-            // Agent keeps the captured callable shape, but its runtime descriptions document
-            // Rig's provider/model inference extensions. TaskStop remains exact.
-            expect(productionTools.find((tool) => tool.name === "TaskStop")).toEqual(
-                goldenTools.find((tool) => tool.name === "TaskStop"),
-            );
+            // Agent and TaskStop keep their captured callable shapes, but their runtime
+            // descriptions document Rig's provider/model and stable-agent-identity extensions.
+            const taskStop = productionTools.find((tool) => tool.name === "TaskStop");
+            const goldenTaskStop = goldenTools.find((tool) => tool.name === "TaskStop");
+            expect(withoutDescriptions(taskStop)).toEqual(withoutDescriptions(goldenTaskStop));
+            expect(taskStop?.description).toContain("Agent ID");
+            expect(taskStop?.description).toContain("canonical path");
+            expect(taskStop?.parameters.properties.task_id.description).toContain("Agent ID");
 
             // TaskOutput keeps the captured arguments, but a Rig agent notifies its parent when it
             // finishes, so waiting on one is deliberately allowed to last an hour instead of
@@ -42,3 +45,9 @@ describe("Claude provider tool goldens", () => {
         },
     );
 });
+
+function withoutDescriptions(value: unknown): unknown {
+    return JSON.parse(
+        JSON.stringify(value, (key, nested) => (key === "description" ? undefined : nested)),
+    ) as unknown;
+}
