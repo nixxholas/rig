@@ -153,6 +153,8 @@ import { PresenceStore, resolvePresences } from "../presence/index.js";
 import { SlotEntryStore } from "../slots/index.js";
 import { WebappStore } from "../webapps/index.js";
 import { querySlotScopeTargetExists } from "../persistence/slots/querySlotScopeTargetExists.js";
+import { PersistentScopeShareCoreStore } from "../persistence/scope-sharing/PersistentScopeShareCoreStore.js";
+import { PersistentScopeShareDaemonStore } from "../persistence/scope-sharing/PersistentScopeShareDaemonStore.js";
 import { PersistentSessionShareCoreStore } from "../persistence/session-sharing/PersistentSessionShareCoreStore.js";
 import { PersistentSessionShareDaemonStore } from "../persistence/session-sharing/PersistentSessionShareDaemonStore.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
@@ -229,6 +231,8 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     readonly happyCloud: HappyCloudService;
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
+    readonly scopeShareDaemonStore: PersistentScopeShareDaemonStore;
+    readonly scopeShares: PersistentScopeShareCoreStore;
     readonly sessionShareDaemonStore: PersistentSessionShareDaemonStore;
     readonly sessionShares: PersistentSessionShareCoreStore;
     readonly slots: SlotEntryStore;
@@ -277,6 +281,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
             options.durableGlobalEventQueue === true
                 ? new PersistentGlobalEventQueue(this.#database)
                 : new InMemoryGlobalEventQueue();
+        this.scopeShares = new PersistentScopeShareCoreStore({
+            now: this.#now,
+            tx: () => this.#tx(),
+        });
+        this.scopeShareDaemonStore = new PersistentScopeShareDaemonStore({
+            tx: () => this.#tx(),
+        });
         this.sessionShares = new PersistentSessionShareCoreStore({
             now: this.#now,
             tx: () => this.#tx(),

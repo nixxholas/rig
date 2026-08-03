@@ -54,6 +54,7 @@ import type { PluginContext } from "../agent/context/PluginContext.js";
 import { PluginManager, PluginMcpRegistry } from "../plugins/index.js";
 import { createGeneratedMediaStore, getGeneratedDirectory } from "../generated-media/index.js";
 import { MurmurService } from "../murmur/index.js";
+import { createScopeShareKind } from "../scope-sharing/createScopeShareKind.js";
 import { createSessionShareKind } from "../session-sharing/createSessionShareKind.js";
 import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
@@ -65,7 +66,10 @@ export interface RunLocalProtocolServerOptions {
 }
 
 /** Every kind of share this daemon replicates, over one transport and one router. */
-type RigShareRuntime = ShareRuntime<{ session: ReturnType<typeof createSessionShareKind> }>;
+type RigShareRuntime = ShareRuntime<{
+    scope: ReturnType<typeof createScopeShareKind>;
+    session: ReturnType<typeof createSessionShareKind>;
+}>;
 
 export async function runLocalProtocolServer(
     options: RunLocalProtocolServerOptions = {},
@@ -499,6 +503,15 @@ async function runOwnedLocalProtocolServer(
             onSessionEvent: (event, session) => {
                 if (happyModule !== undefined) happySyncService?.observe(event, session);
                 shareRuntime?.kinds.session.wake(event.sessionId);
+                const shared = session?.projectIdentity();
+                if (shared !== undefined) {
+                    shareRuntime?.kinds.scope.wakeForSession({
+                        projectId: shared.projectId,
+                        ...(shared.workspaceId === undefined
+                            ? {}
+                            : { workspaceId: shared.workspaceId }),
+                    });
+                }
                 if (store !== undefined && gitStateTracker !== undefined) {
                     const identity = session?.projectIdentity();
                     markGitStateFromSessionEvent(
@@ -537,6 +550,10 @@ async function runOwnedLocalProtocolServer(
         const activeMurmur = murmurService;
         shareRuntime = createShareRuntime({
             kinds: {
+                scope: createScopeShareKind({
+                    daemonStore: activeStore.scopeShareDaemonStore,
+                    shareStore: activeStore.scopeShares,
+                }),
                 session: createSessionShareKind({
                     daemonStore: activeStore.sessionShareDaemonStore,
                     deliverFriendMessage: (ownerSessionId, message, persisted) => {
@@ -658,7 +675,10 @@ async function runOwnedLocalProtocolServer(
                 murmur: murmurService,
                 ...(shareRuntime === undefined
                     ? {}
-                    : { sessionShares: shareRuntime.kinds.session.contract }),
+                    : {
+                          scopeShares: shareRuntime.kinds.scope.contract,
+                          sessionShares: shareRuntime.kinds.session.contract,
+                      }),
                 plugins,
                 getProviderQuota: (providerId) => providerQuotaService.get(providerId),
                 listProviderUsage: () => providerUsageTracker?.all() ?? [],

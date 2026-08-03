@@ -133,7 +133,16 @@ import {
     addSessionShareMemberRequestSchema,
     HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
     answerMurmurFriendRequestRequestSchema,
+    addScopeShareMemberRequestSchema,
+    createScopeShareRequestSchema,
     createSessionShareRequestSchema,
+    revokeScopeShareMemberRequestSchema,
+    stopScopeShareRequestSchema,
+    type GetScopeShareHealthResponse,
+    type GetScopeShareReplicaResponse,
+    type GetScopeShareSessionHistoryResponse,
+    type ListScopeShareReplicasResponse,
+    type ScopeShareOwnerResponse,
     discoverPluginCatalogRequestSchema,
     globalSecurityPolicySchema,
     installPluginRequestSchema,
@@ -158,6 +167,10 @@ import {
 import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
 import { HappyCloudPersistenceError } from "../persistence/happy-cloud/HappyCloudPersistenceError.js";
 import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
+import type {
+    ScopeShareServiceContract,
+    ScopeShareTarget,
+} from "../scope-sharing/ScopeShareServiceContract.js";
 import type { SessionShareServiceContract } from "../session-sharing/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
 import { WorkspaceTransferTargetRestoreError } from "../git/prepareWorkspaceTransfer.js";
@@ -297,6 +310,8 @@ export interface ProtocolHttpServerOptions {
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
     murmur?: MurmurServiceContract;
+    /** Workspace and project sharing over Murmur. The daemon always supplies it. */
+    scopeShares?: ScopeShareServiceContract;
     /** Session sharing over Murmur. The daemon always supplies it. */
     sessionShares?: SessionShareServiceContract;
     fileSearchService?: FileSearchServiceContract;
@@ -357,6 +372,7 @@ export function createProtocolHttpServer(
         globalSecurityPolicyPath: options.globalSecurityPolicyPath ?? getGlobalSecurityMdPath(),
         listProviderUsage: options.listProviderUsage,
         murmur: options.murmur,
+        scopeShares: options.scopeShares,
         sessionShares: options.sessionShares,
         happyCloud: options.happyCloud,
         onDaemonSettingsChange: options.onDaemonSettingsChange,
@@ -436,6 +452,7 @@ interface ProtocolServerRuntimeConfig {
     globalSecurityPolicyPath: string;
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
     murmur: MurmurServiceContract | undefined;
+    scopeShares: ScopeShareServiceContract | undefined;
     sessionShares: SessionShareServiceContract | undefined;
     happyCloud: HappyCloudServiceContract | undefined;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
@@ -746,6 +763,118 @@ async function handleRequest(
             sendJson(response, 409, { error: errorToMessage(error) });
             return;
         }
+    }
+
+    if (route.name.startsWith("scope-share")) {
+        const scopeShares = runtimeConfig.scopeShares;
+        if (scopeShares === undefined) {
+            sendJson(response, 503, {
+                error: "This Rig server was started without workspace sharing.",
+            });
+            return;
+        }
+        if (
+            route.name === "scope-share-workspace" ||
+            route.name === "scope-share-workspace-members" ||
+            route.name === "scope-share-workspace-member-revoke" ||
+            route.name === "scope-share-workspace-stop"
+        ) {
+            const scope: ScopeShareTarget = { scopeId: route.workspaceId, scopeKind: "workspace" };
+            if (request.method === "GET" && route.name === "scope-share-workspace") {
+                const share = scopeShares.getOwner(scope);
+                if (share === undefined) {
+                    sendJson(response, 404, { error: "Workspace share not found." });
+                } else sendJson<ScopeShareOwnerResponse>(response, 200, share);
+                return;
+            }
+            if (request.method === "POST" && route.name === "scope-share-workspace") {
+                const body = await readCheckedBody(request, createScopeShareRequestSchema);
+                if (body === undefined) {
+                    sendJson(response, 400, { error: "The workspace share request is invalid." });
+                    return;
+                }
+                sendJson<ScopeShareOwnerResponse>(
+                    response,
+                    201,
+                    await scopeShares.create(scope, body),
+                );
+                return;
+            }
+            if (request.method === "POST" && route.name === "scope-share-workspace-members") {
+                const body = await readCheckedBody(request, addScopeShareMemberRequestSchema);
+                if (body === undefined) {
+                    sendJson(response, 400, { error: "The member request is invalid." });
+                    return;
+                }
+                sendJson<ScopeShareOwnerResponse>(
+                    response,
+                    200,
+                    await scopeShares.add(scope, body),
+                );
+                return;
+            }
+            if (request.method === "POST" && route.name === "scope-share-workspace-member-revoke") {
+                const body = await readCheckedBody(request, revokeScopeShareMemberRequestSchema);
+                if (body === undefined) {
+                    sendJson(response, 400, { error: "The revocation request is invalid." });
+                    return;
+                }
+                sendJson<ScopeShareOwnerResponse>(
+                    response,
+                    200,
+                    await scopeShares.revoke(scope, route.shareMemberId, body),
+                );
+                return;
+            }
+            if (request.method === "POST" && route.name === "scope-share-workspace-stop") {
+                const body = await readCheckedBody(request, stopScopeShareRequestSchema);
+                if (body === undefined) {
+                    sendJson(response, 400, { error: "The stop request is invalid." });
+                    return;
+                }
+                sendJson<ScopeShareOwnerResponse>(
+                    response,
+                    200,
+                    await scopeShares.stop(scope, body),
+                );
+                return;
+            }
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
+        if (request.method === "GET" && route.name === "scope-share-replicas") {
+            sendJson<ListScopeShareReplicasResponse>(response, 200, scopeShares.listReplicas());
+            return;
+        }
+        if (request.method === "GET" && route.name === "scope-share-replica") {
+            const replica = scopeShares.replica(
+                route.shareId,
+                url.searchParams.get("after") ?? undefined,
+            );
+            if (replica === undefined) {
+                sendJson(response, 404, { error: "Shared workspace not found." });
+            } else sendJson<GetScopeShareReplicaResponse>(response, 200, replica);
+            return;
+        }
+        if (request.method === "GET" && route.name === "scope-share-replica-session") {
+            const history = scopeShares.replicaSessionHistory(
+                route.shareId,
+                route.scopeSessionId,
+                url.searchParams.get("after") ?? undefined,
+            );
+            if (history === undefined) {
+                sendJson(response, 404, { error: "Shared workspace not found." });
+            } else sendJson<GetScopeShareSessionHistoryResponse>(response, 200, history);
+            return;
+        }
+        if (request.method === "GET" && route.name === "scope-share-health") {
+            const health = scopeShares.health(route.shareId);
+            if (health === undefined) sendJson(response, 404, { error: "Share not found." });
+            else sendJson<GetScopeShareHealthResponse>(response, 200, health);
+            return;
+        }
+        sendJson(response, 405, { error: "Method not allowed" });
+        return;
     }
 
     if (route.name.startsWith("session-share")) {
@@ -2119,6 +2248,9 @@ async function handleRequest(
                 sendJson(response, 404, { error: "Project not found" });
                 return;
             }
+            // Archiving a project retires its own share and every workspace share
+            // beneath it, because none of those workspaces is there to replicate.
+            await runtimeConfig.scopeShares?.stopForArchivedProject(route.projectId);
             sendJson<ProjectResponse>(response, 202, { project });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -2309,6 +2441,9 @@ async function handleRequest(
                 sendJson(response, 404, { error: "Workspace not found" });
                 return;
             }
+            // Archiving one workspace stops its share and nothing else's: a project
+            // share above it still covers everything that is left.
+            await runtimeConfig.scopeShares?.stopForArchivedWorkspace(route.workspaceId);
             sendJson<ProjectWorkspaceResponse>(response, 202, { workspace });
         } catch (error) {
             if (isDatabaseFailure(error)) throw error;
@@ -3990,6 +4125,7 @@ function matchRoute(pathname: string):
               | "plugins"
               | "projects"
               | "provider-usage"
+              | "scope-share-replicas"
               | "secret-registrations"
               | "session-share-post"
               | "session-share-replicas"
@@ -4009,6 +4145,17 @@ function matchRoute(pathname: string):
           name: "murmur-friend-request-answer";
           peerId: string;
           sessionId?: undefined;
+      }
+    | {
+          name: "scope-share-health" | "scope-share-replica";
+          sessionId?: undefined;
+          shareId: string;
+      }
+    | {
+          name: "scope-share-replica-session";
+          scopeSessionId: string;
+          sessionId?: undefined;
+          shareId: string;
       }
     | {
           name: "session-share-health" | "session-share-replica-history";
@@ -4071,9 +4218,19 @@ function matchRoute(pathname: string):
               | "project-workspace"
               | "project-workspace-archive"
               | "project-workspace-git"
-              | "project-workspace-reorder";
+              | "project-workspace-reorder"
+              | "scope-share-workspace"
+              | "scope-share-workspace-members"
+              | "scope-share-workspace-stop";
           projectId: string;
           sessionId?: undefined;
+          workspaceId: string;
+      }
+    | {
+          name: "scope-share-workspace-member-revoke";
+          projectId: string;
+          sessionId?: undefined;
+          shareMemberId: string;
           workspaceId: string;
       }
     | {
@@ -4197,6 +4354,7 @@ function matchRoute(pathname: string):
     if (pathname === "/secrets") return { name: "secret-registrations" };
     if (pathname === "/sessions") return { name: "sessions" };
     if (pathname === "/session-shares/friend-messages") return { name: "session-share-post" };
+    if (pathname === "/scope-share-replicas") return { name: "scope-share-replicas" };
     if (pathname === "/session-share-replicas") return { name: "session-share-replicas" };
     if (pathname === "/shutdown") return { name: "shutdown" };
     if (pathname === "/slots") return { name: "slots" };
@@ -4244,6 +4402,30 @@ function matchRoute(pathname: string):
     }
 
     const globalParts = pathname.split("/").filter(Boolean);
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "scope-shares" &&
+        globalParts[2] === "health"
+    ) {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        return shareId === undefined ? undefined : { name: "scope-share-health", shareId };
+    }
+    if (globalParts.length === 2 && globalParts[0] === "scope-share-replicas") {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        return shareId === undefined ? undefined : { name: "scope-share-replica", shareId };
+    }
+    if (
+        globalParts.length === 5 &&
+        globalParts[0] === "scope-share-replicas" &&
+        globalParts[2] === "sessions" &&
+        globalParts[4] === "history"
+    ) {
+        const shareId = decodeUrlComponent(globalParts[1]);
+        const scopeSessionId = decodeUrlComponent(globalParts[3]);
+        return shareId === undefined || scopeSessionId === undefined
+            ? undefined
+            : { name: "scope-share-replica-session", scopeSessionId, shareId };
+    }
     if (
         globalParts.length === 3 &&
         globalParts[0] === "session-shares" &&
@@ -4416,6 +4598,37 @@ function matchRoute(pathname: string):
             }
             if (globalParts.length === 5 && globalParts[4] === "reorder") {
                 return { name: "project-workspace-reorder", projectId, workspaceId };
+            }
+            if (globalParts.length === 5 && globalParts[4] === "share") {
+                return { name: "scope-share-workspace", projectId, workspaceId };
+            }
+            if (
+                globalParts.length === 6 &&
+                globalParts[4] === "share" &&
+                globalParts[5] === "members"
+            ) {
+                return { name: "scope-share-workspace-members", projectId, workspaceId };
+            }
+            if (
+                globalParts.length === 6 &&
+                globalParts[4] === "share" &&
+                globalParts[5] === "stop"
+            ) {
+                return { name: "scope-share-workspace-stop", projectId, workspaceId };
+            }
+            if (
+                globalParts.length === 8 &&
+                globalParts[4] === "share" &&
+                globalParts[5] === "members" &&
+                globalParts[6] !== undefined &&
+                globalParts[7] === "revoke"
+            ) {
+                return {
+                    name: "scope-share-workspace-member-revoke",
+                    projectId,
+                    shareMemberId: decodeURIComponent(globalParts[6]),
+                    workspaceId,
+                };
             }
             if (globalParts.length === 5 && globalParts[4] === "terminals") {
                 return { name: "project-terminals", projectId, workspaceId };
@@ -4890,6 +5103,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     }
     if (route.name === "sessions") return request.method === "POST";
     if (route.name === "session-share-post") return request.method === "POST";
+    if (route.name.startsWith("scope-share-workspace")) return request.method !== "GET";
     if (route.name === "projects") return request.method !== "GET";
     if (
         [
