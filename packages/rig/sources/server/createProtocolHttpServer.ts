@@ -31,6 +31,10 @@ import type {
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
     GetGlobalSecurityPolicyResponse,
+    HappyCloudCommandResponse,
+    HappyCloudProfileCiphertextResponse,
+    HappyCloudSessionBlobResponse,
+    HappyCloudStatus,
     GetSessionUsageResponse,
     GetTimelineResponse,
     GetMurmurFriendsResponse,
@@ -132,6 +136,7 @@ import {
     globalSecurityPolicySchema,
     installPluginRequestSchema,
     listFileTreeRequestSchema,
+    happyCloudCommandSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
     postSessionShareFriendMessageRequestSchema,
@@ -147,6 +152,8 @@ import {
     transferSessionRequestSchema,
     writeProjectFileRequestSchema,
 } from "../protocol/index.js";
+import type { HappyCloudServiceContract } from "../happy-cloud/index.js";
+import { HappyCloudPersistenceError } from "../persistence/happy-cloud/HappyCloudPersistenceError.js";
 import { MurmurServiceError, type MurmurServiceContract } from "../murmur/index.js";
 import type { SessionShareServiceContract } from "../session-sharing/index.js";
 import { getDaemonIdentity } from "../daemon/index.js";
@@ -283,6 +290,7 @@ export interface ProtocolHttpServerOptions {
     globalSecurityPolicyPath?: string;
     defaultDocker?: DockerExecutionConfig;
     gitStateTracker?: GitStateTracker;
+    happyCloud?: HappyCloudServiceContract;
     identity?: DaemonIdentity;
     modelCatalog?: ModelCatalog;
     murmur?: MurmurServiceContract;
@@ -347,6 +355,7 @@ export function createProtocolHttpServer(
         listProviderUsage: options.listProviderUsage,
         murmur: options.murmur,
         sessionShares: options.sessionShares,
+        happyCloud: options.happyCloud,
         onDaemonSettingsChange: options.onDaemonSettingsChange,
         onReloadHappy: options.onReloadHappy,
         onStartInspector: options.onStartInspector,
@@ -425,6 +434,7 @@ interface ProtocolServerRuntimeConfig {
     listProviderUsage: (() => readonly ProviderUsageEntry[]) | undefined;
     murmur: MurmurServiceContract | undefined;
     sessionShares: SessionShareServiceContract | undefined;
+    happyCloud: HappyCloudServiceContract | undefined;
     onDaemonSettingsChange: ProtocolHttpServerOptions["onDaemonSettingsChange"];
     onStartInspector: (() => StartInspectorResponse | Promise<StartInspectorResponse>) | undefined;
     onReloadHappy: (() => boolean | Promise<boolean>) | undefined;
@@ -541,6 +551,74 @@ async function handleRequest(
             source: "daemon",
         });
         return;
+    }
+    if (route.name.startsWith("happy-cloud-")) {
+        const happyCloud = runtimeConfig.happyCloud;
+        if (happyCloud === undefined) {
+            sendJson(response, 503, { error: "Happy Cloud settings are unavailable." });
+            return;
+        }
+        try {
+            if (request.method === "GET" && route.name === "happy-cloud-status") {
+                sendJson<HappyCloudStatus>(response, 200, happyCloud.status());
+                return;
+            }
+            if (request.method === "POST" && route.name === "happy-cloud-commands") {
+                const command = Value.Decode(
+                    happyCloudCommandSchema,
+                    await readJson<unknown>(request, 17 * 1024 * 1024),
+                );
+                const headerMutationId = requestMutationId(request);
+                if (headerMutationId === undefined || headerMutationId !== command.mutationId) {
+                    sendJson(response, 400, {
+                        error: "The Happy Cloud mutation id header is required and must match the body.",
+                    });
+                    return;
+                }
+                sendJson<HappyCloudCommandResponse>(response, 200, happyCloud.apply(command));
+                return;
+            }
+            if (request.method === "GET" && route.name === "happy-cloud-profile") {
+                const profile = happyCloud.getProfile();
+                if (profile === undefined) {
+                    sendJson(response, 404, { error: "No encrypted Happy Profile is stored." });
+                    return;
+                }
+                sendJson<HappyCloudProfileCiphertextResponse>(response, 200, profile);
+                return;
+            }
+            if (request.method === "GET" && route.name === "happy-cloud-session-blob") {
+                const blob = happyCloud.getSessionBlob(route.cloudSessionId);
+                if (blob === undefined) {
+                    sendJson(response, 404, {
+                        error: "No encrypted mobile session blob is stored.",
+                    });
+                    return;
+                }
+                sendJson<HappyCloudSessionBlobResponse>(response, 200, blob);
+                return;
+            }
+        } catch (error) {
+            if (isDatabaseFailure(error)) throw error;
+            if (
+                error instanceof InvalidJsonBodyError ||
+                error instanceof RequestBodyTooLargeError
+            ) {
+                throw error;
+            }
+            if (error instanceof HappyCloudPersistenceError) {
+                const conflict =
+                    error.code === "version_conflict" || error.code === "mutation_reused";
+                sendJson(response, conflict ? 409 : 403, {
+                    code: error.code,
+                    error: error.message,
+                    status: happyCloud.status(),
+                });
+                return;
+            }
+            sendJson(response, 400, { error: "The Happy Cloud command is invalid." });
+            return;
+        }
     }
 
     if (route.name.startsWith("murmur-")) {
@@ -3872,6 +3950,9 @@ function matchRoute(pathname: string):
               | "debug-inspector"
               | "health"
               | "installation"
+              | "happy-cloud-commands"
+              | "happy-cloud-profile"
+              | "happy-cloud-status"
               | "happy-reload"
               | "messages"
               | "models"
@@ -3894,6 +3975,11 @@ function matchRoute(pathname: string):
               | "slots"
               | "timeline"
               | "webapps";
+          sessionId?: undefined;
+      }
+    | {
+          cloudSessionId: string;
+          name: "happy-cloud-session-blob";
           sessionId?: undefined;
       }
     | {
@@ -4056,6 +4142,9 @@ function matchRoute(pathname: string):
     | undefined {
     if (pathname === "/health") return { name: "health" };
     if (pathname === "/installation") return { name: "installation" };
+    if (pathname === "/happy-cloud/commands") return { name: "happy-cloud-commands" };
+    if (pathname === "/happy-cloud/profile") return { name: "happy-cloud-profile" };
+    if (pathname === "/happy-cloud/status") return { name: "happy-cloud-status" };
     if (pathname === "/happy/reload") return { name: "happy-reload" };
     if (pathname === "/config") return { name: "config" };
     if (pathname === "/config/instructions") return { name: "global-instructions" };
@@ -4149,6 +4238,17 @@ function matchRoute(pathname: string):
         return shareId === undefined
             ? undefined
             : { name: "session-share-replica-history", shareId };
+    }
+    if (
+        globalParts.length === 3 &&
+        globalParts[0] === "happy-cloud" &&
+        globalParts[1] === "session-blobs" &&
+        globalParts[2] !== undefined
+    ) {
+        const cloudSessionId = decodeUrlComponent(globalParts[2]);
+        return cloudSessionId === undefined
+            ? undefined
+            : { cloudSessionId, name: "happy-cloud-session-blob" };
     }
     if (
         globalParts.length === 4 &&
@@ -4736,6 +4836,7 @@ function isMutatingProtocolRequest(request: IncomingMessage): boolean {
     if (route.name === "debug-inspector") return request.method === "POST";
     if (route.name === "global-events-trim") return request.method === "POST";
     if (route.name === "happy-reload") return request.method === "POST";
+    if (route.name === "happy-cloud-commands") return request.method === "POST";
     if (route.name === "plugins") return request.method === "POST";
     if (route.name === "plugin-catalog") return false;
     if (

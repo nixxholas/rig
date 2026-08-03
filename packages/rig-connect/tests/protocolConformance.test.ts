@@ -141,6 +141,20 @@ type _WorkspaceErrorMaxLength = Assignable<
 >;
 type _SessionSummary = Assignable<local.SessionSummary, daemon.SessionSummary>;
 type _GlobalEvent = Assignable<local.GlobalEvent, daemon.GlobalEvent>;
+type _HappyCloudStatus = Assignable<local.HappyCloudStatus, daemon.HappyCloudStatus>;
+type _HappyCloudCommand = Assignable<daemon.HappyCloudCommand, local.HappyCloudCommand>;
+type _HappyCloudCommandResponse = Assignable<
+    local.HappyCloudCommandResponse,
+    daemon.HappyCloudCommandResponse
+>;
+type _HappyCloudProfile = Assignable<
+    local.HappyCloudProfileCiphertextResponse,
+    daemon.HappyCloudProfileCiphertextResponse
+>;
+type _HappyCloudSessionBlob = Assignable<
+    local.HappyCloudSessionBlobResponse,
+    daemon.HappyCloudSessionBlobResponse
+>;
 type _Attachment = Assignable<local.Attachment, daemon.Attachment>;
 type _Webapp = Assignable<local.Webapp, daemon.Webapp>;
 type _ResolveWebappOpenRequest = Assignable<

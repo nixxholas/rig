@@ -29,6 +29,8 @@ export type {
     DraftUpdate,
     GoalStatus,
     GroupTarget,
+    HappyCloudCommandInput,
+    HappyCloudOperationOptions,
     ModelSelection,
     MurmurOperationOptions,
     ProjectAddOptions,
@@ -36,6 +38,8 @@ export type {
     RigProjects,
     RigGroupsConnection,
     RigGroupsSubscriptionOptions,
+    RigHappyCloudConnection,
+    RigHappyCloudSubscriptionOptions,
     RigInboxConnection,
     RigInboxSubscriptionOptions,
     RigProviderUsageConnection,
@@ -78,6 +82,14 @@ export type {
     ReadPluginIconResult,
 } from "./PluginElement.js";
 export type {
+    HappyCloudCapability,
+    HappyCloudCapabilityStatus,
+    HappyCloudCommand,
+    HappyCloudCommandResponse,
+    HappyCloudConsent,
+    HappyCloudProfileCiphertextResponse,
+    HappyCloudSessionBlobResponse,
+    HappyCloudStatus,
     InstalledPluginSummary,
     DiscoverPluginCatalogRequest,
     GitHubPluginCatalog,
@@ -178,6 +190,14 @@ export type {
 } from "./GroupElement.js";
 export { sessionUnreadAfterEvent } from "./sessionUnread.js";
 export {
+    HAPPY_CLOUD_CONTRACT_VERSION,
+    happyCloudCapabilitySchema,
+    happyCloudCommandResponseSchema,
+    happyCloudCommandSchema,
+    happyCloudConsentSchema,
+    happyCloudProfileCiphertextResponseSchema,
+    happyCloudSessionBlobResponseSchema,
+    happyCloudStatusSchema,
     computePreparationNoticeSchema,
     computeServiceErrorSchema,
     PROJECT_WORKSPACE_ERROR_MAX_LENGTH,

@@ -2513,6 +2513,144 @@ export interface ListProviderUsageResponse {
     providers: readonly ProviderUsageEntry[];
 }
 
+const happyCloudExact = { additionalProperties: false } as const;
+const happyCloudTimestampSchema = Type.Integer({
+    maximum: Number.MAX_SAFE_INTEGER,
+    minimum: 0,
+});
+const happyCloudVersionSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
+const happyCloudCiphertextSchema = Type.String({ maxLength: 16 * 1024 * 1024, minLength: 1 });
+const happyCloudSessionIdSchema = Type.String({ maxLength: 256, minLength: 1 });
+export const HAPPY_CLOUD_CONTRACT_VERSION = 1 as const;
+export const happyCloudCapabilitySchema = Type.Union([
+    Type.Literal("friends"),
+    Type.Literal("group_chats"),
+    Type.Literal("live_session_sharing"),
+    Type.Literal("remote_control"),
+    Type.Literal("session_blob_persistence"),
+    Type.Literal("happy_profile"),
+]);
+export type HappyCloudCapability = Static<typeof happyCloudCapabilitySchema>;
+export const happyCloudConsentSchema = Type.Union([
+    Type.Literal("denied"),
+    Type.Literal("granted"),
+]);
+export type HappyCloudConsent = Static<typeof happyCloudConsentSchema>;
+export const happyCloudCapabilityStatusSchema = Type.Object(
+    { changedAt: happyCloudTimestampSchema, consent: happyCloudConsentSchema },
+    happyCloudExact,
+);
+export type HappyCloudCapabilityStatus = Static<typeof happyCloudCapabilityStatusSchema>;
+export const happyCloudStatusSchema = Type.Object(
+    {
+        capabilities: Type.Object(
+            {
+                friends: happyCloudCapabilityStatusSchema,
+                group_chats: happyCloudCapabilityStatusSchema,
+                happy_profile: happyCloudCapabilityStatusSchema,
+                live_session_sharing: happyCloudCapabilityStatusSchema,
+                remote_control: happyCloudCapabilityStatusSchema,
+                session_blob_persistence: happyCloudCapabilityStatusSchema,
+            },
+            happyCloudExact,
+        ),
+        contractVersion: Type.Literal(HAPPY_CLOUD_CONTRACT_VERSION),
+        enrollment: Type.Object(
+            {
+                changedAt: happyCloudTimestampSchema,
+                state: Type.Union([Type.Literal("not_enrolled"), Type.Literal("enrolled")]),
+            },
+            happyCloudExact,
+        ),
+        profile: Type.Object(
+            {
+                changedAt: happyCloudTimestampSchema,
+                state: Type.Union([Type.Literal("not_created"), Type.Literal("created")]),
+            },
+            happyCloudExact,
+        ),
+        updatedAt: happyCloudTimestampSchema,
+        version: happyCloudVersionSchema,
+    },
+    happyCloudExact,
+);
+export type HappyCloudStatus = Static<typeof happyCloudStatusSchema>;
+const happyCloudCommandBase = {
+    contractVersion: Type.Literal(HAPPY_CLOUD_CONTRACT_VERSION),
+    expectedVersion: happyCloudVersionSchema,
+    mutationId: Type.String({ maxLength: 256, minLength: 1 }),
+};
+export const happyCloudCommandSchema = Type.Union([
+    Type.Object(
+        {
+            ...happyCloudCommandBase,
+            action: Type.Literal("set_enrollment"),
+            state: Type.Union([Type.Literal("not_enrolled"), Type.Literal("enrolled")]),
+        },
+        happyCloudExact,
+    ),
+    Type.Object(
+        {
+            ...happyCloudCommandBase,
+            action: Type.Literal("set_capability"),
+            capability: happyCloudCapabilitySchema,
+            consent: happyCloudConsentSchema,
+        },
+        happyCloudExact,
+    ),
+    Type.Object(
+        {
+            ...happyCloudCommandBase,
+            action: Type.Literal("put_profile"),
+            ciphertext: happyCloudCiphertextSchema,
+        },
+        happyCloudExact,
+    ),
+    Type.Object(
+        { ...happyCloudCommandBase, action: Type.Literal("delete_profile") },
+        happyCloudExact,
+    ),
+    Type.Object(
+        {
+            ...happyCloudCommandBase,
+            action: Type.Literal("put_session_blob"),
+            ciphertext: happyCloudCiphertextSchema,
+            sessionId: happyCloudSessionIdSchema,
+        },
+        happyCloudExact,
+    ),
+    Type.Object(
+        {
+            ...happyCloudCommandBase,
+            action: Type.Literal("delete_session_blob"),
+            sessionId: happyCloudSessionIdSchema,
+        },
+        happyCloudExact,
+    ),
+]);
+export type HappyCloudCommand = Static<typeof happyCloudCommandSchema>;
+export const happyCloudCommandResponseSchema = Type.Object(
+    { status: happyCloudStatusSchema },
+    happyCloudExact,
+);
+export type HappyCloudCommandResponse = Static<typeof happyCloudCommandResponseSchema>;
+export const happyCloudProfileCiphertextResponseSchema = Type.Object(
+    { ciphertext: happyCloudCiphertextSchema, version: happyCloudVersionSchema },
+    happyCloudExact,
+);
+export type HappyCloudProfileCiphertextResponse = Static<
+    typeof happyCloudProfileCiphertextResponseSchema
+>;
+export const happyCloudSessionBlobResponseSchema = Type.Object(
+    {
+        ciphertext: happyCloudCiphertextSchema,
+        sessionId: happyCloudSessionIdSchema,
+        version: happyCloudVersionSchema,
+    },
+    happyCloudExact,
+);
+export type HappyCloudSessionBlobResponse = Static<typeof happyCloudSessionBlobResponseSchema>;
+
 const murmurProtocolExact = { additionalProperties: false } as const;
 const murmurBase64Schema = Type.String({
     maxLength: 32 * 1024 * 1024,

@@ -766,6 +766,45 @@ export const happyOutbox = sqliteTable(
     ],
 );
 
+export const happyCloudEnrollment = sqliteTable("happy_cloud_enrollment", {
+    singletonId: integer("singleton_id").primaryKey(),
+    contractVersion: integer("contract_version").notNull(),
+    version: integer("version").notNull(),
+    enrollmentState: text("enrollment_state").notNull(),
+    enrollmentChangedAtMs: integer("enrollment_changed_at_ms").notNull(),
+    friendsConsent: text("friends_consent").notNull(),
+    friendsChangedAtMs: integer("friends_changed_at_ms").notNull(),
+    groupChatsConsent: text("group_chats_consent").notNull(),
+    groupChatsChangedAtMs: integer("group_chats_changed_at_ms").notNull(),
+    liveSessionSharingConsent: text("live_session_sharing_consent").notNull(),
+    liveSessionSharingChangedAtMs: integer("live_session_sharing_changed_at_ms").notNull(),
+    remoteControlConsent: text("remote_control_consent").notNull(),
+    remoteControlChangedAtMs: integer("remote_control_changed_at_ms").notNull(),
+    sessionBlobPersistenceConsent: text("session_blob_persistence_consent").notNull(),
+    sessionBlobPersistenceChangedAtMs: integer("session_blob_persistence_changed_at_ms").notNull(),
+    happyProfileConsent: text("happy_profile_consent").notNull(),
+    happyProfileChangedAtMs: integer("happy_profile_changed_at_ms").notNull(),
+    profileCiphertext: text("profile_ciphertext"),
+    profileVersion: integer("profile_version"),
+    profileChangedAtMs: integer("profile_changed_at_ms").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
+export const happyCloudSessionBlobs = sqliteTable("happy_cloud_session_blobs", {
+    sessionId: text("session_id").primaryKey(),
+    ciphertext: text("ciphertext").notNull(),
+    version: integer("version").notNull(),
+    updatedAtMs: integer("updated_at_ms").notNull(),
+});
+
+export const happyCloudMutationReceipts = sqliteTable("happy_cloud_mutation_receipts", {
+    seq: integer("seq").primaryKey({ autoIncrement: true }),
+    mutationId: text("mutation_id").notNull().unique(),
+    requestFingerprint: text("request_fingerprint").notNull(),
+    responseJson: text("response_json").notNull(),
+    createdAtMs: integer("created_at_ms").notNull(),
+});
+
 export const slotEntries = sqliteTable("slot_entries", {
     id: text("id").primaryKey(),
     slot: text("slot").notNull(),

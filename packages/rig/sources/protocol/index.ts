@@ -54,6 +54,24 @@ export {
     type RigInstallationData,
 } from "./InstallationProtocol.js";
 export {
+    HAPPY_CLOUD_CONTRACT_VERSION,
+    happyCloudCapabilitySchema,
+    happyCloudCommandResponseSchema,
+    happyCloudCommandSchema,
+    happyCloudConsentSchema,
+    happyCloudProfileCiphertextResponseSchema,
+    happyCloudSessionBlobResponseSchema,
+    happyCloudStatusSchema,
+    type HappyCloudCapability,
+    type HappyCloudCapabilityStatus,
+    type HappyCloudCommand,
+    type HappyCloudCommandResponse,
+    type HappyCloudConsent,
+    type HappyCloudProfileCiphertextResponse,
+    type HappyCloudSessionBlobResponse,
+    type HappyCloudStatus,
+} from "./HappyCloudProtocol.js";
+export {
     computePreparationNoticeSchema,
     SERVICE_NOTICE_MESSAGE_MAX_LENGTH,
     SERVICE_NOTICE_TEXT_MAX_LENGTH,

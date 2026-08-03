@@ -38,6 +38,11 @@ import type {
     ListProviderUsageResponse,
     GlobalStreamHello,
     HealthResponse,
+    HappyCloudCommand,
+    HappyCloudCommandResponse,
+    HappyCloudProfileCiphertextResponse,
+    HappyCloudSessionBlobResponse,
+    HappyCloudStatus,
     GoalSessionResponse,
     ListGlobalEventsResponse,
     ListExternalToolCallsResponse,
@@ -176,6 +181,38 @@ export class ProtocolHttpClient {
     constructor(options: ProtocolHttpClientOptions) {
         this.socketPath = options.socketPath;
         this.token = options.token;
+    }
+
+    getHappyCloudStatus(): Promise<HappyCloudStatus> {
+        return this.#requestJson("GET", "/happy-cloud/status");
+    }
+
+    applyHappyCloudCommand(command: HappyCloudCommand): Promise<HappyCloudCommandResponse> {
+        return this.#requestJson("POST", "/happy-cloud/commands", command, {
+            "x-rig-mutation-id": command.mutationId,
+        });
+    }
+
+    getHappyCloudProfile(): Promise<HappyCloudProfileCiphertextResponse | undefined> {
+        return this.#requestJson<HappyCloudProfileCiphertextResponse>(
+            "GET",
+            "/happy-cloud/profile",
+        ).catch((error: unknown) => {
+            if (error instanceof ProtocolHttpError && error.statusCode === 404) return undefined;
+            throw error;
+        });
+    }
+
+    getHappyCloudSessionBlob(
+        sessionId: string,
+    ): Promise<HappyCloudSessionBlobResponse | undefined> {
+        return this.#requestJson<HappyCloudSessionBlobResponse>(
+            "GET",
+            `/happy-cloud/session-blobs/${encodeURIComponent(sessionId)}`,
+        ).catch((error: unknown) => {
+            if (error instanceof ProtocolHttpError && error.statusCode === 404) return undefined;
+            throw error;
+        });
     }
 
     steerMessage(sessionId: string, request: SteerMessageRequest): Promise<SteerMessageResponse> {

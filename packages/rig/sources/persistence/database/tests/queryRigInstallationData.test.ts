@@ -24,6 +24,7 @@ import {
     RIG_DATA_IDENTITY_SCHEMA_VERSION,
 } from "../migrateSessionDatabase.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
+import { dropSchemaAddedAfterIdentityMigrations } from "./dropSchemaAddedAfterIdentityMigrations.js";
 
 const directories: string[] = [];
 
@@ -101,6 +102,7 @@ describe("queryRigInstallationData", () => {
         const databasePath = join(testDirectory(), "sessions.sqlite");
         const opened = openSessionDatabase(databasePath);
         migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded-epoch" });
+        dropSchemaAddedAfterIdentityMigrations(opened.database);
         opened.database.run(sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"));
         opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_SCHEMA_VERSION)}`),

@@ -395,6 +395,37 @@ shape used by the catalog. Invalid folders reject with `ProjectRegistrationError
 `status`, and human-readable message are safe to display. An optional `{ projectId, signal }`
 controls identity and cancellation.
 
+### Happy Cloud enrollment and capability consent
+
+`connectHappyCloud()` follows one versioned singleton, including local optimistic choices.
+Enrollment is only enrollment: all six capabilities remain denied until each is granted explicitly.
+
+```ts
+const cloud = rig.connectHappyCloud({
+    onChange(status) {
+        renderCloudChoices(status);
+    },
+});
+
+const mutationId = rig.applyHappyCloudCommand({
+    action: "set_capability",
+    capability: "remote_control",
+    consent: "granted",
+});
+```
+
+The capabilities are `friends`, `group_chats`, `live_session_sharing`, `remote_control`,
+`session_blob_persistence`, and `happy_profile`. Rig Connect assigns the strict contract version,
+expected state version, and mutation identity, then owns FIFO delivery, retry, reconciliation, and
+rejection. The daemon rejects stale commands and mutation-identity reuse with different content.
+Unenrollment revokes every capability and deletes stored ciphertext. Revoking profile or
+session-blob persistence deletes only that capability's ciphertext.
+
+Rig does not create or inspect Happy Cloud cryptography. Profile and mobile-session payloads are
+caller-encrypted opaque strings, stored and returned verbatim through `getHappyCloudProfile()` and
+`getHappyCloudSessionBlob()`. The contract reports what is stored; it does not claim that plaintext
+was encrypted or that anything was uploaded to a cloud service.
+
 ## The groups
 
 A session does not live alone. Above it is a project, and inside a project are worktrees; both hold

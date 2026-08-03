@@ -16,6 +16,7 @@ import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
 import { projectComputeGeneration } from "../migrations/12-project-compute-generation.js";
 import { projectUserMutationVersion } from "../migrations/16-project-user-mutation-version.js";
 import { openSessionDatabase } from "../openSessionDatabase.js";
+import { dropSchemaAddedAfterIdentityMigrations } from "./dropSchemaAddedAfterIdentityMigrations.js";
 import * as schema from "../schema.js";
 
 const directories: string[] = [];
@@ -66,6 +67,7 @@ describe("migrateSessionDatabase", () => {
     it("does not replay the identity migration when the following migration runs", () => {
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database, { createDataEpoch: () => "stable-epoch" });
+        dropSchemaAddedAfterIdentityMigrations(opened.database);
         opened.database.run(sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"));
         opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_SCHEMA_VERSION)}`),
@@ -90,6 +92,7 @@ describe("migrateSessionDatabase", () => {
         expect(RIG_DATA_IDENTITY_MIGRATION_INDEX).toBe(19);
         const opened = openTestDatabase();
         migrateSessionDatabase(opened.database, { createDataEpoch: () => "discarded" });
+        dropSchemaAddedAfterIdentityMigrations(opened.database);
         opened.database.run(sql.raw("DROP TABLE rig_data_identity"));
         opened.database.run(
             sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_MIGRATION_INDEX)}`),
