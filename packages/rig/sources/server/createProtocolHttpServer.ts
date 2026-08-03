@@ -31,6 +31,7 @@ import type {
     GetDaemonConfigResponse,
     GetGlobalInstructionsResponse,
     GetGlobalSecurityPolicyResponse,
+    HappyCloudCommand,
     HappyCloudCommandResponse,
     HappyCloudProfileCiphertextResponse,
     HappyCloudSessionBlobResponse,
@@ -130,6 +131,7 @@ import type {
 } from "../protocol/index.js";
 import {
     addSessionShareMemberRequestSchema,
+    HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
     answerMurmurFriendRequestRequestSchema,
     createSessionShareRequestSchema,
     discoverPluginCatalogRequestSchema,
@@ -137,6 +139,7 @@ import {
     installPluginRequestSchema,
     listFileTreeRequestSchema,
     happyCloudCommandSchema,
+    happyCloudSessionIdSchema,
     RIG_PROTOCOL_VERSION,
     registerProjectRequestSchema,
     postSessionShareFriendMessageRequestSchema,
@@ -553,70 +556,90 @@ async function handleRequest(
         return;
     }
     if (route.name.startsWith("happy-cloud-")) {
+        const allowedMethod = route.name === "happy-cloud-commands" ? "POST" : "GET";
+        if (request.method !== allowedMethod) {
+            response.setHeader("allow", allowedMethod);
+            sendJson(response, 405, { error: "Method not allowed" });
+            return;
+        }
         const happyCloud = runtimeConfig.happyCloud;
         if (happyCloud === undefined) {
             sendJson(response, 503, { error: "Happy Cloud settings are unavailable." });
             return;
         }
-        try {
-            if (request.method === "GET" && route.name === "happy-cloud-status") {
-                sendJson<HappyCloudStatus>(response, 200, happyCloud.status());
-                return;
-            }
-            if (request.method === "POST" && route.name === "happy-cloud-commands") {
-                const command = Value.Decode(
+        if (route.name === "happy-cloud-status") {
+            sendJson<HappyCloudStatus>(response, 200, happyCloud.status());
+            return;
+        }
+        if (route.name === "happy-cloud-commands") {
+            let command: HappyCloudCommand;
+            try {
+                command = Value.Decode(
                     happyCloudCommandSchema,
-                    await readJson<unknown>(request, 17 * 1024 * 1024),
+                    await readJson<unknown>(request, HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH + 4_096),
                 );
-                const headerMutationId = requestMutationId(request);
-                if (headerMutationId === undefined || headerMutationId !== command.mutationId) {
-                    sendJson(response, 400, {
-                        error: "The Happy Cloud mutation id header is required and must match the body.",
-                    });
-                    return;
+            } catch (error) {
+                if (
+                    error instanceof InvalidJsonBodyError ||
+                    error instanceof RequestBodyTooLargeError
+                ) {
+                    throw error;
                 }
-                sendJson<HappyCloudCommandResponse>(response, 200, happyCloud.apply(command));
+                sendJson(response, 400, { error: "The Happy Cloud command is invalid." });
                 return;
             }
-            if (request.method === "GET" && route.name === "happy-cloud-profile") {
-                const profile = happyCloud.getProfile();
-                if (profile === undefined) {
-                    sendJson(response, 404, { error: "No encrypted Happy Profile is stored." });
-                    return;
-                }
-                sendJson<HappyCloudProfileCiphertextResponse>(response, 200, profile);
-                return;
-            }
-            if (request.method === "GET" && route.name === "happy-cloud-session-blob") {
-                const blob = happyCloud.getSessionBlob(route.cloudSessionId);
-                if (blob === undefined) {
-                    sendJson(response, 404, {
-                        error: "No encrypted mobile session blob is stored.",
-                    });
-                    return;
-                }
-                sendJson<HappyCloudSessionBlobResponse>(response, 200, blob);
-                return;
-            }
-        } catch (error) {
-            if (isDatabaseFailure(error)) throw error;
-            if (
-                error instanceof InvalidJsonBodyError ||
-                error instanceof RequestBodyTooLargeError
-            ) {
-                throw error;
-            }
-            if (error instanceof HappyCloudPersistenceError) {
-                const conflict =
-                    error.code === "version_conflict" || error.code === "mutation_reused";
-                sendJson(response, conflict ? 409 : 403, {
-                    code: error.code,
-                    error: error.message,
-                    status: happyCloud.status(),
+            const headerMutationId = requestMutationId(request);
+            if (headerMutationId === undefined || headerMutationId !== command.mutationId) {
+                sendJson(response, 400, {
+                    error: "The Happy Cloud mutation id header is required and must match the body.",
                 });
                 return;
             }
-            sendJson(response, 400, { error: "The Happy Cloud command is invalid." });
+            try {
+                sendJson<HappyCloudCommandResponse>(response, 200, happyCloud.apply(command));
+                return;
+            } catch (error) {
+                if (isDatabaseFailure(error)) throw error;
+                if (error instanceof HappyCloudPersistenceError) {
+                    const conflict =
+                        error.code === "version_conflict" || error.code === "mutation_reused";
+                    sendJson(response, conflict ? 409 : 403, {
+                        code: error.code,
+                        error: error.message,
+                        status: happyCloud.status(),
+                    });
+                    return;
+                }
+                throw error;
+            }
+        }
+        if (route.name === "happy-cloud-profile") {
+            const profile = happyCloud.getProfile();
+            if (profile === undefined) {
+                sendJson(response, 404, { error: "No encrypted Happy Profile is stored." });
+                return;
+            }
+            sendJson<HappyCloudProfileCiphertextResponse>(response, 200, profile);
+            return;
+        }
+        if (route.name === "happy-cloud-session-blob") {
+            let cloudSessionId: string;
+            try {
+                cloudSessionId = Value.Decode(happyCloudSessionIdSchema, route.cloudSessionId);
+            } catch {
+                sendJson(response, 400, {
+                    error: "The encrypted mobile session blob id is invalid.",
+                });
+                return;
+            }
+            const blob = happyCloud.getSessionBlob(cloudSessionId);
+            if (blob === undefined) {
+                sendJson(response, 404, {
+                    error: "No encrypted mobile session blob is stored.",
+                });
+                return;
+            }
+            sendJson<HappyCloudSessionBlobResponse>(response, 200, blob);
             return;
         }
     }

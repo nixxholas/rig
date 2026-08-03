@@ -4,8 +4,12 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { HappyCloudService } from "../../happy-cloud/index.js";
-import { HAPPY_CLOUD_CONTRACT_VERSION, type HappyCloudCommand } from "../../protocol/index.js";
+import { PersistentSessionStore } from "../../session/PersistentSessionStore.js";
+import {
+    HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
+    HAPPY_CLOUD_CONTRACT_VERSION,
+    type HappyCloudCommand,
+} from "../../protocol/index.js";
 import { ProtocolHttpClient } from "../../client/ProtocolHttpClient.js";
 import { createTestSocketDirectory } from "../../testing/createTestSocketDirectory.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
@@ -39,11 +43,11 @@ describe("Happy Cloud HTTP API", () => {
             await fixture.client.applyHappyCloudCommand(
                 command("profile", 2, {
                     action: "put_profile",
-                    ciphertext: "opaque-profile-ciphertext",
+                    ciphertext: "b3BhcXVlX3Byb2ZpbGVfY2lwaGVydGV4dA",
                 }),
             );
             await expect(fixture.client.getHappyCloudProfile()).resolves.toEqual({
-                ciphertext: "opaque-profile-ciphertext",
+                ciphertext: "b3BhcXVlX3Byb2ZpbGVfY2lwaGVydGV4dA",
                 version: 3,
             });
 
@@ -62,6 +66,20 @@ describe("Happy Cloud HTTP API", () => {
             );
             expect(malformed.status).toBe(400);
             expect(fixture.service.status().version).toBe(3);
+            const futureContract = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/commands",
+                {
+                    ...command("future-contract", 3, {
+                        action: "set_capability",
+                        capability: "friends",
+                        consent: "granted",
+                    }),
+                    contractVersion: 2,
+                },
+            );
+            expect(futureContract.status).toBe(400);
 
             const missingMutationHeader = await rawRequest(
                 fixture.socketPath,
@@ -75,6 +93,64 @@ describe("Happy Cloud HTTP API", () => {
                 false,
             );
             expect(missingMutationHeader.status).toBe(400);
+
+            const wrongCommandMethod = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/commands",
+                {},
+                true,
+                "GET",
+            );
+            expect(wrongCommandMethod).toMatchObject({ allow: "POST", status: 405 });
+            const wrongStatusMethod = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/status",
+                {},
+            );
+            expect(wrongStatusMethod).toMatchObject({ allow: "GET", status: 405 });
+            const invalidBlobId = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                `/happy-cloud/session-blobs/${"x".repeat(257)}`,
+                {},
+                true,
+                "GET",
+            );
+            expect(invalidBlobId.status).toBe(400);
+
+            const boundaryCiphertext = "A".repeat(HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH);
+            const boundary = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/commands",
+                command("boundary", 3, {
+                    action: "put_profile",
+                    ciphertext: boundaryCiphertext,
+                }),
+            );
+            expect(boundary.status).toBe(200);
+            const oversized = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/commands",
+                command("oversized", 4, {
+                    action: "put_profile",
+                    ciphertext: `${boundaryCiphertext}A`,
+                }),
+            );
+            expect(oversized.status).toBe(400);
+            const bodyTooLarge = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/commands",
+                command("body-too-large", 4, {
+                    action: "put_profile",
+                    ciphertext: `${boundaryCiphertext}${"A".repeat(5_000)}`,
+                }),
+            );
+            expect(bodyTooLarge.status).toBe(413);
 
             const unauthorized = await rawRequest(
                 fixture.socketPath,
@@ -115,6 +191,51 @@ describe("Happy Cloud HTTP API", () => {
             await fixture.close();
         }
     });
+
+    it("reports unexpected service failures as server errors", async () => {
+        const fixture = await startServer();
+        try {
+            fixture.service.apply = () => {
+                throw new Error("unexpected cloud failure");
+            };
+            const response = await rawRequest(
+                fixture.socketPath,
+                "secret",
+                "/happy-cloud/commands",
+                command("unexpected", 0, {
+                    action: "set_enrollment",
+                    state: "enrolled",
+                }),
+            );
+            expect(response).toMatchObject({
+                body: { error: "unexpected cloud failure" },
+                status: 500,
+            });
+        } finally {
+            await fixture.close();
+        }
+    });
+
+    it("delivers one committed lightweight change through the real live SSE route", async () => {
+        const fixture = await startServer();
+        const stream = await openLiveStream(fixture.socketPath, "secret");
+        try {
+            await stream.waitFor("event: hello");
+            await fixture.client.applyHappyCloudCommand(
+                command("live-enrollment", 0, {
+                    action: "set_enrollment",
+                    state: "enrolled",
+                }),
+            );
+            const delivered = await stream.waitFor("happy_cloud_changed");
+            expect(delivered).toContain('"mutationId":"live-enrollment"');
+            expect(delivered).toContain('"version":1');
+            expect(delivered).not.toContain('"status"');
+        } finally {
+            stream.close();
+            await fixture.close();
+        }
+    });
 });
 
 function command(
@@ -139,8 +260,11 @@ async function startServer() {
     const directory = await createTestSocketDirectory();
     directories.push(directory);
     const socketPath = join(directory, "rig.sock");
-    const service = new HappyCloudService(join(directory, "sessions.sqlite"));
-    const server = createProtocolHttpServer({ happyCloud: service, token: "secret" });
+    const store = new PersistentSessionStore({
+        databasePath: join(directory, "sessions.sqlite"),
+    });
+    const service = store.happyCloud;
+    const server = createProtocolHttpServer({ happyCloud: service, store, token: "secret" });
     await new Promise<void>((resolve) => server.listen(socketPath, resolve));
     return {
         client: new ProtocolHttpClient({ socketPath, token: "secret" }),
@@ -148,7 +272,7 @@ async function startServer() {
             await new Promise<void>((resolve, reject) =>
                 server.close((error) => (error === undefined ? resolve() : reject(error))),
             );
-            service.close();
+            store.close();
         },
         service,
         socketPath,
@@ -161,7 +285,8 @@ async function rawRequest(
     path: string,
     body: unknown,
     includeMutationHeader = true,
-): Promise<{ body: unknown; status: number }> {
+    method = "POST",
+): Promise<{ allow: string | undefined; body: unknown; status: number }> {
     const payload = JSON.stringify(body);
     return await new Promise((resolve, reject) => {
         const request = httpRequest(
@@ -172,7 +297,7 @@ async function rawRequest(
                     "content-type": "application/json",
                     ...(includeMutationHeader ? mutationHeaders(body) : {}),
                 },
-                method: "POST",
+                method,
                 path,
                 socketPath,
             },
@@ -182,6 +307,10 @@ async function rawRequest(
                 response.on("end", () => {
                     const text = Buffer.concat(chunks).toString("utf8");
                     resolve({
+                        allow:
+                            typeof response.headers.allow === "string"
+                                ? response.headers.allow
+                                : undefined,
                         body: text.length === 0 ? undefined : JSON.parse(text),
                         status: response.statusCode ?? 500,
                     });
@@ -196,4 +325,53 @@ async function rawRequest(
 function mutationHeaders(body: unknown): Record<string, string> {
     if (body === null || typeof body !== "object" || !("mutationId" in body)) return {};
     return typeof body.mutationId === "string" ? { "x-rig-mutation-id": body.mutationId } : {};
+}
+
+async function openLiveStream(
+    socketPath: string,
+    token: string,
+): Promise<{ close: () => void; waitFor: (needle: string) => Promise<string> }> {
+    return await new Promise((resolve, reject) => {
+        const request = httpRequest(
+            {
+                headers: {
+                    accept: "text/event-stream",
+                    authorization: `Bearer ${token}`,
+                },
+                method: "GET",
+                path: "/events/live",
+                socketPath,
+            },
+            (response) => {
+                let text = "";
+                const waiters: Array<{ needle: string; resolve: (value: string) => void }> = [];
+                response.setEncoding("utf8");
+                response.on("data", (chunk: string) => {
+                    text += chunk;
+                    for (let index = waiters.length - 1; index >= 0; index -= 1) {
+                        const waiter = waiters[index];
+                        if (waiter === undefined) continue;
+                        if (!text.includes(waiter.needle)) continue;
+                        waiter.resolve(text);
+                        waiters.splice(index, 1);
+                    }
+                });
+                response.on("error", reject);
+                resolve({
+                    close: () => {
+                        response.destroy();
+                        request.destroy();
+                    },
+                    waitFor: (needle) =>
+                        text.includes(needle)
+                            ? Promise.resolve(text)
+                            : new Promise<string>((resolveWaiter) =>
+                                  waiters.push({ needle, resolve: resolveWaiter }),
+                              ),
+                });
+            },
+        );
+        request.on("error", reject);
+        request.end();
+    });
 }

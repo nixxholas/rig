@@ -9,9 +9,34 @@ import { happyCloudEnrollment } from "../database/schema.js";
 import type { TX } from "../Transaction.js";
 
 export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
-    const row = tx.select().from(happyCloudEnrollment).get();
+    const row = tx
+        .select({
+            contractVersion: happyCloudEnrollment.contractVersion,
+            enrollmentChangedAtMs: happyCloudEnrollment.enrollmentChangedAtMs,
+            enrollmentState: happyCloudEnrollment.enrollmentState,
+            friendsChangedAtMs: happyCloudEnrollment.friendsChangedAtMs,
+            friendsConsent: happyCloudEnrollment.friendsConsent,
+            groupChatsChangedAtMs: happyCloudEnrollment.groupChatsChangedAtMs,
+            groupChatsConsent: happyCloudEnrollment.groupChatsConsent,
+            happyProfileChangedAtMs: happyCloudEnrollment.happyProfileChangedAtMs,
+            happyProfileConsent: happyCloudEnrollment.happyProfileConsent,
+            liveSessionSharingChangedAtMs: happyCloudEnrollment.liveSessionSharingChangedAtMs,
+            liveSessionSharingConsent: happyCloudEnrollment.liveSessionSharingConsent,
+            profileChangedAtMs: happyCloudEnrollment.profileChangedAtMs,
+            profileVersion: happyCloudEnrollment.profileVersion,
+            remoteControlChangedAtMs: happyCloudEnrollment.remoteControlChangedAtMs,
+            remoteControlConsent: happyCloudEnrollment.remoteControlConsent,
+            sessionBlobPersistenceChangedAtMs:
+                happyCloudEnrollment.sessionBlobPersistenceChangedAtMs,
+            sessionBlobPersistenceConsent: happyCloudEnrollment.sessionBlobPersistenceConsent,
+            updatedAtMs: happyCloudEnrollment.updatedAtMs,
+            version: happyCloudEnrollment.version,
+        })
+        .from(happyCloudEnrollment)
+        .get();
     if (row === undefined) return defaultHappyCloudStatus();
     return Value.Decode(happyCloudStatusSchema, {
+        authority: "local_record_only",
         capabilities: {
             friends: { changedAt: row.friendsChangedAtMs, consent: row.friendsConsent },
             group_chats: {
@@ -42,7 +67,7 @@ export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
         },
         profile: {
             changedAt: row.profileChangedAtMs,
-            state: row.profileCiphertext === null ? "not_created" : "created",
+            state: row.profileVersion === null ? "not_created" : "created",
         },
         updatedAt: row.updatedAtMs,
         version: row.version,
@@ -52,6 +77,7 @@ export function queryHappyCloudStatus(tx: TX): HappyCloudStatus {
 export function defaultHappyCloudStatus(): HappyCloudStatus {
     const denied = { changedAt: 0, consent: "denied" as const };
     return {
+        authority: "local_record_only",
         capabilities: {
             friends: denied,
             group_chats: denied,

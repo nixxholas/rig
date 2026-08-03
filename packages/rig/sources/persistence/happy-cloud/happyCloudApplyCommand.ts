@@ -21,6 +21,7 @@ import { HappyCloudPersistenceError } from "./HappyCloudPersistenceError.js";
 import { queryHappyCloudStatus } from "./queryHappyCloudStatus.js";
 
 const MAX_MUTATION_RECEIPTS = 4_096;
+export const HAPPY_CLOUD_SESSION_BLOB_LIMIT = 64;
 
 export function happyCloudApplyCommand(
     tx: TX,
@@ -206,6 +207,12 @@ function applyCommand(tx: TX, command: HappyCloudCommand, nextVersion: number, n
                 target: happyCloudSessionBlobs.sessionId,
             })
             .run();
+        tx.run(sql`DELETE FROM happy_cloud_session_blobs
+            WHERE session_id NOT IN (
+                SELECT session_id FROM happy_cloud_session_blobs
+                ORDER BY version DESC, session_id DESC
+                LIMIT ${HAPPY_CLOUD_SESSION_BLOB_LIMIT}
+            )`);
     } else {
         tx.delete(happyCloudSessionBlobs)
             .where(eq(happyCloudSessionBlobs.sessionId, command.sessionId))
@@ -232,7 +239,7 @@ function capabilityUpdate(
     capability: HappyCloudCapability,
     consent: "denied" | "granted",
     now: number,
-): Record<string, number | string> {
+): Partial<typeof happyCloudEnrollment.$inferInsert> {
     switch (capability) {
         case "friends":
             return { friendsChangedAtMs: now, friendsConsent: consent };

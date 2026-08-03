@@ -177,10 +177,10 @@ const CATCHUP_PAGE_LIMIT = 1_000;
 const CATCHUP_PENDING_LIMIT = 1_000;
 
 function liveEventKey(event: GlobalLiveEvent): string {
-    // Presence, plugins, slots, and webapps describe the whole daemon, so each coalesces on its
-    // type alone.
+    // These events describe daemon-wide state, so each coalesces on its type alone.
     if (
         event.type === "presence_changed" ||
+        event.type === "happy_cloud_changed" ||
         event.type === "plugins_changed" ||
         event.type === "slots_changed" ||
         event.type === "webapps_changed"

@@ -114,7 +114,9 @@ import {
     deleteMurmurAccountResponseSchema,
     getMurmurAccountResponseSchema,
     getMurmurFriendsResponseSchema,
+    happyCloudCommandErrorResponseSchema,
     happyCloudCommandResponseSchema,
+    happyCloudChangedEventSchema,
     happyCloudProfileCiphertextResponseSchema,
     happyCloudSessionBlobResponseSchema,
     happyCloudStatusSchema,
@@ -151,7 +153,6 @@ const MAXIMUM_PLUGIN_APP_REQUEST_BYTES = 1024 * 1024;
 const MAXIMUM_PLUGIN_APP_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAXIMUM_PLUGIN_ICON_BYTES = 4 * 1024 * 1024;
 const MAXIMUM_REMEMBERED_MURMUR_FRIENDSHIP_EVENTS = 1_024;
-const HAPPY_CLOUD_REFRESH_MS = 30_000;
 const pluginAppToolResponseSchema = Type.Object(
     { result: Type.Unknown() },
     { additionalProperties: false },
@@ -887,12 +888,21 @@ interface HappyCloudSubscriber extends RigHappyCloudSubscriptionOptions {
 }
 
 interface HappyCloudEntry {
+    acknowledgements: Map<string, number>;
+    authoritativeVersion: number;
+    bootstrapVersion: number;
+    controller: AbortController;
+    detachRoot: () => void;
+    lastLoadError?: unknown;
+    loadErrorReported: boolean;
     loaded: boolean;
+    loading?: Promise<void>;
+    recoveryScheduled: boolean;
     ready: Promise<void>;
+    requiredVersion: number;
     started: boolean;
     status: HappyCloudStatus;
     subscribers: Set<HappyCloudSubscriber>;
-    timer?: ReturnType<typeof setTimeout>;
 }
 
 interface MutationRequest {
@@ -916,6 +926,7 @@ interface PendingMutation {
     prepare: () => MutationRequest;
     reconcileEchoInPlace?: boolean;
     ready?: () => Promise<void>;
+    rebaseOnConflict?: (data: unknown) => boolean;
     replacesTranscript?: boolean;
     retryOnConflict?: boolean;
     sessionId?: string;
@@ -1576,6 +1587,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (
                         error instanceof MutationHttpError &&
                         error.status === 409 &&
+                        mutation.rebaseOnConflict?.(error.data) === true
+                    ) {
+                        recordAcceptedResponse(mutation, error.data);
+                        continue;
+                    }
+                    if (
+                        error instanceof MutationHttpError &&
+                        error.status === 409 &&
                         mutation.retryOnConflict === true
                     ) {
                         recordAcceptedResponse(mutation, error.data);
@@ -2125,6 +2144,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 gitWatchSignature = "";
                 if (gitWatchTimer !== undefined) clearTimeout(gitWatchTimer);
                 gitWatchTimer = undefined;
+                if (happyCloudEntry !== undefined && happyCloudEntry.started) {
+                    void requestHappyCloudReload(happyCloudEntry, hello.gap);
+                }
                 const groups = groupsEntry;
                 if (groups !== undefined && groups.started) {
                     void loadCatalog(groups).catch((error: unknown) =>
@@ -2174,6 +2196,31 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     return;
                 }
                 rememberGlobalIdentity(event);
+                if (event.type === "happy_cloud_changed") {
+                    const entry = happyCloudEntry;
+                    if (entry === undefined || !entry.started) return;
+                    let changed: Static<typeof happyCloudChangedEventSchema>;
+                    try {
+                        changed = Value.Decode(happyCloudChangedEventSchema, event);
+                    } catch {
+                        void requestHappyCloudReload(entry);
+                        return;
+                    }
+                    if (
+                        pendingOverlays.some((mutation) => mutation.id === changed.data.mutationId)
+                    ) {
+                        entry.acknowledgements.set(changed.data.mutationId, changed.data.version);
+                    }
+                    if (entry.loaded && changed.data.version <= entry.authoritativeVersion) {
+                        acknowledge(changed.data.mutationId);
+                        entry.acknowledgements.delete(changed.data.mutationId);
+                        releaseUnusedEntries();
+                        return;
+                    }
+                    entry.requiredVersion = Math.max(entry.requiredVersion, changed.data.version);
+                    void requestHappyCloudReload(entry);
+                    return;
+                }
                 if (event.type === "murmur_friendship_changed") {
                     const entry = murmurFriendsEntry;
                     if (
@@ -2536,6 +2583,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             entry.controller.abort();
             entry.detachRoot();
             timelineEntries.delete(key);
+        }
+        if (
+            happyCloudEntry !== undefined &&
+            happyCloudEntry.subscribers.size === 0 &&
+            !pendingOverlays.some((mutation) => mutation.entityKey === "happy-cloud") &&
+            (queues.get("happy-cloud")?.length ?? 0) === 0
+        ) {
+            happyCloudEntry.controller.abort();
+            happyCloudEntry.detachRoot();
+            happyCloudEntry = undefined;
         }
         if (
             groupsEntry !== undefined &&
@@ -3389,9 +3446,18 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
 
     const createHappyCloudEntry = (): HappyCloudEntry => {
         if (happyCloudEntry !== undefined) return happyCloudEntry;
+        const linked = linkedController(rootController.signal);
         happyCloudEntry = {
+            acknowledgements: new Map(),
+            authoritativeVersion: 0,
+            bootstrapVersion: 0,
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            loadErrorReported: false,
             loaded: false,
             ready: Promise.resolve(),
+            recoveryScheduled: false,
+            requiredVersion: 0,
             started: false,
             status: initialHappyCloudStatus(),
             subscribers: new Set(),
@@ -3400,70 +3466,143 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     };
 
     const reconcileHappyCloud = (
+        entry: HappyCloudEntry,
         status: HappyCloudStatus,
         mutationId: string | undefined,
-    ): void => {
-        const entry = createHappyCloudEntry();
+        allowVersionReset = false,
+    ): boolean => {
+        if (happyCloudEntry !== entry) return false;
+        const minimumVersion = Math.max(entry.authoritativeVersion, entry.requiredVersion);
+        if (status.version < minimumVersion && !allowVersionReset) return false;
+        if (allowVersionReset && status.version < minimumVersion) {
+            for (const acknowledgedMutationId of entry.acknowledgements.keys()) {
+                acknowledge(acknowledgedMutationId);
+            }
+            entry.acknowledgements.clear();
+            entry.requiredVersion = status.version;
+        }
         const relevant = pendingOverlays.filter((mutation) => mutation.entityKey === "happy-cloud");
         for (const mutation of [...relevant].reverse()) mutation.undo();
         entry.status = status;
+        entry.authoritativeVersion = status.version;
+        entry.loadErrorReported = false;
+        delete entry.lastLoadError;
         entry.loaded = true;
         acknowledge(mutationId);
+        for (const [echoedMutationId, version] of entry.acknowledgements) {
+            if (version > status.version) continue;
+            acknowledge(echoedMutationId);
+            entry.acknowledgements.delete(echoedMutationId);
+        }
         for (const mutation of pendingOverlays) {
             if (mutation.entityKey === "happy-cloud") {
                 mutation.undo = mutation.applyOptimistic(false);
             }
         }
         publishHappyCloud();
+        return true;
     };
 
-    const scheduleHappyCloudRefresh = (entry: HappyCloudEntry): void => {
-        if (entry.timer !== undefined) clearTimeout(entry.timer);
-        if (closed || entry.subscribers.size === 0) {
-            delete entry.timer;
-            return;
-        }
-        entry.timer = setTimeout(() => {
-            delete entry.timer;
-            if (pendingOverlays.some((mutation) => mutation.entityKey === "happy-cloud")) {
-                scheduleHappyCloudRefresh(entry);
+    const loadHappyCloudEntry = async (
+        entry: HappyCloudEntry,
+        bootstrapVersion: number,
+        allowVersionReset: boolean,
+    ): Promise<void> => {
+        let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
+        let staleSnapshots = 0;
+        for (;;) {
+            let status: HappyCloudStatus;
+            try {
+                status = await getHappyCloudStatus({ signal: entry.controller.signal });
+            } catch (error) {
+                if (
+                    entry.controller.signal.aborted ||
+                    entry.bootstrapVersion !== bootstrapVersion
+                ) {
+                    return;
+                }
+                if (!isRetryableMutationError(error)) {
+                    throw error;
+                }
+                await wait(retryDelay, entry.controller.signal);
+                retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
+                continue;
+            }
+            if (
+                happyCloudEntry !== entry ||
+                entry.controller.signal.aborted ||
+                entry.bootstrapVersion !== bootstrapVersion
+            ) {
                 return;
             }
-            entry.ready = getHappyCloudStatus({ signal: rootController.signal })
-                .then((status) => reconcileHappyCloud(status, undefined))
-                .catch((error: unknown) => {
-                    if (!rootController.signal.aborted) {
-                        for (const subscriber of [...entry.subscribers]) {
-                            subscriber.onError?.(error);
-                        }
-                    }
-                })
-                .finally(() => scheduleHappyCloudRefresh(entry));
-        }, HAPPY_CLOUD_REFRESH_MS);
+            if (reconcileHappyCloud(entry, status, undefined, allowVersionReset)) {
+                return;
+            }
+            staleSnapshots += 1;
+            if (staleSnapshots === 8) {
+                throw new Error("Happy Cloud status did not reach the version announced by Rig.");
+            }
+            await wait(retryDelay, entry.controller.signal);
+            retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
+        }
     };
 
-    const startHappyCloudEntry = (entry: HappyCloudEntry): void => {
-        if (entry.started) return;
-        entry.started = true;
-        entry.ready = retryHappyCloudBootstrap(entry).finally(() =>
-            scheduleHappyCloudRefresh(entry),
+    const requestHappyCloudReload = (
+        entry: HappyCloudEntry,
+        allowVersionReset = false,
+    ): Promise<void> => {
+        if (entry.loading !== undefined && !allowVersionReset) return entry.loading;
+        const bootstrapVersion = ++entry.bootstrapVersion;
+        const loading = loadHappyCloudEntry(entry, bootstrapVersion, allowVersionReset);
+        let shouldRecover = false;
+        entry.loading = loading;
+        entry.ready = loading;
+        void loading
+            .catch((error: unknown) => {
+                if (entry.controller.signal.aborted || happyCloudEntry !== entry) return;
+                const changedError =
+                    entry.lastLoadError instanceof Error && error instanceof Error
+                        ? entry.lastLoadError.message !== error.message
+                        : entry.lastLoadError !== error;
+                entry.lastLoadError = error;
+                if (!entry.loadErrorReported || changedError) {
+                    entry.loadErrorReported = true;
+                    for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+                }
+                shouldRecover = true;
+            })
+            .finally(() => {
+                if (entry.loading === loading) delete entry.loading;
+                if (shouldRecover) scheduleHappyCloudRecovery(entry);
+                releaseUnusedEntries();
+            });
+        return loading;
+    };
+
+    const scheduleHappyCloudRecovery = (entry: HappyCloudEntry): void => {
+        if (entry.recoveryScheduled || entry.controller.signal.aborted) return;
+        entry.recoveryScheduled = true;
+        void wait(MAXIMUM_MUTATION_RETRY_MS, entry.controller.signal).then(
+            () => {
+                entry.recoveryScheduled = false;
+                if (
+                    entry.controller.signal.aborted ||
+                    happyCloudEntry !== entry ||
+                    entry.loading !== undefined
+                ) {
+                    return;
+                }
+                void requestHappyCloudReload(entry);
+            },
+            () => {
+                entry.recoveryScheduled = false;
+            },
         );
     };
 
-    const retryHappyCloudBootstrap = async (entry: HappyCloudEntry): Promise<void> => {
-        let retryDelay = options.mutationRetryDelayMs ?? INITIAL_MUTATION_RETRY_MS;
-        for (;;) {
-            try {
-                const status = await getHappyCloudStatus({ signal: rootController.signal });
-                reconcileHappyCloud(status, undefined);
-                return;
-            } catch (error) {
-                if (rootController.signal.aborted || !isRetryableMutationError(error)) throw error;
-                for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
-                await wait(retryDelay, rootController.signal);
-                retryDelay = Math.min(MAXIMUM_MUTATION_RETRY_MS, retryDelay * 2);
-            }
-        }
+    const startHappyCloudEntry = (entry: HappyCloudEntry): void => {
+        if (!entry.started) entry.started = true;
+        if (!entry.loaded && entry.loading === undefined) void requestHappyCloudReload(entry);
     };
 
     const connectHappyCloud: RigConnection["connectHappyCloud"] = (subscription) => {
@@ -3472,17 +3611,16 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         const subscriber: HappyCloudSubscriber = { ...subscription, closed: false };
         entry.subscribers.add(subscriber);
         if (entry.loaded) subscriber.onChange(entry.status);
+        if (entry.loadErrorReported) subscriber.onError?.(entry.lastLoadError);
+        ensureLiveStream();
         startHappyCloudEntry(entry);
         return {
-            status: () => (entry.loaded ? entry.status : undefined),
+            status: () => (subscriber.closed || !entry.loaded ? undefined : entry.status),
             close: () => {
                 if (subscriber.closed) return;
                 subscriber.closed = true;
                 entry.subscribers.delete(subscriber);
-                if (entry.subscribers.size === 0 && entry.timer !== undefined) {
-                    clearTimeout(entry.timer);
-                    delete entry.timer;
-                }
+                releaseUnusedEntries();
             },
         };
     };
@@ -3490,34 +3628,49 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const applyHappyCloudCommand: RigConnection["applyHappyCloudCommand"] = (input) => {
         const entry = createHappyCloudEntry();
         startHappyCloudEntry(entry);
-        const ready = entry.ready;
         const mutationId = nextMutationId();
-        let command = {
-            ...input,
-            contractVersion: HAPPY_CLOUD_CONTRACT_VERSION,
-            expectedVersion: entry.status.version,
-            mutationId,
-        } as HappyCloudCommand;
+        const attemptedExpectedVersions = new Set<number>();
+        let conflictRebases = 0;
+        let deliveredCommand: HappyCloudCommand | undefined;
+        let projectedExpectedVersion = entry.status.version;
+        const projectedCommand = (): HappyCloudCommand =>
+            ({
+                ...input,
+                contractVersion: HAPPY_CLOUD_CONTRACT_VERSION,
+                expectedVersion: projectedExpectedVersion,
+                mutationId,
+            }) as HappyCloudCommand;
         const mutation: PendingMutation = {
             acknowledged: false,
             action: "apply_happy_cloud_command",
             applyAcceptedResponse: (data) => {
                 const response = Value.Decode(happyCloudCommandResponseSchema, data);
-                reconcileHappyCloud(response.status, mutationId);
+                if (!reconcileHappyCloud(entry, response.status, mutationId)) {
+                    entry.acknowledgements.set(mutationId, response.status.version);
+                    entry.requiredVersion = Math.max(
+                        entry.requiredVersion,
+                        response.status.version,
+                    );
+                    void requestHappyCloudReload(entry);
+                }
                 return true;
             },
             applyAuthoritativeResponse: (data) => {
-                if (data === null || typeof data !== "object" || !("status" in data)) return;
                 try {
-                    entry.status = Value.Decode(happyCloudStatusSchema, data.status);
+                    const response = Value.Decode(happyCloudCommandErrorResponseSchema, data);
+                    if (response.status.version >= entry.requiredVersion) {
+                        entry.status = response.status;
+                        entry.authoritativeVersion = response.status.version;
+                        entry.loaded = true;
+                    }
                 } catch {
                     // A malformed error response cannot become authoritative state.
                 }
             },
             applyOptimistic: (publish) => {
                 const before = entry.status;
-                command = { ...command, expectedVersion: before.version };
-                entry.status = predictHappyCloudStatus(before, command, now());
+                projectedExpectedVersion = before.version;
+                entry.status = predictHappyCloudStatus(before, projectedCommand(), now());
                 if (publish && entry.loaded) publishHappyCloud();
                 return () => {
                     entry.status = before;
@@ -3525,13 +3678,41 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             entityKey: "happy-cloud",
             id: mutationId,
-            prepare: () => ({
-                body: command,
-                headers: { "x-rig-mutation-id": mutationId },
-                method: "POST",
-                url: endpointUrl(options.endpoint, "happy-cloud/commands"),
-            }),
-            ready: () => ready,
+            prepare: () => {
+                deliveredCommand ??= projectedCommand();
+                attemptedExpectedVersions.add(deliveredCommand.expectedVersion);
+                return {
+                    body: deliveredCommand,
+                    headers: { "x-rig-mutation-id": mutationId },
+                    method: "POST",
+                    url: endpointUrl(options.endpoint, "happy-cloud/commands"),
+                };
+            },
+            ready: () => entry.ready,
+            rebaseOnConflict: (data) => {
+                try {
+                    const response = Value.Decode(happyCloudCommandErrorResponseSchema, data);
+                    if (response.code !== "version_conflict") return false;
+                    if (
+                        conflictRebases >= 8 ||
+                        attemptedExpectedVersions.has(response.status.version)
+                    ) {
+                        return false;
+                    }
+                    conflictRebases += 1;
+                    deliveredCommand = undefined;
+                    if (!reconcileHappyCloud(entry, response.status, undefined)) {
+                        entry.requiredVersion = Math.max(
+                            entry.requiredVersion,
+                            response.status.version,
+                        );
+                        void requestHappyCloudReload(entry);
+                    }
+                    return true;
+                } catch {
+                    return false;
+                }
+            },
             undo: () => undefined,
         };
         const id = enqueue(mutation);
@@ -4739,7 +4920,8 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 groupsEntry.subscribers.clear();
                 groupsEntry = undefined;
             }
-            if (happyCloudEntry?.timer !== undefined) clearTimeout(happyCloudEntry.timer);
+            happyCloudEntry?.controller.abort();
+            happyCloudEntry?.detachRoot();
             happyCloudEntry?.subscribers.clear();
             happyCloudEntry = undefined;
             if (providerUsageEntry !== undefined) {
@@ -4907,6 +5089,7 @@ function composeUndo(undos: readonly (() => void)[]): () => void {
 function initialHappyCloudStatus(): HappyCloudStatus {
     const denied = { changedAt: 0, consent: "denied" as const };
     return {
+        authority: "local_record_only",
         capabilities: {
             friends: denied,
             group_chats: denied,

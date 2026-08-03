@@ -365,7 +365,8 @@ assets, sessions, session events, session messages, session context messages,
 session turns, queued runs, external tool calls, durable user inputs, durable
 waits, scheduled messages, secret registrations and their environment variables,
 project secret attachments, Happy sync sessions and outbox, and the durable
-global-event stream with its cursor state.
+global-event stream with its cursor state. It also holds local Happy Cloud enrollment and consent
+records plus caller-encrypted profile and bounded mobile-session ciphertext.
 
 Secrets are stored as plaintext JSON in this database. The file is mode `0600`
 and its directory `0700`, which is access control, not encryption: replaced values

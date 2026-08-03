@@ -4,8 +4,13 @@ const exact = { additionalProperties: false } as const;
 const timestampSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
 const versionSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
 const mutationIdSchema = Type.String({ maxLength: 256, minLength: 1 });
-const ciphertextSchema = Type.String({ maxLength: 16 * 1024 * 1024, minLength: 1 });
-const sessionIdSchema = Type.String({ maxLength: 256, minLength: 1 });
+export const HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH = 2 * 1024 * 1024;
+const ciphertextSchema = Type.String({
+    maxLength: HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
+    minLength: 1,
+    pattern: "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$",
+});
+export const happyCloudSessionIdSchema = Type.String({ maxLength: 256, minLength: 1 });
 
 export const HAPPY_CLOUD_CONTRACT_VERSION = 1 as const;
 
@@ -36,6 +41,7 @@ export type HappyCloudCapabilityStatus = Static<typeof happyCloudCapabilityStatu
 
 export const happyCloudStatusSchema = Type.Object(
     {
+        authority: Type.Literal("local_record_only"),
         capabilities: Type.Object(
             {
                 friends: happyCloudCapabilityStatusSchema,
@@ -68,6 +74,23 @@ export const happyCloudStatusSchema = Type.Object(
     exact,
 );
 export type HappyCloudStatus = Static<typeof happyCloudStatusSchema>;
+
+export const happyCloudChangedEventSchema = Type.Object(
+    {
+        createdAt: timestampSchema,
+        data: Type.Object(
+            {
+                mutationId: mutationIdSchema,
+                version: versionSchema,
+            },
+            exact,
+        ),
+        id: Type.String({ maxLength: 256, minLength: 1 }),
+        type: Type.Literal("happy_cloud_changed"),
+    },
+    exact,
+);
+export type HappyCloudChangedEvent = Static<typeof happyCloudChangedEventSchema>;
 
 const commandBase = {
     contractVersion: Type.Literal(HAPPY_CLOUD_CONTRACT_VERSION),
@@ -107,7 +130,7 @@ export const happyCloudCommandSchema = Type.Union([
             ...commandBase,
             action: Type.Literal("put_session_blob"),
             ciphertext: ciphertextSchema,
-            sessionId: sessionIdSchema,
+            sessionId: happyCloudSessionIdSchema,
         },
         exact,
     ),
@@ -115,7 +138,7 @@ export const happyCloudCommandSchema = Type.Union([
         {
             ...commandBase,
             action: Type.Literal("delete_session_blob"),
-            sessionId: sessionIdSchema,
+            sessionId: happyCloudSessionIdSchema,
         },
         exact,
     ),
@@ -127,6 +150,21 @@ export const happyCloudCommandResponseSchema = Type.Object(
     exact,
 );
 export type HappyCloudCommandResponse = Static<typeof happyCloudCommandResponseSchema>;
+
+export const happyCloudCommandErrorResponseSchema = Type.Object(
+    {
+        code: Type.Union([
+            Type.Literal("capability_not_granted"),
+            Type.Literal("mutation_reused"),
+            Type.Literal("not_enrolled"),
+            Type.Literal("version_conflict"),
+        ]),
+        error: Type.String({ minLength: 1 }),
+        status: happyCloudStatusSchema,
+    },
+    exact,
+);
+export type HappyCloudCommandErrorResponse = Static<typeof happyCloudCommandErrorResponseSchema>;
 
 export const happyCloudProfileCiphertextResponseSchema = Type.Object(
     {
@@ -142,7 +180,7 @@ export type HappyCloudProfileCiphertextResponse = Static<
 export const happyCloudSessionBlobResponseSchema = Type.Object(
     {
         ciphertext: ciphertextSchema,
-        sessionId: sessionIdSchema,
+        sessionId: happyCloudSessionIdSchema,
         version: versionSchema,
     },
     exact,

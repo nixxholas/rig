@@ -57,7 +57,6 @@ import { MurmurService } from "../murmur/index.js";
 import { createSessionShareKind } from "../session-sharing/createSessionShareKind.js";
 import { createShareRuntime, type ShareRuntime } from "../sharing/createShareRuntime.js";
 import { SqliteMurmurStore } from "../persistence/murmur/index.js";
-import { HappyCloudService } from "../happy-cloud/index.js";
 
 export interface RunLocalProtocolServerOptions {
     happyIntegration?: HappyIntegrationMode;
@@ -128,7 +127,6 @@ async function runOwnedLocalProtocolServer(
     let mcpToolProvider: McpToolProvider | undefined;
     let murmurService: MurmurService | undefined;
     let shareRuntime: RigShareRuntime | undefined;
-    let happyCloudService: HappyCloudService | undefined;
     let happySyncService: HappySyncService | undefined;
     let happyLifecycle = Promise.resolve();
     let gitStateTracker: GitStateTracker | undefined;
@@ -526,10 +524,6 @@ async function runOwnedLocalProtocolServer(
             taskDrain,
         });
         const activeStore = store;
-        happyCloudService = new HappyCloudService(paths.databasePath);
-        shutdown.register("happy-cloud", async () => {
-            happyCloudService?.close();
-        });
         murmurService = new MurmurService({
             publishGlobalEvent: (event) => {
                 const entry = activeStore.globalEventQueue.appendReplaySafe(event);
@@ -660,7 +654,7 @@ async function runOwnedLocalProtocolServer(
                     : { globalEventQueue: store.globalEventQueue }),
                 ...(gitStateTracker === undefined ? {} : { gitStateTracker }),
                 modelCatalog,
-                happyCloud: happyCloudService,
+                happyCloud: store.happyCloud,
                 murmur: murmurService,
                 ...(shareRuntime === undefined
                     ? {}

@@ -2315,6 +2315,7 @@ export type MurmurFriendshipChangedEvent = Static<typeof murmurFriendshipChanged
 
 export type GlobalEvent =
     | ComputePreparationEvent
+    | HappyCloudChangedEvent
     | BaseGlobalEvent<"project_created", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"project_updated", { mutationId?: MutationId; project: Project }>
     | BaseGlobalEvent<"workspace_created", { mutationId?: MutationId; workspace: ProjectWorkspace }>
@@ -2519,7 +2520,12 @@ const happyCloudTimestampSchema = Type.Integer({
     minimum: 0,
 });
 const happyCloudVersionSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
-const happyCloudCiphertextSchema = Type.String({ maxLength: 16 * 1024 * 1024, minLength: 1 });
+export const HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH = 2 * 1024 * 1024;
+const happyCloudCiphertextSchema = Type.String({
+    maxLength: HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
+    minLength: 1,
+    pattern: "^(?:[A-Za-z0-9_-]{4})*(?:[A-Za-z0-9_-][AQgw]|[A-Za-z0-9_-]{2}[AEIMQUYcgkosw048])?$",
+});
 const happyCloudSessionIdSchema = Type.String({ maxLength: 256, minLength: 1 });
 export const HAPPY_CLOUD_CONTRACT_VERSION = 1 as const;
 export const happyCloudCapabilitySchema = Type.Union([
@@ -2543,6 +2549,7 @@ export const happyCloudCapabilityStatusSchema = Type.Object(
 export type HappyCloudCapabilityStatus = Static<typeof happyCloudCapabilityStatusSchema>;
 export const happyCloudStatusSchema = Type.Object(
     {
+        authority: Type.Literal("local_record_only"),
         capabilities: Type.Object(
             {
                 friends: happyCloudCapabilityStatusSchema,
@@ -2575,6 +2582,22 @@ export const happyCloudStatusSchema = Type.Object(
     happyCloudExact,
 );
 export type HappyCloudStatus = Static<typeof happyCloudStatusSchema>;
+export const happyCloudChangedEventSchema = Type.Object(
+    {
+        createdAt: happyCloudTimestampSchema,
+        data: Type.Object(
+            {
+                mutationId: Type.String({ maxLength: 256, minLength: 1 }),
+                version: happyCloudVersionSchema,
+            },
+            happyCloudExact,
+        ),
+        id: Type.String({ maxLength: 256, minLength: 1 }),
+        type: Type.Literal("happy_cloud_changed"),
+    },
+    happyCloudExact,
+);
+export type HappyCloudChangedEvent = Static<typeof happyCloudChangedEventSchema>;
 const happyCloudCommandBase = {
     contractVersion: Type.Literal(HAPPY_CLOUD_CONTRACT_VERSION),
     expectedVersion: happyCloudVersionSchema,
@@ -2634,6 +2657,20 @@ export const happyCloudCommandResponseSchema = Type.Object(
     happyCloudExact,
 );
 export type HappyCloudCommandResponse = Static<typeof happyCloudCommandResponseSchema>;
+export const happyCloudCommandErrorResponseSchema = Type.Object(
+    {
+        code: Type.Union([
+            Type.Literal("capability_not_granted"),
+            Type.Literal("mutation_reused"),
+            Type.Literal("not_enrolled"),
+            Type.Literal("version_conflict"),
+        ]),
+        error: Type.String({ minLength: 1 }),
+        status: happyCloudStatusSchema,
+    },
+    happyCloudExact,
+);
+export type HappyCloudCommandErrorResponse = Static<typeof happyCloudCommandErrorResponseSchema>;
 export const happyCloudProfileCiphertextResponseSchema = Type.Object(
     { ciphertext: happyCloudCiphertextSchema, version: happyCloudVersionSchema },
     happyCloudExact,

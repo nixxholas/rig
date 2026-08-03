@@ -10,6 +10,8 @@
 - Added protocol version 6 installation discovery for Happy onboarding, including stable Rig data
   epochs, offline CLI inspection, explicit schema compatibility, and bounded browser-safe
   rig-connect discovery.
+- Added strict local Happy Cloud enrollment records, independent default-denied capability consent,
+  bounded opaque encrypted-payload storage, and live rig-connect reconciliation.
 - Added parsed OSC 8 hyperlink metadata to Ghostty snapshot cells and preserved it through remote
   semantic-grid keyframes, patches, reconnect recovery, resize snapshots, and scrollback.
 

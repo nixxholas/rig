@@ -397,8 +397,9 @@ controls identity and cancellation.
 
 ### Happy Cloud enrollment and capability consent
 
-`connectHappyCloud()` follows one versioned singleton, including local optimistic choices.
-Enrollment is only enrollment: all six capabilities remain denied until each is granted explicitly.
+`connectHappyCloud()` follows one versioned singleton through the shared live stream, including
+local optimistic choices. Its `authority` is always `local_record_only`: enrollment is only a local
+record, and all six capabilities remain denied until each is granted explicitly.
 
 ```ts
 const cloud = rig.connectHappyCloud({
@@ -418,13 +419,21 @@ The capabilities are `friends`, `group_chats`, `live_session_sharing`, `remote_c
 `session_blob_persistence`, and `happy_profile`. Rig Connect assigns the strict contract version,
 expected state version, and mutation identity, then owns FIFO delivery, retry, reconciliation, and
 rejection. The daemon rejects stale commands and mutation-identity reuse with different content.
-Unenrollment revokes every capability and deletes stored ciphertext. Revoking profile or
-session-blob persistence deletes only that capability's ciphertext.
+The newest 4,096 successful mutation receipts are retained. Within that window, an exact duplicate
+returns current authoritative status and reuse with different content is rejected. After expiry, a
+stale expected version rejects the command rather than replaying its old response.
 
 Rig does not create or inspect Happy Cloud cryptography. Profile and mobile-session payloads are
-caller-encrypted opaque strings, stored and returned verbatim through `getHappyCloudProfile()` and
-`getHappyCloudSessionBlob()`. The contract reports what is stored; it does not claim that plaintext
-was encrypted or that anything was uploaded to a cloud service.
+caller-encrypted canonical base64url strings of at most 2 MiB, stored and returned verbatim through
+`getHappyCloudProfile()` and `getHappyCloudSessionBlob()`. At most 64 session blobs are retained;
+writing a 65th distinct session evicts the oldest write. The active database therefore retains at
+most about 128 MiB of session-blob ciphertext plus one 2 MiB profile. Unenrollment and targeted
+revocation logically remove the affected active rows, but SQLite pages, its WAL, and backups may
+retain old encrypted bytes. This is not secure erasure.
+
+These records do not create a Happy Cloud account or device enrollment, upload anything, authorize
+remote control, or activate or gate the existing Happy, Murmur, and terminal integrations. Those
+effects require separate cloud and integration primitives.
 
 ## The groups
 

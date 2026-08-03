@@ -84,7 +84,9 @@ export type {
 export type {
     HappyCloudCapability,
     HappyCloudCapabilityStatus,
+    HappyCloudChangedEvent,
     HappyCloudCommand,
+    HappyCloudCommandErrorResponse,
     HappyCloudCommandResponse,
     HappyCloudConsent,
     HappyCloudProfileCiphertextResponse,
@@ -191,7 +193,10 @@ export type {
 export { sessionUnreadAfterEvent } from "./sessionUnread.js";
 export {
     HAPPY_CLOUD_CONTRACT_VERSION,
+    HAPPY_CLOUD_CIPHERTEXT_MAX_LENGTH,
     happyCloudCapabilitySchema,
+    happyCloudChangedEventSchema,
+    happyCloudCommandErrorResponseSchema,
     happyCloudCommandResponseSchema,
     happyCloudCommandSchema,
     happyCloudConsentSchema,

@@ -1,1 +1,6 @@
-export { HappyCloudService, type HappyCloudServiceContract } from "./HappyCloudService.js";
+export {
+    HappyCloudService,
+    type HappyCloudPersistence,
+    type HappyCloudServiceContract,
+    type HappyCloudServiceOptions,
+} from "./HappyCloudService.js";

@@ -25,6 +25,7 @@ import {
     githubPluginPackageSourceSchema,
     githubRepositorySchema,
 } from "../plugins/githubPluginCatalog.js";
+import type { HappyCloudChangedEvent } from "./HappyCloudProtocol.js";
 
 export type ProjectKind = "regular" | "home";
 export type ProjectInitializationStatus = "initializing" | "ready" | "failed";
@@ -623,6 +624,7 @@ export interface ComputePreparationEvent {
 }
 
 export type GlobalLiveEvent =
+    | HappyCloudChangedEvent
     | PluginsChangedEvent
     | PresenceChangedEvent
     | SlotsChangedEvent
@@ -660,6 +662,7 @@ export type GlobalEventDelivery = GlobalEventQueueEntry | GlobalLiveEventDeliver
 export function isLiveGlobalEvent(event: GlobalEvent): event is GlobalLiveEvent {
     return (
         event.type === "plugins_changed" ||
+        event.type === "happy_cloud_changed" ||
         event.type === "presence_changed" ||
         event.type === "slots_changed" ||
         event.type === "webapps_changed" ||

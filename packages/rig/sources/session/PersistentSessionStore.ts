@@ -163,6 +163,7 @@ import {
     executeSessionWorkspaceTransfer,
     scheduleSessionWorkspaceTransfer,
 } from "./transferSessionWorkspace.js";
+import { HappyCloudService } from "../happy-cloud/index.js";
 
 const RESTORED_SESSION_EVENT_LIMIT = 4_096;
 const MAX_SCHEDULE_TIMER_DELAY_MS = 2_147_000_000;
@@ -225,6 +226,7 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
     #activeTransaction: TX | undefined;
     #transactionCommitCallbacks: (() => void)[] | undefined;
     readonly liveEvents = new LiveGlobalEventQueue();
+    readonly happyCloud: HappyCloudService;
     readonly presence: PresenceStore;
     readonly remoteTerminals: ProjectRemoteTerminalStore;
     readonly sessionShareDaemonStore: PersistentSessionShareDaemonStore;
@@ -281,6 +283,11 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
         this.sessionShareDaemonStore = new PersistentSessionShareDaemonStore({
             tx: () => this.#tx(),
+        });
+        this.happyCloud = new HappyCloudService({
+            now: this.#now,
+            persistence: this,
+            publish: (event) => this.#publishGlobalEvent(event),
         });
         this.webapps = new WebappStore({
             now: this.#now,
@@ -1300,8 +1307,13 @@ export class PersistentSessionStore implements SessionStore, InMemorySessionPers
         });
     }
 
-    transaction<T>(body: () => T): T {
-        return this.#transaction(() => body());
+    query<T>(operation: (tx: TX) => T): T {
+        this.#assertOpen();
+        return operation(this.#tx());
+    }
+
+    transaction<T>(operation: (tx: TX) => T): T {
+        return this.#transaction(operation);
     }
 
     #assertAcceptingMutations(): void {
