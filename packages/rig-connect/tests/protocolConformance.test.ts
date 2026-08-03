@@ -137,6 +137,12 @@ type _SignupMurmurResponse = Assignable<
 >;
 type _MurmurFriendRequest = Assignable<local.MurmurFriendRequest, daemon.MurmurFriendRequest>;
 type _MurmurContact = Assignable<local.MurmurContact, daemon.MurmurContact>;
+type _MurmurFriendship = Assignable<local.MurmurFriendship, daemon.MurmurFriendship>;
+type _MurmurFriendStats = Assignable<local.MurmurFriendStats, daemon.MurmurFriendStats>;
+type _MurmurFriendsResponse = Assignable<
+    local.GetMurmurFriendsResponse,
+    daemon.GetMurmurFriendsResponse
+>;
 type _TimelineScope = Assignable<local.TimelineScope, daemon.TimelineScope>;
 type _TimelineSpan = Assignable<local.TimelineSpan, daemon.TimelineSpan>;
 type _TimelineSpanKind = Assignable<local.TimelineSpanKind, daemon.TimelineSpanKind>;

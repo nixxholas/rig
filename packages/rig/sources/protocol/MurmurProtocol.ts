@@ -8,6 +8,7 @@ const base64Schema = Type.String({
 });
 const identifierSchema = Type.String({ maxLength: 256, minLength: 1 });
 const nameSchema = Type.String({ maxLength: 128, minLength: 1 });
+const profileLastNameSchema = Type.String({ maxLength: 128 });
 const thumbhashSchema = Type.String({ maxLength: 1_024, minLength: 1 });
 const timestampSchema = Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 });
 const tokenSchema = Type.String({ maxLength: 4_096, minLength: 1 });
@@ -37,7 +38,7 @@ export type MurmurPhoto = Static<typeof murmurPhotoSchema>;
 export const murmurProfileSchema = Type.Object(
     {
         firstName: nameSchema,
-        lastName: nameSchema,
+        lastName: profileLastNameSchema,
         photo: Type.Optional(murmurPhotoSchema),
     },
     exact,
@@ -65,6 +66,95 @@ export const murmurServiceStateSchema = Type.Object(
     exact,
 );
 export type MurmurServiceState = Static<typeof murmurServiceStateSchema>;
+
+export const murmurFriendshipStateSchema = Type.Union([
+    Type.Literal("incoming_pending"),
+    Type.Literal("outgoing_pending"),
+    Type.Literal("friends"),
+    Type.Literal("rejected_incoming"),
+    Type.Literal("rejected_outgoing"),
+]);
+export type MurmurFriendshipState = Static<typeof murmurFriendshipStateSchema>;
+
+export const murmurFriendshipDirectionSchema = Type.Union([
+    Type.Literal("incoming"),
+    Type.Literal("outgoing"),
+    Type.Literal("mutual"),
+]);
+export type MurmurFriendshipDirection = Static<typeof murmurFriendshipDirectionSchema>;
+
+export const murmurFriendshipHistorySchema = Type.Object(
+    {
+        accepted: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        autoAccepted: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        received: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        rejected: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        sent: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+    },
+    exact,
+);
+export type MurmurFriendshipHistory = Static<typeof murmurFriendshipHistorySchema>;
+
+export const murmurFriendshipSchema = Type.Object(
+    {
+        answeredAt: Type.Optional(timestampSchema),
+        autoAcceptEligible: Type.Boolean(),
+        direction: murmurFriendshipDirectionSchema,
+        firstSeenAt: timestampSchema,
+        history: murmurFriendshipHistorySchema,
+        peerId: identifierSchema,
+        profile: Type.Optional(murmurProfileSchema),
+        requestId: Type.Optional(identifierSchema),
+        state: murmurFriendshipStateSchema,
+        token: tokenSchema,
+        updatedAt: timestampSchema,
+        version: identifierSchema,
+    },
+    exact,
+);
+export type MurmurFriendship = Static<typeof murmurFriendshipSchema>;
+
+export const murmurFriendStatsSchema = Type.Object(
+    {
+        acceptedRequests: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        autoAcceptedRequests: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        contacts: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        incomingPending: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        outgoingPending: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+        rejectedRequests: Type.Integer({ maximum: Number.MAX_SAFE_INTEGER, minimum: 0 }),
+    },
+    exact,
+);
+export type MurmurFriendStats = Static<typeof murmurFriendStatsSchema>;
+
+export const murmurFriendshipChangedReasonSchema = Type.Union([
+    Type.Literal("request_received"),
+    Type.Literal("request_sent"),
+    Type.Literal("accepted"),
+    Type.Literal("rejected"),
+    Type.Literal("auto_accepted"),
+    Type.Literal("profile_updated"),
+]);
+export type MurmurFriendshipChangedReason = Static<typeof murmurFriendshipChangedReasonSchema>;
+
+export const murmurFriendshipChangedEventSchema = Type.Object(
+    {
+        createdAt: timestampSchema,
+        data: Type.Object(
+            {
+                direction: murmurFriendshipDirectionSchema,
+                reason: murmurFriendshipChangedReasonSchema,
+                state: murmurFriendshipStateSchema,
+            },
+            exact,
+        ),
+        id: identifierSchema,
+        murmurPeerId: identifierSchema,
+        type: Type.Literal("murmur_friendship_changed"),
+    },
+    exact,
+);
+export type MurmurFriendshipChangedEvent = Static<typeof murmurFriendshipChangedEventSchema>;
 
 export const getMurmurAccountResponseSchema = Type.Object(
     {
@@ -126,7 +216,12 @@ export const sendMurmurFriendRequestRequestSchema = Type.Object({ token: tokenSc
 export type SendMurmurFriendRequestRequest = Static<typeof sendMurmurFriendRequestRequestSchema>;
 
 export const sendMurmurFriendRequestResponseSchema = Type.Object(
-    { recipientId: identifierSchema },
+    {
+        friendship: murmurFriendshipSchema,
+        queued: Type.Boolean(),
+        recipientId: identifierSchema,
+        stats: murmurFriendStatsSchema,
+    },
     exact,
 );
 export type SendMurmurFriendRequestResponse = Static<typeof sendMurmurFriendRequestResponseSchema>;
@@ -145,7 +240,7 @@ export type MurmurFriendRequest = Static<typeof murmurFriendRequestSchema>;
 
 export const listMurmurFriendRequestsResponseSchema = Type.Object(
     {
-        requests: Type.Array(murmurFriendRequestSchema, { maxItems: 1_000 }),
+        requests: Type.Array(murmurFriendRequestSchema, { maxItems: 10_000 }),
     },
     exact,
 );
@@ -179,6 +274,8 @@ export const answerMurmurFriendRequestResponseSchema = Type.Object(
     {
         answer: Type.Union([Type.Literal("accept"), Type.Literal("reject")]),
         contact: Type.Optional(murmurContactSchema),
+        friendship: murmurFriendshipSchema,
+        stats: murmurFriendStatsSchema,
     },
     exact,
 );
@@ -193,3 +290,15 @@ export const listMurmurContactsResponseSchema = Type.Object(
     exact,
 );
 export type ListMurmurContactsResponse = Static<typeof listMurmurContactsResponseSchema>;
+
+export const getMurmurFriendsResponseSchema = Type.Object(
+    {
+        account: Type.Optional(murmurAccountSchema),
+        contacts: Type.Array(murmurContactSchema, { maxItems: 10_000 }),
+        friendships: Type.Array(murmurFriendshipSchema, { maxItems: 10_000 }),
+        service: murmurServiceStateSchema,
+        stats: murmurFriendStatsSchema,
+    },
+    exact,
+);
+export type GetMurmurFriendsResponse = Static<typeof getMurmurFriendsResponseSchema>;

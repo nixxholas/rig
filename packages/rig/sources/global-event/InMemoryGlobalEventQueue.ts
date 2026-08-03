@@ -42,6 +42,15 @@ export class InMemoryGlobalEventQueue implements GlobalEventQueue {
         return entry;
     }
 
+    appendReplaySafe(event: GlobalEvent): GlobalEventQueueEntry | undefined {
+        const existing = this.#entries.find((entry) => entry.event.id === event.id);
+        if (existing === undefined) return this.append(event);
+        if (JSON.stringify(existing.event) !== JSON.stringify(event)) {
+            throw new Error(`Global event ${event.id} was reused with different content`);
+        }
+        return undefined;
+    }
+
     cursor(): string {
         return this.#head;
     }

@@ -63,6 +63,25 @@ describe("SqliteMurmurStore", () => {
         await store.close();
     });
 
+    it("reads one ordered bounded page without loading the rest of a prefix", async () => {
+        const store = new SqliteMurmurStore(":memory:");
+        await store.set("outbox/a", new Uint8Array([1]));
+        await store.set("outbox/b", new Uint8Array([2]));
+        await store.set("outbox/c", new Uint8Array([3]));
+        await store.set("other/a", new Uint8Array([4]));
+
+        await expect(store.listPage("outbox/", undefined, 2)).resolves.toEqual(
+            new Map([
+                ["outbox/a", new Uint8Array([1])],
+                ["outbox/b", new Uint8Array([2])],
+            ]),
+        );
+        await expect(store.listPage("outbox/", "outbox/b", 2)).resolves.toEqual(
+            new Map([["outbox/c", new Uint8Array([3])]]),
+        );
+        await store.close();
+    });
+
     it("rejects symlinked state and removes every state file only after close", async () => {
         const { directory, path } = createDatabasePath();
         const target = join(directory, "target.sqlite");

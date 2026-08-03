@@ -16,6 +16,27 @@ const profile = {
 };
 const account = { id: "ada", profile, token: "ada-token" };
 const stopped = { relayUrls: [], status: "stopped" as const };
+const stats = {
+    acceptedRequests: 0,
+    autoAcceptedRequests: 0,
+    contacts: 0,
+    incomingPending: 0,
+    outgoingPending: 1,
+    rejectedRequests: 0,
+};
+const friendship = {
+    autoAcceptEligible: false,
+    direction: "outgoing" as const,
+    firstSeenAt: 1,
+    history: { accepted: 0, autoAccepted: 0, received: 0, rejected: 0, sent: 1 },
+    peerId: "grace",
+    profile: { firstName: "Grace", lastName: "Hopper" },
+    requestId: "request-1",
+    state: "outgoing_pending" as const,
+    token: "grace-token",
+    updatedAt: 1,
+    version: "v1",
+};
 
 describe("Murmur API", () => {
     it("exposes account, service, friend-request, and contact operations", async () => {
@@ -52,8 +73,20 @@ describe("Murmur API", () => {
                         },
                     ],
                 },
+                "GET /murmur/friends": {
+                    account,
+                    contacts: [],
+                    friendships: [friendship],
+                    service: stopped,
+                    stats,
+                },
                 "POST /murmur/account": { account, service: stopped },
-                "POST /murmur/friend-requests": { recipientId: "grace" },
+                "POST /murmur/friend-requests": {
+                    friendship,
+                    queued: true,
+                    recipientId: "grace",
+                    stats,
+                },
                 "POST /murmur/friend-requests/request-1/answer": {
                     answer: "accept",
                     contact: {
@@ -62,6 +95,19 @@ describe("Murmur API", () => {
                         profile: { firstName: "Grace", lastName: "Hopper" },
                         token: "grace-token",
                         updatedAt: 1,
+                    },
+                    friendship: {
+                        ...friendship,
+                        requestId: undefined,
+                        state: "friends",
+                        updatedAt: 2,
+                        version: "v2",
+                    },
+                    stats: {
+                        ...stats,
+                        acceptedRequests: 1,
+                        contacts: 1,
+                        outgoingPending: 0,
                     },
                 },
                 "POST /murmur/service/start": {
@@ -84,7 +130,8 @@ describe("Murmur API", () => {
             rig.startMurmurService({ relayUrls: ["https://relay.example"] }),
         ).resolves.toMatchObject({ service: { status: "running" } });
         await expect(rig.stopMurmurService()).resolves.toEqual({ service: stopped });
-        await expect(rig.sendMurmurFriendRequest("grace-token")).resolves.toEqual({
+        await expect(rig.sendMurmurFriendRequest("grace-token")).resolves.toMatchObject({
+            friendship: { peerId: "grace" },
             recipientId: "grace",
         });
         await expect(rig.listMurmurFriendRequests()).resolves.toMatchObject({
@@ -96,6 +143,10 @@ describe("Murmur API", () => {
         });
         await expect(rig.listMurmurContacts()).resolves.toMatchObject({
             contacts: [{ id: "grace" }],
+        });
+        await expect(rig.listMurmurFriends()).resolves.toMatchObject({
+            friendships: [{ peerId: "grace" }],
+            stats,
         });
         await expect(rig.deleteMurmurAccount()).resolves.toEqual({ deleted: true });
 

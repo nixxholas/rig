@@ -376,7 +376,7 @@ function plugin(generation: string, withLargeResource = false): PluginSummary {
 }
 
 function hello(cursor: string, gap: boolean, resumed: boolean): string {
-    return sse("hello", { cursor, gap, protocolVersion: 3, resumed });
+    return sse("hello", { cursor, gap, protocolVersion: 4, resumed });
 }
 
 function pluginsChanged(cursor: string, plugins: readonly PluginSummary[]): string {

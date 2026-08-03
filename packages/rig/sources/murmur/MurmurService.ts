@@ -1,12 +1,7 @@
 import {
-    ContactBook,
     HttpRelayTransport,
     MurmurClient,
-    createRelayEvent,
-    decryptContactProfile,
-    destroyIdentity,
     encodeBase64Url,
-    encryptProfileForContact,
     generateIdentityKeyPair,
     hashBytes,
     identityId,
@@ -15,10 +10,8 @@ import {
     zeroBytes,
     type Contact,
     type IdentityPublicKeys,
-    type ReceivedEvent,
     type RelayTransport,
-    type SignedRelayEvent,
-    type StoreTransaction,
+    type ReceivedEvent,
 } from "@slopus/murmur";
 
 import type {
@@ -26,10 +19,12 @@ import type {
     AnswerMurmurFriendRequestResponse,
     DeleteMurmurAccountResponse,
     GetMurmurAccountResponse,
+    GetMurmurFriendsResponse,
     ListMurmurContactsResponse,
     ListMurmurFriendRequestsResponse,
     MurmurAccount,
     MurmurContact,
+    MurmurFriendship,
     MurmurFriendRequest,
     MurmurProfile,
     MurmurServiceState,
@@ -42,46 +37,27 @@ import type {
     StopMurmurServiceResponse,
 } from "../protocol/MurmurProtocol.js";
 import {
-    decodeFriendRequestEnvelope,
-    decodeStoredHandledRequest,
     decodeStoredMurmurAccount,
-    decodeStoredOutboundEvent,
-    decodeStoredPendingRequest,
-    decodeStoredPendingRequestCount,
     destroyStoredMurmurAccount,
-    encodeFriendRequestEnvelope,
-    encodeHandledRequestEnvelope,
-    encodeStoredHandledRequest,
     encodeStoredMurmurAccount,
-    encodeStoredOutboundEvent,
-    encodeStoredPendingRequest,
-    encodeStoredPendingRequestCount,
     nativeProfileToPublic,
-    openedProfileToPending,
-    pendingToOpened,
     publicProfileToNative,
-    isHandledRequestEnvelope,
-    type StoredPendingRequest,
 } from "./impl/murmurCodec.js";
 import { decodeMurmurIdentityToken, encodeMurmurIdentityToken } from "./impl/identityToken.js";
 import { normalizeMurmurPhoto } from "./impl/photoNormalize.js";
 import { DatabaseFailureObservingMurmurStore } from "./impl/DatabaseFailureObservingMurmurStore.js";
 import { MurmurServiceError } from "./MurmurServiceError.js";
+import {
+    destroyMurmurFriendship,
+    destroyMurmurFriendshipContact,
+    MurmurFriendshipManager,
+    type MurmurFriendshipChangedEvent,
+} from "./MurmurFriendshipManager.js";
 import type { MurmurLifecycleStore, MurmurServiceContract, StoredMurmurAccount } from "./types.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
 import { rethrowDatabaseFailure } from "../persistence/rethrowDatabaseFailure.js";
 
 const ACCOUNT_KEY = "rig/murmur/account/v1";
-const PENDING_PREFIX = "rig/murmur/friend-requests/pending/v1/";
-const PENDING_COUNT_KEY = "rig/murmur/friend-requests/pending-count/v1";
-const HANDLED_PREFIX = "rig/murmur/friend-requests/handled/v1/";
-const OUTBOUND_FRIEND_PREFIX = "rig/murmur/outbound/friend-request/v1/";
-const OUTBOUND_ANSWER_PREFIX = "rig/murmur/outbound/friend-answer/v1/";
-const QUARANTINE_PREFIX = "rig/murmur/quarantine/v1/";
-const MAX_QUARANTINE_RECORDS = 100;
-const MAX_HANDLED_REQUESTS = 10_000;
-const MAX_OUTBOUND_FRIEND_REQUESTS = 256;
-const DEFAULT_MAX_PENDING_REQUESTS = 1_000;
 const DEFAULT_SYNC_WAIT_MILLISECONDS = 25_000;
 const DEFAULT_SYNC_RETRY_DELAY_MILLISECONDS = 1_000;
 const DEFAULT_RELAY_REQUEST_TIMEOUT_MILLISECONDS = 30_000;
@@ -93,6 +69,7 @@ interface MurmurRuntime {
     readonly controller: AbortController;
     readonly observedStore: DatabaseFailureObservingMurmurStore;
     readonly transports: readonly RelayTransport[];
+    relayFlush: Promise<void> | undefined;
     loop: Promise<void>;
 }
 
@@ -103,7 +80,9 @@ interface PendingStoreDeletion {
 
 export interface MurmurServiceOptions {
     readonly defaultRelayUrls?: readonly string[];
-    readonly maxPendingFriendRequests?: number;
+    readonly maxRelationships?: number;
+    readonly now?: () => number;
+    readonly publishGlobalEvent?: (event: MurmurFriendshipChangedEvent) => void | Promise<void>;
     readonly relayRequestTimeoutMilliseconds?: number;
     readonly storeFactory: () => MurmurLifecycleStore | Promise<MurmurLifecycleStore>;
     readonly syncRetryDelayMilliseconds?: number;
@@ -111,44 +90,9 @@ export interface MurmurServiceOptions {
     readonly transportFactory?: (relayUrls: readonly string[]) => readonly RelayTransport[];
 }
 
-function pendingKey(id: string): string {
-    return `${PENDING_PREFIX}${id}`;
-}
-
-function handledKey(id: string): string {
-    return `${HANDLED_PREFIX}${id}`;
-}
-
-function outboundFriendKey(recipientId: string): string {
-    return `${OUTBOUND_FRIEND_PREFIX}${recipientId}`;
-}
-
-function outboundAnswerKey(id: string): string {
-    return `${OUTBOUND_ANSWER_PREFIX}${id}`;
-}
-
-function payloadId(payload: Uint8Array): string {
-    const digest = hashBytes(payload);
-    try {
-        return encodeBase64Url(digest);
-    } finally {
-        zeroBytes(digest);
-    }
-}
-
 function destroyPublicIdentity(identity: IdentityPublicKeys): void {
     zeroBytes(identity.signingKey);
     zeroBytes(identity.encryptionKey);
-}
-
-function destroySignedRelayEvent(event: SignedRelayEvent): void {
-    zeroBytes(event.author.signingKey);
-    zeroBytes(event.payload);
-    zeroBytes(event.signature);
-    if (event.snapshot?.bytes !== undefined) zeroBytes(event.snapshot.bytes);
-    for (const operation of event.list ?? []) {
-        if ("bytes" in operation) zeroBytes(operation.bytes);
-    }
 }
 
 function contactToPublic(contact: Contact): MurmurContact {
@@ -166,27 +110,47 @@ function destroyContact(contact: Contact): void {
     if (contact.profile.avatar !== undefined) zeroBytes(contact.profile.avatar);
 }
 
-function pendingToPublic(request: StoredPendingRequest): MurmurFriendRequest {
-    const opened = pendingToOpened(request);
-    try {
-        return {
-            id: request.id,
-            profile: nativeProfileToPublic(opened.profile),
-            receivedAt: request.receivedAt,
-            senderId: identityId(opened.identity),
-            senderToken: encodeMurmurIdentityToken(opened.identity),
-        };
-    } finally {
-        destroyPublicIdentity(opened.identity);
-        if (opened.profile.avatar !== undefined) zeroBytes(opened.profile.avatar);
-    }
-}
-
 function accountToPublic(account: StoredMurmurAccount): MurmurAccount {
     return {
         id: identityId(account.identity),
         profile: nativeProfileToPublic(account.profile),
         token: encodeMurmurIdentityToken(account.identity),
+    };
+}
+
+function friendshipToPublic(
+    friendship: import("./MurmurFriendshipManager.js").MurmurFriendship,
+): MurmurFriendship {
+    return {
+        ...(friendship.answeredAt === undefined ? {} : { answeredAt: friendship.answeredAt }),
+        autoAcceptEligible: friendship.autoAcceptEligible,
+        direction: friendship.direction,
+        firstSeenAt: friendship.firstSeenAt,
+        history: friendship.history,
+        peerId: identityId(friendship.identity),
+        ...(friendship.profile === undefined
+            ? {}
+            : { profile: nativeProfileToPublic(friendship.profile) }),
+        ...(friendship.requestId === undefined ? {} : { requestId: friendship.requestId }),
+        state: friendship.state,
+        token: encodeMurmurIdentityToken(friendship.identity),
+        updatedAt: friendship.updatedAt,
+        version: friendship.eventVersion,
+    };
+}
+
+function pendingFriendshipToPublic(
+    friendship: import("./MurmurFriendshipManager.js").MurmurFriendship,
+): MurmurFriendRequest {
+    if (friendship.profile === undefined) {
+        throw new Error("A pending Murmur friend request has no profile");
+    }
+    return {
+        id: identityId(friendship.identity),
+        profile: nativeProfileToPublic(friendship.profile),
+        receivedAt: friendship.updatedAt,
+        senderId: identityId(friendship.identity),
+        senderToken: encodeMurmurIdentityToken(friendship.identity),
     };
 }
 
@@ -258,12 +222,15 @@ function abortableDelay(milliseconds: number, signal: AbortSignal): Promise<void
  */
 export class MurmurService implements MurmurServiceContract {
     readonly #defaultRelayUrls: readonly string[];
-    readonly #maxPendingFriendRequests: number;
+    readonly #maxRelationships: number | undefined;
+    readonly #now: (() => number) | undefined;
+    readonly #publishGlobalEvent: MurmurServiceOptions["publishGlobalEvent"];
     readonly #storeFactory: MurmurServiceOptions["storeFactory"];
     readonly #syncRetryDelayMilliseconds: number;
     readonly #syncWaitMilliseconds: number;
     readonly #transportFactory: NonNullable<MurmurServiceOptions["transportFactory"]>;
     #closed = false;
+    #friendships: MurmurFriendshipManager | undefined;
     #relayUrls: readonly string[] = [];
     #runtime: MurmurRuntime | undefined;
     #sequence: Promise<void> = Promise.resolve();
@@ -276,15 +243,9 @@ export class MurmurService implements MurmurServiceContract {
             options.defaultRelayUrls ?? DEFAULT_MURMUR_RELAY_URLS,
         );
         this.#storeFactory = options.storeFactory;
-        this.#maxPendingFriendRequests =
-            options.maxPendingFriendRequests ?? DEFAULT_MAX_PENDING_REQUESTS;
-        if (
-            !Number.isSafeInteger(this.#maxPendingFriendRequests) ||
-            this.#maxPendingFriendRequests < 1 ||
-            this.#maxPendingFriendRequests > DEFAULT_MAX_PENDING_REQUESTS
-        ) {
-            throw new Error("Murmur pending friend-request limit must be between 1 and 1,000");
-        }
+        this.#maxRelationships = options.maxRelationships;
+        this.#now = options.now;
+        this.#publishGlobalEvent = options.publishGlobalEvent;
         const relayRequestTimeoutMilliseconds =
             options.relayRequestTimeoutMilliseconds ?? DEFAULT_RELAY_REQUEST_TIMEOUT_MILLISECONDS;
         if (
@@ -306,15 +267,18 @@ export class MurmurService implements MurmurServiceContract {
             options.transportFactory ??
             ((relayUrls) => createHttpTransports(relayUrls, relayRequestTimeoutMilliseconds));
         this.#ready = Promise.resolve(options.storeFactory()).then((store) => {
-            this.#store = store;
+            this.#installStore(store);
         });
     }
 
     async getAccount(): Promise<GetMurmurAccountResponse> {
-        return this.#serialize(async () => ({
-            ...(await this.#loadPublicAccount()),
-            service: this.#serviceState(),
-        }));
+        return this.#serialize(async () => {
+            await this.#requireFriendships().drainGlobalEventOutbox();
+            return {
+                ...(await this.#loadPublicAccount()),
+                service: this.#serviceState(),
+            };
+        });
     }
 
     async signup(request: SignupMurmurAccountRequest): Promise<SignupMurmurAccountResponse> {
@@ -405,12 +369,14 @@ export class MurmurService implements MurmurServiceContract {
                     controller: new AbortController(),
                     loop: Promise.resolve(),
                     observedStore,
+                    relayFlush: undefined,
                     transports,
                 };
                 this.#relayUrls = relayUrls;
                 this.#runtime = runtime;
                 runtime.loop = this.#syncLoop(runtime);
                 void runtime.loop.catch(rethrowDatabaseFailure);
+                void this.#flushRelayOutbox(runtime).catch(rethrowDatabaseFailure);
                 return { service: this.#serviceState() };
             } catch (error: unknown) {
                 destroyStoredMurmurAccount(account);
@@ -442,7 +408,7 @@ export class MurmurService implements MurmurServiceContract {
             }
             await deletion.store.deleteDatabaseFiles();
             const replacement = await this.#storeFactory();
-            this.#store = replacement;
+            this.#installStore(replacement);
             this.#storeDeletion = undefined;
             return { deleted: deletion.existed };
         });
@@ -452,7 +418,6 @@ export class MurmurService implements MurmurServiceContract {
         request: SendMurmurFriendRequestRequest,
     ): Promise<SendMurmurFriendRequestResponse> {
         return this.#serialize(async () => {
-            const runtime = this.#requireRuntime();
             let recipient: IdentityPublicKeys;
             try {
                 recipient = decodeMurmurIdentityToken(request.token);
@@ -463,60 +428,41 @@ export class MurmurService implements MurmurServiceContract {
                     { cause: error },
                 );
             }
-            let payload: Uint8Array | undefined;
+            const runtime = this.#runtime;
+            const account = runtime?.account ?? (await this.#readAccount());
+            if (account === undefined) {
+                destroyPublicIdentity(recipient);
+                throw new MurmurServiceError("account_missing", "No Murmur account exists");
+            }
+            const destroyAccount = runtime === undefined;
             try {
-                if (identityId(recipient) === identityId(runtime.account.identity)) {
+                if (identityId(recipient) === identityId(account.identity)) {
                     throw new MurmurServiceError(
                         "invalid_identity_token",
                         "A Murmur account cannot send a friend request to itself",
                     );
                 }
-                payload = encodeFriendRequestEnvelope(
-                    encryptProfileForContact(
-                        runtime.account.identity,
-                        recipient,
-                        runtime.account.profile,
-                    ),
+                const result = await this.#requireFriendships().queueFriendRequest(
+                    account.identity,
+                    account.profile,
+                    recipient,
                 );
-                const id = payloadId(payload);
                 const recipientId = identityId(recipient);
-                const complete = await this.#publishPreparedOutbound(
-                    runtime,
-                    outboundFriendKey(recipientId),
-                    OUTBOUND_FRIEND_PREFIX,
-                    MAX_OUTBOUND_FRIEND_REQUESTS,
-                    () => {
-                        const ephemeralAuthor = generateIdentityKeyPair();
-                        try {
-                            return createRelayEvent(
-                                ephemeralAuthor,
-                                identityInboxTopic(recipient),
-                                payload!,
-                                {
-                                    list: [
-                                        {
-                                            bytes: payload!,
-                                            id: `profile:${id}`,
-                                            op: "append",
-                                        },
-                                    ],
-                                },
-                            );
-                        } finally {
-                            destroyIdentity(ephemeralAuthor);
-                        }
-                    },
-                );
-                if (!complete) {
-                    throw new MurmurServiceError(
-                        "relay_unavailable",
-                        "Every Murmur relay must confirm the friend request",
-                    );
+                try {
+                    if (runtime !== undefined) {
+                        void this.#flushRelayOutbox(runtime).catch(rethrowDatabaseFailure);
+                    }
+                    return {
+                        friendship: friendshipToPublic(result.friendship),
+                        queued: result.queued,
+                        recipientId,
+                        stats: await this.#requireFriendships().stats(),
+                    };
+                } finally {
+                    destroyMurmurFriendship(result.friendship);
                 }
-                await this.#requireStore().delete(outboundFriendKey(recipientId));
-                return { recipientId };
             } finally {
-                if (payload !== undefined) zeroBytes(payload);
+                if (destroyAccount) destroyStoredMurmurAccount(account);
                 destroyPublicIdentity(recipient);
             }
         });
@@ -525,106 +471,97 @@ export class MurmurService implements MurmurServiceContract {
     async listFriendRequests(): Promise<ListMurmurFriendRequestsResponse> {
         return this.#serialize(async () => {
             await this.#requireAccountExists();
-            const values = await this.#requireStore().list(PENDING_PREFIX);
+            const pending = await this.#requireFriendships().listPendingIncoming();
             const requests: MurmurFriendRequest[] = [];
-            for (const value of values.values()) {
+            for (const friendship of pending) {
                 try {
-                    requests.push(pendingToPublic(decodeStoredPendingRequest(value)));
+                    requests.push(pendingFriendshipToPublic(friendship));
                 } finally {
-                    zeroBytes(value);
+                    destroyMurmurFriendship(friendship);
                 }
             }
-            requests.sort(
-                (left, right) =>
-                    left.receivedAt - right.receivedAt || left.id.localeCompare(right.id),
-            );
             return { requests };
         });
     }
 
+    async getFriends(): Promise<GetMurmurFriendsResponse> {
+        return this.#serialize(async () => {
+            await this.#requireFriendships().drainGlobalEventOutbox();
+            const account = await this.#readAccount();
+            if (account === undefined) {
+                return {
+                    contacts: [],
+                    friendships: [],
+                    service: this.#serviceState(),
+                    stats: await this.#requireFriendships().stats(),
+                };
+            }
+            const friendships = await this.#requireFriendships().listFriendships();
+            const contacts = await this.#requireFriendships().listContacts(account.identity);
+            try {
+                return {
+                    account: accountToPublic(account),
+                    contacts: contacts.map(contactToPublic),
+                    friendships: friendships.map(friendshipToPublic),
+                    service: this.#serviceState(),
+                    stats: await this.#requireFriendships().stats(),
+                };
+            } finally {
+                for (const friendship of friendships) destroyMurmurFriendship(friendship);
+                for (const contact of contacts) destroyMurmurFriendshipContact(contact);
+                destroyStoredMurmurAccount(account);
+            }
+        });
+    }
+
     async answerFriendRequest(
-        id: string,
+        peerId: string,
         request: AnswerMurmurFriendRequestRequest,
     ): Promise<AnswerMurmurFriendRequestResponse> {
         return this.#serialize(async () => {
-            const runtime = this.#requireRuntime();
-            const store = this.#requireStore();
-            const encodedPending = await store.get(pendingKey(id));
-            if (encodedPending === undefined) {
-                throw new MurmurServiceError(
-                    "request_not_found",
-                    "Murmur friend request not found",
-                );
+            const runtime = this.#runtime;
+            const account = runtime?.account ?? (await this.#readAccount());
+            if (account === undefined) {
+                throw new MurmurServiceError("account_missing", "No Murmur account exists");
             }
-            zeroBytes(encodedPending);
-            const cleanupPayload = encodeHandledRequestEnvelope(id);
+            const destroyAccount = runtime === undefined;
+            let result;
             try {
-                const outboxKey = outboundAnswerKey(id);
-                const complete = await this.#publishPreparedOutbound(
-                    runtime,
-                    outboxKey,
-                    OUTBOUND_ANSWER_PREFIX,
-                    DEFAULT_MAX_PENDING_REQUESTS,
-                    () =>
-                        createRelayEvent(
-                            runtime.account.identity,
-                            identityInboxTopic(runtime.account.identity),
-                            cleanupPayload,
-                            { list: [{ id: `profile:${id}`, op: "delete" }] },
-                        ),
+                result = await this.#requireFriendships().answerIncoming(
+                    account.identity,
+                    account.profile,
+                    peerId,
+                    request.answer,
                 );
-                if (!complete) {
+            } catch (error: unknown) {
+                if (error instanceof Error && error.message === "Murmur friend request not found") {
                     throw new MurmurServiceError(
-                        "relay_unavailable",
-                        "Every Murmur relay must confirm the friend-request answer",
+                        "request_not_found",
+                        "Murmur friend request not found",
+                        { cause: error },
                     );
                 }
-                const contacts = new ContactBook(runtime.account.identity, store);
-                return await store.transaction(async (transaction) => {
-                    const encoded = await transaction.get(pendingKey(id));
-                    if (encoded === undefined) {
-                        throw new MurmurServiceError(
-                            "request_not_found",
-                            "Murmur friend request not found",
-                        );
-                    }
-                    try {
-                        const pending = decodeStoredPendingRequest(encoded);
-                        await this.#recordHandledRequest(
-                            transaction,
-                            id,
-                            request.answer,
-                            Date.now(),
-                        );
-                        if (request.answer === "reject") {
-                            await transaction.delete(pendingKey(id));
-                            await transaction.delete(outboxKey);
-                            await this.#decrementPendingCount(transaction);
-                            return { answer: "reject" };
-                        }
-                        const opened = pendingToOpened(pending);
-                        try {
-                            const contact = await contacts.saveInTransaction(transaction, opened);
-                            try {
-                                await transaction.delete(pendingKey(id));
-                                await transaction.delete(outboxKey);
-                                await this.#decrementPendingCount(transaction);
-                                return { answer: "accept", contact: contactToPublic(contact) };
-                            } finally {
-                                destroyContact(contact);
-                            }
-                        } finally {
-                            destroyPublicIdentity(opened.identity);
-                            if (opened.profile.avatar !== undefined) {
-                                zeroBytes(opened.profile.avatar);
-                            }
-                        }
-                    } finally {
-                        zeroBytes(encoded);
-                    }
-                });
+                throw error;
             } finally {
-                zeroBytes(cleanupPayload);
+                if (destroyAccount) destroyStoredMurmurAccount(account);
+            }
+            try {
+                if (runtime !== undefined) {
+                    void this.#flushRelayOutbox(runtime).catch(rethrowDatabaseFailure);
+                }
+                return {
+                    answer: result.answer,
+                    ...(result.contact === undefined
+                        ? {}
+                        : { contact: contactToPublic(result.contact) }),
+                    friendship: friendshipToPublic(result.friendship),
+                    stats: await this.#requireFriendships().stats(),
+                };
+            } finally {
+                if (result.contact !== undefined) {
+                    destroyMurmurFriendshipContact(result.contact);
+                }
+                destroyMurmurFriendship(result.friendship);
             }
         });
     }
@@ -636,10 +573,7 @@ export class MurmurService implements MurmurServiceContract {
                 throw new MurmurServiceError("account_missing", "No Murmur account exists");
             }
             try {
-                const contacts = await new ContactBook(
-                    account.identity,
-                    this.#requireStore(),
-                ).list();
+                const contacts = await this.#requireFriendships().listContacts(account.identity);
                 return {
                     contacts: contacts.map((contact) => {
                         try {
@@ -661,6 +595,7 @@ export class MurmurService implements MurmurServiceContract {
             await this.#stopRuntime();
             if (this.#store !== undefined) await this.#store.close();
             this.#store = undefined;
+            this.#friendships = undefined;
             this.#closed = true;
         }, true);
     }
@@ -687,11 +622,25 @@ export class MurmurService implements MurmurServiceContract {
         return this.#store;
     }
 
-    #requireRuntime(): MurmurRuntime {
-        if (this.#runtime === undefined) {
-            throw new MurmurServiceError("service_not_running", "Murmur service is not running");
+    #installStore(store: MurmurLifecycleStore): void {
+        this.#store = store;
+        this.#friendships = new MurmurFriendshipManager({
+            ...(this.#maxRelationships === undefined
+                ? {}
+                : { maxRelationships: this.#maxRelationships }),
+            ...(this.#now === undefined ? {} : { now: this.#now }),
+            ...(this.#publishGlobalEvent === undefined
+                ? {}
+                : { publishGlobalEvent: this.#publishGlobalEvent }),
+            store,
+        });
+    }
+
+    #requireFriendships(): MurmurFriendshipManager {
+        if (this.#friendships === undefined) {
+            throw new Error("Murmur friendship store is unavailable");
         }
-        return this.#runtime;
+        return this.#friendships;
     }
 
     #serviceState(): MurmurServiceState {
@@ -738,6 +687,7 @@ export class MurmurService implements MurmurServiceContract {
         runtime.controller.abort();
         try {
             await runtime.loop;
+            if (runtime.relayFlush !== undefined) await runtime.relayFlush;
         } finally {
             if (this.#runtime === runtime) this.#runtime = undefined;
             this.#relayUrls = [];
@@ -749,6 +699,7 @@ export class MurmurService implements MurmurServiceContract {
         const signal = runtime.controller.signal;
         while (!signal.aborted) {
             try {
+                await this.#flushRelayOutbox(runtime);
                 const result = await runtime.client.sync(this.#syncWaitMilliseconds, signal);
                 if (signal.aborted) break;
                 if (result.status === "reset") {
@@ -757,17 +708,24 @@ export class MurmurService implements MurmurServiceContract {
                             reset.topic,
                             async (transaction, state) => {
                                 for (const element of state.elements) {
-                                    await this.#persistInboundPayload(
-                                        runtime,
-                                        transaction,
-                                        element.bytes,
-                                        Date.now(),
-                                    );
+                                    const processed =
+                                        await this.#requireFriendships().processInboundPayload(
+                                            runtime.account.identity,
+                                            runtime.account.profile,
+                                            transaction,
+                                            element.bytes,
+                                            Date.now(),
+                                        );
+                                    if (processed.friendship !== undefined) {
+                                        destroyMurmurFriendship(processed.friendship);
+                                    }
                                 }
                             },
                             reset.relayId,
                         );
                     }
+                    await this.#requireFriendships().drainGlobalEventOutbox();
+                    await this.#flushRelayOutbox(runtime);
                 } else {
                     for (const received of result.events) {
                         await this.#persistReceivedEvent(runtime, received);
@@ -788,217 +746,37 @@ export class MurmurService implements MurmurServiceContract {
         const inbox = identityInboxTopic(runtime.account.identity);
         if (received.event.topic !== inbox) {
             await this.#requireStore().transaction(async (transaction) => {
-                await this.#quarantine(transaction, received.event.payload, "unexpected-topic");
                 await received.advanceCursor(transaction);
             });
             return;
         }
         await this.#requireStore().transaction(async (transaction) => {
-            await this.#persistInboundPayload(
-                runtime,
+            const processed = await this.#requireFriendships().processInboundPayload(
+                runtime.account.identity,
+                runtime.account.profile,
                 transaction,
                 received.event.payload,
                 received.event.createdAt,
             );
+            if (processed.friendship !== undefined) {
+                destroyMurmurFriendship(processed.friendship);
+            }
             await received.advanceCursor(transaction);
         });
+        await this.#requireFriendships().drainGlobalEventOutbox();
+        await this.#flushRelayOutbox(runtime);
     }
 
-    async #persistInboundPayload(
-        runtime: MurmurRuntime,
-        transaction: StoreTransaction,
-        payload: Uint8Array,
-        receivedAt: number,
-    ): Promise<void> {
-        if (isHandledRequestEnvelope(payload)) return;
-        const id = payloadId(payload);
-        const handled = await transaction.get(handledKey(id));
-        if (handled !== undefined) {
-            zeroBytes(handled);
-            return;
-        }
-        const key = pendingKey(id);
-        const existing = await transaction.get(key);
-        if (existing !== undefined) {
-            zeroBytes(existing);
-            return;
-        }
-        const pendingCount = await this.#readPendingCount(transaction);
-        if (pendingCount >= this.#maxPendingFriendRequests) {
-            await this.#quarantine(transaction, payload, "pending-limit-reached");
-            return;
-        }
-        let pending: StoredPendingRequest;
-        try {
-            const opened = decryptContactProfile(
-                runtime.account.identity,
-                decodeFriendRequestEnvelope(payload),
-            );
-            try {
-                pending = openedProfileToPending(id, opened, receivedAt);
-            } finally {
-                destroyPublicIdentity(opened.identity);
-                if (opened.profile.avatar !== undefined) zeroBytes(opened.profile.avatar);
-                if (opened.privateData !== undefined) zeroBytes(opened.privateData);
-            }
-        } catch {
-            await this.#quarantine(transaction, payload, "invalid-friend-request");
-            return;
-        }
-        const encoded = encodeStoredPendingRequest(pending);
-        const encodedCount = encodeStoredPendingRequestCount(pendingCount + 1);
-        try {
-            await transaction.set(key, encoded.slice());
-            await transaction.set(PENDING_COUNT_KEY, encodedCount.slice());
-        } finally {
-            zeroBytes(encoded);
-            zeroBytes(encodedCount);
-        }
-    }
-
-    async #readPendingCount(transaction: StoreTransaction): Promise<number> {
-        const encoded = await transaction.get(PENDING_COUNT_KEY);
-        if (encoded === undefined) return 0;
-        try {
-            return decodeStoredPendingRequestCount(encoded);
-        } finally {
-            zeroBytes(encoded);
-        }
-    }
-
-    async #decrementPendingCount(transaction: StoreTransaction): Promise<void> {
-        const count = await this.#readPendingCount(transaction);
-        const encoded = encodeStoredPendingRequestCount(Math.max(0, count - 1));
-        try {
-            await transaction.set(PENDING_COUNT_KEY, encoded.slice());
-        } finally {
-            zeroBytes(encoded);
-        }
-    }
-
-    async #recordHandledRequest(
-        transaction: StoreTransaction,
-        id: string,
-        answer: "accept" | "reject",
-        answeredAt: number,
-    ): Promise<void> {
-        const encoded = encodeStoredHandledRequest({ answer, answeredAt, id, version: 1 });
-        try {
-            await transaction.set(handledKey(id), encoded.slice());
-        } finally {
-            zeroBytes(encoded);
-        }
-        const handled = await transaction.list(HANDLED_PREFIX);
-        try {
-            const expired = [...handled.entries()]
-                .map(([key, value]) => ({
-                    answeredAt: decodeStoredHandledRequest(value).answeredAt,
-                    key,
-                }))
-                .sort(
-                    (left, right) =>
-                        left.answeredAt - right.answeredAt || left.key.localeCompare(right.key),
-                )
-                .slice(0, Math.max(0, handled.size - MAX_HANDLED_REQUESTS));
-            for (const record of expired) await transaction.delete(record.key);
-        } finally {
-            for (const value of handled.values()) zeroBytes(value);
-        }
-    }
-
-    async #publishPreparedOutbound(
-        runtime: MurmurRuntime,
-        key: string,
-        prefix: string,
-        limit: number,
-        createEvent: () => SignedRelayEvent,
-    ): Promise<boolean> {
-        const store = this.#requireStore();
-        let event: SignedRelayEvent;
-        let publishedRelayIds: readonly string[] = [];
-        const existing = await store.get(key);
-        if (existing === undefined) {
-            const retained = await store.list(prefix);
-            try {
-                if (retained.size >= limit) {
-                    throw new MurmurServiceError(
-                        "relay_unavailable",
-                        "The Murmur outbound queue is full",
-                    );
-                }
-            } finally {
-                for (const value of retained.values()) zeroBytes(value);
-            }
-            event = createEvent();
-            const encoded = encodeStoredOutboundEvent({ event, publishedRelayIds });
-            try {
-                await store.set(key, encoded.slice());
-            } finally {
-                zeroBytes(encoded);
-            }
-        } else {
-            try {
-                const stored = decodeStoredOutboundEvent(existing);
-                event = stored.event;
-                publishedRelayIds = stored.publishedRelayIds;
-            } finally {
-                zeroBytes(existing);
-            }
-        }
-
-        try {
-            const configuredRelayIds = new Set(runtime.transports.map((transport) => transport.id));
-            const published = new Set(
-                publishedRelayIds.filter((relayId) => configuredRelayIds.has(relayId)),
-            );
-            const pending = runtime.transports.filter((transport) => !published.has(transport.id));
-            const attempts = await Promise.allSettled(
-                pending.map(async (transport) => {
-                    await transport.publish(event);
-                    return transport.id;
-                }),
-            );
-            for (const attempt of attempts) {
-                if (attempt.status === "fulfilled") published.add(attempt.value);
-            }
-            const updated = encodeStoredOutboundEvent({
-                event,
-                publishedRelayIds: [...published],
-            });
-            try {
-                await store.set(key, updated.slice());
-            } finally {
-                zeroBytes(updated);
-            }
-            return runtime.transports.every((transport) => published.has(transport.id));
-        } finally {
-            destroySignedRelayEvent(event);
-        }
-    }
-
-    async #quarantine(
-        transaction: StoreTransaction,
-        payload: Uint8Array,
-        reason: string,
-    ): Promise<void> {
-        const id = payloadId(payload);
-        const record = utf8Encode(
-            JSON.stringify({
-                bytes: payload.byteLength,
-                reason,
-                version: 1,
-            }),
-        );
-        try {
-            await transaction.set(`${QUARANTINE_PREFIX}${id}`, record.slice());
-            const records = await transaction.list(QUARANTINE_PREFIX);
-            for (const value of records.values()) zeroBytes(value);
-            const expired = [...records.keys()]
-                .sort()
-                .slice(0, Math.max(0, records.size - MAX_QUARANTINE_RECORDS));
-            for (const key of expired) await transaction.delete(key);
-        } finally {
-            zeroBytes(record);
-        }
+    #flushRelayOutbox(runtime: MurmurRuntime): Promise<void> {
+        if (runtime.relayFlush !== undefined) return runtime.relayFlush;
+        const task = this.#requireFriendships()
+            .flushRelayOutbox(runtime.transports)
+            .then(() => undefined);
+        runtime.relayFlush = task;
+        const clear = () => {
+            if (runtime.relayFlush === task) runtime.relayFlush = undefined;
+        };
+        void task.then(clear, clear);
+        return task;
     }
 }

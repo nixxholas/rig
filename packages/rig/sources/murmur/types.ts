@@ -4,6 +4,7 @@ import type {
     AnswerMurmurFriendRequestResponse,
     DeleteMurmurAccountResponse,
     GetMurmurAccountResponse,
+    GetMurmurFriendsResponse,
     ListMurmurContactsResponse,
     ListMurmurFriendRequestsResponse,
     SendMurmurFriendRequestRequest,
@@ -15,7 +16,15 @@ import type {
     StopMurmurServiceResponse,
 } from "../protocol/MurmurProtocol.js";
 
-export interface MurmurLifecycleStore extends MurmurStore {
+export interface MurmurPagedStore extends MurmurStore {
+    listPage(
+        prefix: string,
+        after: string | undefined,
+        limit: number,
+    ): Promise<ReadonlyMap<string, Uint8Array>>;
+}
+
+export interface MurmurLifecycleStore extends MurmurPagedStore {
     close(): void | Promise<void>;
     deleteDatabaseFiles(): void | Promise<void>;
 }
@@ -27,6 +36,7 @@ export interface StoredMurmurAccount {
 
 export interface MurmurServiceContract {
     getAccount(): Promise<GetMurmurAccountResponse>;
+    getFriends(): Promise<GetMurmurFriendsResponse>;
     signup(request: SignupMurmurAccountRequest): Promise<SignupMurmurAccountResponse>;
     start(request?: StartMurmurServiceRequest): Promise<StartMurmurServiceResponse>;
     stop(): Promise<StopMurmurServiceResponse>;

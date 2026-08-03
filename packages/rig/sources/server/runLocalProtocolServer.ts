@@ -514,7 +514,13 @@ async function runOwnedLocalProtocolServer(
             },
             taskDrain,
         });
+        const activeStore = store;
         murmurService = new MurmurService({
+            publishGlobalEvent: (event) => {
+                const entry = activeStore.globalEventQueue.appendReplaySafe(event);
+                if (entry !== undefined) activeStore.globalEventQueue.publish(entry);
+                if (entry !== undefined) activeStore.liveEvents.publish(event);
+            },
             storeFactory: () =>
                 new SqliteMurmurStore(join(dirname(paths.databasePath), "murmur.sqlite")),
         });

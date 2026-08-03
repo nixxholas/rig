@@ -7,6 +7,7 @@ import type {
 import { Type, type Static } from "@sinclair/typebox";
 
 import type { EventId } from "./EventId.js";
+import type { MurmurFriendshipChangedEvent } from "./MurmurProtocol.js";
 import type {
     BaseSessionEvent,
     DaemonIdentity,
@@ -544,6 +545,7 @@ export type GlobalLiveEvent =
 
 export type GlobalEvent =
     | ComputePreparationEvent
+    | MurmurFriendshipChangedEvent
     | SessionEvent
     | ProjectEvent
     | ProjectWorkspaceEvent

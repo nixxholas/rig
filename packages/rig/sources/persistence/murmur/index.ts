@@ -11,6 +11,7 @@ const exact = { additionalProperties: false } as const;
 
 const databasePathSchema = Type.String({ minLength: 1 });
 const keySchema = Type.String({ maxLength: MAXIMUM_KEY_CHARACTERS, minLength: 1 });
+const pageLimitSchema = Type.Integer({ maximum: 1_000, minimum: 1 });
 const prefixSchema = Type.String({ maxLength: MAXIMUM_KEY_CHARACTERS });
 const valueSchema = Type.Uint8Array({ maxByteLength: MAXIMUM_VALUE_BYTES });
 const storedValueRowSchema = Type.Object({ value: valueSchema }, exact);
@@ -66,6 +67,14 @@ export class SqliteMurmurStore implements MurmurStore {
 
     async list(prefix: string): Promise<ReadonlyMap<string, Uint8Array>> {
         return this.#exclusive(async () => this.#list(prefix));
+    }
+
+    async listPage(
+        prefix: string,
+        after: string | undefined,
+        limit: number,
+    ): Promise<ReadonlyMap<string, Uint8Array>> {
+        return this.#exclusive(async () => this.#listPage(prefix, after, limit));
     }
 
     async transaction<Result>(
@@ -173,6 +182,47 @@ export class SqliteMurmurStore implements MurmurStore {
                  ORDER BY key`,
             )
             .all(prefix.length, prefix);
+        const values = new Map<string, Uint8Array>();
+        for (const row of rows) {
+            if (!Value.Check(storedKeyValueRowSchema, row)) {
+                throw new Error("Invalid Murmur SQLite key-value row");
+            }
+            values.set(row.key, Uint8Array.from(row.value));
+        }
+        return values;
+    }
+
+    #listPage(
+        prefix: string,
+        after: string | undefined,
+        limit: number,
+    ): ReadonlyMap<string, Uint8Array> {
+        this.#ensureOpen();
+        if (
+            !Value.Check(prefixSchema, prefix) ||
+            (after !== undefined && !Value.Check(keySchema, after)) ||
+            !Value.Check(pageLimitSchema, limit)
+        ) {
+            throw new Error("Invalid Murmur SQLite page");
+        }
+        const rows =
+            after === undefined
+                ? this.#database
+                      .prepare<[number, string, number], StoredKeyValueRow>(
+                          `SELECT key, value FROM murmur_key_values
+                           WHERE substr(key, 1, ?) = ?
+                           ORDER BY key
+                           LIMIT ?`,
+                      )
+                      .all(prefix.length, prefix, limit)
+                : this.#database
+                      .prepare<[number, string, string, number], StoredKeyValueRow>(
+                          `SELECT key, value FROM murmur_key_values
+                           WHERE substr(key, 1, ?) = ? AND key > ?
+                           ORDER BY key
+                           LIMIT ?`,
+                      )
+                      .all(prefix.length, prefix, after, limit);
         const values = new Map<string, Uint8Array>();
         for (const row of rows) {
             if (!Value.Check(storedKeyValueRowSchema, row)) {

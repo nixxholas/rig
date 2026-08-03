@@ -33,6 +33,7 @@ import type {
     GetGlobalSecurityPolicyResponse,
     GetSessionUsageResponse,
     GetTimelineResponse,
+    GetMurmurFriendsResponse,
     ListProviderUsageResponse,
     ProviderUsageEntry,
     SessionStateResponse,
@@ -542,6 +543,10 @@ async function handleRequest(
                 );
                 return;
             }
+            if (request.method === "GET" && route.name === "murmur-friends") {
+                sendJson<GetMurmurFriendsResponse>(response, 200, await murmur.getFriends());
+                return;
+            }
             if (request.method === "POST" && route.name === "murmur-friend-request-answer") {
                 const body = decodeMurmurRequest(
                     answerMurmurFriendRequestRequestSchema,
@@ -550,7 +555,7 @@ async function handleRequest(
                 sendJson<AnswerMurmurFriendRequestResponse>(
                     response,
                     200,
-                    await murmur.answerFriendRequest(route.requestId, body),
+                    await murmur.answerFriendRequest(route.peerId, body),
                 );
                 return;
             }
@@ -3409,6 +3414,7 @@ function matchRoute(pathname: string):
               | "models"
               | "murmur-account"
               | "murmur-contacts"
+              | "murmur-friends"
               | "murmur-friend-requests"
               | "murmur-service-start"
               | "murmur-service-stop"
@@ -3426,7 +3432,7 @@ function matchRoute(pathname: string):
       }
     | {
           name: "murmur-friend-request-answer";
-          requestId: string;
+          peerId: string;
           sessionId?: undefined;
       }
     | { name: "slot-entry"; sessionId?: undefined; slotEntryId: string }
@@ -3573,6 +3579,7 @@ function matchRoute(pathname: string):
     if (pathname === "/messages") return { name: "messages" };
     if (pathname === "/murmur/account") return { name: "murmur-account" };
     if (pathname === "/murmur/contacts") return { name: "murmur-contacts" };
+    if (pathname === "/murmur/friends") return { name: "murmur-friends" };
     if (pathname === "/murmur/friend-requests") return { name: "murmur-friend-requests" };
     if (pathname === "/murmur/service/start") return { name: "murmur-service-start" };
     if (pathname === "/murmur/service/stop") return { name: "murmur-service-stop" };
@@ -3636,10 +3643,8 @@ function matchRoute(pathname: string):
         globalParts[2] !== undefined &&
         globalParts[3] === "answer"
     ) {
-        const requestId = decodeUrlComponent(globalParts[2]);
-        return requestId === undefined
-            ? undefined
-            : { name: "murmur-friend-request-answer", requestId };
+        const peerId = decodeUrlComponent(globalParts[2]);
+        return peerId === undefined ? undefined : { name: "murmur-friend-request-answer", peerId };
     }
     const appOperation =
         /^\/plugin-apps\/([^/]+)\/generations\/([^/]+)\/(resources\/read|tools\/call|extensions\/io\.slopus\.happy\/storage\/(get|set|delete|list))$/u.exec(

@@ -17,6 +17,11 @@ export type GlobalEventQueueListener = (delivery: GlobalEventDelivery) => void;
 export interface GlobalEventQueue {
     readonly durable: boolean;
     append(event: GlobalEvent, tx?: TX): GlobalEventQueueEntry | undefined;
+    /**
+     * Appends an event delivered from a durable outbox whose source transaction
+     * may have missed the acknowledgement of an earlier successful append.
+     */
+    appendReplaySafe(event: GlobalEvent, tx?: TX): GlobalEventQueueEntry | undefined;
     cursor(): string;
     deactivate(): void;
     list(options?: ListGlobalEventQueueOptions): readonly GlobalEventQueueEntry[] | undefined;

@@ -31,6 +31,7 @@ import {
     PluginManagementRequestError,
     PluginStore,
 } from "./PluginElement.js";
+import { MurmurFriendsStore, type MurmurFriendsState } from "./MurmurFriendElement.js";
 import type { TimelineAgentNode, TimelineDelta, TimelineState } from "./TimelineElement.js";
 import { TimelineStore } from "./TimelineStore.js";
 import { createCuid2 } from "./createCuid2.js";
@@ -74,6 +75,7 @@ import type {
     AnswerMurmurFriendRequestResponse,
     DeleteMurmurAccountResponse,
     GetMurmurAccountResponse,
+    GetMurmurFriendsResponse,
     SendMurmurFriendRequestResponse,
     SignupMurmurAccountRequest,
     SignupMurmurAccountResponse,
@@ -85,6 +87,7 @@ import {
     answerMurmurFriendRequestResponseSchema,
     deleteMurmurAccountResponseSchema,
     getMurmurAccountResponseSchema,
+    getMurmurFriendsResponseSchema,
     listMurmurContactsResponseSchema,
     listMurmurFriendRequestsResponseSchema,
     pluginInstallClassificationSchema,
@@ -106,6 +109,7 @@ const GIT_WATCH_RENEWAL_MS = 4 * 60 * 1_000;
 const GIT_WATCH_RETRY_MS = 5_000;
 const MAXIMUM_PLUGIN_APP_REQUEST_BYTES = 1024 * 1024;
 const MAXIMUM_PLUGIN_APP_RESPONSE_BYTES = 2 * 1024 * 1024;
+const MAXIMUM_REMEMBERED_MURMUR_FRIENDSHIP_EVENTS = 1_024;
 const pluginAppToolResponseSchema = Type.Object(
     { result: Type.Unknown() },
     { additionalProperties: false },
@@ -261,6 +265,17 @@ export interface RigPluginsSubscriptionOptions {
     onError?: (error: unknown) => void;
 }
 
+/**
+ * Follows the authoritative Murmur social graph shared by every friends view.
+ *
+ * The snapshot is refetched after each friendship event instead of making a UI
+ * infer the graph from a lightweight notification.
+ */
+export interface RigMurmurFriendsSubscriptionOptions {
+    onChange: (state: MurmurFriendsState) => void;
+    onError?: (error: unknown) => void;
+}
+
 export interface RigTimelineSubscriptionOptions {
     /** Leave archived chats out, as the daemon does by default. */
     includeArchived?: boolean;
@@ -327,6 +342,15 @@ export interface RigPluginsConnection {
         key: string,
         value: unknown,
     ): Promise<void>;
+    close: () => void;
+}
+
+export interface RigMurmurFriendsConnection {
+    account: () => MurmurFriendsState["account"];
+    contacts: () => MurmurFriendsState["contacts"];
+    friendships: () => MurmurFriendsState["friendships"];
+    state: () => MurmurFriendsState;
+    stats: () => MurmurFriendsState["stats"];
     close: () => void;
 }
 
@@ -429,6 +453,10 @@ export interface RigConnection {
     ) => RigProviderUsageConnection;
     /** Follows the complete local plugin and application catalog. */
     connectPlugins: (options: RigPluginsSubscriptionOptions) => RigPluginsConnection;
+    /** Follows the complete Murmur friendship graph and its counters. */
+    connectMurmurFriends: (
+        options: RigMurmurFriendsSubscriptionOptions,
+    ) => RigMurmurFriendsConnection;
     connectTimeline: (options: RigTimelineSubscriptionOptions) => RigTimelineConnection;
     /** Reads the current plugin catalog once. Lifecycle changes are also announced live. */
     listPlugins: (options?: { signal?: AbortSignal }) => Promise<{
@@ -470,11 +498,13 @@ export interface RigConnection {
         options?: MurmurOperationOptions,
     ) => Promise<ListMurmurFriendRequestsResponse>;
     answerMurmurFriendRequest: (
-        requestId: string,
+        peerId: string,
         answer: "accept" | "reject",
         options?: MurmurOperationOptions,
     ) => Promise<AnswerMurmurFriendRequestResponse>;
     listMurmurContacts: (options?: MurmurOperationOptions) => Promise<ListMurmurContactsResponse>;
+    /** Reads the complete current friendship graph once. */
+    listMurmurFriends: (options?: MurmurOperationOptions) => Promise<GetMurmurFriendsResponse>;
     /** Returns the workspace's own identity, which is also this action's identity. */
     createWorkspace: (input: CreateWorkspaceInput) => MutationId;
     archiveWorkspace: (projectId: string, workspaceId: string) => MutationId;
@@ -589,6 +619,24 @@ interface PluginsEntry {
     started: boolean;
     store: PluginStore;
     subscribers: Set<PluginsSubscriber>;
+}
+
+interface MurmurFriendsSubscriber extends RigMurmurFriendsSubscriptionOptions {
+    closed: boolean;
+}
+
+interface MurmurFriendsEntry {
+    bootstrapVersion: number;
+    controller: AbortController;
+    detachRoot: () => void;
+    loading: boolean;
+    reloadPending: boolean;
+    rememberedEventIds: Set<string>;
+    rememberedEventOrder: string[];
+    snapshotLoaded: boolean;
+    started: boolean;
+    store: MurmurFriendsStore;
+    subscribers: Set<MurmurFriendsSubscriber>;
 }
 
 interface TimelineSubscriber extends RigTimelineSubscriptionOptions {
@@ -707,6 +755,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
     const presenceClosers = new Set<() => void>();
     let groupsEntry: GroupEntry | undefined;
     let inboxEntry: InboxEntry | undefined;
+    let murmurFriendsEntry: MurmurFriendsEntry | undefined;
     let pluginsEntry: PluginsEntry | undefined;
     let providerUsageEntry: ProviderUsageEntryState | undefined;
     const timelineEntries = new Map<string, TimelineEntry>();
@@ -755,6 +804,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 pluginsEntry.store.plugins(),
                 pluginsEntry.store.state(),
             );
+        }
+    };
+
+    const publishMurmurFriends = (changed: boolean): void => {
+        const entry = murmurFriendsEntry;
+        if (closed || !changed || entry === undefined) return;
+        for (const subscriber of [...entry.subscribers]) {
+            if (!subscriber.closed) subscriber.onChange(entry.store.state());
         }
     };
 
@@ -1552,6 +1609,96 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         });
     };
 
+    const createMurmurFriendsEntry = (): MurmurFriendsEntry => {
+        if (murmurFriendsEntry !== undefined) return murmurFriendsEntry;
+        const linked = linkedController(rootController.signal);
+        const entry: MurmurFriendsEntry = {
+            bootstrapVersion: 0,
+            controller: linked.controller,
+            detachRoot: linked.detach,
+            loading: false,
+            reloadPending: false,
+            rememberedEventIds: new Set(),
+            rememberedEventOrder: [],
+            snapshotLoaded: false,
+            started: false,
+            store: new MurmurFriendsStore(),
+            subscribers: new Set(),
+        };
+        murmurFriendsEntry = entry;
+        return entry;
+    };
+
+    const reportMurmurFriendsError = (entry: MurmurFriendsEntry, error: unknown): void => {
+        if (closed || entry.controller.signal.aborted) return;
+        // A request event may have arrived immediately before this failed
+        // reload. Retain that fact so a clean stream reconnect also rebuilds
+        // instead of relabeling a stale graph as live.
+        entry.reloadPending = true;
+        publishMurmurFriends(entry.store.setConnection("closed"));
+        for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
+    };
+
+    /**
+     * Keeps at most one fetch in flight. Events that land while it is reading
+     * merely ask it for one newer snapshot once that read has settled.
+     */
+    const loadMurmurFriends = async (entry: MurmurFriendsEntry): Promise<void> => {
+        if (entry.loading) {
+            entry.reloadPending = true;
+            return;
+        }
+        entry.loading = true;
+        const version = ++entry.bootstrapVersion;
+        try {
+            do {
+                entry.reloadPending = false;
+                const snapshot = await requestMurmur(
+                    "murmur/friends",
+                    getMurmurFriendsResponseSchema,
+                    murmurJsonInit("GET", undefined, { signal: entry.controller.signal }),
+                );
+                if (
+                    closed ||
+                    entry.controller.signal.aborted ||
+                    version !== entry.bootstrapVersion ||
+                    murmurFriendsEntry !== entry
+                ) {
+                    return;
+                }
+                entry.snapshotLoaded = true;
+                publishMurmurFriends(entry.store.replace(snapshot, "live"));
+            } while (entry.reloadPending);
+        } finally {
+            entry.loading = false;
+        }
+    };
+
+    const requestMurmurFriendsReload = (entry: MurmurFriendsEntry): void => {
+        void loadMurmurFriends(entry).catch((error: unknown) => {
+            reportMurmurFriendsError(entry, error);
+        });
+    };
+
+    const rememberMurmurFriendshipEvent = (entry: MurmurFriendsEntry, id: string): boolean => {
+        if (entry.rememberedEventIds.has(id)) return false;
+        entry.rememberedEventIds.add(id);
+        entry.rememberedEventOrder.push(id);
+        if (entry.rememberedEventOrder.length > MAXIMUM_REMEMBERED_MURMUR_FRIENDSHIP_EVENTS) {
+            const oldest = entry.rememberedEventOrder.shift();
+            if (oldest !== undefined) entry.rememberedEventIds.delete(oldest);
+        }
+        return true;
+    };
+
+    const startMurmurFriendsEntry = (entry: MurmurFriendsEntry): void => {
+        if (entry.started) return;
+        entry.started = true;
+        ensureLiveStream();
+        if (!liveStreamOpen) return;
+        requestMurmurFriendsReload(entry);
+    };
+
     const createTimelineEntry = (subscription: RigTimelineSubscriptionOptions): TimelineEntry => {
         const key = timelineKey(subscription);
         const existing = timelineEntries.get(key);
@@ -1654,6 +1801,14 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                     if (pluginsEntry !== undefined) {
                         publishPlugins(pluginsEntry.store.setConnection("live"));
                     }
+                    if (murmurFriendsEntry !== undefined) {
+                        const friends = murmurFriendsEntry;
+                        if (friends.started && (!friends.snapshotLoaded || friends.reloadPending)) {
+                            requestMurmurFriendsReload(friends);
+                        } else {
+                            publishMurmurFriends(friends.store.setConnection("live"));
+                        }
+                    }
                     setTimelineConnection("live");
                     for (const entry of [...sessionEntries.values()]) {
                         if (entry.started) publishSession(entry, entry.store.setConnection("live"));
@@ -1682,6 +1837,10 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         }
                     });
                 }
+                const friends = murmurFriendsEntry;
+                if (friends !== undefined && friends.started) {
+                    requestMurmurFriendsReload(friends);
+                }
                 for (const entry of [...sessionEntries.values()]) {
                     if (!entry.started) continue;
                     void bootstrapSession(entry).catch((error: unknown) => {
@@ -1707,6 +1866,17 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
             },
             onEvent: (event, cursor) => {
                 rememberGlobalIdentity(event);
+                if (event.type === "murmur_friendship_changed") {
+                    const entry = murmurFriendsEntry;
+                    if (
+                        entry !== undefined &&
+                        entry.started &&
+                        rememberMurmurFriendshipEvent(entry, event.id)
+                    ) {
+                        requestMurmurFriendsReload(entry);
+                    }
+                    return;
+                }
                 if (event.type === "plugins_changed") {
                     const entry = pluginsEntry;
                     if (entry === undefined || !entry.started) return;
@@ -1803,6 +1973,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("reconnecting"));
                 }
+                if (murmurFriendsEntry !== undefined) {
+                    publishMurmurFriends(murmurFriendsEntry.store.setConnection("reconnecting"));
+                }
                 setTimelineConnection("reconnecting");
                 for (const entry of [...sessionEntries.values()]) {
                     if (entry.started) {
@@ -1831,6 +2004,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                         subscriber.onError?.(error);
                     }
                 }
+                if (murmurFriendsEntry !== undefined) {
+                    publishMurmurFriends(murmurFriendsEntry.store.setConnection("closed"));
+                    for (const subscriber of [...murmurFriendsEntry.subscribers]) {
+                        subscriber.onError?.(error);
+                    }
+                }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
                     for (const subscriber of [...entry.subscribers]) subscriber.onError?.(error);
@@ -1850,6 +2029,9 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 }
                 if (pluginsEntry !== undefined) {
                     publishPlugins(pluginsEntry.store.setConnection("closed"));
+                }
+                if (murmurFriendsEntry !== undefined) {
+                    publishMurmurFriends(murmurFriendsEntry.store.setConnection("closed"));
                 }
                 for (const entry of [...sessionEntries.values()]) {
                     publishSession(entry, entry.store.setConnection("closed"));
@@ -2243,6 +2425,33 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         };
     };
 
+    const connectMurmurFriends = (
+        subscription: RigMurmurFriendsSubscriptionOptions,
+    ): RigMurmurFriendsConnection => {
+        if (closed) throw new Error("This Rig connection is closed.");
+        const entry = createMurmurFriendsEntry();
+        const subscriber: MurmurFriendsSubscriber = { ...subscription, closed: false };
+        entry.subscribers.add(subscriber);
+        subscriber.onChange(entry.store.state());
+        startMurmurFriendsEntry(entry);
+        return {
+            account: () => entry.store.state().account,
+            contacts: () => entry.store.state().contacts,
+            friendships: () => entry.store.state().friendships,
+            state: () => entry.store.state(),
+            stats: () => entry.store.state().stats,
+            close: () => {
+                if (subscriber.closed) return;
+                subscriber.closed = true;
+                entry.subscribers.delete(subscriber);
+                if (entry.subscribers.size !== 0 || murmurFriendsEntry !== entry) return;
+                entry.controller.abort();
+                entry.detachRoot();
+                murmurFriendsEntry = undefined;
+            },
+        };
+    };
+
     const connectPlugins = (subscription: RigPluginsSubscriptionOptions): RigPluginsConnection => {
         if (closed) throw new Error("This Rig connection is closed.");
         const entry = createPluginsEntry();
@@ -2532,12 +2741,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         );
 
     const answerMurmurFriendRequest: RigConnection["answerMurmurFriendRequest"] = (
-        requestId,
+        peerId,
         answer,
         operationOptions = {},
     ) =>
         requestMurmur(
-            `murmur/friend-requests/${encodeURIComponent(requestId)}/answer`,
+            `murmur/friend-requests/${encodeURIComponent(peerId)}/answer`,
             answerMurmurFriendRequestResponseSchema,
             murmurJsonInit("POST", { answer }, operationOptions),
         );
@@ -2546,6 +2755,13 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         requestMurmur(
             "murmur/contacts",
             listMurmurContactsResponseSchema,
+            murmurJsonInit("GET", undefined, operationOptions),
+        );
+
+    const listMurmurFriends: RigConnection["listMurmurFriends"] = (operationOptions = {}) =>
+        requestMurmur(
+            "murmur/friends",
+            getMurmurFriendsResponseSchema,
             murmurJsonInit("GET", undefined, operationOptions),
         );
 
@@ -3586,6 +3802,12 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
                 pluginsEntry.subscribers.clear();
                 pluginsEntry = undefined;
             }
+            if (murmurFriendsEntry !== undefined) {
+                murmurFriendsEntry.controller.abort();
+                murmurFriendsEntry.detachRoot();
+                murmurFriendsEntry.subscribers.clear();
+                murmurFriendsEntry = undefined;
+            }
             inboxEntry?.subscribers.clear();
             inboxEntry = undefined;
             for (const entry of timelineEntries.values()) {
@@ -3603,6 +3825,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         compactSession,
         connectGroups,
         connectInbox,
+        connectMurmurFriends,
         connectPlugins,
         connectProviderUsage,
         connectSession,
@@ -3616,6 +3839,7 @@ export function connectRig(options: ConnectRigOptions): RigConnection {
         installPlugin,
         getMurmurAccount,
         listMurmurContacts,
+        listMurmurFriends,
         listMurmurFriendRequests,
         readBackgroundProcess,
         readPluginLog,

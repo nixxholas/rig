@@ -1,5 +1,8 @@
 import { createEventIdFactory, eventIdsShareScope, isLiveGlobalEvent } from "../protocol/index.js";
-import { globalEventAppend } from "../persistence/global-event/globalEventAppend.js";
+import {
+    globalEventAppend,
+    globalEventAppendReplaySafe,
+} from "../persistence/global-event/globalEventAppend.js";
 import { globalEventReset } from "../persistence/global-event/globalEventReset.js";
 import { globalEventTrim } from "../persistence/global-event/globalEventTrim.js";
 import { queryGlobalEvents } from "../persistence/global-event/queryGlobalEvents.js";
@@ -47,11 +50,32 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
     }
 
     append(event: GlobalEvent, tx: TX = this.#database): GlobalEventQueueEntry | undefined {
+        return this.#append(event, tx, false);
+    }
+
+    /**
+     * Appends an event delivered by a durable outbox in another database.
+     *
+     * Replaying the exact event is success without publishing it twice.
+     */
+    appendReplaySafe(
+        event: GlobalEvent,
+        tx: TX = this.#database,
+    ): GlobalEventQueueEntry | undefined {
+        return this.#append(event, tx, true);
+    }
+
+    #append(event: GlobalEvent, tx: TX, replaySafe: boolean): GlobalEventQueueEntry | undefined {
         if (isLiveGlobalEvent(event)) return undefined;
         if ("sessionId" in event && !shouldPersistGlobalEventType(event.type)) return undefined;
-        let aggregate: { id: string; kind: "compute" | "project" | "session" | "workspace" };
+        let aggregate: {
+            id: string;
+            kind: "compute" | "murmur" | "project" | "session" | "workspace";
+        };
         if ("computeInstanceId" in event) {
             aggregate = { id: event.computeInstanceId, kind: "compute" };
+        } else if ("murmurPeerId" in event) {
+            aggregate = { id: event.murmurPeerId, kind: "murmur" };
         } else if ("workspaceId" in event && typeof event.workspaceId === "string") {
             aggregate = { id: event.workspaceId, kind: "workspace" };
         } else if ("sessionId" in event && typeof event.sessionId === "string") {
@@ -60,7 +84,8 @@ export class PersistentGlobalEventQueue implements GlobalEventQueue {
             aggregate = { id: (event as ProjectEvent).projectId, kind: "project" };
         }
         const cursor = this.#createCursor();
-        const entry = globalEventAppend(tx, {
+        const append = replaySafe ? globalEventAppendReplaySafe : globalEventAppend;
+        const entry = append(tx, {
             aggregateId: aggregate.id,
             aggregateKind: aggregate.kind,
             cursor,

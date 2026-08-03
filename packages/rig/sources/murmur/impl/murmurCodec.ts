@@ -120,17 +120,10 @@ const outboundEventSchema = Type.Object(
     },
     exact,
 );
-const nativeMetadataSchema = Type.Object(
-    {
-        firstName: Type.String({ maxLength: 128, minLength: 1 }),
-        lastName: Type.String({ maxLength: 128, minLength: 1 }),
-        photoHeight: Type.Optional(Type.String({ pattern: "^[1-9][0-9]{0,3}$" })),
-        photoMediaType: Type.Optional(Type.Literal("image/webp")),
-        photoThumbhash: Type.Optional(Type.String({ maxLength: 1_024, minLength: 1 })),
-        photoWidth: Type.Optional(Type.String({ pattern: "^[1-9][0-9]{0,3}$" })),
-    },
-    exact,
-);
+const nativeNameSchema = Type.String({ maxLength: 128, minLength: 1 });
+const nativePhotoDimensionSchema = Type.String({ pattern: "^[1-9][0-9]{0,3}$" });
+const nativePhotoMediaTypeSchema = Type.Literal("image/webp");
+const nativePhotoThumbhashSchema = Type.String({ maxLength: 1_024, minLength: 1 });
 
 type StoredProfile = Static<typeof storedProfileSchema>;
 type StoredOutboundEventWire = Static<typeof outboundEventSchema>;
@@ -189,44 +182,68 @@ export function publicProfileToStored(profile: MurmurProfile): StoredProfile {
 }
 
 export function nativeProfileToPublic(profile: IdentityProfile): MurmurProfile {
-    const metadata = Value.Decode(nativeMetadataSchema, profile.metadata);
-    const hasPhotoMetadata =
-        metadata.photoHeight !== undefined ||
-        metadata.photoMediaType !== undefined ||
-        metadata.photoThumbhash !== undefined ||
-        metadata.photoWidth !== undefined;
-    if (profile.avatar === undefined && hasPhotoMetadata) {
-        throw new Error("Murmur profile photo metadata has no avatar");
-    }
+    const metadata = profile.metadata ?? {};
+    const fallbackName = splitMurmurDisplayName(profile.name);
+    const firstName = Value.Check(nativeNameSchema, metadata.firstName)
+        ? metadata.firstName
+        : fallbackName.firstName;
+    const lastName = Value.Check(nativeNameSchema, metadata.lastName)
+        ? metadata.lastName
+        : fallbackName.lastName;
+    const photoHeight = Value.Check(nativePhotoDimensionSchema, metadata.photoHeight)
+        ? metadata.photoHeight
+        : undefined;
+    const photoMediaType = Value.Check(nativePhotoMediaTypeSchema, metadata.photoMediaType)
+        ? metadata.photoMediaType
+        : undefined;
+    const photoThumbhash = Value.Check(nativePhotoThumbhashSchema, metadata.photoThumbhash)
+        ? metadata.photoThumbhash
+        : undefined;
+    const photoWidth = Value.Check(nativePhotoDimensionSchema, metadata.photoWidth)
+        ? metadata.photoWidth
+        : undefined;
+    let photo: MurmurPhoto | undefined;
+    const width = Number(photoWidth);
+    const height = Number(photoHeight);
     if (
         profile.avatar !== undefined &&
-        (metadata.photoHeight === undefined ||
-            metadata.photoMediaType === undefined ||
-            metadata.photoThumbhash === undefined ||
-            metadata.photoWidth === undefined)
+        photoMediaType !== undefined &&
+        photoThumbhash !== undefined &&
+        Number.isSafeInteger(width) &&
+        width >= 1 &&
+        width <= 512 &&
+        Number.isSafeInteger(height) &&
+        height >= 1 &&
+        height <= 512
     ) {
-        throw new Error("Murmur profile avatar metadata is incomplete");
-    }
-    let photo: MurmurPhoto | undefined;
-    if (profile.avatar !== undefined) {
-        const width = Number(metadata.photoWidth);
-        const height = Number(metadata.photoHeight);
-        if (width > 512 || height > 512) {
-            throw new Error("Murmur profile photo dimensions are invalid");
-        }
         photo = {
             bytes: profile.avatar.byteLength,
             data: Buffer.from(profile.avatar).toString("base64"),
             height,
             mediaType: "image/webp",
-            thumbhash: metadata.photoThumbhash!,
+            thumbhash: photoThumbhash,
             width,
         };
     }
     return {
-        firstName: metadata.firstName,
-        lastName: metadata.lastName,
+        firstName,
+        lastName,
         ...(photo === undefined ? {} : { photo }),
+    };
+}
+
+function splitMurmurDisplayName(name: string): Pick<MurmurProfile, "firstName" | "lastName"> {
+    const normalized = name.trim().replaceAll(/\s+/g, " ");
+    const separator = normalized.indexOf(" ");
+    if (separator < 1) {
+        return {
+            firstName: normalized.slice(0, 128) || "Unknown",
+            lastName: "",
+        };
+    }
+    return {
+        firstName: normalized.slice(0, separator).slice(0, 128),
+        lastName: normalized.slice(separator + 1).slice(0, 128),
     };
 }
 

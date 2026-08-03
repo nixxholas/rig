@@ -26,6 +26,28 @@ const friendRequest = {
     senderId: contact.id,
     senderToken: contact.token,
 };
+const stats = {
+    acceptedRequests: 1,
+    autoAcceptedRequests: 0,
+    contacts: 1,
+    incomingPending: 0,
+    outgoingPending: 0,
+    rejectedRequests: 0,
+};
+const friendship = {
+    answeredAt: 2,
+    autoAcceptEligible: false,
+    direction: "mutual" as const,
+    firstSeenAt: 1,
+    history: { accepted: 1, autoAccepted: 0, received: 1, rejected: 0, sent: 0 },
+    peerId: contact.id,
+    profile: contact.profile,
+    requestId: "request-1",
+    state: "friends" as const,
+    token: contact.token,
+    updatedAt: 2,
+    version: "018bcfe5-6800-7fff-a5aa-0102030405ff",
+};
 
 describe("Murmur HTTP API", () => {
     it("routes account, service, friend-request, and contact methods without exposing keys", async () => {
@@ -50,13 +72,25 @@ describe("Murmur HTTP API", () => {
             await server.client.stopMurmurService();
             await expect(
                 server.client.sendMurmurFriendRequest({ token: "grace-token" }),
-            ).resolves.toEqual({ recipientId: "grace" });
+            ).resolves.toEqual({
+                friendship,
+                queued: true,
+                recipientId: "grace",
+                stats,
+            });
             await expect(server.client.listMurmurFriendRequests()).resolves.toEqual({
                 requests: [friendRequest],
             });
             await expect(
                 server.client.answerMurmurFriendRequest("request/1", { answer: "accept" }),
-            ).resolves.toEqual({ answer: "accept", contact });
+            ).resolves.toEqual({ answer: "accept", contact, friendship, stats });
+            await expect(server.client.getMurmurFriends()).resolves.toEqual({
+                account,
+                contacts: [contact],
+                friendships: [friendship],
+                service: stopped,
+                stats,
+            });
             await expect(server.client.listMurmurContacts()).resolves.toEqual({
                 contacts: [contact],
             });
@@ -140,13 +174,27 @@ function createMurmurStub(): MurmurServiceContract & {
         answerFriendRequest: vi.fn(async (_id, request) => ({
             answer: request.answer,
             ...(request.answer === "accept" ? { contact } : {}),
+            friendship,
+            stats,
         })),
         close: vi.fn(async () => undefined),
         deleteAccount: vi.fn(async () => ({ deleted: true })),
         getAccount: vi.fn(async () => ({ account, service: stopped })),
+        getFriends: vi.fn(async () => ({
+            account,
+            contacts: [contact],
+            friendships: [friendship],
+            service: stopped,
+            stats,
+        })),
         listContacts: vi.fn(async () => ({ contacts: [contact] })),
         listFriendRequests: vi.fn(async () => ({ requests: [friendRequest] })),
-        sendFriendRequest: vi.fn(async () => ({ recipientId: "grace" })),
+        sendFriendRequest: vi.fn(async () => ({
+            friendship,
+            queued: true,
+            recipientId: "grace",
+            stats,
+        })),
         signup: vi.fn(async (_request) => ({ account, service: stopped })),
         start: vi.fn(async (request = {}) => ({
             service: {

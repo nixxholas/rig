@@ -33,6 +33,7 @@ import type {
     SetPresenceResponse,
     GetGlobalInstructionsResponse,
     GetGlobalSecurityPolicyResponse,
+    GetMurmurFriendsResponse,
     GetSessionUsageResponse,
     ListProviderUsageResponse,
     GlobalStreamHello,
@@ -558,13 +559,17 @@ export class ProtocolHttpClient {
         return this.#requestJson("GET", "/murmur/friend-requests");
     }
 
+    getMurmurFriends(): Promise<GetMurmurFriendsResponse> {
+        return this.#requestJson("GET", "/murmur/friends");
+    }
+
     answerMurmurFriendRequest(
-        requestId: string,
+        peerId: string,
         request: AnswerMurmurFriendRequestRequest,
     ): Promise<AnswerMurmurFriendRequestResponse> {
         return this.#requestJson(
             "POST",
-            `/murmur/friend-requests/${encodeURIComponent(requestId)}/answer`,
+            `/murmur/friend-requests/${encodeURIComponent(peerId)}/answer`,
             request,
         );
     }

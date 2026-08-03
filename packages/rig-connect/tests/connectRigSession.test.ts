@@ -52,7 +52,7 @@ function liveHello(): string {
     return `event: hello\ndata: ${JSON.stringify({
         cursor: "01900000-0000-7000-8000-000000000001",
         gap: false,
-        protocolVersion: 3,
+        protocolVersion: 4,
         resumed: false,
     })}\n\n`;
 }

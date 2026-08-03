@@ -5,7 +5,7 @@ import { getImageProcessor } from "../../images/getImageProcessor.js";
 
 const MAX_INPUT_BYTES = 24 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 40_000_000;
-const MAX_PROFILE_PHOTO_BYTES = 96 * 1024;
+export const MAX_MURMUR_PROFILE_PHOTO_BYTES = 96 * 1024;
 const PROFILE_DIMENSIONS = [512, 448, 384, 320, 256, 224, 192] as const;
 const THUMBHASH_DIMENSION = 100;
 
@@ -51,7 +51,7 @@ export async function normalizeMurmurPhoto(input: MurmurPhotoInput): Promise<Mur
                 })
                 .webp({ effort: 4, quality: 82 })
                 .toBuffer();
-            if (candidate.byteLength <= MAX_PROFILE_PHOTO_BYTES) {
+            if (candidate.byteLength <= MAX_MURMUR_PROFILE_PHOTO_BYTES) {
                 webp = candidate;
                 break;
             }

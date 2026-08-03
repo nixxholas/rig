@@ -1,8 +1,16 @@
 import {
     MemoryMurmurStore,
+    createRelayEvent,
     decodeSignedRelayEventWire,
+    destroyIdentity,
     encodeSignedRelayEventWire,
+    encryptProfileForContact,
+    generateIdentityKeyPair,
+    identityId,
+    identityInboxTopic,
+    zeroBytes,
     type EventPage,
+    type IdentityProfile,
     type ListPage,
     type PublishOutcome,
     type RelayBlob,
@@ -15,6 +23,12 @@ import sharp from "sharp";
 import { describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_MURMUR_RELAY_URLS, MurmurService } from "../index.js";
+import { decodeMurmurIdentityToken } from "../impl/identityToken.js";
+import {
+    encodeFriendshipControl,
+    encodeFriendshipProfileEnvelope,
+} from "../impl/friendshipCodec.js";
+import { MAX_MURMUR_PROFILE_PHOTO_BYTES } from "../impl/photoNormalize.js";
 import type { MurmurLifecycleStore } from "../types.js";
 
 class TestLifecycleStore implements MurmurLifecycleStore {
@@ -41,6 +55,23 @@ class TestLifecycleStore implements MurmurLifecycleStore {
 
     list(prefix: string): Promise<ReadonlyMap<string, Uint8Array>> {
         return this.memory.list(prefix);
+    }
+
+    async listPage(
+        prefix: string,
+        after: string | undefined,
+        limit: number,
+    ): Promise<ReadonlyMap<string, Uint8Array>> {
+        const values = await this.memory.list(prefix);
+        const selected = [...values.entries()]
+            .filter(([key]) => after === undefined || key > after)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .slice(0, limit);
+        const selectedKeys = new Set(selected.map(([key]) => key));
+        for (const [key, bytes] of values) {
+            if (!selectedKeys.has(key)) zeroBytes(bytes);
+        }
+        return new Map(selected);
     }
 
     transaction<Result>(
@@ -166,7 +197,54 @@ class TestRelay implements RelayTransport {
     }
 }
 
-function createService(relay: RelayTransport | readonly RelayTransport[] = new TestRelay()): {
+async function publishForeignFriendRequest(
+    relay: TestRelay,
+    recipientToken: string,
+    requestId: string,
+    profile: IdentityProfile,
+): Promise<string> {
+    const sender = generateIdentityKeyPair();
+    const recipient = decodeMurmurIdentityToken(recipientToken);
+    const author = generateIdentityKeyPair();
+    const sentAt = Date.now();
+    const privateData = encodeFriendshipControl({
+        action: "request",
+        eventVersion: `event-${requestId}`,
+        kind: "rig.murmur.friendship-control.v1",
+        requestId,
+        sentAt,
+        version: 1,
+    });
+    const payload = encodeFriendshipProfileEnvelope(
+        encryptProfileForContact(sender, recipient, profile, privateData),
+    );
+    const event = createRelayEvent(author, identityInboxTopic(recipient), payload, {
+        list: [{ bytes: payload, id: `friend-request:${requestId}`, op: "append" }],
+    });
+    const senderId = identityId(sender);
+    try {
+        await relay.publish(event);
+        return senderId;
+    } finally {
+        destroyIdentity(sender);
+        destroyIdentity(author);
+        zeroBytes(recipient.signingKey);
+        zeroBytes(recipient.encryptionKey);
+        zeroBytes(privateData);
+        zeroBytes(payload);
+        zeroBytes(event.author.signingKey);
+        zeroBytes(event.payload);
+        zeroBytes(event.signature);
+        for (const operation of event.list ?? []) {
+            if ("bytes" in operation) zeroBytes(operation.bytes);
+        }
+    }
+}
+
+function createService(
+    relay: RelayTransport | readonly RelayTransport[] = new TestRelay(),
+    publishGlobalEvent?: ConstructorParameters<typeof MurmurService>[0]["publishGlobalEvent"],
+): {
     readonly service: MurmurService;
     readonly stores: TestLifecycleStore[];
 } {
@@ -182,6 +260,7 @@ function createService(relay: RelayTransport | readonly RelayTransport[] = new T
             syncRetryDelayMilliseconds: 0,
             syncWaitMilliseconds: 0,
             transportFactory: () => transports,
+            ...(publishGlobalEvent === undefined ? {} : { publishGlobalEvent }),
         }),
         stores,
     };
@@ -225,7 +304,7 @@ describe("MurmurService", () => {
         await service.close();
     });
 
-    it("keeps inbound profiles pending until accept or reject", async () => {
+    it("keeps inbound profiles pending, then creates mutual contacts on accept", async () => {
         const relay = new TestRelay();
         const alice = createService(relay).service;
         const bob = createService(relay).service;
@@ -254,6 +333,9 @@ describe("MurmurService", () => {
         });
         expect((await bob.listFriendRequests()).requests).toEqual([]);
         expect((await bob.listContacts()).contacts).toHaveLength(1);
+        await expect
+            .poll(async () => (await alice.listContacts()).contacts.map((item) => item.id))
+            .toEqual([bobAccount.id]);
         const inboxTopic = [...relay.events.keys()][0]!;
         expect((await relay.readState(inboxTopic))?.list.elements).toEqual([]);
 
@@ -262,17 +344,216 @@ describe("MurmurService", () => {
         await expect.poll(() => relay.readStateCalls).toBeGreaterThan(readStateCalls);
         expect((await bob.listFriendRequests()).requests).toEqual([]);
 
-        await alice.sendFriendRequest({ token: bobAccount.token });
-        await expect.poll(async () => (await bob.listFriendRequests()).requests.length).toBe(1);
-        const second = (await bob.listFriendRequests()).requests[0]!;
-        expect(await bob.answerFriendRequest(second.id, { answer: "reject" })).toEqual({
-            answer: "reject",
+        await expect(alice.sendFriendRequest({ token: bobAccount.token })).resolves.toMatchObject({
+            friendship: { state: "friends" },
+            queued: false,
         });
         expect((await bob.listFriendRequests()).requests).toEqual([]);
         expect((await bob.listContacts()).contacts).toHaveLength(1);
 
         await alice.close();
         await bob.close();
+    });
+
+    it("accepts foreign CLI profiles and cannot let oversized metadata stall the inbox", async () => {
+        const relay = new TestRelay();
+        const bob = createService(relay).service;
+        const bobAccount = (await bob.signup({ firstName: "Bob", lastName: "Example" })).account;
+        await bob.start();
+
+        const plainPeerId = await publishForeignFriendRequest(
+            relay,
+            bobAccount.token,
+            "foreign-plain",
+            { name: "Foreign Peer" },
+        );
+        await expect
+            .poll(
+                async () =>
+                    (await bob.listFriendRequests()).requests.find(
+                        (request) => request.senderId === plainPeerId,
+                    )?.profile,
+            )
+            .toEqual({ firstName: "Foreign", lastName: "Peer" });
+        await bob.answerFriendRequest(plainPeerId, { answer: "accept" });
+        await expect
+            .poll(
+                async () =>
+                    (await bob.getFriends()).contacts.find((contact) => contact.id === plainPeerId)
+                        ?.profile,
+            )
+            .toEqual({ firstName: "Foreign", lastName: "Peer" });
+
+        const metadata = Object.fromEntries(
+            Array.from({ length: 65 }, (_, index) => [`foreign-${String(index)}`, "value"]),
+        );
+        metadata.oversized = "x".repeat(2_049);
+        const oversizedPeerId = await publishForeignFriendRequest(
+            relay,
+            bobAccount.token,
+            "foreign-oversized",
+            { metadata, name: "Oversized Metadata" },
+        );
+        const followingPeerId = await publishForeignFriendRequest(
+            relay,
+            bobAccount.token,
+            "foreign-following",
+            { name: "Following Event" },
+        );
+        await expect
+            .poll(async () =>
+                (await bob.listFriendRequests()).requests.map((request) => request.senderId).sort(),
+            )
+            .toEqual([followingPeerId, oversizedPeerId].sort());
+        await bob.answerFriendRequest(oversizedPeerId, { answer: "accept" });
+        await expect
+            .poll(
+                async () =>
+                    (await bob.getFriends()).contacts.find(
+                        (contact) => contact.id === oversizedPeerId,
+                    )?.profile,
+            )
+            .toEqual({ firstName: "Oversized", lastName: "Metadata" });
+
+        const oversizedAvatar = new Uint8Array(MAX_MURMUR_PROFILE_PHOTO_BYTES + 1).fill(7);
+        let oversizedAvatarPeerId: string;
+        try {
+            oversizedAvatarPeerId = await publishForeignFriendRequest(
+                relay,
+                bobAccount.token,
+                "foreign-large-avatar",
+                {
+                    avatar: oversizedAvatar,
+                    metadata: {
+                        firstName: "Large",
+                        lastName: "Avatar",
+                        photoHeight: "512",
+                        photoMediaType: "image/webp",
+                        photoThumbhash: "thumbhash",
+                        photoWidth: "512",
+                    },
+                    name: "Large Avatar",
+                },
+            );
+        } finally {
+            zeroBytes(oversizedAvatar);
+        }
+        await expect
+            .poll(
+                async () =>
+                    (await bob.listFriendRequests()).requests.find(
+                        (request) => request.senderId === oversizedAvatarPeerId,
+                    )?.profile,
+            )
+            .toEqual({ firstName: "Large", lastName: "Avatar" });
+        await bob.answerFriendRequest(oversizedAvatarPeerId, { answer: "accept" });
+        const largeAvatarSnapshot = await bob.getFriends();
+        expect(
+            largeAvatarSnapshot.contacts.find((contact) => contact.id === oversizedAvatarPeerId)
+                ?.profile,
+        ).toEqual({ firstName: "Large", lastName: "Avatar" });
+        expect(
+            largeAvatarSnapshot.friendships.find(
+                (friendship) => friendship.peerId === oversizedAvatarPeerId,
+            )?.profile,
+        ).toEqual({ firstName: "Large", lastName: "Avatar" });
+
+        await bob.close();
+    });
+
+    it("tracks rejection and auto-accepts when the rejecting peer later reciprocates", async () => {
+        const relay = new TestRelay();
+        const alice = createService(relay).service;
+        const bob = createService(relay).service;
+        const aliceAccount = (await alice.signup({ firstName: "Alice", lastName: "Example" }))
+            .account;
+        const bobAccount = (await bob.signup({ firstName: "Bob", lastName: "Example" })).account;
+        await alice.start();
+        await bob.start();
+
+        await alice.sendFriendRequest({ token: bobAccount.token });
+        await expect.poll(async () => (await bob.listFriendRequests()).requests.length).toBe(1);
+        await expect(
+            bob.answerFriendRequest(aliceAccount.id, { answer: "reject" }),
+        ).resolves.toMatchObject({
+            answer: "reject",
+            friendship: { state: "rejected_incoming" },
+            stats: { rejectedRequests: 1 },
+        });
+        await expect
+            .poll(
+                async () =>
+                    (await alice.getFriends()).friendships.find(
+                        (friendship) => friendship.peerId === bobAccount.id,
+                    )?.state,
+            )
+            .toBe("rejected_outgoing");
+
+        await expect(bob.sendFriendRequest({ token: aliceAccount.token })).resolves.toMatchObject({
+            friendship: { state: "outgoing_pending" },
+        });
+        await expect
+            .poll(async () => (await alice.listContacts()).contacts.map((item) => item.id))
+            .toEqual([bobAccount.id]);
+        await expect
+            .poll(async () => (await bob.listContacts()).contacts.map((item) => item.id))
+            .toEqual([aliceAccount.id]);
+        expect(await alice.getFriends()).toMatchObject({
+            friendships: [
+                {
+                    history: { autoAccepted: 1 },
+                    peerId: bobAccount.id,
+                    state: "friends",
+                },
+            ],
+            stats: { autoAcceptedRequests: 1, contacts: 1, rejectedRequests: 1 },
+        });
+
+        await alice.close();
+        await bob.close();
+    });
+
+    it("publishes durable request and answer events with stable retry identities", async () => {
+        const relay = new TestRelay();
+        const deliveries: string[] = [];
+        let rejectPublication = true;
+        const alice = createService(relay, (event) => {
+            deliveries.push(`${event.id}:${event.data.reason}:${event.data.direction}`);
+            if (rejectPublication) throw new Error("Simulated global event database failure");
+        });
+        const bob = createService(relay);
+        const bobAccount = (await bob.service.signup({ firstName: "Bob", lastName: "Example" }))
+            .account;
+        await alice.service.signup({ firstName: "Alice", lastName: "Example" });
+
+        await expect(alice.service.sendFriendRequest({ token: bobAccount.token })).rejects.toThrow(
+            "Simulated global event database failure",
+        );
+        const firstDelivery = deliveries[0]!;
+        rejectPublication = false;
+        expect((await alice.service.getFriends()).friendships).toMatchObject([
+            { peerId: bobAccount.id, state: "outgoing_pending" },
+        ]);
+        expect(deliveries[1]).toBe(firstDelivery);
+        expect(
+            (await alice.stores[0]!.memory.list("rig/murmur/friendship-global-outbox/v1/")).size,
+        ).toBe(0);
+
+        await alice.service.start();
+        await bob.service.start();
+        await expect
+            .poll(async () => (await bob.service.listFriendRequests()).requests.length)
+            .toBe(1);
+        await bob.service.answerFriendRequest(
+            (await bob.service.listFriendRequests()).requests[0]!.id,
+            { answer: "accept" },
+        );
+        await expect
+            .poll(() => deliveries.some((delivery) => delivery.endsWith(":accepted:outgoing")))
+            .toBe(true);
+
+        await alice.service.close();
+        await bob.service.close();
     });
 
     it("stops idempotently and deletes keys before reopening an empty usable store", async () => {
@@ -302,7 +583,7 @@ describe("MurmurService", () => {
         const carol = createService(relay).service;
         const bobStore = new TestLifecycleStore();
         const bob = new MurmurService({
-            maxPendingFriendRequests: 1,
+            maxRelationships: 1,
             storeFactory: () => bobStore,
             syncWaitMilliseconds: 0,
             transportFactory: () => [relay],
@@ -318,7 +599,10 @@ describe("MurmurService", () => {
         await bob.start();
         await expect.poll(async () => (await bob.listFriendRequests()).requests.length).toBe(1);
         await expect
-            .poll(async () => (await bobStore.memory.list("rig/murmur/quarantine/v1/")).size)
+            .poll(
+                async () =>
+                    (await bobStore.memory.list("rig/murmur/friendship-quarantine/v1/")).size,
+            )
             .toBe(1);
         expect((await bob.listFriendRequests()).requests).toHaveLength(1);
 
@@ -356,7 +640,7 @@ describe("MurmurService", () => {
 
     it("reuses one bounded prepared friend-request event across relay failures", async () => {
         const relay = new TestRelay();
-        relay.publishFailuresRemaining = 3;
+        relay.publishFailuresRemaining = 1_000;
         const sender = createService(relay);
         const recipient = createService().service;
         const recipientToken = (await recipient.signup({ firstName: "Bob", lastName: "Example" }))
@@ -364,21 +648,32 @@ describe("MurmurService", () => {
         await sender.service.signup({ firstName: "Alice", lastName: "Example" });
         await sender.service.start();
 
+        await expect(
+            sender.service.sendFriendRequest({ token: recipientToken }),
+        ).resolves.toMatchObject({ queued: true });
         for (let attempt = 0; attempt < 3; attempt += 1) {
             await expect(
                 sender.service.sendFriendRequest({ token: recipientToken }),
-            ).rejects.toMatchObject({ code: "relay_unavailable" });
+            ).resolves.toMatchObject({ queued: false });
         }
         expect(
-            (await sender.stores[0]!.memory.list("rig/murmur/outbound/friend-request/v1/")).size,
+            (await sender.stores[0]!.memory.list("rig/murmur/friendship-relay-outbox/v1/request/"))
+                .size,
         ).toBe(1);
+        expect((await sender.service.getFriends()).friendships[0]?.history.sent).toBe(1);
 
-        await expect(
-            sender.service.sendFriendRequest({ token: recipientToken }),
-        ).resolves.toBeDefined();
-        expect(
-            (await sender.stores[0]!.memory.list("rig/murmur/outbound/friend-request/v1/")).size,
-        ).toBe(0);
+        relay.publishFailuresRemaining = 0;
+        await expect
+            .poll(
+                async () =>
+                    (
+                        await sender.stores[0]!.memory.list(
+                            "rig/murmur/friendship-relay-outbox/v1/request/",
+                        )
+                    ).size,
+            )
+            .toBe(0);
+        expect([...relay.events.values()].flat()).toHaveLength(1);
 
         await sender.service.close();
         await recipient.close();
@@ -402,25 +697,34 @@ describe("MurmurService", () => {
             .toBe(1);
         const request = (await bob.service.listFriendRequests()).requests[0]!;
 
-        secondRelay.publishFailuresRemaining = 1;
-        await expect(
-            bob.service.answerFriendRequest(request.id, { answer: "accept" }),
-        ).rejects.toMatchObject({ code: "relay_unavailable" });
-        const firstRelayCallsAfterPartialAnswer = firstRelay.publishCalls;
-        expect(
-            (await bob.stores[0]!.memory.list("rig/murmur/outbound/friend-answer/v1/")).size,
-        ).toBe(1);
-
+        secondRelay.publishFailuresRemaining = 1_000;
         await expect(
             bob.service.answerFriendRequest(request.id, { answer: "accept" }),
         ).resolves.toMatchObject({
             answer: "accept",
             contact: { id: aliceAccount.id },
+            friendship: { state: "friends" },
         });
-        expect(firstRelay.publishCalls).toBe(firstRelayCallsAfterPartialAnswer);
-        expect(
-            (await bob.stores[0]!.memory.list("rig/murmur/outbound/friend-answer/v1/")).size,
-        ).toBe(0);
+        await expect
+            .poll(
+                async () =>
+                    (await bob.stores[0]!.memory.list("rig/murmur/friendship-relay-outbox/v1/"))
+                        .size,
+            )
+            .toBeGreaterThan(0);
+        secondRelay.publishFailuresRemaining = 0;
+        await expect
+            .poll(
+                async () =>
+                    (await bob.stores[0]!.memory.list("rig/murmur/friendship-relay-outbox/v1/"))
+                        .size,
+            )
+            .toBe(0);
+        const firstRelayEventIds = [...firstRelay.events.values()].flat().map((event) => event.id);
+        expect(new Set(firstRelayEventIds).size).toBe(firstRelayEventIds.length);
+        await expect
+            .poll(async () => (await alice.service.listContacts()).contacts.map((item) => item.id))
+            .toEqual([bobAccount.id]);
 
         await alice.service.close();
         await bob.service.close();
@@ -458,8 +762,11 @@ describe("MurmurService", () => {
             await service.start();
             await expect(
                 service.sendFriendRequest({ token: recipientToken }),
-            ).rejects.toMatchObject({ code: "relay_unavailable" });
-            expect(fetchMock).toHaveBeenCalled();
+            ).resolves.toMatchObject({ queued: true });
+            await expect.poll(() => fetchMock.mock.calls.length).toBeGreaterThan(0);
+            await expect
+                .poll(async () => (await service.getFriends()).stats.outgoingPending)
+                .toBe(1);
         } finally {
             await service.close();
             await recipient.close();
