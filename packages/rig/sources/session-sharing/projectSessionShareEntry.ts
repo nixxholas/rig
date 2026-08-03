@@ -63,7 +63,7 @@ export function projectSessionShareEntry(options: {
     shareSequence: number;
     source: SessionShareProjectionSource;
 }): ShareOpaqueEntry | undefined {
-    const projection = project(options.source);
+    const projection = projectSessionShareProjection(options.source);
     if (projection === undefined) return undefined;
     const canonicalJson = canonicalShareJson(projection);
     return {
@@ -76,7 +76,16 @@ export function projectSessionShareEntry(options: {
     };
 }
 
-function project(source: SessionShareProjectionSource): SessionShareProjection | undefined {
+/**
+ * The transcript projection on its own, without the entry it usually travels in.
+ *
+ * A shared scope carries the same projection nested inside its own envelope, so
+ * both kinds of share decide what is visible and how it is sanitized right here.
+ * `undefined` means the source is not part of a shared transcript at all.
+ */
+export function projectSessionShareProjection(
+    source: SessionShareProjectionSource,
+): SessionShareProjection | undefined {
     if (source.kind === "event") {
         if (!VISIBLE_TRANSCRIPT_EVENT_TYPES.has(source.event.type)) return undefined;
         return { kind: "event", payload: sanitize(source.event), version: 1 };

@@ -595,6 +595,251 @@ export const sessionShareEntries = sqliteTable(
     ],
 );
 
+export const scopeShares = sqliteTable(
+    "scope_shares",
+    {
+        shareId: text("share_id").primaryKey(),
+        scopeKind: text("scope_kind").notNull(),
+        scopeId: text("scope_id").notNull(),
+        projectId: text("project_id")
+            .notNull()
+            .references(() => projects.id, { onDelete: "cascade" }),
+        state: text("state").notNull(),
+        ownerPeerId: text("owner_peer_id").notNull(),
+        nextShareSequence: integer("next_share_sequence").notNull().default(1),
+        publishedScopeVersion: integer("published_scope_version").notNull().default(-1),
+        outboxBytes: integer("outbox_bytes").notNull().default(0),
+        outboxCount: integer("outbox_count").notNull().default(0),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+        stoppedAtMs: integer("stopped_at_ms"),
+    },
+    (table) => [
+        uniqueIndex("scope_shares_one_current_per_scope")
+            .on(table.scopeKind, table.scopeId)
+            .where(sql`${table.state} <> 'stopped'`),
+        index("scope_shares_project").on(table.projectId, table.state),
+        check("scope_shares_kind_check", sql`${table.scopeKind} IN ('workspace', 'project')`),
+        check("scope_shares_state_check", sql`${table.state} IN ('active', 'degraded', 'stopped')`),
+        check("scope_shares_next_sequence_check", sql`${table.nextShareSequence} >= 1`),
+        check("scope_shares_scope_version_check", sql`${table.publishedScopeVersion} >= -1`),
+        check("scope_shares_outbox_bytes_check", sql`${table.outboxBytes} >= 0`),
+        check("scope_shares_outbox_count_check", sql`${table.outboxCount} >= 0`),
+    ],
+);
+
+export const scopeShareMembers = sqliteTable(
+    "scope_share_members",
+    {
+        shareMemberId: text("share_member_id").primaryKey(),
+        shareId: text("share_id")
+            .notNull()
+            .references(() => scopeShares.shareId, { onDelete: "cascade" }),
+        murmurPeerId: text("murmur_peer_id").notNull(),
+        displayName: text("display_name").notNull(),
+        currentGrantEpoch: integer("current_grant_epoch").notNull(),
+        state: text("state").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        unique().on(table.shareId, table.murmurPeerId),
+        unique().on(table.shareMemberId, table.currentGrantEpoch),
+        index("scope_share_members_share_state").on(table.shareId, table.state),
+        check("scope_share_members_epoch_check", sql`${table.currentGrantEpoch} >= 1`),
+        check(
+            "scope_share_members_state_check",
+            sql`${table.state} IN ('active', 'revoked', 'stopped')`,
+        ),
+    ],
+);
+
+export const scopeShareGrants = sqliteTable(
+    "scope_share_grants",
+    {
+        shareMemberId: text("share_member_id")
+            .notNull()
+            .references(() => scopeShareMembers.shareMemberId, { onDelete: "cascade" }),
+        grantEpoch: integer("grant_epoch").notNull(),
+        state: text("state").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+        endedAtMs: integer("ended_at_ms"),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareMemberId, table.grantEpoch] }),
+        index("scope_share_grants_state").on(table.shareMemberId, table.state),
+        check("scope_share_grants_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check(
+            "scope_share_grants_state_check",
+            sql`${table.state} IN ('active', 'revoked', 'stopped')`,
+        ),
+    ],
+);
+
+export const scopeShareSessionCursors = sqliteTable(
+    "scope_share_session_cursors",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => scopeShares.shareId, { onDelete: "cascade" }),
+        sessionId: text("session_id")
+            .notNull()
+            .references(() => sessions.id, { onDelete: "cascade" }),
+        rotationSeq: integer("rotation_seq").notNull().default(0),
+        publishedEventSeq: integer("published_event_seq").notNull().default(0),
+        indexVersion: integer("index_version").notNull().default(-1),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.sessionId] }),
+        index("scope_share_session_cursors_rotation").on(
+            table.shareId,
+            table.rotationSeq,
+            table.sessionId,
+        ),
+        check("scope_share_session_cursors_rotation_check", sql`${table.rotationSeq} >= 0`),
+        check("scope_share_session_cursors_event_check", sql`${table.publishedEventSeq} >= 0`),
+        check("scope_share_session_cursors_index_check", sql`${table.indexVersion} >= -1`),
+    ],
+);
+
+export const scopeShareOutbox = sqliteTable(
+    "scope_share_outbox",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => scopeShares.shareId, { onDelete: "cascade" }),
+        sequence: integer("sequence").notNull(),
+        shareEventId: text("share_event_id").notNull().unique(),
+        subjectKind: text("subject_kind").notNull(),
+        subjectId: text("subject_id").notNull(),
+        sourceEventSeq: integer("source_event_seq").references(() => sessionEvents.seq, {
+            onDelete: "set null",
+        }),
+        canonicalJson: text("canonical_json").notNull(),
+        contentHash: text("content_hash").notNull(),
+        byteLength: integer("byte_length").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.sequence] }),
+        unique().on(table.shareId, table.sourceEventSeq),
+        index("scope_share_outbox_subject").on(table.shareId, table.subjectKind, table.subjectId),
+        index("scope_share_outbox_source_event").on(table.shareId, table.sourceEventSeq),
+        check("scope_share_outbox_sequence_check", sql`${table.sequence} >= 1`),
+        check("scope_share_outbox_byte_length_check", sql`${table.byteLength} >= 0`),
+        check(
+            "scope_share_outbox_subject_kind_check",
+            sql`${table.subjectKind} IN ('scope', 'session_index', 'session_event')`,
+        ),
+        check(
+            "scope_share_outbox_source_event_check",
+            sql`${table.sourceEventSeq} IS NULL OR ${table.sourceEventSeq} >= 0`,
+        ),
+    ],
+);
+
+export const scopeShareEntries = sqliteTable(
+    "scope_share_entries",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => scopeShares.shareId, { onDelete: "cascade" }),
+        sequence: integer("sequence").notNull(),
+        shareEventId: text("share_event_id").notNull(),
+        subjectKind: text("subject_kind").notNull(),
+        subjectId: text("subject_id").notNull(),
+        contentHash: text("content_hash").notNull(),
+        canonicalJson: text("canonical_json").notNull(),
+        byteLength: integer("byte_length").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.sequence] }),
+        index("scope_share_entries_subject").on(
+            table.shareId,
+            table.subjectKind,
+            table.subjectId,
+            table.sequence,
+        ),
+        check("scope_share_entries_sequence_check", sql`${table.sequence} >= 1`),
+        check("scope_share_entries_byte_length_check", sql`${table.byteLength} >= 0`),
+        check(
+            "scope_share_entries_subject_kind_check",
+            sql`${table.subjectKind} IN ('scope', 'session_index', 'session_event')`,
+        ),
+    ],
+);
+
+export const scopeShareReplicas = sqliteTable(
+    "scope_share_replicas",
+    {
+        shareId: text("share_id").primaryKey(),
+        scopeKind: text("scope_kind").notNull(),
+        ownerPeerId: text("owner_peer_id").notNull(),
+        murmurPeerId: text("murmur_peer_id").notNull(),
+        shareMemberId: text("share_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        appliedThroughSequence: integer("applied_through_sequence").notNull().default(0),
+        title: text("title").notNull(),
+        memberCount: integer("member_count").notNull(),
+        state: text("state").notNull(),
+        endedReason: text("ended_reason"),
+        endedAtMs: integer("ended_at_ms"),
+        createdAtMs: integer("created_at_ms").notNull(),
+        updatedAtMs: integer("updated_at_ms").notNull(),
+    },
+    (table) => [
+        index("scope_share_replicas_member").on(table.shareMemberId, table.grantEpoch),
+        check(
+            "scope_share_replicas_kind_check",
+            sql`${table.scopeKind} IN ('workspace', 'project')`,
+        ),
+        check("scope_share_replicas_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check(
+            "scope_share_replicas_applied_sequence_check",
+            sql`${table.appliedThroughSequence} >= 0`,
+        ),
+        check("scope_share_replicas_member_count_check", sql`${table.memberCount} >= 0`),
+        check("scope_share_replicas_state_check", sql`${table.state} IN ('active', 'ended')`),
+    ],
+);
+
+export const scopeShareReplicaEntries = sqliteTable(
+    "scope_share_replica_entries",
+    {
+        shareId: text("share_id")
+            .notNull()
+            .references(() => scopeShareReplicas.shareId, { onDelete: "cascade" }),
+        shareEventId: text("share_event_id").notNull(),
+        grantMemberId: text("grant_member_id").notNull(),
+        grantEpoch: integer("grant_epoch").notNull(),
+        sequence: integer("sequence").notNull(),
+        subjectKind: text("subject_kind").notNull(),
+        subjectId: text("subject_id").notNull(),
+        canonicalJson: text("canonical_json").notNull(),
+        contentHash: text("content_hash").notNull(),
+        createdAtMs: integer("created_at_ms").notNull(),
+    },
+    (table) => [
+        primaryKey({ columns: [table.shareId, table.shareEventId] }),
+        unique().on(table.shareId, table.sequence),
+        index("scope_share_replica_entries_session").on(
+            table.shareId,
+            table.subjectKind,
+            table.subjectId,
+            table.sequence,
+        ),
+        check("scope_share_replica_entries_epoch_check", sql`${table.grantEpoch} >= 1`),
+        check("scope_share_replica_entries_sequence_check", sql`${table.sequence} >= 1`),
+        check(
+            "scope_share_replica_entries_subject_kind_check",
+            sql`${table.subjectKind} IN ('scope', 'session_index', 'session_event')`,
+        ),
+    ],
+);
+
 export const externalToolCalls = sqliteTable(
     "external_tool_calls",
     {

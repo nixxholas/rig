@@ -13,7 +13,9 @@ import type { SessionDatabase } from "../openSessionDatabase.js";
 export function dropSchemaAddedAfterIdentityMigrations(database: SessionDatabase): void {
     for (const table of database.all<{ name: string }>(
         sql.raw(
-            "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'happy_cloud_%'",
+            `SELECT name FROM sqlite_master
+             WHERE type = 'table'
+               AND (name LIKE 'happy_cloud_%' OR name LIKE 'scope_share%')`,
         ),
     )) {
         database.run(sql.raw(`DROP TABLE "${table.name}"`));
