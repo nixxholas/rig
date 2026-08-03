@@ -5,9 +5,10 @@ import { runExec } from "./runExec.js";
 import { parsePermissionMode } from "../permissions/index.js";
 import { runLocalProtocolServer } from "../server/index.js";
 import { parseExecCommand } from "./parseExecCommand.js";
+import { parseDesktopCommand } from "./parseDesktopCommand.js";
 import { parseSessionCommand } from "./parseSessionCommand.js";
 import { parseSessionEnvironmentOptions } from "./parseSessionEnvironmentOptions.js";
-import { formatCliHelp } from "./formatCliHelp.js";
+import { formatCliHelp, formatDesktopCliHelp } from "./formatCliHelp.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { RigUserError } from "../RigUserError.js";
 
@@ -47,6 +48,15 @@ export async function main(argv: readonly string[] = process.argv.slice(2)): Pro
             ...(parsedEnvironment.debug === true ? { debug: true } : {}),
             ...(parsedEnvironment.docker === undefined ? {} : { docker: parsedEnvironment.docker }),
         });
+        return;
+    }
+    if (command === "desktop") {
+        if (commandArgs.length === 1 && (commandArgs[0] === "--help" || commandArgs[0] === "-h")) {
+            console.log(formatDesktopCliHelp());
+            return;
+        }
+        const { runDesktop } = await import("./runDesktop.js");
+        await runDesktop(parseDesktopCommand(commandArgs));
         return;
     }
     if (command === "resume" || command === "fork") {

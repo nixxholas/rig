@@ -3,11 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { main } from "./main.js";
 import { readPackageVersion } from "../readPackageVersion.js";
 import { runApp } from "./runApp.js";
+import { runDesktop } from "./runDesktop.js";
 import { runExec } from "./runExec.js";
 import { runLocalProtocolServer } from "../server/index.js";
 import { runHappyAuthCommand } from "../happy/index.js";
 
 vi.mock("./runApp.js", () => ({ runApp: vi.fn() }));
+vi.mock("./runDesktop.js", () => ({ runDesktop: vi.fn() }));
 vi.mock("./runExec.js", () => ({ runExec: vi.fn() }));
 vi.mock("../readPackageVersion.js", () => ({ readPackageVersion: vi.fn(() => "1.2.3") }));
 vi.mock("../server/index.js", () => ({ runLocalProtocolServer: vi.fn() }));
@@ -17,6 +19,7 @@ describe("main command dispatch", () => {
     beforeEach(() => {
         vi.mocked(runApp).mockReset();
         vi.mocked(runApp).mockResolvedValue({ action: "exit" });
+        vi.mocked(runDesktop).mockReset();
         vi.mocked(runExec).mockReset();
         vi.mocked(runLocalProtocolServer).mockReset();
         vi.mocked(readPackageVersion).mockClear();
@@ -63,6 +66,7 @@ describe("main command dispatch", () => {
 
         expect(log).toHaveBeenCalledOnce();
         expect(log.mock.calls[0]?.[0]).toContain("Usage: rig");
+        expect(log.mock.calls[0]?.[0]).toContain("rig desktop");
         expect(log.mock.calls[0]?.[0]).toContain("rig exec");
         expect(runApp).not.toHaveBeenCalled();
         log.mockRestore();
@@ -84,6 +88,29 @@ describe("main command dispatch", () => {
 
         expect(runHappyAuthCommand).toHaveBeenCalledOnce();
         expect(runApp).not.toHaveBeenCalled();
+    });
+
+    it("builds and launches the local Happy desktop app without opening a session", async () => {
+        await main(["desktop", "--build-only", "--force-build", "--happy2-root", "/source/happy2"]);
+
+        expect(runDesktop).toHaveBeenCalledWith({
+            buildOnly: true,
+            forceBuild: true,
+            happy2Root: "/source/happy2",
+            skipBuild: false,
+        });
+        expect(runApp).not.toHaveBeenCalled();
+    });
+
+    it("prints desktop help without building the app", async () => {
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+        await main(["desktop", "--help"]);
+
+        expect(log.mock.calls[0]?.[0]).toContain("Usage: rig desktop");
+        expect(runDesktop).not.toHaveBeenCalled();
+        expect(runApp).not.toHaveBeenCalled();
+        log.mockRestore();
     });
 
     it.each(["resmue", "--unknown"])("rejects unknown top-level input %s", async (input) => {
