@@ -339,6 +339,42 @@ describe("the Murmur session-share transport", () => {
         unfriended.close();
     }, 30_000);
 
+    it("replays a revocation Murmur never received and skips one it already applied", async () => {
+        const relay = new InMemoryMurmurRelay();
+        const owner = createPeer(relay);
+        const friend = createPeer(relay);
+        const shareId = "share-revoke-replay";
+        const friendBundle = createMlsKeyPackage(friend.identity);
+        const transport = new MurmurSessionShareTransport({
+            directory: {
+                ...unusedDirectory(),
+                deliver: async () => undefined,
+                identity: async () => friend.identity,
+                keyPackage: async () => friendBundle.keyPackage,
+            },
+            entrySource: () => entrySourceOver([]),
+            runtime: runtimeOf(owner),
+        });
+        await transport.createOwner({ ownerPeerId: owner.peerId, shareId });
+        const grant: SessionShareTransportGrant = {
+            grantEpoch: 1,
+            murmurPeerId: friend.peerId,
+            shareId,
+            shareMemberId: "member-1",
+        };
+        await transport.invite(grant);
+
+        // Rig records a revocation before asking the transport, so a transport that never
+        // heard it leaves the member decrypting. Recovery replays it, and the replay must
+        // both take effect the first time and be harmless every time after — Murmur rejects
+        // revoking a grant it has already ended.
+        await transport.revoke(grant);
+        await expect(transport.revoke(grant)).resolves.toBeUndefined();
+        await expect(transport.revoke(grant)).resolves.toBeUndefined();
+
+        transport.close();
+    }, 30_000);
+
     it("refuses to add a friend who has not offered a key package", async () => {
         const relay = new InMemoryMurmurRelay();
         const owner = createPeer(relay);

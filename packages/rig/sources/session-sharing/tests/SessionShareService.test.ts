@@ -194,7 +194,38 @@ describe("SessionShareService", () => {
         expect(store.replicaEntries).toHaveLength(replicated);
     });
 
-    it("recovers a share whose member was revoked and keeps publishing", async () => {
+    it("repairs a revocation that never reached the transport", async () => {
+        const transport = new FakeSessionShareTransport();
+        const store = new MemorySessionShareStore();
+        const service = new SessionShareService({
+            deliverFriendMessage: () => undefined,
+            idFactory: sequenceIds("share-1", "member-1", "member-2"),
+            store,
+            transport,
+        });
+        const share = await service.create({
+            friends: [{ displayName: "Casey", murmurPeerId: "peer-casey" }],
+            includeFriendMessagesInModel: true,
+            ownerPeerId: "peer-owner",
+            ownerSessionId: "session-1",
+        });
+        const grant = toGrant(share.members[0]!);
+
+        // The durable revocation lands but the transport call fails, so Rig says revoked
+        // while the member is still in the group and still decrypting every entry.
+        transport.failNext("revoke");
+        await expect(service.revoke(share.shareId, grant.shareMemberId)).rejects.toThrow(
+            "Fake revoke failure",
+        );
+        expect(transport.grantsFor(share.shareId)).toContainEqual(grant);
+
+        await service.recover();
+
+        expect(transport.grantsFor(share.shareId)).not.toContainEqual(grant);
+        expect(store.queryShare(share.shareId)?.state).toBe("active");
+    });
+
+    it("never re-revokes a friend who was invited back", async () => {
         const transport = new FakeSessionShareTransport();
         const store = new MemorySessionShareStore();
         const service = new SessionShareService({
@@ -209,16 +240,20 @@ describe("SessionShareService", () => {
             ownerPeerId: "peer-owner",
             ownerSessionId: "session-1",
         });
-        await service.revoke(share.shareId, share.members[0]!.shareMemberId);
-        expect(store.endedGrants).toHaveLength(1);
+        const grant = toGrant(share.members[0]!);
+        await service.revoke(share.shareId, grant.shareMemberId);
+        const readded = await service.add({
+            displayName: "Casey again",
+            murmurPeerId: grant.murmurPeerId,
+            shareId: share.shareId,
+        });
 
-        // Recovery must never replay an ended grant. Murmur rejects revoking a grant it has
-        // already ended, and a revocation names only the peer, so replaying an old epoch
-        // would remove the membership that same friend holds today.
-        transport.failNext("revoke");
+        // A revocation names only the peer, so replaying the ended epoch would remove the
+        // membership that same friend holds right now.
         await service.recover();
 
-        expect(store.queryShare(share.shareId)?.state).not.toBe("degraded");
+        expect(transport.grantsFor(share.shareId)).toContainEqual(toGrant(readded));
+        expect(store.queryShare(share.shareId)?.state).toBe("active");
     });
 
     it("stops a share terminally when its owner session is archived", async () => {

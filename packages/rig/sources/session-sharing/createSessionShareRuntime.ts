@@ -13,6 +13,12 @@ import type { SessionShareServiceContract } from "./SessionShareServiceContract.
 
 const HISTORY_PAGE_ENTRIES = 100;
 const HISTORY_PAGE_BYTES = 256 * 1024;
+const MAX_BACKFILL_ATTEMPTS = 12;
+const MAX_BACKFILL_DELAY_MS = 30_000;
+
+function delay(milliseconds: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
 
 export interface SessionShareRuntimeOptions {
     /** Applies a friend message to the live session after it is durably stored. */
@@ -144,18 +150,28 @@ export function createSessionShareRuntime(
     };
 
     // Draining deferred backfills is coalesced: a member that is waiting on history defers
-    // every event that arrives, and one retry pass serves all of them.
+    // every event that arrives, and one retry pass serves all of them. Murmur re-reads a
+    // deferred event every 50ms, so a gap a backfill cannot close would otherwise turn into
+    // a permanent 20Hz round of relay traffic. Each unproductive drain therefore waits
+    // longer than the last, and a share that never recovers stops asking.
     let draining: Promise<void> | undefined;
+    const backoff = new Map<string, number>();
     const drainDeferred = (): void => {
         if (draining !== undefined) return;
         draining = (async () => {
             for (const shareId of transport.takeDeferredShares()) {
+                const attempt = backoff.get(shareId) ?? 0;
+                if (attempt >= MAX_BACKFILL_ATTEMPTS) continue;
+                backoff.set(shareId, attempt + 1);
+                if (attempt > 0) await delay(Math.min(2 ** attempt * 100, MAX_BACKFILL_DELAY_MS));
                 await backfillReplica(transport, shareId);
             }
         })().finally(() => {
             draining = undefined;
         });
     };
+    // A replica that applies an entry has caught up, so its next stall starts over.
+    const unobserveProgress = service.onReplicaProgress((shareId) => backoff.delete(shareId));
     const unregisterRouter = options.murmur.registerEventRouter(async (received) => {
         // The router must be total. Murmur's synchronization loop absorbs a thrown
         // non-database error and simply retries the same event, so anything escaping here
@@ -207,6 +223,7 @@ export function createSessionShareRuntime(
             unregisterRouter();
             unobserveOffers();
             unobserveInvitations();
+            unobserveProgress();
             unobserveRuntime();
             service.close();
             transport.close();

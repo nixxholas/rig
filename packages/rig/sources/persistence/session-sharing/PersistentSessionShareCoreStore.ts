@@ -124,8 +124,8 @@ export class PersistentSessionShareCoreStore implements SessionShareCoreStore {
         return toCoreMember(member);
     }
 
-    stopShare(shareId: string): CoreShare {
-        sessionShareStop(this.#tx(), shareId, this.#now());
+    stopShare(shareId: string, options?: { readonly pruneEntryLog: boolean }): CoreShare {
+        sessionShareStop(this.#tx(), shareId, this.#now(), options);
         return this.#shareWithMembers(shareId);
     }
 

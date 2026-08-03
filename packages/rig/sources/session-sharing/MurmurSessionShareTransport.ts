@@ -73,6 +73,8 @@ export type SessionShareEventOutcome = "applied" | "retained" | "unowned";
 
 /** Bounded retry passes one catch-up will make before yielding to the next wake. */
 const MAX_HISTORY_RETRY_PASSES = 512;
+/** One published outbox page, the largest prefix a restart can resend as a duplicate. */
+const MAX_DUPLICATE_PAGE = 100;
 
 type OwnerHandler = (event: SessionShareTransportOwnerEvent) => void | Promise<void>;
 type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise<void>;
@@ -80,6 +82,8 @@ type MemberHandler = (event: SessionShareTransportMemberEvent) => void | Promise
 interface OwnerSession {
     /** Whether this process has committed an append, which bounds duplicate skipping. */
     appendedThisSession: boolean;
+    /** Where this process started appending, which bounds it to the unacknowledged page. */
+    firstAttemptedSequence: number | undefined;
     lastAppendedSequence: number;
     readonly session: SharedSessionOwner;
     state: SharedSessionState | undefined;
@@ -171,6 +175,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         });
         this.#owners.set(owner.shareId, {
             appendedThisSession: false,
+            firstAttemptedSequence: undefined,
             lastAppendedSequence: 0,
             session,
             state: session.state,
@@ -191,6 +196,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         const owner = await this.#requireOwner(shareId);
         for (const entry of entries) {
             if (entry.shareSequence <= owner.lastAppendedSequence) continue;
+            owner.firstAttemptedSequence ??= entry.shareSequence;
             try {
                 await owner.session.append({
                     payload: JSON.parse(entry.canonicalJson) as never,
@@ -201,13 +207,16 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
                 owner.appendedThisSession = true;
             } catch (error: unknown) {
                 // Murmur raises one code whichever side is ahead, and it exposes no way to
-                // read its committed maximum, so the two are told apart by when the gap
-                // happens. Rig acknowledges an outbox page only after Murmur has durably
-                // committed it, so the sole prefix Murmur can already hold is the page a
-                // restart left unacknowledged — before this session has appended anything.
-                // A gap after a successful append means Murmur is genuinely behind, and
-                // skipping there would drop an entry every member is then missing forever.
-                if (!isSequenceGap(error) || owner.appendedThisSession) throw error;
+                // read its committed maximum, so the two are told apart by how a duplicate
+                // can arise at all. Rig acknowledges an outbox page only after Murmur has
+                // durably committed it, so the sole prefix Murmur can already hold is the
+                // one page a restart left unacknowledged. Beyond that page — or after this
+                // session has itself appended — Murmur is genuinely behind, and skipping
+                // would drop an entry every member is then missing with no error at all.
+                const duplicable =
+                    !owner.appendedThisSession &&
+                    entry.shareSequence < (owner.firstAttemptedSequence ?? 0) + MAX_DUPLICATE_PAGE;
+                if (!isSequenceGap(error) || !duplicable) throw error;
             }
             owner.lastAppendedSequence = entry.shareSequence;
         }
@@ -238,6 +247,10 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
     async revoke(grant: SessionShareTransportGrant): Promise<void> {
         const owner = await this.#requireOwner(grant.shareId);
         this.#forgetGrant(grant);
+        // Murmur rejects revoking a grant it has already ended, and recovery has to be able
+        // to replay a revocation that never reached it, so the two are told apart by asking
+        // Murmur what it currently holds. A peer it no longer shows as active is done.
+        if (!this.#isPeerActive(owner, grant.murmurPeerId)) return;
         // A Murmur peer ID is the base64url signing key, which is all a revocation
         // needs. Removal must never depend on the friendship still existing: an
         // unfriended member has to be removable, or they keep decrypting the share.
@@ -407,24 +420,23 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
      * outright, writing through them would write into a store that is gone.
      */
     resetRuntime(): void {
-        for (const owner of this.#owners.values()) owner.session.destroy();
-        for (const member of this.#members.values()) member.session.destroy();
-        this.#owners.clear();
-        this.#members.clear();
-        this.#grants.clear();
-        this.#deferred.clear();
         // Handlers deliberately survive: they belong to the service's subscriptions, and a
         // runtime that comes back rebuilds the sessions behind the same subscribers.
+        this.#destroySessions();
     }
 
     /** Release every in-memory epoch secret; durable state stays loadable. */
     close(): void {
+        this.#destroySessions();
+        this.#ownerHandlers.clear();
+        this.#memberHandlers.clear();
+    }
+
+    #destroySessions(): void {
         for (const owner of this.#owners.values()) owner.session.destroy();
         for (const member of this.#members.values()) member.session.destroy();
         this.#owners.clear();
         this.#members.clear();
-        this.#ownerHandlers.clear();
-        this.#memberHandlers.clear();
         this.#grants.clear();
         this.#deferred.clear();
     }
@@ -465,6 +477,7 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
         }
         const owner: OwnerSession = {
             appendedThisSession: false,
+            firstAttemptedSequence: undefined,
             lastAppendedSequence: 0,
             session,
             state: session.state,
@@ -493,9 +506,20 @@ export class MurmurSessionShareTransport implements SessionShareTransport {
     }
 
     #isAlreadyActive(owner: OwnerSession, grant: SessionShareTransportGrant): boolean {
+        return this.#isPeerActive(owner, grant.murmurPeerId);
+    }
+
+    /**
+     * Whether Murmur still counts this peer as a member of the group.
+     *
+     * Murmur numbers its own grants, so a Rig epoch cannot be matched against one.
+     * The peer is the whole identity a removal acts on, which makes this the only
+     * question Murmur can answer and the only one either caller needs.
+     */
+    #isPeerActive(owner: OwnerSession, murmurPeerId: string): boolean {
         return (
             owner.state?.members.some(
-                (member) => member.peerId === grant.murmurPeerId && member.status === "active",
+                (member) => member.peerId === murmurPeerId && member.status === "active",
             ) === true
         );
     }

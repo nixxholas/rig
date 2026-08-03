@@ -107,7 +107,7 @@ export interface SessionShareCoreStore {
         shareMemberId: string;
     }): SessionShareMemberRecord;
     revokeMember(shareId: string, shareMemberId: string): SessionShareMemberRecord;
-    stopShare(shareId: string): SessionShareRecord;
+    stopShare(shareId: string, options?: { readonly pruneEntryLog: boolean }): SessionShareRecord;
     setIncludeFriendMessages(shareId: string, include: boolean): SessionShareRecord;
     setShareHealth(shareId: string, state: "active" | "degraded"): void;
     acceptFriendMessage(
@@ -156,6 +156,7 @@ export class SessionShareService {
     readonly #ownerSubscriptions = new Map<string, () => void>();
     readonly #memberSubscriptions = new Map<string, () => void>();
     readonly #publishQueues = new Map<string, AsyncQueue>();
+    readonly #replicaProgressListeners = new Set<(shareId: string) => void>();
     readonly #publishRequested = new Set<string>();
     readonly #store: SessionShareCoreStore;
     readonly #transport: SessionShareTransport;
@@ -355,6 +356,7 @@ export class SessionShareService {
         this.#ownerSubscriptions.clear();
         this.#memberSubscriptions.clear();
         this.#publishRequested.clear();
+        this.#replicaProgressListeners.clear();
     }
 
     #subscribeOwner(shareId: string): void {
@@ -375,11 +377,16 @@ export class SessionShareService {
                     shareId: share.shareId,
                 });
             }
-            // Ended grants are deliberately not replayed. Murmur's own durable state
-            // already records every removal, and asking it to revoke a grant it has
-            // already ended fails; worse, a revocation names only the peer, so replaying
-            // an old epoch would remove the membership that same friend holds today.
+            // A revocation that failed at the transport left Rig saying revoked while the
+            // member is still in the group and still decrypting, so recovery has to repair
+            // it. Only a peer Rig no longer grants access to is replayed — otherwise a
+            // stale epoch would remove the membership that same friend holds today — and
+            // the transport skips anyone Murmur has already removed.
             const grants = activeGrants(share);
+            const active = new Set(grants.map((grant) => grant.murmurPeerId));
+            for (const ended of this.#store.queryEndedGrants(share.shareId)) {
+                if (!active.has(ended.murmurPeerId)) await this.#transport.revoke(ended);
+            }
             if (grants.length > 0) await this.#transport.inviteMany(grants);
             await this.#transport.retry(share.shareId);
             await this.publish(share.shareId);
@@ -421,7 +428,7 @@ export class SessionShareService {
             // Murmur already deleted this group's rows, so no retry can revive the share.
             // Recording it as stopped is the honest end state; left degraded, recovery
             // would retry forever against owner state that no longer exists.
-            this.#store.stopShare(event.shareId);
+            this.#store.stopShare(event.shareId, { pruneEntryLog: false });
             this.#ownerSubscriptions.get(event.shareId)?.();
             this.#ownerSubscriptions.delete(event.shareId);
             return;
@@ -469,6 +476,14 @@ export class SessionShareService {
         }
     }
 
+    /** Observe a replica applying entries, which is the signal that it caught up. */
+    onReplicaProgress(listener: (shareId: string) => void): () => void {
+        this.#replicaProgressListeners.add(listener);
+        return () => {
+            this.#replicaProgressListeners.delete(listener);
+        };
+    }
+
     #handleMemberEvent(event: unknown): void {
         if (!Value.Check(sessionShareTransportMemberEventSchema, event)) {
             throw new Error("The session-share member transport event is invalid.");
@@ -477,6 +492,9 @@ export class SessionShareService {
         if (event.type === "entries_appended") {
             assertPageBounds(event.entries);
             this.#store.appendReplicaEntries(event.grant, event.entries);
+            for (const listener of this.#replicaProgressListeners) {
+                listener(event.grant.shareId);
+            }
             return;
         }
         // The subscription goes either way: an end for a grant this replica has already

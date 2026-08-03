@@ -189,8 +189,20 @@ export class FakeSessionShareTransport implements SessionShareTransport {
     async revoke(grant: SessionShareTransportGrant): Promise<void> {
         this.#throwFailure("revoke");
         const share = this.#requireShare(grant.shareId);
-        share.grants.delete(grantKey(grant));
-        await this.#enqueueMember(grant, { grant, reason: "revoked", type: "ended" });
+        // The real transport removes a Murmur peer, not one epoch of it, so a revocation
+        // takes out whichever grant that peer currently holds and does nothing when it
+        // holds none. Modelling it any other way hides the divergence from the real one.
+        const current = [...share.grants.values()].find(
+            (candidate) => candidate.murmurPeerId === grant.murmurPeerId,
+        );
+        if (current === undefined) return;
+        share.grants.delete(grantKey(current));
+        await this.#enqueueMember(current, { grant: current, reason: "revoked", type: "ended" });
+    }
+
+    /** Grants this share currently holds, for asserting who can still decrypt it. */
+    grantsFor(shareId: string): readonly SessionShareTransportGrant[] {
+        return [...(this.#shares.get(shareId)?.grants.values() ?? [])];
     }
 
     async stop(shareId: string, grants: readonly SessionShareTransportGrant[]): Promise<void> {
