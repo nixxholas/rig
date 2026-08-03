@@ -11,6 +11,7 @@ import { getPluginDataDirectory } from "../getPluginDataDirectory.js";
 import { getPluginsDirectory } from "../getPluginsDirectory.js";
 import { MAXIMUM_PLUGIN_LOG_READ_BYTES, readBoundedPluginLog } from "../readBoundedPluginLog.js";
 import { readPluginManifest } from "../readPluginManifest.js";
+import { PluginIconSummaryCache } from "../readPluginIcon.js";
 
 const PNG_SIGNATURE = Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
@@ -118,11 +119,17 @@ describe("plugins", () => {
         const root = await temporaryDirectory();
         const valid = join(root, "valid");
         const rectangular = join(root, "rectangular");
+        const tooWide = join(root, "too-wide");
         const oversized = join(root, "oversized");
+        const jpeg = join(root, "jpeg");
+        const truncated = join(root, "truncated");
         await Promise.all([
             createPluginFixture(valid, {}),
             createPluginFixture(rectangular, {}),
+            createPluginFixture(tooWide, {}),
             createPluginFixture(oversized, {}),
+            createPluginFixture(jpeg, {}),
+            createPluginFixture(truncated, {}),
         ]);
         await writeFile(
             join(rectangular, "icon.png"),
@@ -137,7 +144,29 @@ describe("plugins", () => {
                 .png()
                 .toBuffer(),
         );
+        await writeFile(
+            join(tooWide, "icon.png"),
+            await sharp({
+                create: {
+                    background: "#336699",
+                    channels: 3,
+                    height: 4_096,
+                    width: 4_096,
+                },
+            })
+                .png({ compressionLevel: 9 })
+                .toBuffer(),
+        );
         await writeFile(join(oversized, "icon.png"), Buffer.alloc(4 * 1024 * 1024 + 1));
+        await writeFile(
+            join(jpeg, "icon.png"),
+            await sharp({
+                create: { background: "#336699", channels: 3, height: 32, width: 32 },
+            })
+                .jpeg()
+                .toBuffer(),
+        );
+        await writeFile(join(truncated, "icon.png"), PNG_SIGNATURE.subarray(0, 40));
 
         await expect(readPluginManifest(valid)).resolves.toMatchObject({
             icon: {
@@ -149,9 +178,38 @@ describe("plugins", () => {
         await expect(readPluginManifest(rectangular)).rejects.toThrow(
             "The plugin icon must be square.",
         );
+        await expect(readPluginManifest(tooWide)).rejects.toThrow(
+            "The plugin icon dimensions must be between 1 and 2048 pixels.",
+        );
         await expect(readPluginManifest(oversized)).rejects.toThrow(
             "The plugin icon cannot exceed 4 MiB.",
         );
+        await expect(readPluginManifest(jpeg)).rejects.toThrow(
+            "The plugin icon is not a valid PNG image.",
+        );
+        await expect(readPluginManifest(truncated)).rejects.toThrow(
+            "The plugin icon is not a valid PNG image.",
+        );
+    });
+
+    it("memoizes icon summaries until the file identity changes", async () => {
+        const root = await temporaryDirectory();
+        const directory = join(root, "cached");
+        await createPluginFixture(directory, {});
+        const cache = new PluginIconSummaryCache();
+        const first = await cache.read(join(directory, "icon.png"));
+        const unchanged = await cache.read(join(directory, "icon.png"));
+        expect(unchanged).toBe(first);
+
+        const replacement = await sharp({
+            create: { background: "#123456", channels: 4, height: 2, width: 2 },
+        })
+            .png()
+            .toBuffer();
+        await writeFile(join(directory, "icon.png"), replacement);
+        const changed = await cache.read(join(directory, "icon.png"));
+        expect(changed).not.toBe(first);
+        expect(changed.generation).not.toBe(first.generation);
     });
 
     it("rejects manifest assets that escape through symbolic links", async () => {
@@ -176,6 +234,22 @@ describe("plugins", () => {
         await expect(readPluginManifest(directory)).rejects.toThrow(
             "The plugin icon must be an ordinary file.",
         );
+
+        const externalAssets = join(root, "outside-assets");
+        await mkdir(externalAssets);
+        await Promise.all([
+            writeFile(join(externalAssets, "index.ts"), 'console.log("outside");\n'),
+            writeFile(join(externalAssets, "icon.png"), PNG_SIGNATURE),
+        ]);
+        await rm(join(directory, "index.ts"));
+        await rm(join(directory, "icon.png"));
+        await symlink(externalAssets, join(directory, "assets"));
+        const manifest = pluginManifest({ icon: "assets/icon.png", main: "assets/index.ts" });
+        await writeFile(
+            join(directory, "happy.plugin.json"),
+            `${JSON.stringify(manifest, null, 2)}\n`,
+        );
+        await expect(readPluginManifest(directory)).rejects.toThrow("must stay inside its folder");
     });
 
     it("keeps recent output within its bound and resets between current runs", async () => {

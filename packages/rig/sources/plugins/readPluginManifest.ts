@@ -1,4 +1,4 @@
-import { lstat, readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
 
 import { Value } from "@sinclair/typebox/value";
@@ -11,13 +11,13 @@ import {
     type RegisteredPlugin,
 } from "./types.js";
 import { resolvePluginDockerRuntime } from "./resolvePluginDockerRuntime.js";
-import { readPluginIcon } from "./readPluginIcon.js";
+import { PluginIconSummaryCache, readPluginIcon } from "./readPluginIcon.js";
 
 const CONVENTIONAL_SKILLS_DIRECTORY = "skills";
 
 export async function readPluginManifest(
     directory: string,
-    options: { folderName?: string } = {},
+    options: { folderName?: string; iconCache?: PluginIconSummaryCache } = {},
 ): Promise<RegisteredPlugin> {
     const manifestPath = resolve(directory, PLUGIN_MANIFEST_FILE_NAME);
     let parsed: unknown;
@@ -68,22 +68,31 @@ export async function readPluginManifest(
             "The plugin must declare a main entry point, provide a skills directory, or contribute a system prompt.",
         );
     }
-    const [entryInfo, icon] = await Promise.all([
+    const entryInfo =
         entryPath === undefined
             ? undefined
-            : lstat(entryPath).catch((error: unknown) => {
+            : await lstat(entryPath).catch((error: unknown) => {
                   if (Value.Check(fileSystemErrorSchema, error) && error.code === "ENOENT") {
                       throw new Error(
                           `The plugin main entry point ${JSON.stringify(manifest.main)} does not exist.`,
                       );
                   }
                   throw error;
-              }),
-        readPluginIcon(iconPath),
-    ]);
-    if (entryInfo !== undefined && !entryInfo.isFile()) {
+              });
+    if (entryInfo !== undefined && (!entryInfo.isFile() || entryInfo.isSymbolicLink())) {
         throw new Error("The plugin main entry point must be a file.");
     }
+    const iconInfo = await lstat(iconPath).catch(() => undefined);
+    if (iconInfo === undefined || !iconInfo.isFile() || iconInfo.isSymbolicLink()) {
+        throw new Error("The plugin icon must be an ordinary file.");
+    }
+    await Promise.all([
+        entryPath === undefined
+            ? undefined
+            : assertOwnedRealPath(directory, entryPath, "main entry point"),
+        assertOwnedRealPath(directory, iconPath, "icon"),
+    ]);
+    const icon = await (options.iconCache?.read(iconPath) ?? readPluginIcon(iconPath));
 
     return {
         directory: resolve(directory),
@@ -178,4 +187,25 @@ function resolveOwnedPath(directory: string, value: string, field: string): stri
         throw new Error(`The plugin ${field} must stay inside its folder.`);
     }
     return path;
+}
+
+async function assertOwnedRealPath(directory: string, path: string, field: string): Promise<void> {
+    let root: string;
+    let target: string;
+    try {
+        [root, target] = await Promise.all([realpath(directory), realpath(path)]);
+    } catch (error) {
+        if (
+            field === "icon" &&
+            Value.Check(fileSystemErrorSchema, error) &&
+            error.code === "ENOENT"
+        ) {
+            throw new Error("The plugin icon must be an ordinary file.");
+        }
+        throw error;
+    }
+    const fromRoot = relative(root, target);
+    if (fromRoot === "" || fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
+        throw new Error(`The plugin ${field} must stay inside its folder.`);
+    }
 }

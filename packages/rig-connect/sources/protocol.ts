@@ -1567,27 +1567,35 @@ export const pluginIconSchema = Type.Object(
 );
 export type PluginIcon = Static<typeof pluginIconSchema>;
 
-export const pluginSummarySchema = Type.Object({
-    apps: Type.Array(pluginAppContributionSchema, { maxItems: 8 }),
-    author: Type.String({
-        maxLength: 80,
-        minLength: 1,
-        pattern: "^(?!\\s)(?!.*\\s$)[^\\x00-\\x1F\\x7F]+$",
-    }),
-    category: pluginCategorySchema,
-    compute: Type.Optional(Type.Unknown()),
-    dataDirectory: Type.String({ minLength: 1 }),
-    description: Type.String({ maxLength: 512, minLength: 1 }),
-    directory: Type.String({ minLength: 1 }),
-    error: Type.Optional(Type.String()),
-    folder: Type.String({ minLength: 1 }),
-    icon: pluginIconSchema,
-    logAvailable: Type.Boolean(),
-    name: Type.String({ maxLength: 128, minLength: 1 }),
-    status: Type.Union([Type.Literal("failed"), Type.Literal("running"), Type.Literal("stopped")]),
-    statusMessage: Type.Optional(Type.String()),
-    version: Type.String({ minLength: 1 }),
-});
+export const pluginSummarySchema = Type.Object(
+    {
+        apps: Type.Array(pluginAppContributionSchema, { maxItems: 8 }),
+        author: Type.String({
+            maxLength: 80,
+            minLength: 1,
+            pattern:
+                "^(?!\\s)(?!.*\\s$)[^\\x00-\\x1F\\x7F-\\x9F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]+$",
+        }),
+        category: pluginCategorySchema,
+        compute: Type.Optional(Type.Unknown()),
+        dataDirectory: Type.String({ minLength: 1 }),
+        description: Type.String({ maxLength: 512, minLength: 1 }),
+        directory: Type.String({ minLength: 1 }),
+        error: Type.Optional(Type.String()),
+        folder: Type.String({ minLength: 1 }),
+        icon: pluginIconSchema,
+        logAvailable: Type.Boolean(),
+        name: Type.String({ maxLength: 128, minLength: 1 }),
+        status: Type.Union([
+            Type.Literal("failed"),
+            Type.Literal("running"),
+            Type.Literal("stopped"),
+        ]),
+        statusMessage: Type.Optional(Type.String()),
+        version: Type.String({ minLength: 1 }),
+    },
+    exact,
+);
 type ValidatedPluginSummary = Static<typeof pluginSummarySchema>;
 export type PluginSummary = Omit<ValidatedPluginSummary, "apps"> & {
     readonly apps: readonly PluginAppContribution[];

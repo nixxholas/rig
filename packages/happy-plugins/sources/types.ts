@@ -774,7 +774,8 @@ export const happyPluginManifestSchema = Type.Object(
         author: Type.String({
             maxLength: 80,
             minLength: 1,
-            pattern: "^(?!\\s)(?!.*\\s$)[^\\x00-\\x1F\\x7F]+$",
+            pattern:
+                "^(?!\\s)(?!.*\\s$)[^\\x00-\\x1F\\x7F-\\x9F\\u061C\\u200E\\u200F\\u202A-\\u202E\\u2066-\\u2069]+$",
         }),
         category: happyPluginCategorySchema,
         compute: Type.Optional(happyComputeProviderManifestSchema),

@@ -60,7 +60,11 @@ export interface PluginContext {
         generation: string,
         resourceUri: string,
     ): PluginAppResource;
-    readIcon(pluginId: string, generation: string): Promise<PluginIconResource>;
+    readIcon(
+        pluginId: string,
+        generation: string,
+        signal?: AbortSignal,
+    ): Promise<PluginIconResource>;
     storageDelete(applicationId: string, generation: string, key: string): Promise<void>;
     storageGet(
         applicationId: string,

@@ -3,7 +3,10 @@
 ## Unreleased
 
 - Added required local-plugin author/category metadata and an authenticated, generation-bound PNG
-  icon capability for local and remote `rig-connect` catalog clients.
+  icon capability for local and remote `rig-connect` catalog clients. This is a hard protocol 5
+  cut: older Happy clients are incompatible, legacy manifests without `author`, `category`, or a
+  valid bounded square PNG no longer load, and Happy must bump `@slopus/rig-connect` in lockstep
+  before consuming the new catalog contract.
 - Added parsed OSC 8 hyperlink metadata to Ghostty snapshot cells and preserved it through remote
   semantic-grid keyframes, patches, reconnect recovery, resize snapshots, and scrollback.
 

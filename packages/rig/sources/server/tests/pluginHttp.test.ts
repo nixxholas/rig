@@ -1,12 +1,33 @@
 import { request as requestHttp } from "node:http";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { defineModel } from "@slopus/rig-execution";
 
-import { PluginAppError, PluginIconError, PluginNotFoundError } from "../../plugins/index.js";
+import {
+    PluginAppError,
+    PluginIconError,
+    PluginManager,
+    PluginMcpRegistry,
+    PluginNotFoundError,
+} from "../../plugins/index.js";
 import type { PluginContext } from "../../agent/context/PluginContext.js";
+import { InMemorySessionStore } from "../../session/InMemorySessionStore.js";
 import { createProtocolHttpServer } from "../createProtocolHttpServer.js";
+import { DaemonLog } from "../DaemonLog.js";
 
 const servers: ReturnType<typeof createProtocolHttpServer>[] = [];
+const PNG = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+);
+const TEST_MODEL = defineModel({
+    defaultThinkingLevel: "off",
+    id: "test/model",
+    name: "Test model",
+    thinkingLevels: ["off"],
+});
 
 afterEach(async () => {
     await Promise.all(
@@ -32,6 +53,81 @@ describe("plugin HTTP protocol", () => {
         await expect(requestJson(port, "/plugins/Clock/log")).resolves.toMatchObject({
             log: { name: "Clock", text: "[stdout] tick\n" },
         });
+    });
+
+    it("serves authenticated generation-bound icons through a real manager and filesystem", async () => {
+        const root = await mkdtemp(join(process.cwd(), ".plugin-http-"));
+        const directory = join(root, "plugins");
+        const plugin = join(directory, "clock");
+        await mkdir(join(plugin, "skills", "clock"), { recursive: true });
+        await Promise.all([
+            writeFile(
+                join(plugin, "happy.plugin.json"),
+                `${JSON.stringify({
+                    author: "Happy",
+                    category: "utilities",
+                    description: "A clock.",
+                    icon: "icon.png",
+                    name: "Clock",
+                    skills: "skills",
+                })}\n`,
+            ),
+            writeFile(join(plugin, "icon.png"), PNG),
+            writeFile(
+                join(plugin, "skills", "clock", "SKILL.md"),
+                "---\nname: clock\ndescription: Reads time\n---\n# Clock\n",
+            ),
+        ]);
+        const store = new InMemorySessionStore({
+            modelCatalog: {
+                defaultModelId: TEST_MODEL.id,
+                defaultProviderId: "test",
+                models: [TEST_MODEL],
+                providers: [{ models: [TEST_MODEL], providerId: "test" }],
+            },
+        });
+        const manager = new PluginManager({
+            daemonLog: new DaemonLog({ path: join(root, "daemon.log"), write: () => {} }),
+            directory,
+            mcpRegistry: new PluginMcpRegistry(),
+            store,
+        });
+        const server = createProtocolHttpServer({ plugins: manager, token: "secret" });
+        servers.push(server);
+        try {
+            const port = await listen(server);
+            const listed = (await requestJson(port, "/plugins")) as {
+                plugins: { icon: { generation: string } }[];
+            };
+            const generation = listed.plugins[0]!.icon.generation;
+            const path = `/plugins/clock/generations/${generation}/icon`;
+            expect((await request(port, { path, token: "wrong" })).status).toBe(401);
+            await expect(request(port, { path })).resolves.toMatchObject({
+                body: PNG.toString("utf8"),
+                status: 200,
+            });
+            expect(
+                (
+                    await request(port, {
+                        path: `/plugins/missing/generations/${generation}/icon`,
+                    })
+                ).status,
+            ).toBe(404);
+
+            await writeFile(join(plugin, "icon.png"), Buffer.from("not a png"));
+            const unavailable = await request(port, { path });
+            expect(unavailable.status).toBe(422);
+            expect(JSON.parse(unavailable.body)).toEqual({
+                error: {
+                    code: "icon_unavailable",
+                    message: "The plugin icon is unavailable.",
+                },
+            });
+        } finally {
+            await manager.close();
+            await store.close();
+            await rm(root, { force: true, recursive: true });
+        }
     });
 
     it("authenticates and validates source-folder installation and uninstallation", async () => {

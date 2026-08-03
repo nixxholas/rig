@@ -25,6 +25,9 @@ describe("happy plugin manifest", () => {
         expect(
             Value.Check(happyPluginManifestSchema, { ...manifest, author: "x".repeat(81) }),
         ).toBe(false);
+        for (const author of ["Happy\u0085Tools", "Happy\u202eTools", "Happy\u2066Tools"]) {
+            expect(Value.Check(happyPluginManifestSchema, { ...manifest, author })).toBe(false);
+        }
         expect(
             Value.Check(happyPluginManifestSchema, { ...manifest, category: "uncategorized" }),
         ).toBe(false);

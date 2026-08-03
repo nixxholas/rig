@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import sharp from "sharp";
 
 import { createNodeFileSystemContext } from "../../agent/context/createNodeFileSystemContext.js";
 import type { FileSystemContext } from "../../agent/context/FileSystemContext.js";
@@ -72,6 +73,44 @@ describe("installing a plugin from a folder", () => {
         await expect(
             installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
         ).rejects.toThrow('The plugin main entry point "index.ts" does not exist.');
+        await expect(fs.readdir(pluginsDirectory)).resolves.toEqual([]);
+    });
+
+    it.each([
+        { height: 32, label: "non-square", width: 64 },
+        { height: 4_096, label: "over-dimension", width: 4_096 },
+    ])("rejects a $label icon before replacing an installation", async ({ height, width }) => {
+        const { fs, pluginsDirectory, workspace } = await createHarness();
+        const source = join(workspace, "invalid-icon");
+        await createPluginSource(source);
+        await writeFile(
+            join(source, "icon.png"),
+            await sharp({
+                create: { background: "#336699", channels: 3, height, width },
+            })
+                .png({ compressionLevel: 9 })
+                .toBuffer(),
+        );
+
+        await expect(
+            installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
+        ).rejects.toThrow(
+            width === height
+                ? "The plugin icon dimensions must be between 1 and 2048 pixels."
+                : "The plugin icon must be square.",
+        );
+        await expect(fs.readdir(pluginsDirectory)).resolves.toEqual([]);
+    });
+
+    it("rejects an icon over 4 MiB before replacing an installation", async () => {
+        const { fs, pluginsDirectory, workspace } = await createHarness();
+        const source = join(workspace, "oversized-icon");
+        await createPluginSource(source);
+        await writeFile(join(source, "icon.png"), Buffer.alloc(4 * 1024 * 1024 + 1));
+
+        await expect(
+            installPluginFromPath({ fs, pluginsDirectory, sourceDirectory: source }),
+        ).rejects.toThrow("The plugin icon cannot exceed 4 MiB.");
         await expect(fs.readdir(pluginsDirectory)).resolves.toEqual([]);
     });
 

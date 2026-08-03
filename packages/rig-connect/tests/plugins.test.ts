@@ -9,28 +9,45 @@ const CURSOR_2 = "01900000-0000-7000-8000-000000000002";
 const CURSOR_3 = "01900000-0000-7000-8000-000000000003";
 
 describe("plugin MCP App projection", () => {
-    it("rejects a catalog contribution that violates the published app schema", () => {
+    it("drops an invalid catalog contribution and surfaces a scoped failure", () => {
         const store = new PluginStore();
         const valid = plugin("generation-1");
         const invalid = {
             ...valid,
             apps: valid.apps.map((app) => ({ ...app, resourceUri: "ui://broken#fragment" })),
         };
-        expect(() => store.replace([invalid], [], "live")).toThrow();
+        expect(store.replace([invalid], [], "live")).toBe(true);
+        expect(store.plugins()).toEqual([]);
+        expect(store.state().failures).toEqual([
+            {
+                error: "Rig returned invalid catalog metadata for this plugin.",
+                pluginId: "usage",
+            },
+        ]);
     });
 
-    it("rejects invalid catalog display metadata at the browser boundary", () => {
+    it("isolates invalid catalog display metadata at the browser boundary", () => {
         const store = new PluginStore();
-        expect(() =>
-            store.replace([{ ...plugin("generation-1"), author: "" }], [], "live"),
-        ).toThrow();
-        expect(() =>
-            store.replace(
-                [{ ...plugin("generation-1"), category: "uncategorized" as never }],
-                [],
-                "live",
-            ),
-        ).toThrow();
+        store.replace([{ ...plugin("generation-1"), author: "" }], [], "live");
+        expect(store.plugins()).toEqual([]);
+        expect(store.state().failures[0]?.pluginId).toBe("usage");
+        store.replace(
+            [{ ...plugin("generation-1"), category: "uncategorized" as never }],
+            [],
+            "live",
+        );
+        expect(store.plugins()).toEqual([]);
+        expect(store.state().connection).toBe("live");
+        store.replace([{ ...plugin("generation-1"), author: "Happy\u202eTools" }], [], "live");
+        expect(store.plugins()).toEqual([]);
+    });
+
+    it("keeps icon identity stable across unrelated plugin status changes", () => {
+        const store = new PluginStore();
+        store.replace([plugin("generation-1")], [], "live");
+        const icon = store.plugins()[0]!.icon;
+        store.replace([{ ...plugin("generation-1"), status: "failed" }], [], "live");
+        expect(store.plugins()[0]!.icon).toBe(icon);
     });
 
     it("rebases a stream change that lands during the opening snapshot without losing it", async () => {
@@ -77,6 +94,63 @@ describe("plugin MCP App projection", () => {
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
         expect(connection.apps()[0]).toBe(application);
         expect(connection.plugins()[0]).toBe(pluginReference);
+
+        connection.close();
+        rig.close();
+        stream.close();
+    });
+
+    it("keeps the live stream open when one event contains a malformed plugin summary", async () => {
+        const encoder = new TextEncoder();
+        let stream!: ReadableStreamDefaultController<Uint8Array>;
+        const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+            if (String(input).endsWith("/events/live")) {
+                return new Response(
+                    new ReadableStream<Uint8Array>({
+                        start(controller) {
+                            stream = controller;
+                        },
+                    }),
+                );
+            }
+            return Response.json({
+                cursor: CURSOR_1,
+                failures: [],
+                plugins: [plugin("generation-1")],
+                version: CURSOR_1,
+            });
+        });
+        const rig = connectRig({ endpoint: "http://rig.test", fetch, token: "secret" });
+        const connection = rig.connectPlugins({ onChange: () => undefined });
+        stream.enqueue(encoder.encode(hello(CURSOR_1, false, false)));
+        await vi.waitFor(() => expect(connection.plugins()).toHaveLength(1));
+
+        stream.enqueue(
+            encoder.encode(
+                pluginsChanged(CURSOR_2, [
+                    { ...plugin("generation-2"), author: "" },
+                    { ...plugin("generation-2"), folder: "healthy", name: "Healthy" },
+                ]),
+            ),
+        );
+        await vi.waitFor(() =>
+            expect(connection.plugins().map(({ id }) => id)).toEqual(["healthy"]),
+        );
+        expect(connection.state()).toMatchObject({
+            connection: "live",
+            failures: [{ pluginId: "usage" }],
+        });
+        stream.enqueue(
+            encoder.encode(
+                pluginsChanged(CURSOR_3, [
+                    { ...plugin("generation-3"), folder: "healthy", name: "Healthy" },
+                ]),
+            ),
+        );
+        await vi.waitFor(() => expect(connection.apps()[0]?.generation).toBe("generation-3"));
+        expect(
+            fetch.mock.calls.filter(([input]) => String(input).endsWith("/events/live")),
+        ).toHaveLength(1);
 
         connection.close();
         rig.close();

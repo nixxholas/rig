@@ -41,7 +41,7 @@ import { installGitHubPlugin } from "./installGitHubPlugin.js";
 import { installPluginFromPath, type InstalledPlugin } from "./installPluginFromPath.js";
 import { PluginNotFoundError } from "./PluginNotFoundError.js";
 import { readPluginManifest } from "./readPluginManifest.js";
-import { readPluginIcon } from "./readPluginIcon.js";
+import { PluginIconSummaryCache, readPluginIcon } from "./readPluginIcon.js";
 import { PluginIconError } from "./PluginIconError.js";
 import { removePluginDockerImages } from "./preparePluginDockerImage.js";
 import { resolvePluginDockerImage } from "./resolvePluginDockerRuntime.js";
@@ -137,6 +137,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     readonly #githubFetch: GitHubFetch | undefined;
     readonly #generatedMedia: GeneratedMediaStore | undefined;
     readonly #hookRegistry: PluginHookRegistry;
+    readonly #iconCache = new PluginIconSummaryCache();
     #discovery: { promise: Promise<PluginDiscovery>; version: EventId } | undefined;
     readonly #now: () => number;
     readonly #mcpRegistry: PluginMcpRegistry | undefined;
@@ -213,7 +214,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     async start(): Promise<void> {
         if (this.#started) return;
         this.#started = true;
-        const discovery = await discoverPlugins(this.directory);
+        const discovery = await discoverPlugins(this.directory, { iconCache: this.#iconCache });
         for (const failure of discovery.failures) {
             this.#daemonLog.record(
                 "error",
@@ -287,7 +288,9 @@ export class PluginManager implements ManagedNetworkInterceptor {
         await this.#stopRunning(installed.folder, true);
         await this.#startRegistered(installed.folder, { preserveLog: true });
         try {
-            const plugin = await readPluginManifest(installed.directory);
+            const plugin = await readPluginManifest(installed.directory, {
+                iconCache: this.#iconCache,
+            });
             if (plugin.docker !== undefined) {
                 await removePluginDockerImages(installed.folder, {
                     docker: this.#docker,
@@ -313,7 +316,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
     }): Promise<UninstalledPlugin> {
         this.#assertOpen();
         options.signal?.throwIfAborted();
-        const discovery = await discoverPlugins(this.directory);
+        const discovery = await discoverPlugins(this.directory, { iconCache: this.#iconCache });
         const wanted = options.name.trim().toLowerCase();
         const installed = discovery.plugins.find(
             (plugin) =>
@@ -581,7 +584,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
             this.#discovery?.version === version
                 ? this.#discovery
                 : {
-                      promise: discoverPlugins(this.directory),
+                      promise: discoverPlugins(this.directory, { iconCache: this.#iconCache }),
                       version,
                   };
         this.#discovery = cached;
@@ -595,7 +598,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
 
     /** Reads at most the current plugin log's fixed retention bound. */
     async readLog(name: string): Promise<PluginLogSnapshot> {
-        const discovery = await discoverPlugins(this.directory);
+        const discovery = await discoverPlugins(this.directory, { iconCache: this.#iconCache });
         const wanted = name.trim().toLowerCase();
         const plugin = discovery.plugins.find(
             (candidate) =>
@@ -636,7 +639,12 @@ export class PluginManager implements ManagedNetworkInterceptor {
         return this.#appRegistry.readResource(applicationId, generation, resourceUri);
     }
 
-    async readIcon(folder: string, generation: string): Promise<PluginIconResource> {
+    async readIcon(
+        folder: string,
+        generation: string,
+        signal?: AbortSignal,
+    ): Promise<PluginIconResource> {
+        signal?.throwIfAborted();
         const discovery = await this.#discoverCurrentPlugins();
         const plugin = discovery.plugins.find((candidate) => candidate.folderName === folder);
         if (plugin === undefined) {
@@ -647,17 +655,31 @@ export class PluginManager implements ManagedNetworkInterceptor {
         }
         let icon: PluginIconResource;
         try {
-            icon = await readPluginIcon(plugin.iconPath);
+            icon = await readPluginIcon(plugin.iconPath, signal === undefined ? {} : { signal });
         } catch (error) {
-            throw new PluginIconError(
-                "icon_unavailable",
-                error instanceof Error ? error.message : String(error),
-            );
+            if (signal?.aborted) throw error;
+            await this.#refreshIconCatalog(plugin.iconPath);
+            throw new PluginIconError("icon_unavailable", "The plugin icon is unavailable.");
         }
         if (icon.generation !== generation) {
+            await this.#refreshIconCatalog(plugin.iconPath);
             throw new PluginIconError("stale_generation", "That plugin icon generation is stale.");
         }
         return icon;
+    }
+
+    async #refreshIconCatalog(iconPath: string): Promise<void> {
+        this.#iconCache.invalidate(iconPath);
+        try {
+            await this.#publishChanged();
+        } catch (error) {
+            this.#daemonLog.record(
+                "warning",
+                "plugin_icon_catalog_refresh_failed",
+                "Rig could not announce a changed plugin icon.",
+                { error: errorToMessage(error) },
+            );
+        }
     }
 
     callAppTool(
@@ -745,7 +767,7 @@ export class PluginManager implements ManagedNetworkInterceptor {
         let name = folderName;
         let running: RunningPlugin | undefined;
         try {
-            const plugin = await readPluginManifest(directory);
+            const plugin = await readPluginManifest(directory, { iconCache: this.#iconCache });
             name = plugin.manifest.name;
             if (plugin.entryPath === undefined) {
                 if (this.#closed || !isCurrentStartup()) return;

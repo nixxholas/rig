@@ -32,13 +32,15 @@ Vary the metaphor and dominant hue so plugins remain distinguishable.
    symbolize.
 2. Write a concise image prompt using the family direction above. State that the image must be
    original and contain no text or third-party marks.
-3. Generate one square image. Prefer 1024×1024 so the source survives later resizing.
+3. Generate one square image between 1×1 and 2048×2048 pixels. Prefer 1024×1024 so the source
+   survives later resizing.
 4. Inspect the result. Regenerate if the metaphor is ambiguous, the silhouette disappears when
    small, the composition contains text, or it resembles a recognizable existing icon.
 5. Save the final asset as a real PNG inside the plugin folder, normally `icon.png`, and set the
    manifest's `icon` field to that relative path.
-6. Verify the file has the PNG signature and square dimensions. Do not substitute a renamed JPEG,
-   SVG, placeholder byte string, or remote URL.
+6. Verify the file is a fully decodable PNG, has square dimensions no larger than 2048×2048, and
+   occupies no more than 4 MiB. Do not substitute a renamed JPEG, truncated PNG, SVG, placeholder
+   byte string, or remote URL.
 
 Prefer the available image-generation tool and use the PNG it returns directly.
 Only when image generation is unavailable, create the icon another way with sandbox-compatible

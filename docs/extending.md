@@ -43,28 +43,37 @@ rejected**:
 ```json
 {
     "name": "Project Counter",
+    "author": "Acme Tools",
+    "category": "developer-tools",
     "description": "Reports how many projects Rig knows about.",
     "main": "index.ts",
     "icon": "icon.png"
 }
 ```
 
-| Field         | Rule                                                                                  |
-| ------------- | ------------------------------------------------------------------------------------- |
-| `name`        | Non-empty string. Human-readable; also used to derive the agent-facing MCP tool name. |
-| `description` | Non-empty string explaining what the plugin does.                                     |
-| `main`        | Relative path to a JavaScript or TypeScript file, excluding declaration files.        |
-| `icon`        | Relative path ending in `.png` (any capitalization of the extension).                 |
-| `version`     | Optional Semantic Versioning string; an omission becomes `0.0.0`.                     |
-| `apps`        | Optional list of bounded static MCP App manifests.                                    |
+| Field         | Rule                                                                                                         |
+| ------------- | ------------------------------------------------------------------------------------------------------------ |
+| `name`        | Non-empty string. Human-readable; also used to derive the agent-facing MCP tool name.                        |
+| `author`      | Required 1–80 character publisher label without leading/trailing whitespace or control/direction characters. |
+| `category`    | Required catalog category; see the canonical values below.                                                   |
+| `description` | Required 1–512 character explanation of what the plugin does.                                                |
+| `main`        | Process entry path; optional only when skills or a system prompt provide the plugin's behavior.              |
+| `icon`        | Relative path ending in `.png` (any capitalization of the extension).                                        |
+| `version`     | Optional Semantic Versioning string; an omission becomes `0.0.0`.                                            |
+| `apps`        | Optional list of bounded static MCP App manifests.                                                           |
+
+`category` is exactly one of `automation`, `collaboration`, `data`,
+`developer-tools`, `media`, `productivity`, `utilities`, or `other`.
 
 Additional rules Rig enforces when it reads the manifest:
 
 - `main` and `icon` must be relative and must resolve **inside** the plugin
   folder.
-- Both must be ordinary files, not symbolic links.
-- The icon must begin with the real PNG signature. A renamed JPEG, an SVG, a
-  placeholder string, or a URL is rejected and the plugin does not register.
+- Both must resolve to ordinary files inside the plugin's real directory tree;
+  final or intermediate symbolic-link escapes are rejected.
+- The icon must be a fully decodable square PNG, between 1×1 and 2048×2048
+  pixels and no larger than 4 MiB. A renamed JPEG, truncated PNG, SVG,
+  placeholder string, or URL is rejected and the plugin does not register.
 
 Do not invent manifest fields such as `permissions` or `contributes`; adding one
 makes the manifest invalid.
@@ -77,7 +86,8 @@ It triggers automatically when you create or edit a plugin, a `happy.plugin.json
 or its icon. Follow it: it defines the shared visual family (Jobs-era iPhone icon
 craft, one metaphor, no text or third-party marks) and the verification steps —
 generate a square image, prefer 1024×1024, inspect it, save a real PNG in the
-plugin folder, and point `icon` at that relative path.
+plugin folder, keep it at or below 2048×2048 and 4 MiB, and point `icon` at that
+relative path.
 
 ### The entry file
 
@@ -275,10 +285,11 @@ Building a plugin from inside Rig, end to end:
 
 1. Create the folder — `.context/project-counter/` is a good scratch location, or
    somewhere the user names.
-2. Write `happy.plugin.json` with exactly the four fields above.
+2. Write `happy.plugin.json` with the six fields this process plugin needs:
+   `name`, `author`, `category`, `description`, `main`, and `icon`.
 3. Write `index.ts` against the `happy` singleton.
 4. Generate `icon.png` using the bundled `local-plugin-icon` skill; verify it is
-   a real square PNG.
+   a fully decodable square PNG no larger than 2048×2048 pixels or 4 MiB.
 5. Type-check and test the plugin, then call `plugin_install` with the absolute
    path to the folder. Rig validates, copies, and starts it without compiling.
 6. Call `plugin_list` to confirm `status: "running"`, and `plugin_logs` if it is

@@ -100,6 +100,7 @@ describe("plugin registration", () => {
             body: PNG_SIGNATURE,
             ...icon,
         });
+        expect(harness.events.at(-1)?.data.installation).toEqual(installed);
         const replacementIcon = await sharp({
             create: {
                 background: "#234567",
@@ -111,10 +112,19 @@ describe("plugin registration", () => {
             .png()
             .toBuffer();
         await writeFile(join(installed.directory, "icon.png"), replacementIcon);
+        const publishedBeforeReplacement = harness.events.length;
         await expect(harness.manager.readIcon("clock", icon.generation)).rejects.toMatchObject({
             code: "stale_generation",
         });
-        expect(harness.events.at(-1)?.data.installation).toEqual(installed);
+        expect(harness.events).toHaveLength(publishedBeforeReplacement + 1);
+        const replacementSummary = harness.events.at(-1)!.data.plugins[0]!.icon;
+        expect(replacementSummary.generation).not.toBe(icon.generation);
+        await expect(
+            harness.manager.readIcon("clock", replacementSummary.generation),
+        ).resolves.toMatchObject({
+            body: replacementIcon,
+            ...replacementSummary,
+        });
         expect(harness.started).toEqual(["Clock"]);
         expect(harness.stopped).toEqual([]);
         harness.store.slots.create({
@@ -145,7 +155,6 @@ describe("plugin registration", () => {
                 plugins: [{ statusMessage: "Waiting for the next tick." }],
             });
         });
-
         const uninstalled = await harness.manager.uninstall({ fs: harness.fs, name: "Clock" });
         expect(uninstalled).toEqual({
             dataDirectory: join(harness.dataRoot, "clock"),

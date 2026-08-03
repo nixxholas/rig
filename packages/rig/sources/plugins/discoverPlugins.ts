@@ -4,11 +4,15 @@ import { join } from "node:path";
 import { errorToMessage } from "../errorToMessage.js";
 import { readPluginManifest } from "./readPluginManifest.js";
 import type { PluginDiscovery } from "./types.js";
+import type { PluginIconSummaryCache } from "./readPluginIcon.js";
 
 // Must stay in sync with HAPPY_PLUGIN_MAX_LIST_ITEMS in happy-plugins.
 export const MAX_INSTALLED_PLUGINS = 64;
 
-export async function discoverPlugins(directory: string): Promise<PluginDiscovery> {
+export async function discoverPlugins(
+    directory: string,
+    options: { iconCache?: PluginIconSummaryCache } = {},
+): Promise<PluginDiscovery> {
     await mkdir(directory, { mode: 0o755, recursive: true });
     const installed = (await readdir(directory, { withFileTypes: true }))
         .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
@@ -23,7 +27,11 @@ export async function discoverPlugins(directory: string): Promise<PluginDiscover
         entries.map(async (entry) => {
             const pluginDirectory = join(directory, entry.name);
             try {
-                return { plugin: await readPluginManifest(pluginDirectory) } as const;
+                const manifestOptions =
+                    options.iconCache === undefined ? {} : { iconCache: options.iconCache };
+                return {
+                    plugin: await readPluginManifest(pluginDirectory, manifestOptions),
+                } as const;
             } catch (error) {
                 return {
                     failure: {

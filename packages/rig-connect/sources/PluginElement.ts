@@ -1,3 +1,4 @@
+import { Type } from "@sinclair/typebox";
 import { Value } from "@sinclair/typebox/value";
 
 import type { ConnectionState } from "./ChatElement.js";
@@ -120,6 +121,8 @@ export interface ReadPluginIconResult {
     mediaType: "image/png";
 }
 
+const pluginIdentitySchema = Type.Object({ folder: Type.String({ minLength: 1 }) });
+
 /** Immutable, reference-stable projection of the daemon's plugin catalog. */
 export class PluginStore {
     #apps: readonly PluginApp[] = [];
@@ -144,7 +147,22 @@ export class PluginStore {
         connection: ConnectionState,
     ): boolean {
         const previous = new Map(this.#plugins.map((plugin) => [plugin.id, plugin]));
-        const nextPlugins = [...plugins]
+        const invalidFailures: PluginCatalogFailure[] = [];
+        const validPlugins = plugins.flatMap((plugin, index) => {
+            try {
+                return [Value.Decode(pluginSummarySchema, plugin)];
+            } catch {
+                const pluginId = Value.Check(pluginIdentitySchema, plugin)
+                    ? plugin.folder
+                    : `invalid-plugin-${String(index + 1)}`;
+                invalidFailures.push({
+                    error: "Rig returned invalid catalog metadata for this plugin.",
+                    pluginId,
+                });
+                return [];
+            }
+        });
+        const nextPlugins = validPlugins
             .sort((left, right) => compareText(left.folder, right.folder))
             .map((plugin) => {
                 const projected = projectPlugin(plugin, previous.get(plugin.folder));
@@ -153,9 +171,10 @@ export class PluginStore {
                     : projected;
             });
         const nextApps = nextPlugins.flatMap((plugin) => plugin.apps).sort(compareApps);
-        const nextFailures = failures
-            .map((failure) => ({ error: failure.error, pluginId: failure.folder }))
-            .sort((left, right) => compareText(left.pluginId, right.pluginId));
+        const nextFailures = [
+            ...failures.map((failure) => ({ error: failure.error, pluginId: failure.folder })),
+            ...invalidFailures,
+        ].sort((left, right) => compareText(left.pluginId, right.pluginId));
         const unchanged =
             sameReferences(this.#plugins, nextPlugins) &&
             sameReferences(this.#apps, nextApps) &&
@@ -181,7 +200,7 @@ export class PluginStore {
 }
 
 function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined): LocalPlugin {
-    const validated = Value.Decode(pluginSummarySchema, plugin);
+    const validated = plugin;
     const previousApps = new Map(previous?.apps.map((app) => [app.id, app]) ?? []);
     const apps = validated.apps.map((app) => {
         const projected = projectApp(Value.Decode(pluginAppContributionSchema, app));
@@ -197,7 +216,13 @@ function projectPlugin(plugin: PluginSummary, previous: LocalPlugin | undefined)
         directory: validated.directory,
         ...(validated.error === undefined ? {} : { error: validated.error }),
         id: validated.folder,
-        icon: validated.icon,
+        icon:
+            previous !== undefined &&
+            previous.icon.generation === validated.icon.generation &&
+            previous.icon.mediaType === validated.icon.mediaType &&
+            previous.icon.size === validated.icon.size
+                ? previous.icon
+                : validated.icon,
         logAvailable: validated.logAvailable,
         name: validated.name,
         status: validated.status,

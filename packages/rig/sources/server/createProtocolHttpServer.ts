@@ -757,15 +757,19 @@ async function handleRequest(
             sendJson(response, 503, { error: "Plugins are unavailable while Rig is starting." });
             return;
         }
+        const operation = requestOperationSignal(request, response);
         try {
-            const icon = await plugins.readIcon(route.pluginId, route.generation);
-            response.statusCode = 200;
-            response.setHeader("cache-control", "private, max-age=31536000, immutable");
-            response.setHeader("content-length", String(icon.body.byteLength));
-            response.setHeader("content-type", icon.mediaType);
-            response.setHeader("x-content-type-options", "nosniff");
-            response.end(icon.body);
+            const icon = await plugins.readIcon(route.pluginId, route.generation, operation.signal);
+            if (!response.destroyed) {
+                response.statusCode = 200;
+                response.setHeader("cache-control", "private, max-age=31536000, immutable");
+                response.setHeader("content-length", String(icon.body.byteLength));
+                response.setHeader("content-type", icon.mediaType);
+                response.setHeader("x-content-type-options", "nosniff");
+                response.end(icon.body);
+            }
         } catch (error) {
+            if (response.destroyed || operation.signal.aborted) return;
             if (!(error instanceof PluginIconError)) throw error;
             const status =
                 error.code === "plugin_not_found"
@@ -774,6 +778,8 @@ async function handleRequest(
                       ? 409
                       : 422;
             sendJson(response, status, { error: { code: error.code, message: error.message } });
+        } finally {
+            operation.detach();
         }
         return;
     }
