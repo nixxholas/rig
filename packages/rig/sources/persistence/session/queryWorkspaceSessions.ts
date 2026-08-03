@@ -15,7 +15,7 @@ export function queryWorkspaceSessions(
     target: { limit?: number; projectId: string; workspaceId?: string },
 ): readonly AgentWorkspaceSession[] {
     const rows = tx.all<Record<string, unknown>>(sql`
-        SELECT id, agent_id, project_id, workspace_id, title, status, updated_at_ms,
+        SELECT id, agent_id, project_id, workspace_id, title, status, archived, updated_at_ms,
             last_message_at_ms, delegated_by_session_id
         FROM sessions
         WHERE project_id = ${target.projectId}
@@ -34,6 +34,7 @@ export function queryWorkspaceSessions(
         const title = readOptionalString(row, "title");
         const delegatedBy = readOptionalString(row, "delegated_by_session_id");
         return {
+            archived: readNumber(row, "archived") !== 0,
             id: readString(row, "id"),
             agentId: readString(row, "agent_id"),
             projectId: readString(row, "project_id"),

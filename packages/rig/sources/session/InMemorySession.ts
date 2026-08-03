@@ -6306,6 +6306,7 @@ export class InMemorySession {
                     projectId: string;
                     status: "initializing" | "ready" | "failed" | "archiving" | "archived";
                 }) => ({
+                    archived: workspace.status === "archiving" || workspace.status === "archived",
                     id: workspace.id,
                     name: workspace.name,
                     path: workspace.path,

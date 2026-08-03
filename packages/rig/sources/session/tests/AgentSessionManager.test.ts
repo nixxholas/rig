@@ -2232,6 +2232,37 @@ describe("AgentSessionManager", () => {
         ).toEqual([]);
     });
 
+    it("marks a workspace ended as soon as archival begins", () => {
+        const delegator = delegatorSession();
+        const manager = new AgentSessionManager({
+            repository: {
+                createSubagent: vi.fn(),
+                get: (id) => (id === delegator.id ? delegator : undefined),
+                listByRoot: () => [],
+                listProjectWorkspaces: () => [
+                    {
+                        id: "workspace-1",
+                        name: "Finished work",
+                        path: "/workspaces/finished",
+                        projectId: "project-1",
+                        status: "archiving",
+                    } as ProjectWorkspace,
+                ],
+            },
+        });
+
+        expect(manager.listWorkspaces(delegator.id, undefined, { crossWorkspace: false })).toEqual([
+            {
+                archived: true,
+                id: "workspace-1",
+                name: "Finished work",
+                path: "/workspaces/finished",
+                projectId: "project-1",
+                status: "archiving",
+            },
+        ]);
+    });
+
     it("waits for owned workspace initialization before starting its agent", async () => {
         const child = {
             agentMetadata: () => ({

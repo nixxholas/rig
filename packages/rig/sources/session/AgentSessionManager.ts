@@ -374,6 +374,7 @@ export class AgentSessionManager {
             this.#repository.ownedWorkspace?.(sessionId, workspace.projectId, workspace.id) !==
             undefined;
         return {
+            archived: workspace.status === "archiving" || workspace.status === "archived",
             id: workspace.id,
             name: workspace.name,
             path: workspace.path,

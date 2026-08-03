@@ -3,6 +3,8 @@ import type { ServiceTier } from "@slopus/rig-execution";
 import type { Message } from "../types.js";
 import type { SpawnSubagentResult, SubagentContextMode } from "./SubagentContext.js";
 export interface AgentWorkspace {
+    /** True once the workspace has logically ended, including while cleanup is still running. */
+    archived: boolean;
     id: string;
     name: string;
     path: string;
@@ -21,6 +23,8 @@ export interface AgentProject {
 }
 
 export interface AgentWorkspaceSession {
+    /** True when the conversation has been put away and is no longer active. */
+    archived: boolean;
     id: string;
     agentId: string;
     projectId: string;

@@ -26,6 +26,10 @@ function requireCrossWorkspace(context: AgentContext): WorkspaceContext {
 }
 
 const workspaceResult = Type.Object({
+    archived: Type.Boolean({
+        description:
+            "True once this workspace has ended, including while archival cleanup is still running.",
+    }),
     id: Type.String(),
     name: Type.String(),
     path: Type.String(),
@@ -186,7 +190,7 @@ export const listWorkspacesTool = defineTool({
     name: "list_workspaces",
     label: "List workspaces",
     description:
-        "List the workspaces of this session's project, or of another project when a project ID is given. Listing is for inspecting and following up on existing work, not for picking a workspace to reuse: a parallel task gets its own workspace from create_workspace.",
+        "List the workspaces of this session's project, or of another project when a project ID is given. Ended workspaces remain visible with archived set to true. Listing is for inspecting and following up on existing work, not for picking a workspace to reuse: a parallel task gets its own workspace from create_workspace.",
     arguments: Type.Object(
         {
             project_id: Type.Optional(
@@ -217,7 +221,7 @@ export const listWorkspaceSessionsTool = defineTool({
     name: "list_workspace_sessions",
     label: "List sessions",
     description:
-        "List the conversations of a project or of one of its workspaces, most recently active first.",
+        "List the conversations of a project or of one of its workspaces, most recently active first. Ended conversations remain visible with archived set to true.",
     arguments: Type.Object(
         {
             project_id: Type.Optional(
@@ -235,6 +239,10 @@ export const listWorkspaceSessionsTool = defineTool({
     returnType: Type.Object({
         sessions: Type.Array(
             Type.Object({
+                archived: Type.Boolean({
+                    description:
+                        "True when this conversation has been put away and is no longer active.",
+                }),
                 id: Type.String(),
                 agentId: Type.String(),
                 projectId: Type.String(),

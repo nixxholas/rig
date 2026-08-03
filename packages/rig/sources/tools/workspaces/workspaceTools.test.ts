@@ -327,6 +327,7 @@ function workspaceContext(overrides: Partial<WorkspaceContext>): WorkspaceContex
 
 function workspace() {
     return {
+        archived: false,
         id: "workspace-1",
         name: "Investigate parser",
         path: "/workspaces/parser",
@@ -338,6 +339,7 @@ function workspace() {
 
 function session() {
     return {
+        archived: false,
         id: "session-1",
         agentId: "agent-1",
         projectId: "project-1",
