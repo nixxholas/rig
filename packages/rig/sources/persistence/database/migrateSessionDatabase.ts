@@ -22,8 +22,15 @@ import { pendingContextMessages } from "./migrations/17-pending-context-messages
 import { agentSessionSharing } from "./migrations/18-agent-session-sharing.js";
 import { sessionShareEntryLog } from "./migrations/19-session-share-entry-log.js";
 import { rigDataIdentity } from "./migrations/20-rig-data-identity.js";
+import { rigDataIdentityFormat } from "./migrations/21-rig-data-identity-format.js";
 
-const migrations = [
+interface MigrationContext {
+    createDataEpoch: () => string;
+}
+
+type SessionDatabaseMigration = (database: SessionDatabase, context: MigrationContext) => void;
+
+const migrations: readonly SessionDatabaseMigration[] = [
     init,
     delegatedSessions,
     timelineIndex,
@@ -43,11 +50,14 @@ const migrations = [
     pendingContextMessages,
     agentSessionSharing,
     sessionShareEntryLog,
-] as const;
-const RIG_DATA_IDENTITY_MIGRATION_INDEX = migrations.length;
+    (database, context) => rigDataIdentity(database, context.createDataEpoch()),
+    rigDataIdentityFormat,
+];
 export const SESSION_DATABASE_APPLICATION_ID = 0x52494732;
+/** First schema version whose committed transaction contains a stable data epoch. */
+export const RIG_DATA_IDENTITY_SCHEMA_VERSION = 20;
 
-export const CURRENT_SESSION_DATABASE_VERSION = migrations.length + 1;
+export const CURRENT_SESSION_DATABASE_VERSION = migrations.length;
 
 export function migrateSessionDatabase(
     database: SessionDatabase,
@@ -80,11 +90,7 @@ export function migrateSessionDatabase(
                     version < CURRENT_SESSION_DATABASE_VERSION;
                     version += 1
                 ) {
-                    if (version === RIG_DATA_IDENTITY_MIGRATION_INDEX) {
-                        rigDataIdentity(transaction, createDataEpoch());
-                    } else {
-                        migrations[version]!(transaction);
-                    }
+                    migrations[version]!(transaction, { createDataEpoch });
                     transaction.run(sql.raw(`PRAGMA user_version = ${String(version + 1)}`));
                 }
                 transaction.run(

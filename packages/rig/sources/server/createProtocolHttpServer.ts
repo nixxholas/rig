@@ -41,7 +41,7 @@ import type {
     ListExternalToolCallsResponse,
     ListSecretsResponse,
     HealthResponse,
-    RigInstallationInspection,
+    RigDaemonInstallationDiscovery,
     InstallPluginRequest,
     InstallPluginResponse,
     GitStateResponse,
@@ -160,6 +160,7 @@ import type {
     SetPresenceResponse,
 } from "../protocol/index.js";
 import { isDatabaseFailure } from "../persistence/isDatabaseFailure.js";
+import { CURRENT_SESSION_DATABASE_VERSION } from "../persistence/database/migrateSessionDatabase.js";
 import { InMemorySessionStore } from "../session/InMemorySessionStore.js";
 import type { SessionUsageSummary } from "../session/usage/index.js";
 import { createModelCatalog } from "../model-catalog/createModelCatalog.js";
@@ -528,11 +529,17 @@ async function handleRequest(
     }
 
     if (request.method === "GET" && route.name === "installation") {
-        sendJson<RigInstallationInspection>(response, 200, {
-            data: { epoch: store.dataEpoch, status: "initialized" },
+        sendJson<RigDaemonInstallationDiscovery>(response, 200, {
+            daemonProtocolVersion: RIG_PROTOCOL_VERSION,
+            daemonVersion: identity.version,
+            data: {
+                epoch: store.dataEpoch,
+                schemaCompatibility: "current",
+                schemaVersion: CURRENT_SESSION_DATABASE_VERSION,
+                status: "initialized",
+            },
             formatVersion: 1,
-            protocolVersion: RIG_PROTOCOL_VERSION,
-            rigVersion: identity.version,
+            source: "daemon",
         });
         return;
     }

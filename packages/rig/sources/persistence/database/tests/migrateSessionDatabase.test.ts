@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
     CURRENT_SESSION_DATABASE_VERSION,
     migrateSessionDatabase,
+    RIG_DATA_IDENTITY_SCHEMA_VERSION,
 } from "../migrateSessionDatabase.js";
 import { agentTreeUsage } from "../migrations/08-agent-tree-usage.js";
 import { projectComputeGeneration } from "../migrations/12-project-compute-generation.js";
@@ -58,6 +59,29 @@ describe("migrateSessionDatabase", () => {
             user_version: CURRENT_SESSION_DATABASE_VERSION,
         });
 
+        opened.client.close();
+    });
+
+    it("does not replay the identity migration when the following migration runs", () => {
+        const opened = openTestDatabase();
+        migrateSessionDatabase(opened.database, { createDataEpoch: () => "stable-epoch" });
+        opened.database.run(sql.raw("ALTER TABLE rig_data_identity DROP COLUMN format_version"));
+        opened.database.run(
+            sql.raw(`PRAGMA user_version = ${String(RIG_DATA_IDENTITY_SCHEMA_VERSION)}`),
+        );
+
+        migrateSessionDatabase(opened.database, {
+            createDataEpoch: () => {
+                throw new Error("The identity migration was replayed.");
+            },
+        });
+
+        expect(
+            opened.database.get(sql.raw("SELECT epoch, format_version FROM rig_data_identity")),
+        ).toEqual({ epoch: "stable-epoch", format_version: 1 });
+        expect(opened.database.get(sql.raw("PRAGMA user_version"))).toEqual({
+            user_version: CURRENT_SESSION_DATABASE_VERSION,
+        });
         opened.client.close();
     });
 

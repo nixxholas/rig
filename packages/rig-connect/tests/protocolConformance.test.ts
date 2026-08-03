@@ -213,13 +213,21 @@ type _ExplorationOperation = Assignable<
     local.ExplorationOperation,
     daemonAgent.ExplorationOperation
 >;
-type _RigInstallationInspection = Assignable<
-    localInstallation.RigInstallationInspection,
-    daemon.RigInstallationInspection
+type _RigCliInstallationInspection = Assignable<
+    localInstallation.RigCliInstallationInspection,
+    daemon.RigCliInstallationInspection
 >;
-type _DaemonRigInstallationInspection = Assignable<
-    daemon.RigInstallationInspection,
-    localInstallation.RigInstallationInspection
+type _DaemonRigCliInstallationInspection = Assignable<
+    daemon.RigCliInstallationInspection,
+    localInstallation.RigCliInstallationInspection
+>;
+type _RigDaemonInstallationDiscovery = Assignable<
+    localInstallation.RigDaemonInstallationDiscovery,
+    daemon.RigDaemonInstallationDiscovery
+>;
+type _DaemonRigDaemonInstallationDiscovery = Assignable<
+    daemon.RigDaemonInstallationDiscovery,
+    localInstallation.RigDaemonInstallationDiscovery
 >;
 
 describe("protocol conformance", () => {

@@ -43,11 +43,15 @@ export {
     type StopSessionShareRequest,
 } from "./SessionShareProtocol.js";
 export {
+    rigCliInstallationInspectionSchema,
+    rigDaemonInstallationDiscoverySchema,
     rigDataEpochSchema,
+    rigInitializedDataSchema,
     rigInstallationDataSchema,
-    rigInstallationInspectionSchema,
+    type RigCliInstallationInspection,
+    type RigDaemonInstallationDiscovery,
+    type RigInitializedData,
     type RigInstallationData,
-    type RigInstallationInspection,
 } from "./InstallationProtocol.js";
 export {
     computePreparationNoticeSchema,

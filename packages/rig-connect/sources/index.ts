@@ -5,11 +5,22 @@ export {
 } from "./connectRig.js";
 export {
     discoverRigInstallation,
+    DEFAULT_INSTALLATION_DISCOVERY_TIMEOUT_MS,
+    MAXIMUM_INSTALLATION_RESPONSE_BYTES,
+    RigInstallationDiscoveryHttpError,
+    RigInstallationDiscoveryUnsupportedError,
     rigInstallationCompatibility,
 } from "./discoverRigInstallation.js";
 export type { DiscoverRigInstallationOptions } from "./discoverRigInstallation.js";
-export { rigInstallationInspectionSchema } from "./RigInstallationInspection.js";
-export type { RigInstallationInspection } from "./RigInstallationInspection.js";
+export {
+    rigCliInstallationInspectionSchema,
+    rigDaemonInstallationDiscoverySchema,
+    rigInstallationCliDataSchema,
+} from "./RigInstallationInspection.js";
+export type {
+    RigCliInstallationInspection,
+    RigDaemonInstallationDiscovery,
+} from "./RigInstallationInspection.js";
 export type {
     ConnectRigOptions,
     CreateSessionInput,

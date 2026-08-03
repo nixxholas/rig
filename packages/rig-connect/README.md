@@ -18,9 +18,10 @@ the same build runs in Node, in a browser, and in any runtime that provides them
 validation uses TypeBox. The package has no runtime dependency on `rig`, and a browser bundle
 carries no daemon code.
 
-## Discovering an installation
+## Discovering a running Rig
 
-Onboarding can inspect a daemon once without opening the live event stream or allocating stores:
+Onboarding can discover an authenticated daemon once without opening the live event stream or
+allocating stores:
 
 ```ts
 import { discoverRigInstallation, rigInstallationCompatibility } from "@slopus/rig-connect";
@@ -29,16 +30,23 @@ const installation = await discoverRigInstallation({ endpoint, token });
 const compatibility = rigInstallationCompatibility(installation);
 ```
 
-The response has a stable format version, the installed Rig version, the daemon protocol version,
-and one authoritative data state:
+`discoverRigInstallation` accepts only the daemon wire contract:
 
-- `absent`: the Rig database file does not exist.
-- `uninitialized`: a file exists, but the current Rig data-identity migration has not committed.
-- `initialized`: the database contains a stable `epoch` for this data generation.
+- `{ formatVersion: 1, source: "daemon", daemonVersion, daemonProtocolVersion }`
+- initialized data with a stable `epoch`, `schemaVersion`, and
+  `schemaCompatibility: "current"`.
 
-The epoch remains the same across inspection, daemon restart, and ordinary schema migrations. It
-changes when Rig atomically resets or recreates its data generation. Local launchers can obtain the
-same shape with `rig inspect --json`; that command does not start or contact the daemon.
+The library validates protocol compatibility using `daemonProtocolVersion`. Discovery is bounded to
+five seconds and 16 KiB. A 404 means the server predates discovery and throws the exported
+`RigInstallationDiscoveryUnsupportedError`, whose compatibility is `server_outdated`; response
+bodies are cancelled before any non-success response is reported.
+
+Local launchers parse `rig inspect --json` with the separate
+`rigCliInstallationInspectionSchema` / `RigCliInstallationInspection` contract. Unlike daemon
+discovery, inspection may report `absent`, `uninitialized`, `initialized` (including
+`upgrade_required`), `incompatible`, or `unavailable` without starting or contacting the daemon.
+The daemon contract is separately exported as
+`rigDaemonInstallationDiscoverySchema` / `RigDaemonInstallationDiscovery`.
 
 Local plugin interfaces read the complete plugin and application catalog through one live
 subscription:

@@ -2003,10 +2003,16 @@ describe("createProtocolHttpServer", () => {
             });
             expect(response.statusCode).toBe(200);
             expect(JSON.parse(response.body)).toEqual({
-                data: { epoch: store.dataEpoch, status: "initialized" },
+                daemonProtocolVersion: expect.any(Number),
+                daemonVersion: expect.any(String),
+                data: {
+                    epoch: store.dataEpoch,
+                    schemaCompatibility: "current",
+                    schemaVersion: expect.any(Number),
+                    status: "initialized",
+                },
                 formatVersion: 1,
-                protocolVersion: expect.any(Number),
-                rigVersion: expect.any(String),
+                source: "daemon",
             });
 
             const unauthorized = await requestRawJson(socketPath, "/installation", {

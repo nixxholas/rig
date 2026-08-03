@@ -31,10 +31,11 @@ describe("runRigInspection", () => {
         });
 
         expect(inspection).toEqual({
+            cliProtocolVersion: expect.any(Number),
+            cliVersion: "1.2.3",
             data: { status: "absent" },
             formatVersion: 1,
-            protocolVersion: expect.any(Number),
-            rigVersion: "1.2.3",
+            source: "cli",
         });
         expect(JSON.parse(output[0]!)).toEqual(inspection);
         expect(existsSync(daemonDirectory)).toBe(false);
@@ -55,10 +56,11 @@ describe("runRigInspection", () => {
         });
 
         expect(output).toEqual([
-            "Rig version: 1.2.3",
-            expect.stringMatching(/^Rig protocol version: \d+$/u),
+            "Installed Rig CLI version: 1.2.3",
+            expect.stringMatching(/^Installed Rig CLI protocol version: \d+$/u),
             "Rig data is initialized.",
             "Rig data epoch: epoch-one",
+            expect.stringMatching(/^Rig data schema version: \d+$/u),
         ]);
     });
 });

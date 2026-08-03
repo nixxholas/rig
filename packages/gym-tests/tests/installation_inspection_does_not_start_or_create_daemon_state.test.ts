@@ -34,15 +34,15 @@ setInterval(() => {}, 60_000);
 `;
         const gym = await createGym({
             entrypoint: [process.execPath, "run-inspection.mjs"],
-            environment: { RIG_SERVER_DIRECTORY: "/workspace/daemon-state" },
+            environment: { RIG_SERVER_DIRECTORY: "daemon-state" },
             files: { "run-inspection.mjs": wrapper },
             startupText: '"status":"absent"',
         });
         running.add(gym);
 
         const screen = await gym.terminal.snapshot();
-        expect(screen.text).toContain('"rigVersion"');
-        expect(screen.text).toContain('"protocolVersion"');
+        expect(screen.text).toContain('"cliVersion"');
+        expect(screen.text).toContain('"cliProtocolVersion"');
         expect(screen.text).toContain('"status":"absent"');
         expect(existsSync(join(gym.workspacePath, "daemon-state"))).toBe(false);
     });

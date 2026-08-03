@@ -2,13 +2,13 @@ import { Value } from "@sinclair/typebox/value";
 
 import { endpointUrl } from "./endpointUrl.js";
 import {
-    rigInstallationInspectionSchema,
-    type RigInstallationInspection,
+    rigDaemonInstallationDiscoverySchema,
+    type RigDaemonInstallationDiscovery,
 } from "./RigInstallationInspection.js";
 import { serverCompatibility, type ServerCompatibility } from "./ServerCompatibility.js";
 
-const DEFAULT_INSTALLATION_DISCOVERY_TIMEOUT_MS = 5_000;
-const MAXIMUM_INSTALLATION_RESPONSE_BYTES = 16 * 1_024;
+export const DEFAULT_INSTALLATION_DISCOVERY_TIMEOUT_MS = 5_000;
+export const MAXIMUM_INSTALLATION_RESPONSE_BYTES = 16 * 1_024;
 
 export interface DiscoverRigInstallationOptions {
     endpoint: string;
@@ -30,7 +30,7 @@ export interface DiscoverRigInstallationOptions {
  */
 export async function discoverRigInstallation(
     options: DiscoverRigInstallationOptions,
-): Promise<RigInstallationInspection> {
+): Promise<RigDaemonInstallationDiscovery> {
     const controller = new AbortController();
     let timedOut = false;
     const timeout = setTimeout(() => {
@@ -54,7 +54,9 @@ export async function discoverRigInstallation(
             },
         );
         if (!response.ok) {
-            throw new Error(`Rig could not inspect the installation (${String(response.status)}).`);
+            await response.body?.cancel().catch(() => undefined);
+            if (response.status === 404) throw new RigInstallationDiscoveryUnsupportedError();
+            throw new RigInstallationDiscoveryHttpError(response.status);
         }
         bytes = await readBoundedInstallationResponse(response);
     } catch (error) {
@@ -66,19 +68,48 @@ export async function discoverRigInstallation(
     }
     try {
         return Value.Decode(
-            rigInstallationInspectionSchema,
+            rigDaemonInstallationDiscoverySchema,
             JSON.parse(new TextDecoder().decode(bytes)) as unknown,
         );
     } catch {
-        throw new Error("Rig returned an invalid installation response.");
+        throw new Error("Rig returned an invalid installation discovery response.");
     }
 }
 
-/** Classifies whether an inspected installation can speak this client protocol. */
+/** Classifies whether the discovered daemon can speak this client protocol. */
 export function rigInstallationCompatibility(
-    inspection: RigInstallationInspection,
+    inspection: RigDaemonInstallationDiscovery,
 ): ServerCompatibility {
-    return serverCompatibility(inspection.protocolVersion);
+    return serverCompatibility(inspection.daemonProtocolVersion);
+}
+
+/**
+ * The server has no authenticated `/installation` endpoint, so it predates
+ * discovery and must be upgraded before this client can identify it.
+ */
+export class RigInstallationDiscoveryUnsupportedError extends Error {
+    readonly compatibility: Extract<ServerCompatibility, { status: "server_outdated" }>;
+    readonly status = 404;
+
+    constructor() {
+        super("This Rig server does not support installation discovery. Update the Rig server.");
+        this.name = "RigInstallationDiscoveryUnsupportedError";
+        this.compatibility = serverCompatibility(0) as Extract<
+            ServerCompatibility,
+            { status: "server_outdated" }
+        >;
+    }
+}
+
+/** An HTTP refusal from a server that supports the discovery route. */
+export class RigInstallationDiscoveryHttpError extends Error {
+    readonly status: number;
+
+    constructor(status: number) {
+        super(`Rig rejected the installation discovery request (${String(status)}).`);
+        this.name = "RigInstallationDiscoveryHttpError";
+        this.status = status;
+    }
 }
 
 async function readBoundedInstallationResponse(response: Response): Promise<Uint8Array> {
@@ -102,6 +133,9 @@ async function readBoundedInstallationResponse(response: Response): Promise<Uint
             }
             chunks.push(value);
         }
+    } catch (error) {
+        await reader.cancel().catch(() => undefined);
+        throw error;
     } finally {
         reader.releaseLock();
     }
